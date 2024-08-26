@@ -1,0 +1,2 @@
+(executables (names graph triangle) (libraries zip graphics tsdl tgls.tgles3)
+ (ocamlopt_flags (-cclib -lGLESv2)))
