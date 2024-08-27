@@ -174,8 +174,9 @@ let fragment_shader =
   \  in vec4 position;\n\
   \  out vec3 color;\n\
   \  void main() {\n\
-  \    float fogAmount = exp(- length(position.xyz) * 1e-4);\n\
-  \    vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
+  \    float fogAmount = exp(- length(position.xyz) * 2e-4);\n\
+  \    // vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
+  \    vec3  fogColor  = vec3(0.36,0.45,0.59);\n\
   \    color = mix(fogColor, v_color, fogAmount);\n\
   \  }"
 
