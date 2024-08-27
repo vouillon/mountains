@@ -76,6 +76,26 @@ module Proj3D = struct
       1.;
     |]
 
+  let rotate_z t : t =
+    [|
+      cos t;
+      sin t;
+      0.;
+      0.;
+      -.sin t;
+      cos t;
+      0.;
+      0.;
+      0.;
+      0.;
+      1.;
+      0.;
+      0.;
+      0.;
+      0.;
+      1.;
+    |]
+
   let c i j = (i * 4) + j
   let o i = (i / 4, i mod 4)
 
@@ -120,8 +140,8 @@ let get_string len f =
 
 (* Shaders *)
 
-let deltax = 40_000. /. 360. /. 3600. *. 1000.
-let deltay = deltax *. cos (44. *. pi /. 180.)
+let deltay = 40_000. /. 360. /. 3600. *. 1000.
+let deltax = deltay *. cos (44. *. pi /. 180.)
 
 let vertex_shader =
   "\n\
@@ -283,7 +303,7 @@ let delete_program pid =
   Gl.delete_program pid;
   Ok ()
 
-let draw pid gid ~aspect ~w ~h win =
+let draw pid gid ~aspect ~w ~h ~x ~y win =
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   Gl.use_program pid;
@@ -296,14 +316,10 @@ let draw pid gid ~aspect ~w ~h win =
   let delta_loc = Gl.get_uniform_location pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
   let transform =
-    (*
-    Proj3D.(
-      mult (translate (-.deltax *. 511.) 0. (-2060.)) (rotate_x (-.pi /. 2.)))
-*)
     Proj3D.(
       mult
-        (translate (-.deltax *. 511.) (-.deltay *. 10.) (-1936.))
-        (rotate_x (-.pi /. 2.)))
+        (translate (-.deltax *. float x) (-.deltay *. float (h - y)) (-2310.))
+        (mult (rotate_z (180. *. pi /. 180.)) (rotate_x (-.pi /. 2.))))
   in
   let proj = Proj3D.project (3. /. aspect) 3. 1. in
   let proj_loc = Gl.get_uniform_location pid "proj" in
@@ -380,12 +396,13 @@ let event_loop win draw =
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h heights normals =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y heights normals =
   Sdl.init Sdl.Init.video >>= fun () ->
   create_window ~gl >>= fun (win, ctx) ->
   create_geometry ~w ~h heights normals >>= fun (gid, bids) ->
   create_program () >>= fun pid ->
-  event_loop win (fun ~aspect win -> ignore (draw pid gid ~aspect ~w ~h win))
+  event_loop win (fun ~aspect win ->
+      ignore (draw pid gid ~aspect ~w ~h ~x ~y win))
   >>= fun () ->
   delete_program pid >>= fun () ->
   delete_geometry gid bids >>= fun () ->
@@ -393,15 +410,31 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h heights normals =
   Sdl.quit ();
   Ok ()
 
+let coordinates { Relief.width; height; tile_width; tile_height; _ } lat lon =
+  let y = truncate (fst (Float.modf lat) *. float height) in
+  let x = truncate (fst (Float.modf lon) *. float width) in
+  let y = height - 1 - y in
+  let tx = x / tile_width in
+  let ty = y / tile_height in
+  let x = x mod tile_width in
+  let y = y mod tile_height in
+  let tile_index = tx + (ty * ((width + tile_width - 1) / tile_width)) in
+  (tile_index, x, y)
+
 let main () =
   let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let { Relief.tile_width; tile_height; tile_offsets; tile_byte_counts; _ } =
+  let ({ Relief.tile_width; tile_height; tile_offsets; tile_byte_counts; _ } as
+       info) =
     Relief.read_info ch
   in
-  let tile =
-    Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts 0
+  let tile_index, x, y =
+    coordinates info (*44.7795096 6.6750065*) 44.6896583 6.8061028
   in
-  Format.eprintf "ZZZZ %f@." tile.{1022 - 10, 512};
+  let tile =
+    Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts
+      tile_index
+  in
+  Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
   let heights, normals = precompute tile_width tile_height tile in
   let exec = Filename.basename Sys.executable_name in
   let usage = str "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec in
@@ -409,7 +442,8 @@ let main () =
   let anon _ = raise (Arg.Bad "no arguments are supported") in
   Arg.parse (Arg.align options) anon usage;
   match
-    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) heights normals
+    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y heights
+      normals
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
@@ -430,4 +464,12 @@ let () = main ()
    0  4  1  5  2  6  3  7  7
 4  4  8  5  9  6 10  7 11 11
 8  8 12  9 13 10 14 11 15
+*)
+
+(*
+  let height = 3600 in
+let width = 3600 
+let tile_width = 1024
+let tile_height = 1024
+let lat, lon = ()
 *)
