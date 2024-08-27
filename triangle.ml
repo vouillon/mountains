@@ -3,7 +3,7 @@
   (interpolated normal + fog)
 - fog: use distance from origin
 - perspective
-  ==> we are at this position (x, y, height) => translate,
+  ==> we are at this position (lat, lon, height) => translate,
       looking in this direction, => rotate
       with this angle of vision. => perspective transform
 
@@ -120,6 +120,9 @@ let get_string len f =
 
 (* Shaders *)
 
+let deltax = 40_000. /. 360. /. 3600. *. 1000.
+let deltay = deltax *. cos (44. *. pi /. 180.)
+
 let vertex_shader =
   "\n\
   \  #version 300 es\n\
@@ -127,15 +130,16 @@ let vertex_shader =
   \  uniform mat4 transform;\n\
   \  uniform int w;\n\
   \  uniform int h;\n\
+  \  uniform vec2 delta;\n\
   \  in float height;\n\
   \  in vec3 normal;\n\
   \  out vec3 v_color;\n\
   \  out vec4 position;\n\
   \  void main()\n\
   \  {\n\
-  \    float x = float(gl_VertexID % w)/float(w - 1)*2.-1.;\n\
-  \    float y = 1.-float(gl_VertexID / w)/float(h - 1)*2.;\n\
-  \    float z = (height - 3000.) / 30. / float(w); \n\
+  \    float x = float(gl_VertexID % w) * delta.x;\n\
+  \    float y = float(h - 1 - (gl_VertexID / w)) * delta.y;\n\
+  \    float z = height; \n\
   \    float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);\n\
   \    v_color = l * vec3(0.3, 0.32, 0.19);\n\
   \    position = transform * vec4(x, y, z, 1.0);\n\
@@ -150,7 +154,7 @@ let fragment_shader =
   \  in vec4 position;\n\
   \  out vec3 color;\n\
   \  void main() {\n\
-  \    float fogAmount = exp(- length(position.xyz));\n\
+  \    float fogAmount = exp(- length(position.xyz) * 1e-4);\n\
   \    vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
   \    color = mix(fogColor, v_color, fogAmount);\n\
   \  }"
@@ -183,9 +187,9 @@ let precompute tile_height tile_width tile =
   in
   for y = 1 to tile_height - 2 do
     for x = 1 to tile_width - 2 do
-      let nx = tile.{y, x - 1} -. tile.{y, x + 1} in
-      let ny = tile.{y - 1, x} -. tile.{y + 1, x} in
-      let nz = 2. *. 30. in
+      let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
+      let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
+      let nz = 2. *. deltax *. deltay in
       let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
       normals.{y - 1, x - 1, 0} <- truncate (nx *. n);
       normals.{y - 1, x - 1, 1} <- truncate (ny *. n);
@@ -289,11 +293,19 @@ let draw pid gid ~aspect ~w ~h win =
   Gl.uniform1i height_loc h;
   let width_loc = Gl.get_uniform_location pid "w" in
   Gl.uniform1i width_loc w;
+  let delta_loc = Gl.get_uniform_location pid "delta" in
+  Gl.uniform2f delta_loc deltax deltay;
   let transform =
-    let s = 1. in
-    Proj3D.(mult (rotate_x (-90. *. pi /. 2. /. 90.)) (scale s s s))
+    (*
+    Proj3D.(
+      mult (translate (-.deltax *. 511.) 0. (-2060.)) (rotate_x (-.pi /. 2.)))
+*)
+    Proj3D.(
+      mult
+        (translate (-.deltax *. 511.) (-.deltay *. 10.) (-1936.))
+        (rotate_x (-.pi /. 2.)))
   in
-  let proj = Proj3D.project (3. /. aspect) 3. 0.001 in
+  let proj = Proj3D.project (3. /. aspect) 3. 1. in
   let proj_loc = Gl.get_uniform_location pid "proj" in
   Gl.uniform_matrix4fv proj_loc 1 false (Proj3D.array proj);
   let transform_loc = Gl.get_uniform_location pid "transform" in
@@ -389,6 +401,7 @@ let main () =
   let tile =
     Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts 0
   in
+  Format.eprintf "ZZZZ %f@." tile.{1022 - 10, 512};
   let heights, normals = precompute tile_width tile_height tile in
   let exec = Filename.basename Sys.executable_name in
   let usage = str "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec in
