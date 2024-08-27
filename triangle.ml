@@ -136,7 +136,7 @@ let vertex_shader =
   \    float y = 1.-float(gl_VertexID / w)/float(h - 1)*2.;\n\
   \    float z = (height - 3000.) / 30. / float(w); \n\
   \    float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);\n\
-  \    v_color = vec3(l, l, l);\n\
+  \    v_color = l * vec3(0.3, 0.32, 0.19);\n\
   \    gl_Position = proj * transform * vec4(x, y, z, 1.0);\n\
   \  }"
 
@@ -273,7 +273,7 @@ let delete_program pid =
   Ok ()
 
 let draw pid gid ~aspect ~w ~h win =
-  Gl.clear_color 0. 0. 0. 1.;
+  Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   Gl.use_program pid;
   Gl.enable Gl.depth_test;
@@ -283,10 +283,10 @@ let draw pid gid ~aspect ~w ~h win =
   let width_loc = Gl.get_uniform_location pid "w" in
   Gl.uniform1i width_loc w;
   let transform =
-    let s = 5. in
+    let s = 1. in
     Proj3D.(mult (rotate_x (-90. *. pi /. 2. /. 90.)) (scale s s s))
   in
-  let proj = Proj3D.project (3. /. aspect) 3. 0.01 in
+  let proj = Proj3D.project (3. /. aspect) 3. 0.001 in
   let proj_loc = Gl.get_uniform_location pid "proj" in
   Gl.uniform_matrix4fv proj_loc 1 false (Proj3D.array proj);
   let transform_loc = Gl.get_uniform_location pid "transform" in
