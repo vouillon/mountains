@@ -130,6 +130,7 @@ let vertex_shader =
   \  in float height;\n\
   \  in vec3 normal;\n\
   \  out vec3 v_color;\n\
+  \  out vec4 position;\n\
   \  void main()\n\
   \  {\n\
   \    float x = float(gl_VertexID % w)/float(w - 1)*2.-1.;\n\
@@ -137,7 +138,8 @@ let vertex_shader =
   \    float z = (height - 3000.) / 30. / float(w); \n\
   \    float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);\n\
   \    v_color = l * vec3(0.3, 0.32, 0.19);\n\
-  \    gl_Position = proj * transform * vec4(x, y, z, 1.0);\n\
+  \    position = transform * vec4(x, y, z, 1.0);\n\
+  \    gl_Position = proj * position; \n\
   \  }"
 
 let fragment_shader =
@@ -145,8 +147,13 @@ let fragment_shader =
   \  #version 300 es\n\
   \  precision highp float;\n\
   \  in vec3 v_color;\n\
+  \  in vec4 position;\n\
   \  out vec3 color;\n\
-  \  void main() { color = v_color; }"
+  \  void main() {\n\
+  \    float fogAmount = exp(- length(position.xyz));\n\
+  \    vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
+  \    color = mix(fogColor, v_color, fogAmount);\n\
+  \  }"
 
 (* Geometry *)
 
