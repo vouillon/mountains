@@ -1,12 +1,16 @@
 (*
-   Minimal Tgles3 example. This code is in the public domain.
-   Draws a fantastic tri-colored triangle.
+- pass normal to fragment shader and compute color there
+  (interpolated normal + fog)
+- fog: use distance from origin
+- perspective
+  ==> we are at this position (x, y, height) => translate,
+      looking in this direction, => rotate
+      with this angle of vision. => perspective transform
 
-   Compile with:
-   ocamlfind ocamlc -linkpkg -package result,tsdl,tgls.tgles3 -o trigles3.byte \
-                    trigles3.ml
-   ocamlfind ocamlopt -linkpkg -package result,tsdl,tgls.tgles3 -o trigles3.native \
-                      trigles3.ml
+http://www.songho.ca/opengl/gl_projectionmatrix.html
+n = 10m (?)
+n/t = 1/0.36
+n/r = 1/0.36 / aspect ratio (viewport w/ viewport h)
 *)
 
 open Tsdl
@@ -19,6 +23,83 @@ let ( >>= ) x f = match x with Ok v -> f v | Error _ as e -> e
 (* Helper functions. *)
 
 let bigarray_create k len = Bigarray.(Array1.create k c_layout len)
+
+module Proj3D = struct
+  type t = float array
+
+  let project s s' n =
+    [| s; 0.; 0.; 0.; 0.; s'; 0.; 0.; 0.; 0.; -1.; -1.; 0.; 0.; -2. *. n; 0. |]
+
+  let scale x y z : t =
+    [| x; 0.; 0.; 0.; 0.; y; 0.; 0.; 0.; 0.; z; 0.; 0.; 0.; 0.; 1. |]
+
+  let translate x y z : t =
+    [| 1.; 0.; 0.; 0.; 0.; 1.; 0.; 0.; 0.; 0.; 1.; 0.; x; y; z; 1. |]
+
+  let rotate_x t : t =
+    [|
+      1.;
+      0.;
+      0.;
+      0.;
+      0.;
+      cos t;
+      sin t;
+      0.;
+      0.;
+      -.sin t;
+      cos t;
+      0.;
+      0.;
+      0.;
+      0.;
+      1.;
+    |]
+
+  let rotate_y t : t =
+    [|
+      cos t;
+      0.;
+      -.sin t;
+      0.;
+      0.;
+      1.;
+      0.;
+      0.;
+      sin t;
+      0.;
+      cos t;
+      0.;
+      0.;
+      0.;
+      0.;
+      1.;
+    |]
+
+  let c i j = (i * 4) + j
+  let o i = (i / 4, i mod 4)
+
+  let mult m1 m2 =
+    let v p =
+      let i, j = o p in
+      (m1.(c i 0) *. m2.(c 0 j))
+      +. (m1.(c i 1) *. m2.(c 1 j))
+      +. (m1.(c i 2) *. m2.(c 2 j))
+      +. (m1.(c i 3) *. m2.(c 3 j))
+    in
+    Array.init 16 v
+
+  let array m =
+    let a = bigarray_create Float32 (Array.length m) in
+    for i = 0 to Array.length m - 1 do
+      a.{i} <- m.(i)
+    done;
+    a
+
+  let _ = (scale, translate, rotate_y, mult, project)
+end
+
+let pi = 4. *. atan 1.
 
 let get_int =
   let a = bigarray_create Bigarray.int32 1 in
@@ -42,17 +123,21 @@ let get_string len f =
 let vertex_shader =
   "\n\
   \  #version 300 es\n\
+  \  uniform mat4 proj;\n\
+  \  uniform mat4 transform;\n\
   \  uniform int w;\n\
   \  uniform int h;\n\
-  \  in vec3 color;\n\
   \  in float height;\n\
+  \  in vec3 normal;\n\
   \  out vec3 v_color;\n\
   \  void main()\n\
   \  {\n\
   \    float x = float(gl_VertexID % w)/float(w - 1)*2.-1.;\n\
   \    float y = 1.-float(gl_VertexID / w)/float(h - 1)*2.;\n\
-  \    v_color = vec3(1.-height/4000., 1.-height/4000., 1.-height/4000.);\n\
-  \    gl_Position = vec4(x, y, 0, 1.0);\n\
+  \    float z = (height - 3000.) / 30. / float(w); \n\
+  \    float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);\n\
+  \    v_color = vec3(l, l, l);\n\
+  \    gl_Position = proj * transform * vec4(x, y, z, 1.0);\n\
   \  }"
 
 let fragment_shader =
@@ -73,6 +158,36 @@ let set_3d ba i x y z =
   ba.{start + 2} <- z
 *)
 
+let linearize2 a =
+  Bigarray.(reshape_1 (genarray_of_array2 a) (Array2.dim1 a * Array2.dim2 a))
+
+let linearize3 a =
+  Bigarray.(
+    reshape_1 (genarray_of_array3 a)
+      (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
+
+let precompute tile_height tile_width tile =
+  let normals =
+    Bigarray.(Array3.create Int8_signed C_layout)
+      (tile_height - 2) (tile_width - 2) 3
+  in
+  let heights =
+    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
+  in
+  for y = 1 to tile_height - 2 do
+    for x = 1 to tile_width - 2 do
+      let nx = tile.{y, x - 1} -. tile.{y, x + 1} in
+      let ny = tile.{y - 1, x} -. tile.{y + 1, x} in
+      let nz = 2. *. 30. in
+      let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
+      normals.{y - 1, x - 1, 0} <- truncate (nx *. n);
+      normals.{y - 1, x - 1, 1} <- truncate (ny *. n);
+      normals.{y - 1, x - 1, 2} <- truncate (nz *. n);
+      heights.{y - 1, x - 1} <- tile.{y, x}
+    done
+  done;
+  (linearize2 heights, linearize3 normals)
+
 let build_indices w h =
   let is = bigarray_create Bigarray.int32 ((2 * (h - 1) * (w + 1)) - 2) in
   for i = 0 to h - 2 do
@@ -86,32 +201,6 @@ let build_indices w h =
   done;
   is
 
-(*
-let colors =
-  let cs = bigarray_create Bigarray.float32 (4 * 3) in
-  set_3d cs 0 1.0 0.0 0.0;
-  set_3d cs 1 0.0 1.0 0.0;
-  set_3d cs 2 0.0 0.0 1.0;
-  set_3d cs 3 1.0 1.0 1.0;
-  cs
-*)
-
-let w = 1024
-let h = 1024
-
-let _heights =
-  let hs = bigarray_create Bigarray.float32 (w * h) in
-  for i = 0 to h - 1 do
-    for j = 0 to w - 1 do
-      let y = (float i /. float (h - 1)) -. 0.5 in
-      let x = (float j /. float (w - 1)) -. 0.5 in
-      hs.{(i * w) + j} <- ((x *. x) +. (y *. y)) /. sqrt 0.5
-    done
-  done;
-  hs
-
-let indices = build_indices w h
-
 (* OpenGL setup *)
 
 let create_buffer b =
@@ -123,12 +212,11 @@ let create_buffer b =
 
 let delete_buffer bid = set_int (Gl.delete_buffers 1) bid
 
-let create_geometry heights =
+let create_geometry ~w ~h heights normals =
+  let indices = build_indices w h in
   let gid = get_int (Gl.gen_vertex_arrays 1) in
   let iid = create_buffer indices in
-  (*
-  let cid = create_buffer colors in
-*)
+  let nid = create_buffer normals in
   let hid = create_buffer heights in
   let bind_attrib id loc dim typ =
     Gl.bind_buffer Gl.array_buffer id;
@@ -138,13 +226,11 @@ let create_geometry heights =
   Gl.bind_vertex_array gid;
   Gl.bind_buffer Gl.element_array_buffer iid;
   bind_attrib hid 0 1 Gl.float;
-  (*
-  bind_attrib cid 1 3 Gl.float;
-*)
+  bind_attrib nid 1 3 Gl.byte;
   Gl.bind_vertex_array 0;
   Gl.bind_buffer Gl.array_buffer 0;
   Gl.bind_buffer Gl.element_array_buffer 0;
-  Ok (gid, [ iid; (*cid;*) hid ])
+  Ok (gid, [ iid; hid; nid ])
 
 let delete_geometry gid bids =
   set_int (Gl.delete_vertex_arrays 1) gid;
@@ -173,7 +259,7 @@ let create_program () =
   Gl.attach_shader pid fid;
   Gl.delete_shader fid;
   Gl.bind_attrib_location pid 0 "height";
-  Gl.bind_attrib_location pid 1 "color";
+  Gl.bind_attrib_location pid 1 "normal";
   Gl.link_program pid;
   if get_program pid Gl.link_status = Gl.true_ then Ok pid
   else
@@ -186,14 +272,25 @@ let delete_program pid =
   Gl.delete_program pid;
   Ok ()
 
-let draw pid gid win =
+let draw pid gid ~aspect ~w ~h win =
   Gl.clear_color 0. 0. 0. 1.;
-  Gl.clear Gl.color_buffer_bit;
+  Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   Gl.use_program pid;
+  Gl.enable Gl.depth_test;
+  Gl.enable Gl.cull_face_enum;
   let height_loc = Gl.get_uniform_location pid "h" in
   Gl.uniform1i height_loc h;
   let width_loc = Gl.get_uniform_location pid "w" in
   Gl.uniform1i width_loc w;
+  let transform =
+    let s = 5. in
+    Proj3D.(mult (rotate_x (-90. *. pi /. 2. /. 90.)) (scale s s s))
+  in
+  let proj = Proj3D.project (3. /. aspect) 3. 0.01 in
+  let proj_loc = Gl.get_uniform_location pid "proj" in
+  Gl.uniform_matrix4fv proj_loc 1 false (Proj3D.array proj);
+  let transform_loc = Gl.get_uniform_location pid "transform" in
+  Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
   Gl.bind_vertex_array gid;
   Gl.draw_elements Gl.triangle_strip
     ((2 * (h - 1) * (w + 1)) - 2)
@@ -254,24 +351,23 @@ let event_loop win draw =
         | `Exposed | `Resized ->
             let w, h = Sdl.get_window_size win in
             reshape win w h;
-            draw win;
-            draw win;
-            (* bug on osx ? *)
+            draw ~aspect:(float w /. float h) win;
             loop ()
         | _ -> loop ())
     | _ -> loop ()
   in
-  draw win;
+  draw ~aspect:(640. /. 400.) win;
   loop ()
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) heights =
+let tri ~gl:((_maj, _min) as gl) ~w ~h heights normals =
   Sdl.init Sdl.Init.video >>= fun () ->
   create_window ~gl >>= fun (win, ctx) ->
-  create_geometry heights >>= fun (gid, bids) ->
+  create_geometry ~w ~h heights normals >>= fun (gid, bids) ->
   create_program () >>= fun pid ->
-  event_loop win (fun win -> ignore (draw pid gid win)) >>= fun () ->
+  event_loop win (fun ~aspect win -> ignore (draw pid gid ~aspect ~w ~h win))
+  >>= fun () ->
   delete_program pid >>= fun () ->
   delete_geometry gid bids >>= fun () ->
   destroy_window win ctx >>= fun () ->
@@ -286,14 +382,14 @@ let main () =
   let tile =
     Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts 0
   in
+  let heights, normals = precompute tile_width tile_height tile in
   let exec = Filename.basename Sys.executable_name in
   let usage = str "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec in
   let options = [] in
   let anon _ = raise (Arg.Bad "no arguments are supported") in
   Arg.parse (Arg.align options) anon usage;
   match
-    tri ~gl:(3, 0)
-      (Bigarray.reshape_1 (Bigarray.genarray_of_array2 tile) (w * h))
+    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) heights normals
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
