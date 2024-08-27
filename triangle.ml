@@ -4,6 +4,8 @@
       (brensham-like algorithm)
 
 - gather tiles around where we are
+
+https://stackoverflow.com/questions/28880562/rendering-text-with-sdl2-and-opengl
 *)
 
 open Tsdl
@@ -109,7 +111,7 @@ module Proj3D = struct
     done;
     a
 
-  let _ = (scale, translate, rotate_y, mult, project)
+  let _ = (scale, translate, rotate_x, rotate_y, rotate_z, mult, project)
 end
 
 let pi = 4. *. atan 1.
@@ -171,6 +173,26 @@ let fragment_shader =
   \    // vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
   \    vec3  fogColor  = vec3(0.36,0.45,0.59);\n\
   \    color = mix(fogColor, v_color, fogAmount);\n\
+  \  }"
+
+let triangle_vertex_shader =
+  "\n\
+  \  #version 300 es\n\
+  \  uniform mat4 transform;\n\
+  \  void main()\n\
+  \  {\n\
+  \    float x = float(gl_VertexID - 1) / 2.;\n\
+  \    float y = float(gl_VertexID != 1) * (sqrt(3.)/ 2.);\n\
+  \    gl_Position = transform * vec4(x, y, 0, 1.);\n\
+  \  }\n"
+
+let triangle_fragment_shader =
+  "\n\
+  \  #version 300 es\n\
+  \  precision highp float;\n\
+  \  out vec3 color;\n\
+  \  void main() {\n\
+  \    color = vec3(0,0,0);\n\
   \  }"
 
 (* Geometry *)
@@ -262,6 +284,19 @@ let delete_geometry gid bids =
   List.iter delete_buffer bids;
   Ok ()
 
+let create_triangle_geometry () =
+  let indices = bigarray_create Bigarray.int8_unsigned 3 in
+  indices.{0} <- 0;
+  indices.{1} <- 1;
+  indices.{2} <- 2;
+  let gid = get_int (Gl.gen_vertex_arrays 1) in
+  let iid = create_buffer indices in
+  Gl.bind_vertex_array gid;
+  Gl.bind_buffer Gl.element_array_buffer iid;
+  Gl.bind_vertex_array 0;
+  Gl.bind_buffer Gl.element_array_buffer 0;
+  Ok (gid, [ iid ])
+
 let compile_shader src typ =
   let get_shader sid e = get_int (Gl.get_shaderiv sid e) in
   let sid = Gl.create_shader typ in
@@ -293,13 +328,33 @@ let create_program () =
     Gl.delete_program pid;
     Error (`Msg log)
 
+let create_triangle_program () =
+  compile_shader triangle_vertex_shader Gl.vertex_shader >>= fun vid ->
+  compile_shader triangle_fragment_shader Gl.fragment_shader >>= fun fid ->
+  let pid = Gl.create_program () in
+  let get_program pid e = get_int (Gl.get_programiv pid e) in
+  Gl.attach_shader pid vid;
+  Gl.delete_shader vid;
+  Gl.attach_shader pid fid;
+  Gl.delete_shader fid;
+  Gl.link_program pid;
+  if get_program pid Gl.link_status = Gl.true_ then Ok pid
+  else
+    let len = get_program pid Gl.info_log_length in
+    let log = get_string len (Gl.get_program_info_log pid len None) in
+    Gl.delete_program pid;
+    Error (`Msg log)
+
 let delete_program pid =
   Gl.delete_program pid;
   Ok ()
 
-let draw pid gid ~aspect ~w ~h ~x ~y ~height ~angle win =
+let draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~height ~angle
+    ~points win =
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
+  ignore (pid, gid, w, h, x, y, height, angle);
+
   Gl.use_program pid;
   Gl.enable Gl.depth_test;
   Gl.enable Gl.cull_face_enum;
@@ -328,6 +383,26 @@ let draw pid gid ~aspect ~w ~h ~x ~y ~height ~angle win =
     ((2 * (h - 1) * (w + 1)) - 2)
     Gl.unsigned_int (`Offset 0);
   Gl.bind_vertex_array 0;
+
+  Gl.use_program triangle_pid;
+  Gl.disable Gl.depth_test;
+  Gl.disable Gl.cull_face_enum;
+  List.iter
+    (fun (nm, x, y) ->
+      let x = x *. 3. /. aspect in
+      let y = y *. 3. in
+      let transform =
+        let d = 0.07 in
+        Proj3D.(mult (scale (d /. aspect) d 0.) (translate x y 0.))
+      in
+      let transform_loc = Gl.get_uniform_location triangle_pid "transform" in
+      Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+      Gl.bind_vertex_array triangle_gid;
+      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0);
+      if x >= -1. && x < 1. then Format.eprintf "%s %g %g@." nm x y)
+    points;
+  Gl.bind_vertex_array 0;
+
   Sdl.gl_swap_window win;
   Ok ()
 
@@ -393,16 +468,23 @@ let event_loop win draw =
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height heights normals =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points heights
+    normals =
   Sdl.init Sdl.Init.video >>= fun () ->
   create_window ~gl >>= fun (win, ctx) ->
   create_geometry ~w ~h heights normals >>= fun (gid, bids) ->
+  create_triangle_geometry () >>= fun (triangle_gid, triangle_bids) ->
   create_program () >>= fun pid ->
+  create_triangle_program () >>= fun triangle_pid ->
   event_loop win (fun ~aspect win ->
-      ignore (draw pid gid ~aspect ~w ~h ~x ~y ~angle ~height win))
+      ignore
+        (draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~angle
+           ~height ~points win))
   >>= fun () ->
   delete_program pid >>= fun () ->
+  delete_program triangle_pid >>= fun () ->
   delete_geometry gid bids >>= fun () ->
+  delete_geometry triangle_gid triangle_bids >>= fun () ->
   destroy_window win ctx >>= fun () ->
   Sdl.quit ();
   Ok ()
@@ -416,26 +498,72 @@ let coordinates { Relief.width; height; tile_width; tile_height; _ } lat lon =
   let x = x mod tile_width in
   let y = y mod tile_height in
   let tile_index = tx + (ty * ((width + tile_width - 1) / tile_width)) in
-  (tile_index, x, y)
+  let tile_lon = floor lon +. (float tx *. float tile_width /. float width) in
+  let tile_lat =
+    floor lat +. 1. -. (float (ty + 1) *. float tile_height /. float height)
+  in
+  ( tile_index,
+    x,
+    y,
+    { Points.lon = tile_lon; lat = tile_lat },
+    {
+      Points.lon = tile_lon +. (float tile_width /. float width);
+      lat = tile_lat +. (float tile_height /. float height);
+    } )
 
 let main () =
   let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let ({ Relief.tile_width; tile_height; tile_offsets; tile_byte_counts; _ } as
-       info) =
+  let ({
+         Relief.width;
+         height;
+         tile_width;
+         tile_height;
+         tile_offsets;
+         tile_byte_counts;
+         _;
+       } as info) =
     Relief.read_info ch
   in
   let lat, lon, angle =
-    (44.6896583, 6.8061028 (*6.8062028*), 180.)
+    (44.6896583, 6.8061028, 180.)
     (*
     (44.789628, 6.670200, 65.)
  *)
   in
-  let tile_index, x, y = coordinates info (*44.7795096 6.6750065*) lat lon in
+  let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
+  let points =
+    Points.find tile_coord tile_coord'
+    |> List.map (fun (nm, { Points.lat; lon }) ->
+           let x = truncate ((lon -. tile_coord.lon) *. float width) in
+           let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+           (nm, (x, y)))
+  in
   let tile =
     Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts
       tile_index
   in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
+  List.iter
+    (fun (nm, (x, y)) -> Format.eprintf "%s %d %d %g@." nm x y tile.{y, x})
+    points;
+  let points =
+    List.filter (fun (_, (x', y')) -> Raytrace.test tile x y x' y') points
+  in
+  let points =
+    List.filter_map
+      (fun (nm, (x', y')) ->
+        Format.eprintf "==> %s@." nm;
+        let z = tile.{y', x'} -. tile.{y, x} in
+        let x = deltax *. float (x' - x) in
+        let y = deltay *. float (y - y') in
+        let angle = angle *. pi /. 180. in
+        let x' = (x *. cos angle) +. (y *. sin angle) in
+        let y' = (-.x *. sin angle) +. (y *. cos angle) in
+        if y' > 0. then Some (nm, x' /. y', z /. y') else None)
+      points
+    |> List.sort (fun (_, x, _) (_, x', _) : int -> Stdlib.compare x x')
+  in
+  List.iter (fun (nm, x, z) -> Format.eprintf "    %s %g %g@." nm x z) points;
   let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in
   Format.eprintf "ZZZZ %f@." heights.{((y - 1) * (tile_width - 2)) + (x - 1)};
@@ -446,7 +574,7 @@ let main () =
   Arg.parse (Arg.align options) anon usage;
   match
     tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
-      heights normals
+      ~points heights normals
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
@@ -454,25 +582,3 @@ let main () =
       exit 1
 
 let () = main ()
-
-(*
-0 1 2 3
-|/|/|/|
-4 5 6 7
-|/|/|/|
-8 9 10 11
-|/|/|/|
-12 13 14 15
-
-   0  4  1  5  2  6  3  7  7
-4  4  8  5  9  6 10  7 11 11
-8  8 12  9 13 10 14 11 15
-*)
-
-(*
-  let height = 3600 in
-let width = 3600 
-let tile_width = 1024
-let tile_height = 1024
-let lat, lon = ()
-*)
