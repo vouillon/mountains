@@ -1,16 +1,9 @@
 (*
-- pass normal to fragment shader and compute color there
-  (interpolated normal + fog)
-- fog: use distance from origin
-- perspective
-  ==> we are at this position (lat, lon, height) => translate,
-      looking in this direction, => rotate
-      with this angle of vision. => perspective transform
+- sommets et cols
+  ==> see which ones are visible from current location
+      (brensham-like algorithm)
 
-http://www.songho.ca/opengl/gl_projectionmatrix.html
-n = 10m (?)
-n/t = 1/0.36
-n/r = 1/0.36 / aspect ratio (viewport w/ viewport h)
+- gather tiles around where we are
 *)
 
 open Tsdl
@@ -304,7 +297,7 @@ let delete_program pid =
   Gl.delete_program pid;
   Ok ()
 
-let draw pid gid ~aspect ~w ~h ~x ~y win =
+let draw pid gid ~aspect ~w ~h ~x ~y ~height ~angle win =
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   Gl.use_program pid;
@@ -319,8 +312,11 @@ let draw pid gid ~aspect ~w ~h ~x ~y win =
   let transform =
     Proj3D.(
       mult
-        (translate (-.deltax *. float x) (-.deltay *. float (h - y)) (-2310.))
-        (mult (rotate_z (180. *. pi /. 180.)) (rotate_x (-.pi /. 2.))))
+        (translate
+           (-.deltax *. float (x - 1))
+           (-.deltay *. float (h - y))
+           (-.height -. 2.))
+        (mult (rotate_z (angle *. pi /. 180.)) (rotate_x (-.pi /. 2.))))
   in
   let proj = Proj3D.project (3. /. aspect) 3. 1. in
   let proj_loc = Gl.get_uniform_location pid "proj" in
@@ -397,13 +393,13 @@ let event_loop win draw =
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y heights normals =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height heights normals =
   Sdl.init Sdl.Init.video >>= fun () ->
   create_window ~gl >>= fun (win, ctx) ->
   create_geometry ~w ~h heights normals >>= fun (gid, bids) ->
   create_program () >>= fun pid ->
   event_loop win (fun ~aspect win ->
-      ignore (draw pid gid ~aspect ~w ~h ~x ~y win))
+      ignore (draw pid gid ~aspect ~w ~h ~x ~y ~angle ~height win))
   >>= fun () ->
   delete_program pid >>= fun () ->
   delete_geometry gid bids >>= fun () ->
@@ -413,7 +409,7 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y heights normals =
 
 let coordinates { Relief.width; height; tile_width; tile_height; _ } lat lon =
   let y = truncate (fst (Float.modf lat) *. float height) in
-  let x = truncate (fst (Float.modf lon) *. float width) in
+  let x = truncate ((fst (Float.modf lon) *. float width) +. 0.5) in
   let y = height - 1 - y in
   let tx = x / tile_width in
   let ty = y / tile_height in
@@ -428,23 +424,29 @@ let main () =
        info) =
     Relief.read_info ch
   in
-  let tile_index, x, y =
-    coordinates info (*44.7795096 6.6750065*) 44.6896583 6.8061028
+  let lat, lon, angle =
+    (44.6896583, 6.8061028 (*6.8062028*), 180.)
+    (*
+    (44.789628, 6.670200, 65.)
+ *)
   in
+  let tile_index, x, y = coordinates info (*44.7795096 6.6750065*) lat lon in
   let tile =
     Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts
       tile_index
   in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
+  let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in
+  Format.eprintf "ZZZZ %f@." heights.{((y - 1) * (tile_width - 2)) + (x - 1)};
   let exec = Filename.basename Sys.executable_name in
   let usage = str "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec in
   let options = [] in
   let anon _ = raise (Arg.Bad "no arguments are supported") in
   Arg.parse (Arg.align options) anon usage;
   match
-    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y heights
-      normals
+    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
+      heights normals
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
