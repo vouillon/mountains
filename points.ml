@@ -6,10 +6,11 @@ let load () =
   d |> member "features" |> to_list
   |> List.map (fun d ->
          match
-           d |> member "properties" |> member "name" |> to_option to_string
+           ( d |> member "properties" |> member "name:fr" |> to_option to_string,
+             d |> member "properties" |> member "name" |> to_option to_string )
          with
-         | None -> []
-         | Some name ->
+         | None, None -> []
+         | Some name, _ | None, Some name ->
              let coord =
                match
                  d |> member "geometry" |> member "coordinates" |> to_list

@@ -166,7 +166,7 @@ let fragment_shader =
   \  in vec4 position;\n\
   \  out vec3 color;\n\
   \  void main() {\n\
-  \    float fogAmount = exp(- length(position.xyz) * 2e-4);\n\
+  \    float fogAmount = exp(- length(position.xyz) * 1e-4);\n\
   \    // vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
   \    vec3  fogColor  = vec3(0.36,0.45,0.59);\n\
   \    color = mix(fogColor, v_color, fogAmount);\n\
@@ -416,7 +416,7 @@ let draw_text font transform_loc transform text =
       mult
         (mult
            (scale (float w /. float h) 1. 0.)
-           (mult (translate 1. (-0.5) 0.) (rotate_z (pi /. 4.))))
+           (mult (translate 0.7 (-0.5) 0.) (rotate_z (pi /. 4.))))
         transform)
   in
   Sdl.lock_surface surface >>= fun () ->
@@ -514,7 +514,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
           mult
             (mult
                (rotate_z (-.pi /. 4.))
-               (scale (text_height /. aspect) text_height 0.))
+               (scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 0.))
             (translate x y 0.))
       in
       Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
@@ -680,7 +680,15 @@ let main () =
     Relief.read_info ch
   in
   let lat, lon, angle =
-    if true then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 66.)
+    if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
+    else if true then (44.207447, 6.906400, 40.)
+      (* Auron vers est vallée de la Tinée *)
+    else if true then (44.278358, 6.790589, 0.)
+    else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
+    else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
+    else if true then (44.7333863, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
+    else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
+    else (44.789628, 6.670200, 66.)
   in
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
   let points =
