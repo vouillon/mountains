@@ -17,7 +17,7 @@ let follow_line plot x0 y0 x1 y1 =
   follow (dx + dy) x0 y0
 
 let test height x0 y0 x1 y1 =
-  let h0 = height.{y0, x0} in
+  let h0 = height.{y0, x0} +. 2. in
   let h1 = height.{y1, x1} in
   let dx = x1 - x0 in
   let dy = y1 - y0 in
@@ -28,7 +28,7 @@ let test height x0 y0 x1 y1 =
     let d' = sqrt ((float dx' ** 2.) +. (float dy' ** 2.)) in
     let h = height.{y, x} in
     let h' = ((h1 -. h0) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. h0 in
-    let res = d' < 1. || d' > 0.9 *. d || h < h' in
+    let res = d' > 0.9 *. d || h < h' in
     (*    Format.eprintf "%g - %g %g - %b@." (d' /. d) h h' res;*)
     res
   in

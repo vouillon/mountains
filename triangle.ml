@@ -1,11 +1,9 @@
 (*
-- sommets et cols
-  ==> see which ones are visible from current location
-      (brensham-like algorithm)
+- clean-up code
+
+- detect overlapping text (keep highest point)
 
 - gather tiles around where we are
-
-https://stackoverflow.com/questions/28880562/rendering-text-with-sdl2-and-opengl
 *)
 
 open Tsdl
@@ -480,7 +478,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
   Gl.bind_vertex_array triangle_gid;
   let transform_loc = Gl.get_uniform_location triangle_pid "transform" in
   List.iter
-    (fun (nm, x, y) ->
+    (fun (_, x, y) ->
       let x = x *. 3. /. aspect in
       let y = y *. 3. in
       let transform =
@@ -491,8 +489,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
             (translate x y 0.))
       in
       Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
-      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0);
-      if x >= -1. && x < 1. then Format.eprintf "%s %g %g@." nm x y)
+      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0))
     points;
   Gl.bind_vertex_array 0;
 
@@ -510,12 +507,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
         let d = 0.07 in
         Proj3D.(mult (scale (d /. aspect) d 0.) (translate x y 0.))
       in
-      ignore (draw_text font transform_loc transform nm);
-      (*
-      Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
-      Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
-*)
-      if x >= -1. && x < 1. then Format.eprintf "%s %g %g@." nm x y)
+      ignore (draw_text font transform_loc transform nm))
     points;
 
   Gl.disable Gl.blend;
@@ -676,10 +668,11 @@ let main () =
         Format.eprintf "==> %s@." nm;
         let z = tile.{y', x'} -. tile.{y, x} in
         let x = deltax *. float (x' - x) in
-        let y = deltay *. float (y - y') in
-        let angle = -.angle *. pi /. 180. in
+        let y = deltay *. float (y' - y) in
+        let angle = angle *. pi /. 180. in
         let x' = (x *. cos angle) +. (y *. sin angle) in
         let y' = (-.x *. sin angle) +. (y *. cos angle) in
+        let y' = -.y' in
         if y' > 0. then Some (nm, x' /. y', z /. y') else None)
       points
     |> List.sort (fun (_, x, _) (_, x', _) : int -> Stdlib.compare x x')
