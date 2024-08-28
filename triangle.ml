@@ -439,7 +439,21 @@ let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
-    ~aspect ~w ~h ~x ~y ~height ~angle ~points win =
+    ~aspect ~w ~h ~x ~y ~height ~angle ~points ~tile win =
+  let points =
+    List.filter_map
+      (fun (nm, (x', y')) ->
+        let z = tile.{y', x'} -. tile.{y, x} in
+        let x = deltax *. float (x' - x) in
+        let y = deltay *. float (y' - y) in
+        let angle = angle *. pi /. 180. in
+        let x' = (x *. cos angle) +. (y *. sin angle) in
+        let y' = (-.x *. sin angle) +. (y *. cos angle) in
+        let y' = -.y' in
+        if y' > 0. then Some (nm, x' /. y', z /. y') else None)
+      points
+    |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
+  in
   let points =
     let pos = ref [] in
     List.filter
@@ -569,33 +583,43 @@ let destroy_window win ctx =
 
 (* Event loop *)
 
-let event_loop win draw =
+let event_loop win angle draw =
   let e = Sdl.Event.create () in
   let key_scancode e = Sdl.Scancode.enum Sdl.Event.(get e keyboard_scancode) in
   let event e = Sdl.Event.(enum (get e typ)) in
   let window_event e = Sdl.Event.(window_event_enum (get e window_event_id)) in
-  let rec loop () =
+  let rec loop angle =
     Sdl.wait_event (Some e) >>= fun () ->
     match event e with
     | `Quit -> Ok ()
     | `Key_down when key_scancode e = `Escape -> Ok ()
+    | `Key_down when key_scancode e = `Right ->
+        let angle = angle +. 3. in
+        let w, h = Sdl.get_window_size win in
+        draw ~aspect:(float w /. float h) ~angle win;
+        loop angle
+    | `Key_down when key_scancode e = `Left ->
+        let angle = angle -. 3. in
+        let w, h = Sdl.get_window_size win in
+        draw ~aspect:(float w /. float h) ~angle win;
+        loop angle
     | `Window_event -> (
         match window_event e with
         | `Exposed | `Resized ->
             let w, h = Sdl.get_window_size win in
             reshape win w h;
-            draw ~aspect:(float w /. float h) win;
-            loop ()
-        | _ -> loop ())
-    | _ -> loop ()
+            draw ~aspect:(float w /. float h) ~angle win;
+            loop angle
+        | _ -> loop angle)
+    | _ -> loop angle
   in
-  draw ~aspect:(640. /. 400.) win;
-  loop ()
+  draw ~aspect:(640. /. 400.) ~angle win;
+  loop angle
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points heights
-    normals =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
+    heights normals =
   Sdl.init Sdl.Init.video >>= fun () ->
   load_font () >>= fun font ->
   create_window ~gl >>= fun (win, ctx) ->
@@ -605,10 +629,10 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points heights
   create_program () >>= fun pid ->
   create_triangle_program () >>= fun triangle_pid ->
   create_rectangle_program () >>= fun rectangle_pid ->
-  event_loop win (fun ~aspect win ->
+  event_loop win angle (fun ~aspect ~angle win ->
       ignore
         (draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid
-           ~font ~aspect ~w ~h ~x ~y ~angle ~height ~points win))
+           ~font ~aspect ~w ~h ~x ~y ~angle ~height ~tile ~points win))
   >>= fun () ->
   delete_program pid >>= fun () ->
   delete_program triangle_pid >>= fun () ->
@@ -656,7 +680,7 @@ let main () =
     Relief.read_info ch
   in
   let lat, lon, angle =
-    if false then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 66.)
+    if true then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 66.)
   in
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
   let points =
@@ -677,22 +701,6 @@ let main () =
   let points =
     List.filter (fun (_, (x', y')) -> Raytrace.test tile x y x' y') points
   in
-  let points =
-    List.filter_map
-      (fun (nm, (x', y')) ->
-        Format.eprintf "==> %s@." nm;
-        let z = tile.{y', x'} -. tile.{y, x} in
-        let x = deltax *. float (x' - x) in
-        let y = deltay *. float (y' - y) in
-        let angle = angle *. pi /. 180. in
-        let x' = (x *. cos angle) +. (y *. sin angle) in
-        let y' = (-.x *. sin angle) +. (y *. cos angle) in
-        let y' = -.y' in
-        if y' > 0. then Some (nm, x' /. y', z /. y') else None)
-      points
-    |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
-  in
-  List.iter (fun (nm, x, z) -> Format.eprintf "    %s %g %g@." nm x z) points;
   let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in
   Format.eprintf "ZZZZ %f@." heights.{((y - 1) * (tile_width - 2)) + (x - 1)};
@@ -703,7 +711,7 @@ let main () =
   Arg.parse (Arg.align options) anon usage;
   match
     tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
-      ~points heights normals
+      ~points ~tile heights normals
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
