@@ -9,6 +9,7 @@ https://stackoverflow.com/questions/28880562/rendering-text-with-sdl2-and-opengl
 *)
 
 open Tsdl
+open Tsdl_ttf
 open Tgles3
 open Result
 
@@ -195,6 +196,30 @@ let triangle_fragment_shader =
   \    color = vec3(0,0,0);\n\
   \  }"
 
+let rectangle_vertex_shader =
+  "\n\
+  \  #version 300 es\n\
+  \  uniform mat4 transform;\n\
+  \  out vec2 texture_coord;\n\
+  \  void main()\n\
+  \  {\n\
+  \    float x = float(gl_VertexID % 2);\n\
+  \    float y = float(gl_VertexID / 2);\n\
+  \    texture_coord = vec2(x, 1. - y);\n\
+  \    gl_Position = transform * vec4(x, y, 0, 1.);\n\
+  \  }\n"
+
+let rectangle_fragment_shader =
+  "\n\
+  \  #version 300 es\n\
+  \  precision highp float;\n\
+  \  in vec2 texture_coord;\n\
+  \  uniform sampler2D tex;\n\
+  \  out vec4 color;\n\
+  \  void main() {\n\
+  \    color = texture(tex, texture_coord);\n\
+  \  }"
+
 (* Geometry *)
 
 (*
@@ -297,6 +322,20 @@ let create_triangle_geometry () =
   Gl.bind_buffer Gl.element_array_buffer 0;
   Ok (gid, [ iid ])
 
+let create_rectangle_geometry () =
+  let indices = bigarray_create Bigarray.int8_unsigned 4 in
+  indices.{0} <- 0;
+  indices.{1} <- 1;
+  indices.{2} <- 2;
+  indices.{3} <- 3;
+  let gid = get_int (Gl.gen_vertex_arrays 1) in
+  let iid = create_buffer indices in
+  Gl.bind_vertex_array gid;
+  Gl.bind_buffer Gl.element_array_buffer iid;
+  Gl.bind_vertex_array 0;
+  Gl.bind_buffer Gl.element_array_buffer 0;
+  Ok (gid, [ iid ])
+
 let compile_shader src typ =
   let get_shader sid e = get_int (Gl.get_shaderiv sid e) in
   let sid = Gl.create_shader typ in
@@ -345,12 +384,63 @@ let create_triangle_program () =
     Gl.delete_program pid;
     Error (`Msg log)
 
+let create_rectangle_program () =
+  compile_shader rectangle_vertex_shader Gl.vertex_shader >>= fun vid ->
+  compile_shader rectangle_fragment_shader Gl.fragment_shader >>= fun fid ->
+  let pid = Gl.create_program () in
+  let get_program pid e = get_int (Gl.get_programiv pid e) in
+  Gl.attach_shader pid vid;
+  Gl.delete_shader vid;
+  Gl.attach_shader pid fid;
+  Gl.delete_shader fid;
+  Gl.link_program pid;
+  if get_program pid Gl.link_status = Gl.true_ then Ok pid
+  else
+    let len = get_program pid Gl.info_log_length in
+    let log = get_string len (Gl.get_program_info_log pid len None) in
+    Gl.delete_program pid;
+    Error (`Msg log)
+
 let delete_program pid =
   Gl.delete_program pid;
   Ok ()
 
-let draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~height ~angle
-    ~points win =
+let load_font () =
+  Ttf.init () >>= fun () ->
+  Ttf.open_font "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" 48
+
+let draw_text font transform_loc transform text =
+  let color = Sdl.Color.create ~r:0 ~g:0 ~b:0 ~a:255 in
+  Ttf.render_utf8_blended font text color >>= fun surface ->
+  let p = Sdl.get_surface_pitch surface in
+  let _w, h = Sdl.get_surface_size surface in
+  let w = p / 4 in
+  let transform =
+    Proj3D.(
+      mult
+        (mult
+           (scale (float w /. float h) 1. 0.)
+           (mult (translate 1. (-0.5) 0.) (rotate_z (pi /. 4.))))
+        transform)
+  in
+  Sdl.lock_surface surface >>= fun () ->
+  let a = Sdl.get_surface_pixels surface Bigarray.Int8_unsigned in
+  let textures = bigarray_create Bigarray.int32 1 in
+  Gl.gen_textures 1 textures;
+  let tid = Int32.to_int textures.{0} in
+  Gl.bind_texture Gl.texture_2d tid;
+  Gl.tex_image2d Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba Gl.unsigned_byte
+    (`Data a);
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+  Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
+  Gl.delete_textures 1 textures;
+  Sdl.free_surface surface;
+  Ok ()
+
+let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
+    ~aspect ~w ~h ~x ~y ~height ~angle ~points win =
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   ignore (pid, gid, w, h, x, y, height, angle);
@@ -383,10 +473,35 @@ let draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~height ~angle
     ((2 * (h - 1) * (w + 1)) - 2)
     Gl.unsigned_int (`Offset 0);
   Gl.bind_vertex_array 0;
-
-  Gl.use_program triangle_pid;
   Gl.disable Gl.depth_test;
   Gl.disable Gl.cull_face_enum;
+
+  Gl.use_program triangle_pid;
+  Gl.bind_vertex_array triangle_gid;
+  let transform_loc = Gl.get_uniform_location triangle_pid "transform" in
+  List.iter
+    (fun (nm, x, y) ->
+      let x = x *. 3. /. aspect in
+      let y = y *. 3. in
+      let transform =
+        let d = 0.07 in
+        Proj3D.(
+          mult
+            (mult (rotate_z (-.pi /. 4.)) (scale (d /. aspect) d 0.))
+            (translate x y 0.))
+      in
+      Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0);
+      if x >= -1. && x < 1. then Format.eprintf "%s %g %g@." nm x y)
+    points;
+  Gl.bind_vertex_array 0;
+
+  Gl.use_program rectangle_pid;
+  Gl.bind_vertex_array rectangle_gid;
+  Gl.enable Gl.texture_2d;
+  Gl.enable Gl.blend;
+  Gl.blend_func Gl.src_alpha Gl.one_minus_src_alpha;
+  let _transform_loc = Gl.get_uniform_location rectangle_pid "transform" in
   List.iter
     (fun (nm, x, y) ->
       let x = x *. 3. /. aspect in
@@ -395,12 +510,16 @@ let draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~height ~angle
         let d = 0.07 in
         Proj3D.(mult (scale (d /. aspect) d 0.) (translate x y 0.))
       in
-      let transform_loc = Gl.get_uniform_location triangle_pid "transform" in
+      ignore (draw_text font transform_loc transform nm);
+      (*
       Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
-      Gl.bind_vertex_array triangle_gid;
-      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0);
+      Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
+*)
       if x >= -1. && x < 1. then Format.eprintf "%s %g %g@." nm x y)
     points;
+
+  Gl.disable Gl.blend;
+  Gl.disable Gl.texture_2d;
   Gl.bind_vertex_array 0;
 
   Sdl.gl_swap_window win;
@@ -471,20 +590,25 @@ let event_loop win draw =
 let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points heights
     normals =
   Sdl.init Sdl.Init.video >>= fun () ->
+  load_font () >>= fun font ->
   create_window ~gl >>= fun (win, ctx) ->
   create_geometry ~w ~h heights normals >>= fun (gid, bids) ->
   create_triangle_geometry () >>= fun (triangle_gid, triangle_bids) ->
+  create_rectangle_geometry () >>= fun (rectangle_gid, rectangle_bids) ->
   create_program () >>= fun pid ->
   create_triangle_program () >>= fun triangle_pid ->
+  create_rectangle_program () >>= fun rectangle_pid ->
   event_loop win (fun ~aspect win ->
       ignore
-        (draw pid gid triangle_pid triangle_gid ~aspect ~w ~h ~x ~y ~angle
-           ~height ~points win))
+        (draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid
+           ~font ~aspect ~w ~h ~x ~y ~angle ~height ~points win))
   >>= fun () ->
   delete_program pid >>= fun () ->
   delete_program triangle_pid >>= fun () ->
+  delete_program rectangle_pid >>= fun () ->
   delete_geometry gid bids >>= fun () ->
   delete_geometry triangle_gid triangle_bids >>= fun () ->
+  delete_geometry rectangle_gid rectangle_bids >>= fun () ->
   destroy_window win ctx >>= fun () ->
   Sdl.quit ();
   Ok ()
@@ -525,10 +649,7 @@ let main () =
     Relief.read_info ch
   in
   let lat, lon, angle =
-    (44.6896583, 6.8061028, 180.)
-    (*
-    (44.789628, 6.670200, 65.)
- *)
+    if true then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 65.)
   in
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
   let points =
@@ -556,7 +677,7 @@ let main () =
         let z = tile.{y', x'} -. tile.{y, x} in
         let x = deltax *. float (x' - x) in
         let y = deltay *. float (y - y') in
-        let angle = angle *. pi /. 180. in
+        let angle = -.angle *. pi /. 180. in
         let x' = (x *. cos angle) +. (y *. sin angle) in
         let y' = (-.x *. sin angle) +. (y *. cos angle) in
         if y' > 0. then Some (nm, x' /. y', z /. y') else None)
