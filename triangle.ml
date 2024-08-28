@@ -437,6 +437,8 @@ let draw_text font transform_loc transform text =
   Sdl.free_surface surface;
   Ok ()
 
+let scale = (*2. *. 27. /. 24.*) 3.2
+
 let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
     ~aspect ~w ~h ~x ~y ~height ~angle ~points win =
   Gl.clear_color 0.37 0.56 0.85 1.;
@@ -461,7 +463,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
            (-.height -. 2.))
         (mult (rotate_z (angle *. pi /. 180.)) (rotate_x (-.pi /. 2.))))
   in
-  let proj = Proj3D.project (3. /. aspect) 3. 1. in
+  let proj = Proj3D.project (scale /. aspect) scale 1. in
   let proj_loc = Gl.get_uniform_location pid "proj" in
   Gl.uniform_matrix4fv proj_loc 1 false (Proj3D.array proj);
   let transform_loc = Gl.get_uniform_location pid "transform" in
@@ -479,8 +481,8 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
   let transform_loc = Gl.get_uniform_location triangle_pid "transform" in
   List.iter
     (fun (_, x, y) ->
-      let x = x *. 3. /. aspect in
-      let y = y *. 3. in
+      let x = x *. scale /. aspect in
+      let y = y *. scale in
       let transform =
         let d = 0.07 in
         Proj3D.(
@@ -501,8 +503,8 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
   let _transform_loc = Gl.get_uniform_location rectangle_pid "transform" in
   List.iter
     (fun (nm, x, y) ->
-      let x = x *. 3. /. aspect in
-      let y = y *. 3. in
+      let x = x *. scale /. aspect in
+      let y = y *. scale in
       let transform =
         let d = 0.07 in
         Proj3D.(mult (scale (d /. aspect) d 0.) (translate x y 0.))
@@ -641,7 +643,7 @@ let main () =
     Relief.read_info ch
   in
   let lat, lon, angle =
-    if true then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 65.)
+    if false then (44.6896583, 6.8061028, 180.) else (44.789628, 6.670200, 66.)
   in
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
   let points =
