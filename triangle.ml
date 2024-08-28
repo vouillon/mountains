@@ -1,8 +1,6 @@
 (*
 - clean-up code
 
-- detect overlapping text (keep highest point)
-
 - gather tiles around where we are
 *)
 
@@ -438,9 +436,23 @@ let draw_text font transform_loc transform text =
   Ok ()
 
 let scale = (*2. *. 27. /. 24.*) 3.2
+let text_height = 0.07
 
 let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
     ~aspect ~w ~h ~x ~y ~height ~angle ~points win =
+  let points =
+    let pos = ref [] in
+    List.filter
+      (fun (_, x, y) ->
+        let p = scale *. (x -. y) /. sqrt 2. in
+        if not (List.exists (fun p' -> abs_float (p' -. p) < text_height) !pos)
+        then (
+          pos := p :: !pos;
+          true)
+        else false)
+      points
+  in
+
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
   ignore (pid, gid, w, h, x, y, height, angle);
@@ -484,10 +496,11 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
-        let d = 0.07 in
         Proj3D.(
           mult
-            (mult (rotate_z (-.pi /. 4.)) (scale (d /. aspect) d 0.))
+            (mult
+               (rotate_z (-.pi /. 4.))
+               (scale (text_height /. aspect) text_height 0.))
             (translate x y 0.))
       in
       Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
@@ -500,14 +513,14 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
   Gl.enable Gl.texture_2d;
   Gl.enable Gl.blend;
   Gl.blend_func Gl.src_alpha Gl.one_minus_src_alpha;
-  let _transform_loc = Gl.get_uniform_location rectangle_pid "transform" in
+  let transform_loc = Gl.get_uniform_location rectangle_pid "transform" in
   List.iter
     (fun (nm, x, y) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
-        let d = 0.07 in
-        Proj3D.(mult (scale (d /. aspect) d 0.) (translate x y 0.))
+        Proj3D.(
+          mult (scale (text_height /. aspect) text_height 0.) (translate x y 0.))
       in
       ignore (draw_text font transform_loc transform nm))
     points;
@@ -677,7 +690,7 @@ let main () =
         let y' = -.y' in
         if y' > 0. then Some (nm, x' /. y', z /. y') else None)
       points
-    |> List.sort (fun (_, x, _) (_, x', _) : int -> Stdlib.compare x x')
+    |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
   in
   List.iter (fun (nm, x, z) -> Format.eprintf "    %s %g %g@." nm x z) points;
   let height = tile.{y, x} in
