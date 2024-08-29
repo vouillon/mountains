@@ -22,8 +22,8 @@ let f ~lat ~lon =
     for lon = min_lon // 3600 to max_lon // 3600 do
       let ch =
         open_in
-          (Printf.sprintf "Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif" lat
-             lon)
+          (Printf.sprintf "data/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif"
+             lat lon)
       in
       let info = Tiff.read_info ch in
       let min_tile_x = max 0 ((min_lon - (3600 * lon)) // 1024) in

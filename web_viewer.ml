@@ -1,63 +1,5 @@
-(*
-https://registry.opendata.aws/copernicus-dem/
-
-aws s3 cp  s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N44_00_E006_00_DEM/Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif ~/tmp/relief
-
-=====
-
-https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
-https://blogs.igalia.com/itoral/2016/10/13/opengl-terrain-renderer-rendering-the-terrain-mesh/
-http://casual-effects.blogspot.com/2014/04/fast-terrain-rendering-with-continuous.html
-https://mikejsavage.co.uk/geometry-clipmaps/
-
-https://iquilezles.org/articles/fog/
-
-Terrender: A Web-Based Multi-Resolution Terrain ...
-RASTeR: Simple and efficient terrain rendering on the GPU
-Top-Down View-Dependent Terrain Triangulation using the Octagon Metric.
-Visualization of large terrains made easy.
-
-http://app.geotiff.io/identify
-
-curl https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N45_00_E006_00_DEM/Copernicus_DSM_COG_10_N45_00_E006_00_DEM.tif
-*)
-
-(*
-- web app
-- use device orientation events
-
-- draw closer triangles before farther triangles
-  (split the whole grid in four quadrants and draw triangles appropriately)
-
-var x = fetch('https://overpass-api.de/api/interpreter', {method:'POST', body: '[out:json][bbox:44,6,45,7];(node[natural=peak]; node[natural=saddle];);out;'}).then(resp=>resp.text());
-*)
-
-open Tsdl
-open Tsdl_ttf
-open Tgles3
-
 let ( let* ) = Result.bind
 let pi = 4. *. atan 1.
-(* Helper functions. *)
-
-let bigarray_create k len = Bigarray.(Array1.create k c_layout len)
-
-let get_int =
-  let a = bigarray_create Bigarray.int32 1 in
-  fun f ->
-    f a;
-    Int32.to_int a.{0}
-
-let set_int =
-  let a = bigarray_create Bigarray.int32 1 in
-  fun f i ->
-    a.{0} <- Int32.of_int i;
-    f a
-
-let get_string len f =
-  let a = bigarray_create Bigarray.char len in
-  f a;
-  Gl.string_of_bigarray a
 
 (* Shaders *)
 
@@ -166,83 +108,79 @@ let text_program =
 
 (* OpenGL setup *)
 
+module Gl = Brr_canvas.Gl
+
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
 
-let create_buffer (Buffer b) =
-  let id = get_int (Gl.gen_buffers 1) in
-  let bytes = Gl.bigarray_byte_size b in
-  Gl.bind_buffer Gl.array_buffer id;
-  Gl.buffer_data Gl.array_buffer bytes (Some b) Gl.static_draw;
+let create_buffer ctx (Buffer b) =
+  let id = Gl.create_buffer ctx in
+  Gl.bind_buffer ctx Gl.array_buffer (Some id);
+  Gl.buffer_data ctx Gl.array_buffer (Brr.Tarray.of_bigarray1 b) Gl.static_draw;
   id
 
-let delete_buffer bid = set_int (Gl.delete_buffers 1) bid
+type geometry = {
+  vertex_array : Gl.vertex_array_object;
+  buffers : Gl.buffer list;
+}
 
-type geometry = { vertex_array : int; buffers : int list }
-
-let create_geometry ~indices ~buffers =
-  let gid = get_int (Gl.gen_vertex_arrays 1) in
-  let iid = create_buffer (Buffer indices) in
+let create_geometry ctx ~indices ~buffers =
+  let gid = Gl.create_vertex_array ctx in
+  let iid = create_buffer ctx (Buffer indices) in
   let bind_attrib loc dim typ data =
-    let id = create_buffer data in
-    Gl.bind_buffer Gl.array_buffer id;
-    Gl.enable_vertex_attrib_array loc;
-    Gl.vertex_attrib_pointer loc dim typ false 0 (`Offset 0);
+    let id = create_buffer ctx data in
+    Gl.bind_buffer ctx Gl.array_buffer (Some id);
+    Gl.enable_vertex_attrib_array ctx loc;
+    Gl.vertex_attrib_pointer ctx loc dim typ false 0 0;
     id
   in
-  Gl.bind_vertex_array gid;
-  Gl.bind_buffer Gl.element_array_buffer iid;
+  Gl.bind_vertex_array ctx (Some gid);
+  Gl.bind_buffer ctx Gl.element_array_buffer (Some iid);
   let buffers =
     List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers
   in
-  Gl.bind_vertex_array 0;
-  Gl.bind_buffer Gl.array_buffer 0;
-  Gl.bind_buffer Gl.element_array_buffer 0;
+  Gl.bind_vertex_array ctx None;
+  Gl.bind_buffer ctx Gl.array_buffer None;
+  Gl.bind_buffer ctx Gl.element_array_buffer None;
   Ok { vertex_array = gid; buffers = iid :: buffers }
 
-let bind_vertex_array { vertex_array; _ } = Gl.bind_vertex_array vertex_array
+let bind_vertex_array ctx { vertex_array; _ } =
+  Gl.bind_vertex_array ctx (Some vertex_array)
 
-let delete_geometry { vertex_array = gid; buffers = bids } =
-  set_int (Gl.delete_vertex_arrays 1) gid;
-  List.iter delete_buffer bids;
+let delete_geometry ctx { vertex_array = gid; buffers = bids } =
+  Gl.delete_vertex_array ctx gid;
+  List.iter (fun bid -> Gl.delete_buffer ctx bid) bids;
   Ok ()
 
-let compile_shader src typ =
-  let get_shader sid e = get_int (Gl.get_shaderiv sid e) in
-  let sid = Gl.create_shader typ in
-  Gl.shader_source sid src;
-  Gl.compile_shader sid;
-  if get_shader sid Gl.compile_status = Gl.true_ then Ok sid
+let compile_shader ctx src typ =
+  let sid = Gl.create_shader ctx typ in
+  Gl.shader_source ctx sid (Jstr.v src);
+  Gl.compile_shader ctx sid;
+  if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then Ok sid
   else
-    let len = get_shader sid Gl.info_log_length in
-    let log = get_string len (Gl.get_shader_info_log sid len None) in
-    Gl.delete_shader sid;
-    Error (`Msg log)
+    let log = Gl.get_shader_info_log ctx sid in
+    Gl.delete_shader ctx sid;
+    Error (`Msg (Jstr.to_string log))
 
-type pid = Program of int
-
-let create_program p =
-  let* vid = compile_shader p.vertex_shader Gl.vertex_shader in
-  let* fid = compile_shader p.fragment_shader Gl.fragment_shader in
-  let pid = Gl.create_program () in
-  let get_program pid e = get_int (Gl.get_programiv pid e) in
-  Gl.attach_shader pid vid;
-  Gl.delete_shader vid;
-  Gl.attach_shader pid fid;
-  Gl.delete_shader fid;
-  List.iteri (fun i attr -> Gl.bind_attrib_location pid i attr) p.attributes;
-  Gl.link_program pid;
-  if get_program pid Gl.link_status = Gl.true_ then Ok (Program pid)
+let create_program ctx p =
+  let* vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
+  let* fid = compile_shader ctx p.fragment_shader Gl.fragment_shader in
+  let pid = Gl.create_program ctx in
+  Gl.attach_shader ctx pid vid;
+  Gl.delete_shader ctx vid;
+  Gl.attach_shader ctx pid fid;
+  Gl.delete_shader ctx fid;
+  List.iteri
+    (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
+    p.attributes;
+  Gl.link_program ctx pid;
+  if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then Ok pid
   else
-    let len = get_program pid Gl.info_log_length in
-    let log = get_string len (Gl.get_program_info_log pid len None) in
-    Gl.delete_program pid;
-    Error (`Msg log)
+    let log = Gl.get_program_info_log ctx pid in
+    Gl.delete_program ctx pid;
+    Error (`Msg (Jstr.to_string log))
 
-let use_program (Program pid) = Gl.use_program pid
-let get_uniform_location (Program pid) attr = Gl.get_uniform_location pid attr
-
-let delete_program (Program pid) =
-  Gl.delete_program pid;
+let delete_program ctx pid =
+  Gl.delete_program ctx pid;
   Ok ()
 
 let linearize2 a =
@@ -295,16 +233,19 @@ let build_indices w w' h =
   done;
   is
 
-let load_font () =
-  let* () = Ttf.init () in
-  Ttf.open_font "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" 48
-
-let draw_text font transform_loc transform text =
+(*
+http://delphic.me.uk/tutorials/webgl-text
+*)
+let draw_text ctx transform_loc transform _text =
+  (*
   let color = Sdl.Color.create ~r:0 ~g:0 ~b:0 ~a:255 in
   let* surface = Ttf.render_utf8_blended font text color in
   let p = Sdl.get_surface_pitch surface in
   let _w, h = Sdl.get_surface_size surface in
   let w = p / 4 in
+*)
+  let w = 34 in
+  let h = 12 in
   let transform =
     Matrix.(
       scale (float w /. float h) 1. 1.
@@ -312,25 +253,25 @@ let draw_text font transform_loc transform text =
       * rotate_z (pi /. 4.)
       * transform)
   in
-  let* () = Sdl.lock_surface surface in
-  let a = Sdl.get_surface_pixels surface Bigarray.Int8_unsigned in
-  let tid = get_int (Gl.gen_textures 1) in
-  Gl.bind_texture Gl.texture_2d tid;
-  Gl.tex_image2d Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba Gl.unsigned_byte
-    (`Data a);
-  Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
-  Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
-  set_int (Gl.delete_textures 1) tid;
-  Sdl.free_surface surface;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  (*ZZZ
+    Gl.tex_image2d Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba Gl.unsigned_byte
+      (`Data a);
+  *)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.uniform_matrix4fv ctx transform_loc false
+    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+  Gl.delete_texture ctx tid;
   Ok ()
 
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
-    ~h ~x ~y ~height ~angle ~points ~tile win =
+let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
+    ~y ~height ~angle ~points ~tile ctx =
   let points : (Points.t * _ * _) list =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -358,18 +299,22 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
       points
   in
 
-  Gl.clear_color 0.37 0.56 0.85 1.;
-  Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
+  Gl.clear_color ctx 0.37 0.56 0.85 1.;
+  Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-  use_program terrain_pid;
-  Gl.enable Gl.depth_test;
-  Gl.enable Gl.cull_face_enum;
-  let width_shift_loc = get_uniform_location terrain_pid "w_shift" in
-  Gl.uniform1i width_shift_loc (truncate (log (float w) /. log 2.));
-  let width_mask_loc = get_uniform_location terrain_pid "w_mask" in
-  Gl.uniform1i width_mask_loc (w - 1);
-  let delta_loc = get_uniform_location terrain_pid "delta" in
-  Gl.uniform2f delta_loc deltax deltay;
+  Gl.use_program ctx terrain_pid;
+  Gl.enable ctx Gl.depth_test;
+  Gl.enable ctx Gl.cull_face';
+  let width_shift_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_shift")
+  in
+  Gl.uniform1i ctx width_shift_loc (truncate (log (float w) /. log 2.));
+  let width_mask_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
+  in
+  Gl.uniform1i ctx width_mask_loc (w - 1);
+  let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
+  Gl.uniform2f ctx delta_loc deltax deltay;
   let transform =
     Matrix.(
       translate
@@ -381,21 +326,27 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
   in
-  let proj_loc = get_uniform_location terrain_pid "proj" in
-  Gl.uniform_matrix4fv proj_loc 1 false (Matrix.array proj);
-  let transform_loc = get_uniform_location terrain_pid "transform" in
-  Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
-  bind_vertex_array terrain_geo;
-  Gl.draw_elements Gl.triangle_strip
+  let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
+  Gl.uniform_matrix4fv ctx proj_loc false
+    (Brr.Tarray.of_bigarray1 (Matrix.array proj));
+  let transform_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "transform")
+  in
+  Gl.uniform_matrix4fv ctx transform_loc false
+    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+  bind_vertex_array ctx terrain_geo;
+  Gl.draw_elements ctx Gl.triangle_strip
     ((2 * (h - 1) * (w + 1)) - 2)
-    Gl.unsigned_int (`Offset 0);
-  Gl.bind_vertex_array 0;
-  Gl.disable Gl.depth_test;
-  Gl.disable Gl.cull_face_enum;
+    Gl.unsigned_int 0;
+  Gl.bind_vertex_array ctx None;
+  Gl.disable ctx Gl.depth_test;
+  Gl.disable ctx Gl.cull_face';
 
-  use_program triangle_pid;
-  bind_vertex_array text_geo;
-  let transform_loc = get_uniform_location triangle_pid "transform" in
+  Gl.use_program ctx triangle_pid;
+  bind_vertex_array ctx text_geo;
+  let transform_loc =
+    Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
+  in
   List.iter
     (fun (_, x, y) ->
       let x = x *. scale /. aspect in
@@ -406,17 +357,20 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
           * scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 1.
           * translate x y 0.)
       in
-      Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
-      Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0))
+      Gl.uniform_matrix4fv ctx transform_loc false
+        (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+      Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
-  Gl.bind_vertex_array 0;
+  Gl.bind_vertex_array ctx None;
 
-  use_program text_pid;
-  bind_vertex_array text_geo;
-  Gl.enable Gl.texture_2d;
-  Gl.enable Gl.blend;
-  Gl.blend_func Gl.src_alpha Gl.one_minus_src_alpha;
-  let transform_loc = get_uniform_location text_pid "transform" in
+  Gl.use_program ctx text_pid;
+  bind_vertex_array ctx text_geo;
+  Gl.enable ctx Gl.texture_2d;
+  Gl.enable ctx Gl.blend;
+  Gl.blend_func ctx Gl.src_alpha Gl.one_minus_src_alpha;
+  let transform_loc =
+    Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
+  in
   List.iter
     (fun ({ Points.name; elevation; _ }, x, y) ->
       let x = x *. scale /. aspect in
@@ -425,56 +379,23 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
         Matrix.(scale (text_height /. aspect) text_height 1. * translate x y 0.)
       in
       ignore
-        (draw_text font transform_loc transform
+        (draw_text ctx transform_loc transform
            (match elevation with
            | None -> name
            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)))
     points;
-  Gl.disable Gl.texture_2d;
-  Gl.disable Gl.blend;
+  Gl.disable ctx Gl.texture_2d;
+  Gl.disable ctx Gl.blend;
 
-  Gl.bind_vertex_array 0;
+  Gl.bind_vertex_array ctx None;
 
-  Sdl.gl_swap_window win;
   Ok ()
 
-let reshape _win w h = Gl.viewport 0 0 w h
-
-(* Window and OpenGL context *)
-
-let pp_opengl_info ppf () =
-  let pp = Format.fprintf in
-  let pp_opt ppf = function
-    | None -> pp ppf "error"
-    | Some s -> pp ppf "%s" s
-  in
-  pp ppf "@[<v>@,";
-  pp ppf "Renderer @[<v>@[%a@]@," pp_opt (Gl.get_string Gl.renderer);
-  pp ppf "@[OpenGL %a / GLSL %a@]@]@," pp_opt (Gl.get_string Gl.version) pp_opt
-    (Gl.get_string Gl.shading_language_version);
-  pp ppf "@]"
-
-let create_window ~gl:(maj, min) =
-  let w_atts = Sdl.Window.(opengl + resizable) in
-  let w_title = Printf.sprintf "OpenGL %d.%d (core profile)" maj min in
-  let set a v = Sdl.gl_set_attribute a v in
-  let* () = set Sdl.Gl.context_profile_mask Sdl.Gl.context_profile_es in
-  let* () = set Sdl.Gl.context_major_version maj in
-  let* () = set Sdl.Gl.context_minor_version min in
-  let* () = set Sdl.Gl.doublebuffer 1 in
-  let* win = Sdl.create_window ~w:640 ~h:480 w_title w_atts in
-  let* ctx = Sdl.gl_create_context win in
-  let* () = Sdl.gl_make_current win ctx in
-  Sdl.log "%a" pp_opengl_info ();
-  Ok (win, ctx)
-
-let destroy_window win ctx =
-  Sdl.gl_delete_context ctx;
-  Sdl.destroy_window win;
-  Ok ()
+let reshape ctx w h = Gl.viewport ctx 0 0 w h
 
 (* Event loop *)
 
+(*
 let event_loop win angle draw =
   let e = Sdl.Event.create () in
   let key_scancode e = Sdl.Scancode.enum Sdl.Event.(get e keyboard_scancode) in
@@ -507,39 +428,34 @@ let event_loop win angle draw =
   in
   draw ~aspect:(640. /. 400.) ~angle win;
   loop angle
+*)
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
-    heights normals =
-  let* () = Sdl.init Sdl.Init.video in
-  let* font = load_font () in
-  let* win, ctx = create_window ~gl in
+let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
   let* terrain_geo =
-    create_geometry ~indices:(build_indices w w h)
+    create_geometry ctx ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
   in
   let* text_geo =
-    create_geometry
+    create_geometry ctx
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
-  let* terrain_pid = create_program terrain_program in
-  let* triangle_pid = create_program triangle_program in
-  let* text_pid = create_program text_program in
+  let* terrain_pid = create_program ctx terrain_program in
+  let* triangle_pid = create_program ctx triangle_program in
+  let* text_pid = create_program ctx text_program in
   let* () =
-    event_loop win angle (fun ~aspect ~angle win ->
+    event_loop ctx angle (fun ~aspect ~angle win ->
         ignore
-          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font
-             ~aspect ~w ~h ~x ~y ~angle ~height ~tile ~points win))
+          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect
+             ~w ~h ~x ~y ~angle ~height ~tile ~points win))
   in
-  let* () = delete_program terrain_pid in
-  let* () = delete_program triangle_pid in
-  let* () = delete_program text_pid in
-  let* () = delete_geometry terrain_geo in
-  let* () = delete_geometry text_geo in
-  let* () = destroy_window win ctx in
-  Sdl.quit ();
+  let* () = delete_program ctx terrain_pid in
+  let* () = delete_program ctx triangle_pid in
+  let* () = delete_program ctx text_pid in
+  let* () = delete_geometry ctx terrain_geo in
+  let* () = delete_geometry ctx text_geo in
   Ok ()
 
 (*
@@ -627,12 +543,13 @@ let main () =
   let anon _ = raise (Arg.Bad "no arguments are supported") in
   Arg.parse (Arg.align options) anon usage;
   match
-    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
-      ~points ~tile heights normals
+    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height ~points
+      ~tile heights normals
+      (assert false)
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
-      Sdl.log "%s@." msg;
+      Brr.Console.log [ Jstr.v msg ];
       exit 1
 
 let () = main ()
