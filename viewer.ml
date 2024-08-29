@@ -99,7 +99,7 @@ let terrain_program =
         void main() {
           float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
           vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
-          float fog_coeff = exp(- length(position.xyz) * 1e-4);
+          float fog_coeff = exp(length(position.xyz) * -1e-4);
           vec3  fog_color  = vec3(0.36, 0.45, 0.59);
           color = mix(fog_color, terrain_color, fog_coeff);
         }
