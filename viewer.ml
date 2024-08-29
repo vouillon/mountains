@@ -7,7 +7,6 @@ aws s3 cp  s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N44_00_E006_00_DEM/Cope
 
 https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
 https://blogs.igalia.com/itoral/2016/10/13/opengl-terrain-renderer-rendering-the-terrain-mesh/
-https://stackoverflow.com/questions/5281261/generating-a-normal-map-from-a-height-map
 
 https://iquilezles.org/articles/fog/
 
@@ -17,17 +16,9 @@ Top-Down View-Dependent Terrain Triangulation using the Octagon Metric.
 Visualization of large terrains made easy.
 
 http://app.geotiff.io/identify
-
-=======================================
-
-- draw from above using height values
-- draw from above using normal map
-- change viewpoint
 *)
 
 (*
-- clean-up code
-
 - gather tiles around where we are
 *)
 
@@ -72,90 +63,94 @@ type program = {
 let terrain_program =
   {
     vertex_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  uniform mat4 proj;\n\
-      \  uniform mat4 transform;\n\
-      \  uniform int w;\n\
-      \  uniform int h;\n\
-      \  uniform vec2 delta;\n\
-      \  in float height;\n\
-      \  in vec3 normal;\n\
-      \  out vec3 v_color;\n\
-      \  out vec4 position;\n\
-      \  void main()\n\
-      \  {\n\
-      \    float x = float(gl_VertexID % w) * delta.x;\n\
-      \    float y = float(h - 1 - (gl_VertexID / w)) * delta.y;\n\
-      \    float z = height; \n\
-      \    float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);\n\
-      \    v_color = l * vec3(0.3, 0.32, 0.19);\n\
-      \    position = transform * vec4(x, y, z, 1.0);\n\
-      \    gl_Position = proj * position; \n\
-      \  }";
+      {|
+        #version 300 es
+        uniform mat4 proj;
+        uniform mat4 transform;
+        uniform int w;
+        uniform int h;
+        uniform vec2 delta;
+        in float height;
+        in vec3 vertex_normal;
+        out vec3 normal;
+        out vec4 position;
+        void main()
+        {
+          float x = float(gl_VertexID % w) * delta.x;
+          float y = float(h - 1 - (gl_VertexID / w)) * delta.y;
+          float z = height;
+          normal = vertex_normal;
+          position = transform * vec4(x, y, z, 1.0);
+          gl_Position = proj * position;
+        }
+      |};
     fragment_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  precision highp float;\n\
-      \  in vec3 v_color;\n\
-      \  in vec4 position;\n\
-      \  out vec3 color;\n\
-      \  void main() {\n\
-      \    float fogAmount = exp(- length(position.xyz) * 1e-4);\n\
-      \    // vec3  fogColor  = vec3(0.5,0.6,0.7);\n\
-      \    vec3  fogColor  = vec3(0.36,0.45,0.59);\n\
-      \    color = mix(fogColor, v_color, fogAmount);\n\
-      \  }";
-    attributes = [ "height"; "normal" ];
+      {|
+        #version 300 es
+        precision highp float;
+        in vec4 position;
+        in vec3 normal;
+        out vec3 color;
+        void main() {
+          float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
+          vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
+          float fog_coeff = exp(- length(position.xyz) * 1e-4);
+          vec3  fog_color  = vec3(0.36, 0.45, 0.59);
+          color = mix(fog_color, terrain_color, fog_coeff);
+        }
+      |};
+    attributes = [ "height"; "vertex_normal" ];
   }
 
 let triangle_program =
   {
     vertex_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  uniform mat4 transform;\n\
-      \  void main()\n\
-      \  {\n\
-      \    float x = float(gl_VertexID - 1) / 2.;\n\
-      \    float y = float(gl_VertexID != 1) * (sqrt(3.)/ 2.);\n\
-      \    gl_Position = transform * vec4(x, y, 0, 1.);\n\
-      \  }\n";
+      {|
+        #version 300 es
+        uniform mat4 transform;
+        void main() {
+          float x = float(gl_VertexID - 1) / 2.;
+          float y = float(gl_VertexID != 1) * (sqrt(3.)/ 2.);
+          gl_Position = transform * vec4(x, y, 0, 1.);
+        }
+      |};
     fragment_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  precision highp float;\n\
-      \  out vec3 color;\n\
-      \  void main() {\n\
-      \    color = vec3(0,0,0);\n\
-      \  }";
+      {|
+        #version 300 es
+        precision highp float;
+        out vec3 color;
+        void main() {
+          color = vec3(0,0,0);
+        }
+      |};
     attributes = [];
   }
 
 let text_program =
   {
     vertex_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  uniform mat4 transform;\n\
-      \  out vec2 texture_coord;\n\
-      \  void main()\n\
-      \  {\n\
-      \    float x = float(gl_VertexID % 2);\n\
-      \    float y = float(gl_VertexID / 2);\n\
-      \    texture_coord = vec2(x, 1. - y);\n\
-      \    gl_Position = transform * vec4(x, y, 0, 1.);\n\
-      \  }\n";
+      {|
+        #version 300 es
+        uniform mat4 transform;
+        out vec2 texture_coord;
+        void main() {
+          float x = float(gl_VertexID % 2);
+          float y = float(gl_VertexID / 2);
+          texture_coord = vec2(x, 1. - y);
+          gl_Position = transform * vec4(x, y, 0, 1.);
+        }
+      |};
     fragment_shader =
-      "\n\
-      \  #version 300 es\n\
-      \  precision highp float;\n\
-      \  in vec2 texture_coord;\n\
-      \  uniform sampler2D tex;\n\
-      \  out vec4 color;\n\
-      \  void main() {\n\
-      \    color = texture(tex, texture_coord);\n\
-      \  }";
+      {|
+        #version 300 es
+        precision highp float;
+        in vec2 texture_coord;
+        uniform sampler2D tex;
+        out vec4 color;
+        void main() {
+          color = texture(tex, texture_coord);
+        }
+      |};
     attributes = [];
   }
 
