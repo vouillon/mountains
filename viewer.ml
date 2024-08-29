@@ -563,13 +563,16 @@ let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
 
 let main () =
   let lat, lon, angle =
-    if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
+    if true then (44.607649, 6.8204019, 0.)
+      (*(44.607728, 6.821075, 0.)*)
+      (* Col Girardin *)
+    else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
     else if true then (44.207447, 6.906400, 40.)
       (* Auron vers est vallée de la Tinée *)
     else if true then (44.278358, 6.790589, 0.)
     else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
     else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
-    else if true then (44.7333863, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
+    else if true then (44.73365, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
