@@ -159,51 +159,6 @@ let text_program =
     attributes = [];
   }
 
-(* Geometry *)
-
-let linearize2 a =
-  Bigarray.(reshape_1 (genarray_of_array2 a) (Array2.dim1 a * Array2.dim2 a))
-
-let linearize3 a =
-  Bigarray.(
-    reshape_1 (genarray_of_array3 a)
-      (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
-
-let precompute tile_height tile_width tile =
-  let normals =
-    Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 3
-  in
-  let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
-  in
-  for y = 1 to tile_height - 2 do
-    for x = 1 to tile_width - 2 do
-      let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
-      let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
-      let nz = 2. *. deltax *. deltay in
-      let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-      normals.{y - 1, x - 1, 0} <- truncate (nx *. n);
-      normals.{y - 1, x - 1, 1} <- truncate (ny *. n);
-      normals.{y - 1, x - 1, 2} <- truncate (nz *. n);
-      heights.{y - 1, x - 1} <- tile.{y, x}
-    done
-  done;
-  (linearize2 heights, linearize3 normals)
-
-let build_indices w h =
-  let is = bigarray_create Bigarray.int32 ((2 * (h - 1) * (w + 1)) - 2) in
-  for i = 0 to h - 2 do
-    for j = 0 to w - 1 do
-      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + (i * w));
-      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + ((i + 1) * w))
-    done;
-    if i > 0 then (
-      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i + 1) * w) - 1);
-      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int (i * w))
-  done;
-  is
-
 (* OpenGL setup *)
 
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
@@ -285,7 +240,55 @@ let delete_program (Program pid) =
   Gl.delete_program pid;
   Ok ()
 
-(***)
+let linearize2 a =
+  Buffer
+    Bigarray.(reshape_1 (genarray_of_array2 a) (Array2.dim1 a * Array2.dim2 a))
+
+let linearize3 a =
+  Buffer
+    Bigarray.(
+      reshape_1 (genarray_of_array3 a)
+        (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
+
+(* Geometry *)
+
+let precompute tile_height tile_width tile =
+  let normals =
+    Bigarray.(Array3.create Int8_signed C_layout)
+      (tile_height - 2) (tile_width - 2) 3
+  in
+  let heights =
+    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
+  in
+  for y = 1 to tile_height - 2 do
+    for x = 1 to tile_width - 2 do
+      let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
+      let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
+      let nz = 2. *. deltax *. deltay in
+      let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
+      normals.{y - 1, x - 1, 0} <- truncate (nx *. n);
+      normals.{y - 1, x - 1, 1} <- truncate (ny *. n);
+      normals.{y - 1, x - 1, 2} <- truncate (nz *. n);
+      heights.{y - 1, x - 1} <- tile.{y, x}
+    done
+  done;
+  (linearize2 heights, linearize3 normals)
+
+let build_indices w h =
+  let is =
+    Bigarray.(
+      Array1.create Bigarray.int32 c_layout ((2 * (h - 1) * (w + 1)) - 2))
+  in
+  for i = 0 to h - 2 do
+    for j = 0 to w - 1 do
+      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + (i * w));
+      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + ((i + 1) * w))
+    done;
+    if i > 0 then (
+      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i + 1) * w) - 1);
+      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int (i * w))
+  done;
+  is
 
 let load_font () =
   let* () = Ttf.init () in
@@ -509,7 +512,7 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
   let* win, ctx = create_window ~gl in
   let* terrain_geo =
     create_geometry ~indices:(build_indices w h)
-      ~buffers:[ (1, Gl.float, Buffer heights); (3, Gl.byte, Buffer normals) ]
+      ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
   in
   let* text_geo =
     create_geometry
@@ -590,7 +593,6 @@ let main () =
   in
   let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in
-  Format.eprintf "ZZZZ %f@." heights.{((y - 1) * (tile_width - 2)) + (x - 1)};
   let exec = Filename.basename Sys.executable_name in
   let usage =
     Printf.sprintf "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec
