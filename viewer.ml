@@ -7,6 +7,8 @@ aws s3 cp  s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N44_00_E006_00_DEM/Cope
 
 https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
 https://blogs.igalia.com/itoral/2016/10/13/opengl-terrain-renderer-rendering-the-terrain-mesh/
+http://casual-effects.blogspot.com/2014/04/fast-terrain-rendering-with-continuous.html
+https://mikejsavage.co.uk/geometry-clipmaps/
 
 https://iquilezles.org/articles/fog/
 
@@ -20,6 +22,9 @@ http://app.geotiff.io/identify
 
 (*
 - gather tiles around where we are
+
+- draw closer triangles before farther triangles
+  (split the whole grid in four quadrants and draw triangles appropriately)
 *)
 
 open Tsdl
@@ -67,8 +72,8 @@ let terrain_program =
         #version 300 es
         uniform mat4 proj;
         uniform mat4 transform;
-        uniform int w;
-        uniform int h;
+        uniform int w_mask;
+        uniform int w_shift;
         uniform vec2 delta;
         in float height;
         in vec3 vertex_normal;
@@ -76,8 +81,8 @@ let terrain_program =
         out vec4 position;
         void main()
         {
-          float x = float(gl_VertexID % w) * delta.x;
-          float y = float(h - 1 - (gl_VertexID / w)) * delta.y;
+          float x = float(gl_VertexID & w_mask) * delta.x;
+          float y = float((gl_VertexID >> w_shift)) * delta.y;
           float z = height;
           normal = vertex_normal;
           position = transform * vec4(x, y, z, 1.0);
@@ -134,8 +139,8 @@ let text_program =
         uniform mat4 transform;
         out vec2 texture_coord;
         void main() {
-          float x = float(gl_VertexID % 2);
-          float y = float(gl_VertexID / 2);
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
           texture_coord = vec2(x, 1. - y);
           gl_Position = transform * vec4(x, y, 0, 1.);
         }
@@ -249,11 +254,10 @@ let linearize3 a =
 
 let precompute tile_height tile_width tile =
   let normals =
-    Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 3
+    Bigarray.(Array3.create Int8_signed C_layout) (tile_height - 2) tile_width 3
   in
   let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
+    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) tile_width
   in
   for y = 1 to tile_height - 2 do
     for x = 1 to tile_width - 2 do
@@ -261,27 +265,27 @@ let precompute tile_height tile_width tile =
       let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
       let nz = 2. *. deltax *. deltay in
       let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-      normals.{y - 1, x - 1, 0} <- truncate (nx *. n);
-      normals.{y - 1, x - 1, 1} <- truncate (ny *. n);
-      normals.{y - 1, x - 1, 2} <- truncate (nz *. n);
-      heights.{y - 1, x - 1} <- tile.{y, x}
+      normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
+      normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
+      normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
+      heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
     done
   done;
   (linearize2 heights, linearize3 normals)
 
-let build_indices w h =
+let build_indices w w' h =
   let is =
     Bigarray.(
       Array1.create Bigarray.int32 c_layout ((2 * (h - 1) * (w + 1)) - 2))
   in
   for i = 0 to h - 2 do
     for j = 0 to w - 1 do
-      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + (i * w));
-      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + ((i + 1) * w))
+      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
+      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
     done;
     if i > 0 then (
-      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i + 1) * w) - 1);
-      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int (i * w))
+      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i - 1) * w') + w - 1);
+      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int ((i + 1) * w'))
   done;
   is
 
@@ -354,10 +358,10 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   use_program terrain_pid;
   Gl.enable Gl.depth_test;
   Gl.enable Gl.cull_face_enum;
-  let height_loc = get_uniform_location terrain_pid "h" in
-  Gl.uniform1i height_loc h;
-  let width_loc = get_uniform_location terrain_pid "w" in
-  Gl.uniform1i width_loc w;
+  let width_shift_loc = get_uniform_location terrain_pid "w_shift" in
+  Gl.uniform1i width_shift_loc (truncate (log (float (w + 2)) /. log 2.));
+  let width_mask_loc = get_uniform_location terrain_pid "w_mask" in
+  Gl.uniform1i width_mask_loc (w + 1);
   let delta_loc = get_uniform_location terrain_pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
   let transform =
@@ -506,7 +510,8 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
   let* font = load_font () in
   let* win, ctx = create_window ~gl in
   let* terrain_geo =
-    create_geometry ~indices:(build_indices w h)
+    create_geometry
+      ~indices:(build_indices w (w + 2) h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
   in
   let* text_geo =
