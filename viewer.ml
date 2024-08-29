@@ -254,10 +254,11 @@ let linearize3 a =
 
 let precompute tile_height tile_width tile =
   let normals =
-    Bigarray.(Array3.create Int8_signed C_layout) (tile_height - 2) tile_width 3
+    Bigarray.(Array3.create Int8_signed C_layout)
+      (tile_height - 2) (tile_width - 2) 3
   in
   let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) tile_width
+    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
   in
   for y = 1 to tile_height - 2 do
     for x = 1 to tile_width - 2 do
@@ -359,9 +360,9 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   Gl.enable Gl.depth_test;
   Gl.enable Gl.cull_face_enum;
   let width_shift_loc = get_uniform_location terrain_pid "w_shift" in
-  Gl.uniform1i width_shift_loc (truncate (log (float (w + 2)) /. log 2.));
+  Gl.uniform1i width_shift_loc (truncate (log (float w) /. log 2.));
   let width_mask_loc = get_uniform_location terrain_pid "w_mask" in
-  Gl.uniform1i width_mask_loc (w + 1);
+  Gl.uniform1i width_mask_loc (w - 1);
   let delta_loc = get_uniform_location terrain_pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
   let transform =
@@ -510,8 +511,7 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
   let* font = load_font () in
   let* win, ctx = create_window ~gl in
   let* terrain_geo =
-    create_geometry
-      ~indices:(build_indices w (w + 2) h)
+    create_geometry ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
   in
   let* text_geo =
@@ -537,6 +537,7 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
   Sdl.quit ();
   Ok ()
 
+(*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
   let y = truncate (fst (Float.modf lat) *. float height) in
   let x = truncate ((fst (Float.modf lon) *. float width) +. 0.5) in
@@ -558,12 +559,9 @@ let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
       Points.lon = tile_lon +. (float tile_width /. float width);
       lat = tile_lat +. (float tile_height /. float height);
     } )
+*)
 
 let main () =
-  let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let ({ Tiff.width; height; tile_width; tile_height; _ } as info) =
-    Tiff.read_info ch
-  in
   let lat, lon, angle =
     if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
     else if true then (44.207447, 6.906400, 40.)
@@ -575,16 +573,36 @@ let main () =
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
+  (*
+  let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
+  let ({ Tiff.width; height; tile_width; tile_height; _ } as info) =
+    Tiff.read_info ch
+  in
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
+  let tile = Tiff.read_tile ch info tile_index in
+  Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
+*)
+  let tile = Loader.f ~lat ~lon in
+  (*ZZZ*)
+  let x = 1025 in
+  let y = 1025 in
+  let tile_coord =
+    { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
+  in
+  let tile_coord' =
+    { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
+  in
+  let tile_width = 2050 in
+  let tile_height = 2050 in
   let points =
+    let width = 3600 in
+    let height = 3600 in
     Points.find tile_coord tile_coord'
     |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
            let x = truncate ((lon -. tile_coord.lon) *. float width) in
            let y = truncate ((tile_coord'.lat -. lat) *. float height) in
            (pt, (x, y)))
   in
-  let tile = Tiff.read_tile ch info tile_index in
-  Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
