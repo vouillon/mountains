@@ -1,4 +1,15 @@
+(*
+curl https://overpass-api.de/api/interpreter -d '[out:json]
+[bbox:44,6,45,7];
+(node[natural=peak];
+ node[natural=saddle];);
+out;' | wc -c
+
+[out:csv(name,"name:fr",natural,::lat,::lon,ele;false)]
+*)
+
 type coord = { lat : float; lon : float }
+type t = { name : string; coord : coord; elevation : int option }
 
 let load () =
   let d = Yojson.Safe.from_file "points.geojson" in
@@ -19,12 +30,16 @@ let load () =
                | [ lon; lat ] -> { lat; lon }
                | _ -> assert false
              in
-             [ (name, coord) ])
+             let elevation =
+               d |> member "properties" |> member "ele" |> to_option to_string
+               |> Option.map (fun s -> truncate (float_of_string s +. 0.5))
+             in
+             [ { name; elevation; coord } ])
   |> List.flatten
 
 let find { lat; lon } { lat = lat'; lon = lon' } =
   let l = load () in
   List.filter
-    (fun (_, { lat = lat''; lon = lon'' }) ->
+    (fun { coord = { lat = lat''; lon = lon'' }; _ } ->
       lat < lat'' && lat'' < lat' && lon < lon'' && lon'' < lon')
     l

@@ -323,9 +323,9 @@ let text_height = 0.07
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
     ~h ~x ~y ~height ~angle ~points ~tile win =
-  let points =
+  let points : (Points.t * _ * _) list =
     List.filter_map
-      (fun (nm, (x', y')) ->
+      (fun (pt, (x', y')) ->
         let z = tile.{y', x'} -. tile.{y, x} in
         let x = deltax *. float (x' - x) in
         let y = deltay *. float (y' - y) in
@@ -333,7 +333,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
         let x' = (x *. cos angle) +. (y *. sin angle) in
         let y' = (-.x *. sin angle) +. (y *. cos angle) in
         let y' = -.y' in
-        if y' > 0. then Some (nm, x' /. y', z /. y') else None)
+        if y' > 0. then Some (pt, x' /. y', z /. y') else None)
       points
     |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
   in
@@ -410,13 +410,17 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   Gl.blend_func Gl.src_alpha Gl.one_minus_src_alpha;
   let transform_loc = get_uniform_location text_pid "transform" in
   List.iter
-    (fun (nm, x, y) ->
+    (fun ({ Points.name; elevation; _ }, x, y) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
         Matrix.(scale (text_height /. aspect) text_height 1. * translate x y 0.)
       in
-      ignore (draw_text font transform_loc transform nm))
+      ignore
+        (draw_text font transform_loc transform
+           (match elevation with
+           | None -> name
+           | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)))
     points;
   Gl.disable Gl.texture_2d;
   Gl.disable Gl.blend;
@@ -571,10 +575,10 @@ let main () =
   let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
   let points =
     Points.find tile_coord tile_coord'
-    |> List.map (fun (nm, { Points.lat; lon }) ->
+    |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
            let x = truncate ((lon -. tile_coord.lon) *. float width) in
            let y = truncate ((tile_coord'.lat -. lat) *. float height) in
-           (nm, (x, y)))
+           (pt, (x, y)))
   in
   let tile = Tiff.read_tile ch info tile_index in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
