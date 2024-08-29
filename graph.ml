@@ -1,21 +1,12 @@
 let () =
   let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let {
-    Relief.width;
-    height;
-    tile_width;
-    tile_height;
-    tile_offsets;
-    tile_byte_counts;
-    _;
-  } =
-    Relief.read_info ch
+  let ({ Tiff.width; height; tile_width; tile_height; tile_offsets; _ } as info)
+      =
+    Tiff.read_info ch
   in
   Graphics.open_graph " 1024x1024";
   for i = 0 to Array.length tile_offsets - 1 do
-    let tile =
-      Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts i
-    in
+    let tile = Tiff.read_tile ch info i in
     let tile_per_line = (width + tile_width - 1) / tile_width in
     let tx = i mod tile_per_line in
     let ty = i / tile_per_line in
@@ -43,26 +34,11 @@ let () =
                tile.{y, x};
              (nm, (x, y)))
     in
-    (*
-    List.iter
-      (fun (nm, (x, y)) -> Format.eprintf "%s %d %d %g@." nm x y tile.{y, x})
-      points;
-*)
     for y = 1 to tile_height - 2 do
       for x = 1 to tile_width - 2 do
-        (*
-        let l = truncate (256. -. (tile.{y, x} /. 4000. *. 256.)) in
-*)
         let nx = tile.{y, x - 1} -. tile.{y, x + 1} in
         let ny = tile.{y - 1, x} -. tile.{y + 1, x} in
         let nz = 2. *. 30. in
-        (*
-(-dhx, -dhy, d)
-
-compute normal
-scalar product with light direction
-negative ==> black
-*)
         let u =
           max 0.
             (-.(nx +. ny -. nz)
@@ -78,7 +54,6 @@ negative ==> black
     done;
     List.iter
       (fun (_, (x, y)) ->
-        Format.eprintf "%d %d@." x y;
         Graphics.set_color Graphics.red;
         Graphics.plot x (tile_width - y - 1);
         Graphics.draw_rect (x - 2) (tile_width - y - 1 - 2) 4 4)

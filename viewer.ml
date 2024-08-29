@@ -1,4 +1,31 @@
 (*
+https://registry.opendata.aws/copernicus-dem/
+
+aws s3 cp  s3://copernicus-dem-30m/Copernicus_DSM_COG_10_N44_00_E006_00_DEM/Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif ~/tmp/relief
+
+=====
+
+https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry
+https://blogs.igalia.com/itoral/2016/10/13/opengl-terrain-renderer-rendering-the-terrain-mesh/
+https://stackoverflow.com/questions/5281261/generating-a-normal-map-from-a-height-map
+
+https://iquilezles.org/articles/fog/
+
+Terrender: A Web-Based Multi-Resolution Terrain ...
+RASTeR: Simple and efficient terrain rendering on the GPU
+Top-Down View-Dependent Terrain Triangulation using the Octagon Metric.
+Visualization of large terrains made easy.
+
+http://app.geotiff.io/identify
+
+=======================================
+
+- draw from above using height values
+- draw from above using normal map
+- change viewpoint
+*)
+
+(*
 - clean-up code
 
 - gather tiles around where we are
@@ -15,102 +42,6 @@ let ( >>= ) x f = match x with Ok v -> f v | Error _ as e -> e
 (* Helper functions. *)
 
 let bigarray_create k len = Bigarray.(Array1.create k c_layout len)
-
-module Proj3D = struct
-  type t = float array
-
-  let project s s' n =
-    [| s; 0.; 0.; 0.; 0.; s'; 0.; 0.; 0.; 0.; -1.; -1.; 0.; 0.; -2. *. n; 0. |]
-
-  let scale x y z : t =
-    [| x; 0.; 0.; 0.; 0.; y; 0.; 0.; 0.; 0.; z; 0.; 0.; 0.; 0.; 1. |]
-
-  let translate x y z : t =
-    [| 1.; 0.; 0.; 0.; 0.; 1.; 0.; 0.; 0.; 0.; 1.; 0.; x; y; z; 1. |]
-
-  let rotate_x t : t =
-    [|
-      1.;
-      0.;
-      0.;
-      0.;
-      0.;
-      cos t;
-      sin t;
-      0.;
-      0.;
-      -.sin t;
-      cos t;
-      0.;
-      0.;
-      0.;
-      0.;
-      1.;
-    |]
-
-  let rotate_y t : t =
-    [|
-      cos t;
-      0.;
-      -.sin t;
-      0.;
-      0.;
-      1.;
-      0.;
-      0.;
-      sin t;
-      0.;
-      cos t;
-      0.;
-      0.;
-      0.;
-      0.;
-      1.;
-    |]
-
-  let rotate_z t : t =
-    [|
-      cos t;
-      sin t;
-      0.;
-      0.;
-      -.sin t;
-      cos t;
-      0.;
-      0.;
-      0.;
-      0.;
-      1.;
-      0.;
-      0.;
-      0.;
-      0.;
-      1.;
-    |]
-
-  let c i j = (i * 4) + j
-  let o i = (i / 4, i mod 4)
-
-  let mult m1 m2 =
-    let v p =
-      let i, j = o p in
-      (m1.(c i 0) *. m2.(c 0 j))
-      +. (m1.(c i 1) *. m2.(c 1 j))
-      +. (m1.(c i 2) *. m2.(c 2 j))
-      +. (m1.(c i 3) *. m2.(c 3 j))
-    in
-    Array.init 16 v
-
-  let array m =
-    let a = bigarray_create Float32 (Array.length m) in
-    for i = 0 to Array.length m - 1 do
-      a.{i} <- m.(i)
-    done;
-    a
-
-  let _ = (scale, translate, rotate_x, rotate_y, rotate_z, mult, project)
-end
-
 let pi = 4. *. atan 1.
 
 let get_int =
@@ -412,12 +343,11 @@ let draw_text font transform_loc transform text =
   let _w, h = Sdl.get_surface_size surface in
   let w = p / 4 in
   let transform =
-    Proj3D.(
-      mult
-        (mult
-           (scale (float w /. float h) 1. 0.)
-           (mult (translate 0.7 (-0.5) 0.) (rotate_z (pi /. 4.))))
-        transform)
+    Matrix.(
+      scale (float w /. float h) 1. 1.
+      * translate 0.7 (-0.5) 0.
+      * rotate_z (pi /. 4.)
+      * transform)
   in
   Sdl.lock_surface surface >>= fun () ->
   let a = Sdl.get_surface_pixels surface Bigarray.Int8_unsigned in
@@ -429,7 +359,7 @@ let draw_text font transform_loc transform text =
     (`Data a);
   Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+  Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
   Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
   Gl.delete_textures 1 textures;
   Sdl.free_surface surface;
@@ -481,19 +411,20 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
   let delta_loc = Gl.get_uniform_location pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
   let transform =
-    Proj3D.(
-      mult
-        (translate
-           (-.deltax *. float (x - 1))
-           (-.deltay *. float (h - y))
-           (-.height -. 2.))
-        (mult (rotate_z (angle *. pi /. 180.)) (rotate_x (-.pi /. 2.))))
+    Matrix.(
+      translate
+        (-.deltax *. float (x - 1))
+        (-.deltay *. float (h - y))
+        (-.height -. 2.)
+      * (rotate_z (angle *. pi /. 180.) * rotate_x (-.pi /. 2.)))
   in
-  let proj = Proj3D.project (scale /. aspect) scale 1. in
+  let proj =
+    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
+  in
   let proj_loc = Gl.get_uniform_location pid "proj" in
-  Gl.uniform_matrix4fv proj_loc 1 false (Proj3D.array proj);
+  Gl.uniform_matrix4fv proj_loc 1 false (Matrix.array proj);
   let transform_loc = Gl.get_uniform_location pid "transform" in
-  Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+  Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
   Gl.bind_vertex_array gid;
   Gl.draw_elements Gl.triangle_strip
     ((2 * (h - 1) * (w + 1)) - 2)
@@ -510,14 +441,12 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
-        Proj3D.(
-          mult
-            (mult
-               (rotate_z (-.pi /. 4.))
-               (scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 0.))
-            (translate x y 0.))
+        Matrix.(
+          rotate_z (-.pi /. 4.)
+          * scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 1.
+          * translate x y 0.)
       in
-      Gl.uniform_matrix4fv transform_loc 1 false (Proj3D.array transform);
+      Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
       Gl.draw_elements Gl.triangles 3 Gl.unsigned_byte (`Offset 0))
     points;
   Gl.bind_vertex_array 0;
@@ -533,8 +462,7 @@ let draw pid gid triangle_pid triangle_gid rectangle_pid rectangle_gid ~font
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
-        Proj3D.(
-          mult (scale (text_height /. aspect) text_height 0.) (translate x y 0.))
+        Matrix.(scale (text_height /. aspect) text_height 1. * translate x y 0.)
       in
       ignore (draw_text font transform_loc transform nm))
     points;
@@ -644,7 +572,7 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
   Sdl.quit ();
   Ok ()
 
-let coordinates { Relief.width; height; tile_width; tile_height; _ } lat lon =
+let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
   let y = truncate (fst (Float.modf lat) *. float height) in
   let x = truncate ((fst (Float.modf lon) *. float width) +. 0.5) in
   let y = height - 1 - y in
@@ -668,16 +596,8 @@ let coordinates { Relief.width; height; tile_width; tile_height; _ } lat lon =
 
 let main () =
   let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let ({
-         Relief.width;
-         height;
-         tile_width;
-         tile_height;
-         tile_offsets;
-         tile_byte_counts;
-         _;
-       } as info) =
-    Relief.read_info ch
+  let ({ Tiff.width; height; tile_width; tile_height; _ } as info) =
+    Tiff.read_info ch
   in
   let lat, lon, angle =
     if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
@@ -698,16 +618,13 @@ let main () =
            let y = truncate ((tile_coord'.lat -. lat) *. float height) in
            (nm, (x, y)))
   in
-  let tile =
-    Relief.read_tile ch tile_width tile_height tile_offsets tile_byte_counts
-      tile_index
-  in
+  let tile = Tiff.read_tile ch info tile_index in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
-  List.iter
-    (fun (nm, (x, y)) -> Format.eprintf "%s %d %d %g@." nm x y tile.{y, x})
-    points;
   let points =
-    List.filter (fun (_, (x', y')) -> Raytrace.test tile x y x' y') points
+    List.filter
+      (fun (_, (dst_x, dst_y)) ->
+        Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
+      points
   in
   let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in

@@ -16,20 +16,25 @@ let follow_line plot x0 y0 x1 y1 =
   in
   follow (dx + dy) x0 y0
 
-let test height x0 y0 x1 y1 =
-  let h0 = height.{y0, x0} +. 2. in
-  let h1 = height.{y1, x1} in
-  let dx = x1 - x0 in
-  let dy = y1 - y0 in
+let test
+    (height :
+      (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array2.t) ~src_x
+    ~src_y ~dst_x ~dst_y =
+  let src_h = height.{src_y, src_x} +. 2. in
+  let dst_h = height.{dst_y, dst_x} in
+  let dx = dst_x - src_x in
+  let dy = dst_y - src_y in
   let d = sqrt ((float dx ** 2.) +. (float dy ** 2.)) in
   let check x y =
-    let dx' = x - x0 in
-    let dy' = y - y0 in
+    let dx' = x - src_x in
+    let dy' = y - src_y in
     let d' = sqrt ((float dx' ** 2.) +. (float dy' ** 2.)) in
     let h = height.{y, x} in
-    let h' = ((h1 -. h0) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. h0 in
+    let h' =
+      ((dst_h -. src_h) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. src_h
+    in
     let res = d' > 0.9 *. d || h < h' in
     (*    Format.eprintf "%g - %g %g - %b@." (d' /. d) h h' res;*)
     res
   in
-  follow_line check x0 y0 x1 y1
+  follow_line check src_x src_y dst_x dst_y
