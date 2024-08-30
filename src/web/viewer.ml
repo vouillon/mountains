@@ -77,7 +77,7 @@ let triangle_program =
         precision highp float;
         out vec4 color;
         void main() {
-          color = vec4(0,0,0,0);
+          color = vec4(0,0,0,1);
         }
       |};
     attributes = [];
@@ -523,7 +523,24 @@ let main () =
     (*
     let** points = Reader.read_file "data/points.geojson" in
 *)
-    let points = "{features:[]}" in
+    let points =
+      {|
+{"features":[
+    {
+      "properties": {
+        "ele": "2881",
+        "name": "Cime de la Charvie"
+      },
+      "geometry": {
+        "coordinates": [
+          6.7626741,
+          44.8556257
+        ]
+      }
+    }
+]}
+|}
+    in
     Lwt.return
       (Points.find tile_coord tile_coord' points
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
