@@ -12,7 +12,7 @@ type coord = { lat : float; lon : float }
 type t = { name : string; coord : coord; elevation : int option }
 
 let load () =
-  let d = Yojson.Safe.from_file "points.geojson" in
+  let d = Yojson.Safe.from_file "data/points.geojson" in
   let open Yojson.Safe.Util in
   d |> member "features" |> to_list
   |> List.map (fun d ->

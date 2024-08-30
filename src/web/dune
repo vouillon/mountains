@@ -1,0 +1,23 @@
+(executables (names viewer)
+ (libraries mountains yojson brr lwt)
+ (modes js)
+ (js_of_ocaml (javascript_files inflate.js))
+ (ocamlopt_flags (-cclib -lGLESv2)))
+
+(rule
+ (target (dir data))
+ (alias all)
+ (deps (glob_files ../../data/*))
+ (action
+  (progn
+   (run mkdir %{target})
+   (run cp %{deps} %{target}))))
+
+(alias
+ (name all)
+ (deps index.html))
+
+(rule
+ (alias web)
+ (action (run python3 -m http.server -d .))
+ (deps index.html data viewer.bc.js))

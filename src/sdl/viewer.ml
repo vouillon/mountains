@@ -31,6 +31,9 @@ curl https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N45_00_E0
 
 var x = fetch('https://overpass-api.de/api/interpreter', {method:'POST', body: '[out:json][bbox:44,6,45,7];(node[natural=peak]; node[natural=saddle];);out;'}).then(resp=>resp.text());
 *)
+module Loader = Loader.Make (Reader)
+
+let ( let** ) = Lwt.bind
 
 open Tsdl
 open Tsdl_ttf
@@ -73,8 +76,7 @@ type program = {
 let terrain_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 proj;
         uniform mat4 transform;
         uniform int w_mask;
@@ -95,18 +97,17 @@ let terrain_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
         in vec4 position;
         in vec3 normal;
-        out vec3 color;
+        out vec4 color;
         void main() {
           float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
           vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
           float fog_coeff = exp(length(position.xyz) * -1e-4);
           vec3  fog_color  = vec3(0.36, 0.45, 0.59);
-          color = mix(fog_color, terrain_color, fog_coeff);
+          color = vec4(mix(fog_color, terrain_color, fog_coeff),1.);
         }
       |};
     attributes = [ "height"; "vertex_normal" ];
@@ -115,8 +116,7 @@ let terrain_program =
 let triangle_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 transform;
         void main() {
           float x = float(gl_VertexID - 1) / 2.;
@@ -125,12 +125,11 @@ let triangle_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
-        out vec3 color;
+        out vec4 color;
         void main() {
-          color = vec3(0,0,0);
+          color = vec4(0,0,0,0);
         }
       |};
     attributes = [];
@@ -139,8 +138,7 @@ let triangle_program =
 let text_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 transform;
         out vec2 texture_coord;
         void main() {
@@ -151,8 +149,7 @@ let text_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
         in vec2 texture_coord;
         uniform sampler2D tex;
@@ -168,11 +165,11 @@ let text_program =
 
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
 
-let create_buffer (Buffer b) =
+let create_buffer target (Buffer b) =
   let id = get_int (Gl.gen_buffers 1) in
   let bytes = Gl.bigarray_byte_size b in
-  Gl.bind_buffer Gl.array_buffer id;
-  Gl.buffer_data Gl.array_buffer bytes (Some b) Gl.static_draw;
+  Gl.bind_buffer target id;
+  Gl.buffer_data target bytes (Some b) Gl.static_draw;
   id
 
 let delete_buffer bid = set_int (Gl.delete_buffers 1) bid
@@ -181,16 +178,16 @@ type geometry = { vertex_array : int; buffers : int list }
 
 let create_geometry ~indices ~buffers =
   let gid = get_int (Gl.gen_vertex_arrays 1) in
-  let iid = create_buffer (Buffer indices) in
+  Gl.bind_vertex_array gid;
+  let iid = create_buffer Gl.element_array_buffer (Buffer indices) in
+  Gl.bind_buffer Gl.element_array_buffer iid;
   let bind_attrib loc dim typ data =
-    let id = create_buffer data in
+    let id = create_buffer Gl.array_buffer data in
     Gl.bind_buffer Gl.array_buffer id;
     Gl.enable_vertex_attrib_array loc;
     Gl.vertex_attrib_pointer loc dim typ false 0 (`Offset 0);
     id
   in
-  Gl.bind_vertex_array gid;
-  Gl.bind_buffer Gl.element_array_buffer iid;
   let buffers =
     List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers
   in
@@ -413,7 +410,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
 
   use_program text_pid;
   bind_vertex_array text_geo;
-  Gl.enable Gl.texture_2d;
   Gl.enable Gl.blend;
   Gl.blend_func Gl.src_alpha Gl.one_minus_src_alpha;
   let transform_loc = get_uniform_location text_pid "transform" in
@@ -430,7 +426,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
            | None -> name
            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)))
     points;
-  Gl.disable Gl.texture_2d;
   Gl.disable Gl.blend;
 
   Gl.bind_vertex_array 0;
@@ -505,7 +500,7 @@ let event_loop win angle draw =
         | _ -> loop angle)
     | _ -> loop angle
   in
-  draw ~aspect:(640. /. 400.) ~angle win;
+  draw ~aspect:(640. /. 480.) ~angle win;
   loop angle
 
 (* Main *)
@@ -590,7 +585,7 @@ let main () =
   let tile = Tiff.read_tile ch info tile_index in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
 *)
-  let tile = Loader.f ~lat ~lon in
+  let** tile = Loader.f ~lat ~lon in
   (*ZZZ*)
   let x = 1025 in
   let y = 1025 in
@@ -635,4 +630,4 @@ let main () =
       Sdl.log "%s@." msg;
       exit 1
 
-let () = main ()
+let () = Lwt_main.run (main ())

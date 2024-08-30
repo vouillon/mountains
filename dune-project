@@ -1,1 +1,2 @@
 (lang dune 3.11)
+(using directory-targets 0.1)

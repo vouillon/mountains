@@ -1,0 +1,4 @@
+(executables (names graph viewer)
+ (libraries
+  mountains zip graphics tsdl tsdl-ttf tgls.tgles3 yojson brr lwt.unix)
+ (ocamlopt_flags (-cclib -lGLESv2)))

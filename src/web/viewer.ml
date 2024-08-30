@@ -1,38 +1,12 @@
-(*
-function toReadableStream(value) {
-	return new ReadableStream({
-		start(controller) {
-			controller.enqueue(value);
-			controller.close();
-		},
-	});
-}
-var s = toReadableStream(new Uint16Array([1,2,3])).pipeThrough(new DecompressionStream('deflate-raw'))
-function concatArrayBuffers(chunks) {
-    const result = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-    let offset = 0;
-    for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-    }
-    return result;
-}
-export async function streamToArrayBuffer(stream) {
-    const chunks = [];
-    const reader = stream.getReader();
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-            break;
-        } else {
-            chunks.push(value);
-        }
-    }
-    return concatArrayBuffers(chunks);
-}
-streamToArrayBuffer(s)
-*)
+let _ =
+  Printexc.register_printer (function
+    | Jv.Error e -> Some (Jstr.to_string (Jv.Error.message e))
+    | _ -> None)
+(* *)
 
+module Loader = Loader.Make (Reader)
+
+let ( let** ) = Lwt.bind
 let ( let* ) = Result.bind
 let pi = 4. *. atan 1.
 
@@ -50,8 +24,7 @@ type program = {
 let terrain_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 proj;
         uniform mat4 transform;
         uniform int w_mask;
@@ -72,18 +45,17 @@ let terrain_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
         in vec4 position;
         in vec3 normal;
-        out vec3 color;
+        out vec4 color;
         void main() {
           float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
           vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
           float fog_coeff = exp(length(position.xyz) * -1e-4);
-          vec3  fog_color  = vec3(0.36, 0.45, 0.59);
-          color = mix(fog_color, terrain_color, fog_coeff);
+          vec3 fog_color = vec3(0.36, 0.45, 0.59);
+          color = vec4(mix(fog_color, terrain_color, fog_coeff), 1.);
         }
       |};
     attributes = [ "height"; "vertex_normal" ];
@@ -92,8 +64,7 @@ let terrain_program =
 let triangle_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 transform;
         void main() {
           float x = float(gl_VertexID - 1) / 2.;
@@ -102,12 +73,11 @@ let triangle_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
-        out vec3 color;
+        out vec4 color;
         void main() {
-          color = vec3(0,0,0);
+          color = vec4(0,0,0,0);
         }
       |};
     attributes = [];
@@ -116,8 +86,7 @@ let triangle_program =
 let text_program =
   {
     vertex_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         uniform mat4 transform;
         out vec2 texture_coord;
         void main() {
@@ -128,8 +97,7 @@ let text_program =
         }
       |};
     fragment_shader =
-      {|
-        #version 300 es
+      {|#version 300 es
         precision highp float;
         in vec2 texture_coord;
         uniform sampler2D tex;
@@ -147,10 +115,10 @@ module Gl = Brr_canvas.Gl
 
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
 
-let create_buffer ctx (Buffer b) =
+let create_buffer ctx target (Buffer b) =
   let id = Gl.create_buffer ctx in
-  Gl.bind_buffer ctx Gl.array_buffer (Some id);
-  Gl.buffer_data ctx Gl.array_buffer (Brr.Tarray.of_bigarray1 b) Gl.static_draw;
+  Gl.bind_buffer ctx target (Some id);
+  Gl.buffer_data ctx target (Brr.Tarray.of_bigarray1 b) Gl.static_draw;
   id
 
 type geometry = {
@@ -160,16 +128,16 @@ type geometry = {
 
 let create_geometry ctx ~indices ~buffers =
   let gid = Gl.create_vertex_array ctx in
-  let iid = create_buffer ctx (Buffer indices) in
+  Gl.bind_vertex_array ctx (Some gid);
+  let iid = create_buffer ctx Gl.element_array_buffer (Buffer indices) in
+  Gl.bind_buffer ctx Gl.element_array_buffer (Some iid);
   let bind_attrib loc dim typ data =
-    let id = create_buffer ctx data in
+    let id = create_buffer ctx Gl.array_buffer data in
     Gl.bind_buffer ctx Gl.array_buffer (Some id);
     Gl.enable_vertex_attrib_array ctx loc;
     Gl.vertex_attrib_pointer ctx loc dim typ false 0 0;
     id
   in
-  Gl.bind_vertex_array ctx (Some gid);
-  Gl.bind_buffer ctx Gl.element_array_buffer (Some iid);
   let buffers =
     List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers
   in
@@ -400,7 +368,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
 
   Gl.use_program ctx text_pid;
   bind_vertex_array ctx text_geo;
-  Gl.enable ctx Gl.texture_2d;
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.src_alpha Gl.one_minus_src_alpha;
   let transform_loc =
@@ -419,7 +386,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
            | None -> name
            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)))
     points;
-  Gl.disable ctx Gl.texture_2d;
   Gl.disable ctx Gl.blend;
 
   Gl.bind_vertex_array ctx None;
@@ -427,7 +393,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
   Ok ()
 
 let reshape ctx w h = Gl.viewport ctx 0 0 w h
-
+let _ = reshape
 (* Event loop *)
 
 (*
@@ -480,12 +446,19 @@ let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
   let* terrain_pid = create_program ctx terrain_program in
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
+
+  let aspect = 640. /. 480. in
+  (*
   let* () =
     event_loop ctx angle (fun ~aspect ~angle win ->
-        ignore
-          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect
-             ~w ~h ~x ~y ~angle ~height ~tile ~points win))
+*)
+  ignore
+    (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h
+       ~x ~y ~angle ~height ~tile ~points ctx);
+  (*
+)
   in
+*)
   let* () = delete_program ctx terrain_pid in
   let* () = delete_program ctx triangle_pid in
   let* () = delete_program ctx text_pid in
@@ -532,36 +505,30 @@ let main () =
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
-  (*
-  let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
-  let ({ Tiff.width; height; tile_width; tile_height; _ } as info) =
-    Tiff.read_info ch
-  in
-  let tile_index, x, y, tile_coord, tile_coord' = coordinates info lat lon in
-  let tile = Tiff.read_tile ch info tile_index in
-  Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
-*)
-  let tile = Loader.f ~lat ~lon in
+  let** tile = Loader.f ~lat ~lon in
   (*ZZZ*)
   let x = 1025 in
   let y = 1025 in
-  let tile_coord =
-    { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
-  in
-  let tile_coord' =
-    { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
-  in
   let tile_width = 2050 in
   let tile_height = 2050 in
-  let points =
-    let width = 3600 in
-    let height = 3600 in
-    Points.find tile_coord tile_coord'
-    |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-           let x = truncate ((lon -. tile_coord.lon) *. float width) in
-           let y = truncate ((tile_coord'.lat -. lat) *. float height) in
-           (pt, (x, y)))
-  in
+  let points = [] in
+  (*ZZZ
+    let tile_coord =
+      { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
+    in
+    let tile_coord' =
+      { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
+    in
+    let points =
+        let width = 3600 in
+        let height = 3600 in
+        Points.find tile_coord tile_coord'
+        |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
+               let x = truncate ((lon -. tile_coord.lon) *. float width) in
+               let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+               (pt, (x, y)))
+      in
+  *)
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
@@ -570,21 +537,19 @@ let main () =
   in
   let height = tile.{y, x} in
   let heights, normals = precompute tile_width tile_height tile in
-  let exec = Filename.basename Sys.executable_name in
-  let usage =
-    Printf.sprintf "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec
+  let canvas =
+    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
-  let options = [] in
-  let anon _ = raise (Arg.Bad "no arguments are supported") in
-  Arg.parse (Arg.align options) anon usage;
+  let ctx =
+    Option.get (Brr_canvas.Gl.get_context (Brr_canvas.Canvas.of_el canvas))
+  in
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height ~points
-      ~tile heights normals
-      (assert false)
+      ~tile heights normals ctx
   with
-  | Ok () -> exit 0
+  | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->
       Brr.Console.log [ Jstr.v msg ];
-      exit 1
+      Lwt.return ()
 
-let () = main ()
+let () = Lwt.async main

@@ -1,3 +1,0 @@
-(executables (names graph viewer web_viewer)
- (libraries zip graphics tsdl tsdl-ttf tgls.tgles3 yojson brr)
- (ocamlopt_flags (-cclib -lGLESv2)))
