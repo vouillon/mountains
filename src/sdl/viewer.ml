@@ -39,6 +39,10 @@ open Tsdl
 open Tsdl_ttf
 open Tgles3
 
+let read_file f =
+  In_channel.with_open_bin f @@ fun ic ->
+  really_input_string ic (in_channel_length ic)
+
 let ( let* ) = Result.bind
 let pi = 4. *. atan 1.
 (* Helper functions. *)
@@ -600,7 +604,8 @@ let main () =
   let points =
     let width = 3600 in
     let height = 3600 in
-    Points.find tile_coord tile_coord'
+    let points = read_file "data/points.geojson" in
+    Points.find tile_coord tile_coord' points
     |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
            let x = truncate ((lon -. tile_coord.lon) *. float width) in
            let y = truncate ((tile_coord'.lat -. lat) *. float height) in

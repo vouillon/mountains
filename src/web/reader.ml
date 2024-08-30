@@ -47,3 +47,9 @@ let inflate s b =
   assert (String.length s' = Bytes.length b);
   String.blit s' 0 b 0 (String.length s');
   Lwt.return ()
+
+let read_file f =
+  let open Brr_io.Fetch in
+  let* resp = to_lwt @@ url (Jstr.v f) in
+  let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
+  Lwt.return Brr.Tarray.(to_string (of_buffer Uint8 buf))

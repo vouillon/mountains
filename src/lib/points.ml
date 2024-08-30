@@ -11,8 +11,8 @@ out;' | wc -c
 type coord = { lat : float; lon : float }
 type t = { name : string; coord : coord; elevation : int option }
 
-let load () =
-  let d = Yojson.Safe.from_file "data/points.geojson" in
+let load d =
+  let d = Yojson.Safe.from_string d in
   let open Yojson.Safe.Util in
   d |> member "features" |> to_list
   |> List.map (fun d ->
@@ -37,8 +37,8 @@ let load () =
              [ { name; elevation; coord } ])
   |> List.flatten
 
-let find { lat; lon } { lat = lat'; lon = lon' } =
-  let l = load () in
+let find { lat; lon } { lat = lat'; lon = lon' } d =
+  let l = load d in
   List.filter
     (fun { coord = { lat = lat''; lon = lon'' }; _ } ->
       lat < lat'' && lat'' < lat' && lon < lon'' && lon'' < lon')

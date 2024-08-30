@@ -511,24 +511,26 @@ let main () =
   let y = 1025 in
   let tile_width = 2050 in
   let tile_height = 2050 in
-  let points = [] in
-  (*ZZZ
-    let tile_coord =
-      { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
-    in
-    let tile_coord' =
-      { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
-    in
-    let points =
-        let width = 3600 in
-        let height = 3600 in
-        Points.find tile_coord tile_coord'
-        |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-               let x = truncate ((lon -. tile_coord.lon) *. float width) in
-               let y = truncate ((tile_coord'.lat -. lat) *. float height) in
-               (pt, (x, y)))
-      in
-  *)
+  let tile_coord =
+    { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
+  in
+  let tile_coord' =
+    { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
+  in
+  let** points =
+    let width = 3600 in
+    let height = 3600 in
+    (*
+    let** points = Reader.read_file "data/points.geojson" in
+*)
+    let points = "{features:[]}" in
+    Lwt.return
+      (Points.find tile_coord tile_coord' points
+      |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
+             let x = truncate ((lon -. tile_coord.lon) *. float width) in
+             let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+             (pt, (x, y))))
+  in
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
