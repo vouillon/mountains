@@ -281,8 +281,15 @@ let draw_text ctx transform_loc transform text =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
-    ~y ~height ~angle ~points ~tile ctx =
+let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
+    ~height ~angle ~points ~tile canvas ctx =
+  let canvas_width = truncate (Brr.El.inner_w canvas) in
+  let canvas_height = truncate (Brr.El.inner_h canvas) in
+  let canvas = Brr_canvas.Canvas.of_el canvas in
+  Brr_canvas.Canvas.set_w canvas canvas_width;
+  Brr_canvas.Canvas.set_h canvas canvas_height;
+  Gl.viewport ctx 0 0 canvas_width canvas_height;
+  let aspect = float canvas_width /. float canvas_height in
   let points : (Points.t * _ * _) list =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -400,8 +407,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
 
   Ok ()
 
-let reshape ctx w h = Gl.viewport ctx 0 0 w h
-let _ = reshape
 (* Event loop *)
 
 let current_angle = ref 0.
@@ -414,7 +419,7 @@ let request_animation_frame () =
 let event_loop ctx draw =
   let rec loop prev_angle =
     let angle = !current_angle in
-    if angle <> prev_angle then draw ~aspect:(640. /. 480.) ~angle ctx;
+    if angle <> prev_angle then draw ~angle ctx;
     let** () = request_animation_frame () in
     loop angle
   in
@@ -422,7 +427,7 @@ let event_loop ctx draw =
 
 (* Main *)
 
-let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
+let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals canvas ctx =
   current_angle := angle;
   let* terrain_geo =
     create_geometry ctx ~indices:(build_indices w w h)
@@ -437,10 +442,10 @@ let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
   ( Lwt.async @@ fun () ->
-    event_loop ctx (fun ~aspect ~angle ctx ->
+    event_loop ctx (fun ~angle ctx ->
         ignore
-          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect
-             ~w ~h ~x ~y ~angle ~height ~tile ~points ctx)) );
+          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x
+             ~y ~angle ~height ~tile ~points canvas ctx)) );
   Ok ()
 (*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
@@ -542,7 +547,7 @@ let main () =
   in
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height ~points
-      ~tile heights normals ctx
+      ~tile heights normals canvas ctx
   with
   | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->

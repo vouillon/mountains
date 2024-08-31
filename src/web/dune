@@ -2,7 +2,7 @@
  (_
   (js_of_ocaml
    (compilation_mode whole_program)
-   (targets js))))
+   (targets wasm))))
 
 (executables (names viewer)
  (libraries mountains yojson brr lwt)
