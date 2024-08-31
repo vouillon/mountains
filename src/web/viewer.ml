@@ -236,19 +236,28 @@ let build_indices w w' h =
   done;
   is
 
+let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
+let text_ctx = Brr_canvas.C2d.get_context text_canvas
+
 (*
 http://delphic.me.uk/tutorials/webgl-text
 *)
-let draw_text ctx transform_loc transform _text =
-  (*
-  let color = Sdl.Color.create ~r:0 ~g:0 ~b:0 ~a:255 in
-  let* surface = Ttf.render_utf8_blended font text color in
-  let p = Sdl.get_surface_pitch surface in
-  let _w, h = Sdl.get_surface_size surface in
-  let w = p / 4 in
-*)
-  let w = 34 in
-  let h = 12 in
+let draw_text ctx transform_loc transform text =
+  let open Brr_canvas in
+  let text = Jstr.v text in
+  C2d.set_font text_ctx (Jstr.v "48px sans");
+  let m = C2d.measure_text text_ctx text in
+  let ascent = C2d.Text_metrics.font_bounding_box_ascent m in
+  let descent = C2d.Text_metrics.font_bounding_box_descent m in
+  let left = C2d.Text_metrics.actual_bounding_box_left m in
+  let right = C2d.Text_metrics.actual_bounding_box_right m in
+  Format.eprintf "TEXT %f %f %f %f@." ascent descent left right;
+  let w = truncate (left +. right +. 0.5) in
+  let h = truncate (ascent +. descent +. 0.5) in
+  Brr_canvas.Canvas.set_w text_canvas w;
+  Brr_canvas.Canvas.set_h text_canvas h;
+  C2d.set_font text_ctx (Jstr.v "48px sans");
+  C2d.fill_text text_ctx text ~x:left ~y:ascent;
   let transform =
     Matrix.(
       scale (float w /. float h) 1. 1.
@@ -258,10 +267,9 @@ let draw_text ctx transform_loc transform _text =
   in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (*ZZZ
-    Gl.tex_image2d Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba Gl.unsigned_byte
-      (`Data a);
-  *)
+  Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
+    Gl.unsigned_byte
+    (Gl.Tex_image_source.of_canvas_el text_canvas);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.uniform_matrix4fv ctx transform_loc false
@@ -560,7 +568,10 @@ let main () =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
   let ctx =
-    Option.get (Brr_canvas.Gl.get_context (Brr_canvas.Canvas.of_el canvas))
+    Option.get
+      (Brr_canvas.Gl.get_context
+         ~attrs:(Gl.Attrs.v ~alpha:false ())
+         (Brr_canvas.Canvas.of_el canvas))
   in
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height ~points
