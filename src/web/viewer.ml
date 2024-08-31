@@ -149,7 +149,7 @@ let create_geometry ctx ~indices ~buffers =
 let bind_vertex_array ctx { vertex_array; _ } =
   Gl.bind_vertex_array ctx (Some vertex_array)
 
-let delete_geometry ctx { vertex_array = gid; buffers = bids } =
+let _delete_geometry ctx { vertex_array = gid; buffers = bids } =
   Gl.delete_vertex_array ctx gid;
   List.iter (fun bid -> Gl.delete_buffer ctx bid) bids;
   Ok ()
@@ -182,7 +182,7 @@ let create_program ctx p =
     Gl.delete_program ctx pid;
     Error (`Msg (Jstr.to_string log))
 
-let delete_program ctx pid =
+let _delete_program ctx pid =
   Gl.delete_program ctx pid;
   Ok ()
 
@@ -377,7 +377,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h ~x
   Gl.use_program ctx text_pid;
   bind_vertex_array ctx text_geo;
   Gl.enable ctx Gl.blend;
-  Gl.blend_func ctx Gl.src_alpha Gl.one_minus_src_alpha;
+  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   let transform_loc =
     Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
   in
@@ -404,44 +404,26 @@ let reshape ctx w h = Gl.viewport ctx 0 0 w h
 let _ = reshape
 (* Event loop *)
 
-(*
-let event_loop win angle draw =
-  let e = Sdl.Event.create () in
-  let key_scancode e = Sdl.Scancode.enum Sdl.Event.(get e keyboard_scancode) in
-  let event e = Sdl.Event.(enum (get e typ)) in
-  let window_event e = Sdl.Event.(window_event_enum (get e window_event_id)) in
-  let rec loop angle =
-    let* () = Sdl.wait_event (Some e) in
-    match event e with
-    | `Quit -> Ok ()
-    | `Key_down when key_scancode e = `Escape -> Ok ()
-    | `Key_down when key_scancode e = `Right ->
-        let angle = angle +. 3. in
-        let w, h = Sdl.get_window_size win in
-        draw ~aspect:(float w /. float h) ~angle win;
-        loop angle
-    | `Key_down when key_scancode e = `Left ->
-        let angle = angle -. 3. in
-        let w, h = Sdl.get_window_size win in
-        draw ~aspect:(float w /. float h) ~angle win;
-        loop angle
-    | `Window_event -> (
-        match window_event e with
-        | `Exposed | `Resized ->
-            let w, h = Sdl.get_window_size win in
-            reshape win w h;
-            draw ~aspect:(float w /. float h) ~angle win;
-            loop angle
-        | _ -> loop angle)
-    | _ -> loop angle
+let current_angle = ref 0.
+
+let request_animation_frame () =
+  let t, u = Lwt.task () in
+  ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
+  t
+
+let event_loop ctx draw =
+  let rec loop prev_angle =
+    let angle = !current_angle in
+    if angle <> prev_angle then draw ~aspect:(640. /. 480.) ~angle ctx;
+    let** () = request_animation_frame () in
+    loop angle
   in
-  draw ~aspect:(640. /. 400.) ~angle win;
-  loop angle
-*)
+  loop (!current_angle -. 1.)
 
 (* Main *)
 
 let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
+  current_angle := angle;
   let* terrain_geo =
     create_geometry ctx ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
@@ -454,26 +436,12 @@ let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals ctx =
   let* terrain_pid = create_program ctx terrain_program in
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
-
-  let aspect = 640. /. 480. in
-  (*
-  let* () =
-    event_loop ctx angle (fun ~aspect ~angle win ->
-*)
-  ignore
-    (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect ~w ~h
-       ~x ~y ~angle ~height ~tile ~points ctx);
-  (*
-)
-  in
-*)
-  let* () = delete_program ctx terrain_pid in
-  let* () = delete_program ctx triangle_pid in
-  let* () = delete_program ctx text_pid in
-  let* () = delete_geometry ctx terrain_geo in
-  let* () = delete_geometry ctx text_geo in
+  ( Lwt.async @@ fun () ->
+    event_loop ctx (fun ~aspect ~angle ctx ->
+        ignore
+          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~aspect
+             ~w ~h ~x ~y ~angle ~height ~tile ~points ctx)) );
   Ok ()
-
 (*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
   let y = truncate (fst (Float.modf lat) *. float height) in
@@ -569,8 +537,7 @@ let main () =
   in
   let ctx =
     Option.get
-      (Brr_canvas.Gl.get_context
-         ~attrs:(Gl.Attrs.v ~alpha:false ())
+      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
          (Brr_canvas.Canvas.of_el canvas))
   in
   match
@@ -581,5 +548,37 @@ let main () =
   | Error (`Msg msg) ->
       Brr.Console.log [ Jstr.v msg ];
       Lwt.return ()
+
+let compass_heading ~alpha ~beta ~gamma =
+  let degtorad = pi /. 180. in
+  let x = beta *. degtorad in
+  let y = gamma *. degtorad in
+  let z = alpha *. degtorad in
+  let cY = cos y in
+  let cZ = cos z in
+  let sX = sin x in
+  let sY = sin y in
+  let sZ = sin z in
+  (* Calculate Vx and Vy components *)
+  let vx = (-.cZ *. sY) -. (sZ *. sX *. cY) in
+  let vy = (-.sZ *. sY) +. (cZ *. sX *. cY) in
+  (* Calculate compass heading *)
+  let compassHeading = atan2 vx vy in
+  compassHeading /. degtorad
+
+let () =
+  let deviceorientation =
+    Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
+  in
+  ignore
+    (Brr.Ev.listen deviceorientation
+       (fun ev ->
+         Brr.Console.log [ ev ];
+         let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
+         current_angle :=
+           compass_heading ~alpha:(angle "alpha") ~beta:(angle "beta")
+             ~gamma:(angle "gamma");
+         Format.eprintf "ANGLE: %f@." !current_angle)
+       (Brr.Window.as_target Brr.G.window))
 
 let () = Lwt.async main
