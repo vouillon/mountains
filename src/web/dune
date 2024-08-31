@@ -1,7 +1,15 @@
+(env
+ (_
+  (js_of_ocaml
+   (compilation_mode whole_program)
+   (targets js))))
+
 (executables (names viewer)
  (libraries mountains yojson brr lwt)
  (modes js)
- (js_of_ocaml (javascript_files inflate.js))
+ (js_of_ocaml
+  (javascript_files inflate.js)
+  (wasm_files inflate.js inflate.wat))
  (ocamlopt_flags (-cclib -lGLESv2)))
 
 (rule
