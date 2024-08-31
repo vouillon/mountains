@@ -282,7 +282,7 @@ let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
-    ~height ~angle ~points ~tile canvas ctx =
+    ~height ~angle ~angle' ~points ~tile canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -339,7 +339,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
         (-.deltax *. float (x - 1))
         (-.deltay *. float (h - y))
         (-.height -. 2.)
-      * (rotate_z (angle *. pi /. 180.) * rotate_x (-.pi /. 2.)))
+      * (rotate_z (angle *. pi /. 180.) * rotate_x (-.angle' *. pi /. 180.)))
   in
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
@@ -410,6 +410,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
 (* Event loop *)
 
 let current_angle = ref 0.
+let current_angle' = ref 0.
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -417,18 +418,21 @@ let request_animation_frame () =
   t
 
 let event_loop ctx draw =
-  let rec loop prev_angle =
+  let rec loop prev_angle prev_angle' =
     let angle = !current_angle in
-    if angle <> prev_angle then draw ~angle ctx;
+    let angle' = !current_angle' in
+    if angle <> prev_angle || angle' <> prev_angle' then draw ~angle ~angle' ctx;
     let** () = request_animation_frame () in
-    loop angle
+    loop angle angle'
   in
-  loop (!current_angle -. 1.)
+  loop (!current_angle -. 1.) (!current_angle' -. 1.)
 
 (* Main *)
 
-let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals canvas ctx =
+let tri ~w ~h ~x ~y ~angle ~angle' ~height ~points ~tile heights normals canvas
+    ctx =
   current_angle := angle;
+  current_angle' := angle';
   let* terrain_geo =
     create_geometry ctx ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
@@ -442,10 +446,10 @@ let tri ~w ~h ~x ~y ~angle ~height ~points ~tile heights normals canvas ctx =
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
   ( Lwt.async @@ fun () ->
-    event_loop ctx (fun ~angle ctx ->
+    event_loop ctx (fun ~angle ~angle' ctx ->
         ignore
           (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x
-             ~y ~angle ~height ~tile ~points canvas ctx)) );
+             ~y ~angle ~angle' ~height ~tile ~points canvas ctx)) );
   Ok ()
 (*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
@@ -546,8 +550,8 @@ let main () =
          (Brr_canvas.Canvas.of_el canvas))
   in
   match
-    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height ~points
-      ~tile heights normals canvas ctx
+    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~angle':90.
+      ~height ~points ~tile heights normals canvas ctx
   with
   | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->
@@ -556,17 +560,17 @@ let main () =
 
 let compass_heading ~alpha ~beta ~gamma =
   let degtorad = pi /. 180. in
-  let x = beta *. degtorad in
-  let y = gamma *. degtorad in
-  let z = alpha *. degtorad in
-  let cY = cos y in
-  let cZ = cos z in
-  let sX = sin x in
-  let sY = sin y in
-  let sZ = sin z in
+  let beta = beta *. degtorad in
+  let gamma = gamma *. degtorad in
+  let alpha = alpha *. degtorad in
+  let cGamma = cos gamma in
+  let cAlpha = cos alpha in
+  let sBeta = sin beta in
+  let sGamma = sin gamma in
+  let sAlpha = sin alpha in
   (* Calculate Vx and Vy components *)
-  let vx = (-.cZ *. sY) -. (sZ *. sX *. cY) in
-  let vy = (-.sZ *. sY) +. (cZ *. sX *. cY) in
+  let vx = (-.cAlpha *. sGamma) -. (sAlpha *. sBeta *. cGamma) in
+  let vy = (-.sAlpha *. sGamma) +. (cAlpha *. sBeta *. cGamma) in
   (* Calculate compass heading *)
   let compassHeading = atan2 vx vy in
   compassHeading /. degtorad
@@ -580,10 +584,12 @@ let () =
        (fun ev ->
          Brr.Console.log [ ev ];
          let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-         current_angle :=
-           compass_heading ~alpha:(angle "alpha") ~beta:(angle "beta")
-             ~gamma:(angle "gamma");
-         Format.eprintf "ANGLE: %f@." !current_angle)
+         let alpha = angle "alpha" in
+         let beta = angle "beta" in
+         let gamma = angle "gamma" in
+         current_angle := compass_heading ~alpha ~beta ~gamma;
+         current_angle' := beta;
+         Format.eprintf "ANGLE: %f %f@." !current_angle !current_angle')
        (Brr.Window.as_target Brr.G.window))
 
 let () = Lwt.async main
