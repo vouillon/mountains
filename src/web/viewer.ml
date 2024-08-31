@@ -282,7 +282,7 @@ let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
-    ~height ~angle ~angle' ~points ~tile canvas ctx =
+    ~height ~angle ~angle' ~angle'' ~points ~tile canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -333,13 +333,16 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Gl.uniform1i ctx width_mask_loc (w - 1);
   let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
+  Format.eprintf "ANGLE'' %f@." angle'';
   let transform =
     Matrix.(
       translate
         (-.deltax *. float (x - 1))
         (-.deltay *. float (h - y))
         (-.height -. 2.)
-      * (rotate_z (angle *. pi /. 180.) * rotate_x (-.angle' *. pi /. 180.)))
+      * rotate_z (-.angle *. pi /. 180.)
+      * rotate_x (-.angle' *. pi /. 180.)
+      * rotate_y (-.angle'' *. pi /. 180.))
   in
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
@@ -411,6 +414,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
 
 let current_angle = ref 0.
 let current_angle' = ref 0.
+let current_angle'' = ref 0.
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -418,21 +422,24 @@ let request_animation_frame () =
   t
 
 let event_loop ctx draw =
-  let rec loop prev_angle prev_angle' =
+  let rec loop prev_angle prev_angle' prev_angle'' =
     let angle = !current_angle in
     let angle' = !current_angle' in
-    if angle <> prev_angle || angle' <> prev_angle' then draw ~angle ~angle' ctx;
+    let angle'' = !current_angle'' in
+    if angle <> prev_angle || angle' <> prev_angle' || angle'' <> prev_angle''
+    then draw ~angle ~angle' ~angle'' ctx;
     let** () = request_animation_frame () in
-    loop angle angle'
+    loop angle angle' angle''
   in
-  loop (!current_angle -. 1.) (!current_angle' -. 1.)
+  loop (!current_angle -. 1.) (!current_angle' -. 1.) (!current_angle'' -. 1.)
 
 (* Main *)
 
-let tri ~w ~h ~x ~y ~angle ~angle' ~height ~points ~tile heights normals canvas
-    ctx =
+let tri ~w ~h ~x ~y ~angle ~angle' ~angle'' ~height ~points ~tile heights
+    normals canvas ctx =
   current_angle := angle;
   current_angle' := angle';
+  current_angle'' := angle'';
   let* terrain_geo =
     create_geometry ctx ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
@@ -446,10 +453,10 @@ let tri ~w ~h ~x ~y ~angle ~angle' ~height ~points ~tile heights normals canvas
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
   ( Lwt.async @@ fun () ->
-    event_loop ctx (fun ~angle ~angle' ctx ->
+    event_loop ctx (fun ~angle ~angle' ~angle'' ctx ->
         ignore
           (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x
-             ~y ~angle ~angle' ~height ~tile ~points canvas ctx)) );
+             ~y ~angle ~angle' ~angle'' ~height ~tile ~points canvas ctx)) );
   Ok ()
 (*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
@@ -551,7 +558,7 @@ let main () =
   in
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~angle':90.
-      ~height ~points ~tile heights normals canvas ctx
+      ~angle'':0. ~height ~points ~tile heights normals canvas ctx
   with
   | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->
@@ -588,7 +595,9 @@ let () =
          let beta = angle "beta" in
          let gamma = angle "gamma" in
          current_angle := compass_heading ~alpha ~beta ~gamma;
+         current_angle := alpha;
          current_angle' := beta;
+         current_angle'' := gamma;
          Format.eprintf "ANGLE: %f %f@." !current_angle !current_angle')
        (Brr.Window.as_target Brr.G.window))
 
