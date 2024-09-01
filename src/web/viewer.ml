@@ -66,18 +66,22 @@ let triangle_program =
     vertex_shader =
       {|#version 300 es
         uniform mat4 transform;
+        uniform vec4 color;
+        out vec4 fragment_color;
         void main() {
           float x = float(gl_VertexID - 1) / 2.;
           float y = float(gl_VertexID != 1) * (sqrt(3.)/ 2.);
+          fragment_color = color;
           gl_Position = transform * vec4(x, y, 0, 1.);
         }
       |};
     fragment_shader =
       {|#version 300 es
         precision highp float;
+        in vec4 fragment_color;
         out vec4 color;
         void main() {
-          color = vec4(0,0,0,1);
+          color = fragment_color;
         }
       |};
     attributes = [];
@@ -318,18 +322,21 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
     let ca = cos angle in
     let sa = sin angle in
-    List.filter
-      (fun (_, x, y, _) ->
+    List.map
+      (fun (texture, x, y, _) ->
         let p = scale *. ((y *. ca) -. (x *. sa)) in
-        if
-          not
-            (List.exists
-               (fun p' -> abs_float (p' -. p) < 0.8 (*ZZZ*) *. text_height)
-               !pos)
-        then (
-          pos := p :: !pos;
-          true)
-        else false)
+        let shown =
+          if
+            not
+              (List.exists
+                 (fun p' -> abs_float (p' -. p) < 0.8 (*ZZZ*) *. text_height)
+                 !pos)
+          then (
+            pos := p :: !pos;
+            true)
+          else false
+        in
+        (texture, x, y, shown))
       points
   in
 
@@ -370,21 +377,28 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   let transform_loc =
     Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
   in
+  let color_loc = Gl.get_uniform_location ctx triangle_pid (Jstr.v "color") in
+  Gl.enable ctx Gl.blend;
+  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
-    (fun (_, x, y, _) ->
+    (fun (_, x, y, shown) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
+      let angle = if shown then -.pi /. 4. else 0. in
       let transform =
         Matrix.(
-          rotate_z ((-.pi /. 4.) +. (screen_inclination *. pi /. 180.))
+          rotate_z (angle +. (screen_inclination *. pi /. 180.))
           * scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 1.
           * translate x y 0.)
       in
       Gl.uniform_matrix4fv ctx transform_loc false
         (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+      if shown then Gl.uniform4f ctx color_loc 0. 0. 0. 1.
+      else Gl.uniform4f ctx color_loc 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
   Gl.bind_vertex_array ctx None;
+  Gl.disable ctx Gl.blend;
 
   Gl.use_program ctx text_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
@@ -394,17 +408,18 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
   in
   List.iter
-    (fun (texture, x, y, _) ->
-      let x = x *. scale /. aspect in
-      let y = y *. scale in
-      let transform =
-        Matrix.(
-          translate 0.7 (-0.5) 0.
-          * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
-          * scale (text_height /. aspect) text_height 1.
-          * translate x y 0.)
-      in
-      draw_text ctx transform_loc transform texture)
+    (fun (texture, x, y, shown) ->
+      if shown then
+        let x = x *. scale /. aspect in
+        let y = y *. scale in
+        let transform =
+          Matrix.(
+            translate 0.7 (-0.5) 0.
+            * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
+            * scale (text_height /. aspect) text_height 1.
+            * translate x y 0.)
+        in
+        draw_text ctx transform_loc transform texture)
     points;
   Gl.disable ctx Gl.blend;
 
