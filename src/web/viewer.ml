@@ -240,8 +240,7 @@ let prepare_text ctx text =
   Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
     Gl.unsigned_byte
     (Gl.Tex_image_source.of_canvas_el text_canvas);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
@@ -257,7 +256,12 @@ let draw_text ctx transform_loc transform (tid, w, h) =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-type orientation = { alpha : float; beta : float; gamma : float }
+type orientation = {
+  alpha : float;
+  beta : float;
+  gamma : float;
+  screen : float;
+}
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     ~height ~orientation ~points ~tile canvas ctx =
@@ -276,7 +280,8 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
         (-.height -. 2.)
       * rotate_z (-.orientation.alpha *. pi /. 180.)
       * rotate_x (-.orientation.beta *. pi /. 180.)
-      * rotate_y (-.orientation.gamma *. pi /. 180.))
+      * rotate_y (-.orientation.gamma *. pi /. 180.)
+      * rotate_z (orientation.screen *. pi /. 180.))
   in
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
@@ -385,7 +390,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
 
 (* Event loop *)
 
-let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0. }
+let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -533,7 +538,7 @@ let main () =
   in
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
-      ~orientation:{ alpha = angle; beta = 90.; gamma = 0. }
+      ~orientation:{ alpha = angle; beta = 90.; gamma = 0.; screen = 0. }
       ~height ~points ~tile heights normals canvas ctx
   with
   | Ok () -> Lwt.return ()
@@ -556,7 +561,11 @@ let () =
          Brr.Console.log
            [ Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle" ];
 *)
-         current_orientation := { alpha; beta; gamma })
+         let screen =
+           Jv.to_float
+             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
+         in
+         current_orientation := { alpha; beta; gamma; screen })
        (Brr.Window.as_target Brr.G.window))
 
 let () = Lwt.async main
