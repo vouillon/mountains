@@ -121,11 +121,6 @@ let create_buffer ctx target (Buffer b) =
   Gl.buffer_data ctx target (Brr.Tarray.of_bigarray1 b) Gl.static_draw;
   id
 
-type geometry = {
-  vertex_array : Gl.vertex_array_object;
-  buffers : Gl.buffer list;
-}
-
 let create_geometry ctx ~indices ~buffers =
   let gid = Gl.create_vertex_array ctx in
   Gl.bind_vertex_array ctx (Some gid);
@@ -135,24 +130,13 @@ let create_geometry ctx ~indices ~buffers =
     let id = create_buffer ctx Gl.array_buffer data in
     Gl.bind_buffer ctx Gl.array_buffer (Some id);
     Gl.enable_vertex_attrib_array ctx loc;
-    Gl.vertex_attrib_pointer ctx loc dim typ false 0 0;
-    id
+    Gl.vertex_attrib_pointer ctx loc dim typ false 0 0
   in
-  let buffers =
-    List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers
-  in
+  List.iteri (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers;
   Gl.bind_vertex_array ctx None;
   Gl.bind_buffer ctx Gl.array_buffer None;
   Gl.bind_buffer ctx Gl.element_array_buffer None;
-  Ok { vertex_array = gid; buffers = iid :: buffers }
-
-let bind_vertex_array ctx { vertex_array; _ } =
-  Gl.bind_vertex_array ctx (Some vertex_array)
-
-let _delete_geometry ctx { vertex_array = gid; buffers = bids } =
-  Gl.delete_vertex_array ctx gid;
-  List.iter (fun bid -> Gl.delete_buffer ctx bid) bids;
-  Ok ()
+  gid
 
 let compile_shader ctx src typ =
   let sid = Gl.create_shader ctx typ in
@@ -182,9 +166,7 @@ let create_program ctx p =
     Gl.delete_program ctx pid;
     Error (`Msg (Jstr.to_string log))
 
-let _delete_program ctx pid =
-  Gl.delete_program ctx pid;
-  Ok ()
+(* Geometry *)
 
 let linearize2 a =
   Buffer
@@ -195,8 +177,6 @@ let linearize3 a =
     Bigarray.(
       reshape_1 (genarray_of_array3 a)
         (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
-
-(* Geometry *)
 
 let precompute tile_height tile_width tile =
   let normals =
@@ -239,10 +219,7 @@ let build_indices w w' h =
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
-(*
-http://delphic.me.uk/tutorials/webgl-text
-*)
-let draw_text ctx transform_loc transform text =
+let prepare_text ctx text =
   let open Brr_canvas in
   let text = Jstr.v text in
   C2d.set_font text_ctx (Jstr.v "48px sans");
@@ -258,13 +235,6 @@ let draw_text ctx transform_loc transform text =
   Brr_canvas.Canvas.set_h text_canvas h;
   C2d.set_font text_ctx (Jstr.v "48px sans");
   C2d.fill_text text_ctx text ~x:left ~y:ascent;
-  let transform =
-    Matrix.(
-      scale (float w /. float h) 1. 1.
-      * translate 0.7 (-0.5) 0.
-      * rotate_z (pi /. 4.)
-      * transform)
-  in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
@@ -272,17 +242,25 @@ let draw_text ctx transform_loc transform text =
     (Gl.Tex_image_source.of_canvas_el text_canvas);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  (tid, w, h)
+
+let draw_text ctx transform_loc transform (tid, w, h) =
+  let open Brr_canvas in
+  let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.uniform_matrix4fv ctx transform_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
-  Gl.delete_texture ctx tid;
-  Ok ()
+  Gl.bind_texture ctx Gl.texture_2d None
 
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+type orientation = { alpha : float; beta : float; gamma : float }
+
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
-    ~height ~angle ~angle' ~angle'' ~points ~tile canvas ctx =
+    ~height ~orientation ~points ~tile canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -290,17 +268,28 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Brr_canvas.Canvas.set_h canvas canvas_height;
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
-  let points : (Points.t * _ * _) list =
+  let transform =
+    Matrix.(
+      translate
+        (-.deltax *. float (x - 1))
+        (-.deltay *. float (h - y))
+        (-.height -. 2.)
+      * rotate_z (-.orientation.alpha *. pi /. 180.)
+      * rotate_x (-.orientation.beta *. pi /. 180.)
+      * rotate_y (-.orientation.gamma *. pi /. 180.))
+  in
+  let proj =
+    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
+  in
+  let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let z = tile.{y', x'} -. tile.{y, x} in
-        let x = deltax *. float (x' - x) in
-        let y = deltay *. float (y' - y) in
-        let angle = angle *. pi /. 180. in
-        let x' = (x *. cos angle) +. (y *. sin angle) in
-        let y' = (-.x *. sin angle) +. (y *. cos angle) in
-        let y' = -.y' in
-        if y' > 0. then Some (pt, x' /. y', z /. y') else None)
+        let x = deltax *. float (x' - 1) in
+        let y = deltay *. float (h - y') in
+        let z = tile.{y', x'} in
+        let r = Matrix.({ x; y; z; w = 1. } *< transform) in
+        let r = { r with z = -.r.z } in
+        if r.z > 0. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
       points
     |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
   in
@@ -333,20 +322,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Gl.uniform1i ctx width_mask_loc (w - 1);
   let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
-  Format.eprintf "ANGLE'' %f@." angle'';
-  let transform =
-    Matrix.(
-      translate
-        (-.deltax *. float (x - 1))
-        (-.deltay *. float (h - y))
-        (-.height -. 2.)
-      * rotate_z (-.angle *. pi /. 180.)
-      * rotate_x (-.angle' *. pi /. 180.)
-      * rotate_y (-.angle'' *. pi /. 180.))
-  in
-  let proj =
-    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
-  in
   let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
   Gl.uniform_matrix4fv ctx proj_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array proj));
@@ -355,7 +330,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   in
   Gl.uniform_matrix4fv ctx transform_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-  bind_vertex_array ctx terrain_geo;
+  Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.draw_elements ctx Gl.triangle_strip
     ((2 * (h - 1) * (w + 1)) - 2)
     Gl.unsigned_int 0;
@@ -364,7 +339,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Gl.disable ctx Gl.cull_face';
 
   Gl.use_program ctx triangle_pid;
-  bind_vertex_array ctx text_geo;
+  Gl.bind_vertex_array ctx (Some text_geo);
   let transform_loc =
     Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
   in
@@ -385,36 +360,32 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Gl.bind_vertex_array ctx None;
 
   Gl.use_program ctx text_pid;
-  bind_vertex_array ctx text_geo;
+  Gl.bind_vertex_array ctx (Some text_geo);
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   let transform_loc =
     Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
   in
   List.iter
-    (fun ({ Points.name; elevation; _ }, x, y) ->
+    (fun (texture, x, y) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
-        Matrix.(scale (text_height /. aspect) text_height 1. * translate x y 0.)
+        Matrix.(
+          translate 0.7 (-0.5) 0.
+          * rotate_z (pi /. 4.)
+          * scale (text_height /. aspect) text_height 1.
+          * translate x y 0.)
       in
-      ignore
-        (draw_text ctx transform_loc transform
-           (match elevation with
-           | None -> name
-           | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)))
+      draw_text ctx transform_loc transform texture)
     points;
   Gl.disable ctx Gl.blend;
 
-  Gl.bind_vertex_array ctx None;
-
-  Ok ()
+  Gl.bind_vertex_array ctx None
 
 (* Event loop *)
 
-let current_angle = ref 0.
-let current_angle' = ref 0.
-let current_angle'' = ref 0.
+let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0. }
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -422,29 +393,24 @@ let request_animation_frame () =
   t
 
 let event_loop ctx draw =
-  let rec loop prev_angle prev_angle' prev_angle'' =
-    let angle = !current_angle in
-    let angle' = !current_angle' in
-    let angle'' = !current_angle'' in
-    if angle <> prev_angle || angle' <> prev_angle' || angle'' <> prev_angle''
-    then draw ~angle ~angle' ~angle'' ctx;
+  let rec loop prev_orientation =
+    let orientation = !current_orientation in
+    if orientation <> prev_orientation then draw ~orientation ctx;
     let** () = request_animation_frame () in
-    loop angle angle' angle''
+    loop orientation
   in
-  loop (!current_angle -. 1.) (!current_angle' -. 1.) (!current_angle'' -. 1.)
+  loop { !current_orientation with alpha = !current_orientation.alpha -. 1. }
 
 (* Main *)
 
-let tri ~w ~h ~x ~y ~angle ~angle' ~angle'' ~height ~points ~tile heights
-    normals canvas ctx =
-  current_angle := angle;
-  current_angle' := angle';
-  current_angle'' := angle'';
-  let* terrain_geo =
+let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
+    ctx =
+  current_orientation := orientation;
+  let terrain_geo =
     create_geometry ctx ~indices:(build_indices w w h)
       ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
   in
-  let* text_geo =
+  let text_geo =
     create_geometry ctx
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
@@ -452,11 +418,20 @@ let tri ~w ~h ~x ~y ~angle ~angle' ~angle'' ~height ~points ~tile heights
   let* terrain_pid = create_program ctx terrain_program in
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
+  let points =
+    List.map
+      (fun ({ Points.name; elevation; _ }, pos) ->
+        ( prepare_text ctx
+            (match elevation with
+            | None -> name
+            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation),
+          pos ))
+      points
+  in
   ( Lwt.async @@ fun () ->
-    event_loop ctx (fun ~angle ~angle' ~angle'' ctx ->
-        ignore
-          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x
-             ~y ~angle ~angle' ~angle'' ~height ~tile ~points canvas ctx)) );
+    event_loop ctx (fun ~orientation ctx ->
+        draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
+          ~orientation ~height ~tile ~points canvas ctx) );
   Ok ()
 (*
 let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
@@ -512,9 +487,8 @@ let main () =
   let** points =
     let width = 3600 in
     let height = 3600 in
-    (*
     let** points = Reader.read_file "data/points.geojson" in
-*)
+    (*
     let points =
       {|
 {"features":[
@@ -533,6 +507,7 @@ let main () =
 ]}
 |}
     in
+ *)
     Lwt.return
       (Points.find tile_coord tile_coord' points
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
@@ -557,30 +532,14 @@ let main () =
          (Brr_canvas.Canvas.of_el canvas))
   in
   match
-    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~angle':90.
-      ~angle'':0. ~height ~points ~tile heights normals canvas ctx
+    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
+      ~orientation:{ alpha = angle; beta = 90.; gamma = 0. }
+      ~height ~points ~tile heights normals canvas ctx
   with
   | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->
       Brr.Console.log [ Jstr.v msg ];
       Lwt.return ()
-
-let compass_heading ~alpha ~beta ~gamma =
-  let degtorad = pi /. 180. in
-  let beta = beta *. degtorad in
-  let gamma = gamma *. degtorad in
-  let alpha = alpha *. degtorad in
-  let cGamma = cos gamma in
-  let cAlpha = cos alpha in
-  let sBeta = sin beta in
-  let sGamma = sin gamma in
-  let sAlpha = sin alpha in
-  (* Calculate Vx and Vy components *)
-  let vx = (-.cAlpha *. sGamma) -. (sAlpha *. sBeta *. cGamma) in
-  let vy = (-.sAlpha *. sGamma) +. (cAlpha *. sBeta *. cGamma) in
-  (* Calculate compass heading *)
-  let compassHeading = atan2 vx vy in
-  compassHeading /. degtorad
 
 let () =
   let deviceorientation =
@@ -589,16 +548,15 @@ let () =
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
-         Brr.Console.log [ ev ];
          let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
          let alpha = angle "alpha" in
          let beta = angle "beta" in
          let gamma = angle "gamma" in
-         current_angle := compass_heading ~alpha ~beta ~gamma;
-         current_angle := alpha;
-         current_angle' := beta;
-         current_angle'' := gamma;
-         Format.eprintf "ANGLE: %f %f@." !current_angle !current_angle')
+         (*
+         Brr.Console.log
+           [ Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle" ];
+*)
+         current_orientation := { alpha; beta; gamma })
        (Brr.Window.as_target Brr.G.window))
 
 let () = Lwt.async main

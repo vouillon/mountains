@@ -1,4 +1,5 @@
 type t = float array
+type vector = { x : float; y : float; z : float; w : float }
 
 let c i j = (i * 4) + j
 let o i = (i / 4, i mod 4)
@@ -14,6 +15,28 @@ let mult m1 m2 =
   Array.init 16 v
 
 let ( * ) = mult
+
+let mult v m =
+  let s j =
+    (v.x *. m.(c 0 j))
+    +. (v.y *. m.(c 1 j))
+    +. (v.z *. m.(c 2 j))
+    +. (v.w *. m.(c 3 j))
+  in
+  { x = s 0; y = s 1; z = s 2; w = s 3 }
+
+let ( *< ) = mult
+
+let mult m v =
+  let s i =
+    (m.(c i 0) *. v.x)
+    +. (m.(c i 1) *. v.y)
+    +. (m.(c i 2) *. v.z)
+    +. (m.(c i 3) *. v.w)
+  in
+  { x = s 0; y = s 1; z = s 2; w = s 3 }
+
+let ( *> ) = mult
 
 let scale x y z : t =
   [| x; 0.; 0.; 0.; 0.; y; 0.; 0.; 0.; 0.; z; 0.; 0.; 0.; 0.; 1. |]

@@ -1,6 +1,9 @@
 type t
+type vector = { x : float; y : float; z : float; w : float }
 
 val ( * ) : t -> t -> t
+val ( *< ) : vector -> t -> vector
+val ( *> ) : t -> vector -> vector
 val scale : float -> float -> float -> t
 val translate : float -> float -> float -> t
 val rotate_x : float -> t
