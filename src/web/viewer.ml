@@ -186,6 +186,7 @@ let precompute tile_height tile_width tile =
   let heights =
     Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
   in
+  let t = Unix.gettimeofday () in
   for y = 1 to tile_height - 2 do
     for x = 1 to tile_width - 2 do
       let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
@@ -198,9 +199,11 @@ let precompute tile_height tile_width tile =
       heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
     done
   done;
+  Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
   (linearize2 heights, linearize3 normals)
 
 let build_indices w w' h =
+  let t = Unix.gettimeofday () in
   let is =
     Bigarray.(
       Array1.create Bigarray.int32 c_layout ((2 * (h - 1) * (w + 1)) - 2))
@@ -214,6 +217,7 @@ let build_indices w w' h =
       is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i - 1) * w') + w - 1);
       is.{(i * (w + 1) * 2) - 1} <- Int32.of_int ((i + 1) * w'))
   done;
+  Format.eprintf "BUILD INDICES %f@." (Unix.gettimeofday () -. t);
   is
 
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
@@ -228,7 +232,6 @@ let prepare_text ctx text =
   let descent = C2d.Text_metrics.font_bounding_box_descent m in
   let left = C2d.Text_metrics.actual_bounding_box_left m in
   let right = C2d.Text_metrics.actual_bounding_box_right m in
-  Format.eprintf "TEXT %f %f %f %f@." ascent descent left right;
   let w = truncate (left +. right +. 0.5) in
   let h = truncate (ascent +. descent +. 0.5) in
   Brr_canvas.Canvas.set_w text_canvas w;
@@ -268,8 +271,10 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
-  Brr_canvas.Canvas.set_w canvas canvas_width;
-  Brr_canvas.Canvas.set_h canvas canvas_height;
+  if Brr_canvas.Canvas.w canvas <> canvas_width then
+    Brr_canvas.Canvas.set_w canvas canvas_width;
+  if Brr_canvas.Canvas.h canvas <> canvas_height then
+    Brr_canvas.Canvas.set_h canvas canvas_height;
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
   let transform =
@@ -283,10 +288,19 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
       * rotate_y (-.orientation.gamma *. pi /. 180.)
       * rotate_z (orientation.screen *. pi /. 180.))
   in
+  let screen_inclination =
+    orientation.screen
+    +. 180. /. pi
+       *. atan2
+            (sin (orientation.gamma *. pi /. 180.)
+            *. cos (orientation.beta *. pi /. 180.))
+            (sin (orientation.beta *. pi /. 180.))
+  in
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
   in
   let points =
+    let vert = Matrix.({ x = 0.; y = 0.; z = 1.; w = 0. } *< transform) in
     List.filter_map
       (fun (pt, (x', y')) ->
         let x = deltax *. float (x' - 1) in
@@ -294,15 +308,19 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
         let z = tile.{y', x'} in
         let r = Matrix.({ x; y; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
-        if r.z > 0. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
+        let h = (vert.x *. r.x /. r.z) +. (vert.y *. r.y /. r.z) in
+        if r.z > 0. then Some (pt, r.x /. r.z, r.y /. r.z, h) else None)
       points
-    |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
+    |> List.sort (fun (_, _, _, h) (_, _, _, h') : int -> Stdlib.compare h' h)
   in
   let points =
     let pos = ref [] in
+    let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
+    let ca = cos angle in
+    let sa = sin angle in
     List.filter
-      (fun (_, x, y) ->
-        let p = scale *. (x -. y) /. sqrt 2. in
+      (fun (_, x, y, _) ->
+        let p = scale *. ((y *. ca) -. (x *. sa)) in
         if not (List.exists (fun p' -> abs_float (p' -. p) < text_height) !pos)
         then (
           pos := p :: !pos;
@@ -349,12 +367,12 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
   in
   List.iter
-    (fun (_, x, y) ->
+    (fun (_, x, y, _) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
         Matrix.(
-          rotate_z (-.pi /. 4.)
+          rotate_z ((-.pi /. 4.) +. (screen_inclination *. pi /. 180.))
           * scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 1.
           * translate x y 0.)
       in
@@ -372,13 +390,13 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
   in
   List.iter
-    (fun (texture, x, y) ->
+    (fun (texture, x, y, _) ->
       let x = x *. scale /. aspect in
       let y = y *. scale in
       let transform =
         Matrix.(
           translate 0.7 (-0.5) 0.
-          * rotate_z (pi /. 4.)
+          * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
           * scale (text_height /. aspect) text_height 1.
           * translate x y 0.)
       in

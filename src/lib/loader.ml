@@ -64,11 +64,13 @@ module Make (R : Tiff.READER) = struct
       Format.eprintf "TILE %d %d - %d %d@." lat tile_y
         (max 0 min_y - min_y)
         (min 1023 max_y - min_y);
+      let t = Unix.gettimeofday () in
       for y = max 0 min_y to min 1023 max_y do
         for x = max 0 min_x to min 1023 max_x do
           heights.{2049 - y + min_y, x - min_x} <- tile.{1023 - y, x}
         done
       done;
+      Format.eprintf "COPYING TILE %f@." (Unix.gettimeofday () -. t);
       Lwt.return ()
     in
     Lwt.return heights

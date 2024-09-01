@@ -143,10 +143,13 @@ module Make (R : READER) = struct
     let* s = R.read_chunk ch (Int32.to_int tile_byte_counts.(i)) in
     let b = Bytes.create (tile_width * tile_height * 4) in
     let* () = R.inflate s b in
+    let t = Unix.gettimeofday () in
     let b = decode_fp b tile_width tile_height in
+    Format.eprintf "DECODING FP %f@." (Unix.gettimeofday () -. t);
     let tile =
       Bigarray.(Array2.create Float32 C_layout) tile_height tile_width
     in
+    let t = Unix.gettimeofday () in
     for i = 0 to tile_height - 1 do
       for j = 0 to tile_width - 1 do
         tile.{i, j} <-
@@ -154,5 +157,6 @@ module Make (R : READER) = struct
             (Bytes.get_int32_le b (4 * ((i * tile_width) + j)))
       done
     done;
+    Format.eprintf "DECODING TILE %f@." (Unix.gettimeofday () -. t);
     Lwt.return tile
 end
