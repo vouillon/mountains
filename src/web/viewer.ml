@@ -321,7 +321,11 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     List.filter
       (fun (_, x, y, _) ->
         let p = scale *. ((y *. ca) -. (x *. sa)) in
-        if not (List.exists (fun p' -> abs_float (p' -. p) < text_height) !pos)
+        if
+          not
+            (List.exists
+               (fun p' -> abs_float (p' -. p) < 0.8 (*ZZZ*) *. text_height)
+               !pos)
         then (
           pos := p :: !pos;
           true)
