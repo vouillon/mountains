@@ -34,4 +34,4 @@
 (rule
  (alias web)
  (action (run python3 -m http.server -d .))
- (deps index.html data viewer.bc.js service_worker.bc.js))
+ (deps index.html data viewer.bc.js service_worker.bc.js manifest.json icon192.png icon512.png))
