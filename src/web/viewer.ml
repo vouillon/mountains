@@ -8,7 +8,6 @@ let _ =
   Printexc.register_printer (function
     | Jv.Error e -> Some (Jstr.to_string (Jv.Error.message e))
     | _ -> None)
-(* *)
 
 module Loader = Loader.Make (Reader)
 
@@ -481,29 +480,6 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
         draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
           ~orientation ~height ~tile ~points canvas ctx) );
   Ok ()
-(*
-let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
-  let y = truncate (fst (Float.modf lat) *. float height) in
-  let x = truncate ((fst (Float.modf lon) *. float width) +. 0.5) in
-  let y = height - 1 - y in
-  let tx = x / tile_width in
-  let ty = y / tile_height in
-  let x = x mod tile_width in
-  let y = y mod tile_height in
-  let tile_index = tx + (ty * ((width + tile_width - 1) / tile_width)) in
-  let tile_lon = floor lon +. (float tx *. float tile_width /. float width) in
-  let tile_lat =
-    floor lat +. 1. -. (float (ty + 1) *. float tile_height /. float height)
-  in
-  ( tile_index,
-    x,
-    y,
-    { Points.lon = tile_lon; lat = tile_lat },
-    {
-      Points.lon = tile_lon +. (float tile_width /. float width);
-      lat = tile_lat +. (float tile_height /. float height);
-    } )
-*)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -619,10 +595,6 @@ let () =
          let alpha = angle "alpha" in
          let beta = angle "beta" in
          let gamma = angle "gamma" in
-         (*
-         Brr.Console.log
-           [ Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle" ];
-*)
          let screen =
            Jv.to_float
              (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
