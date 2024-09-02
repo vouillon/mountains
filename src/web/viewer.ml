@@ -1,3 +1,9 @@
+let to_lwt f =
+  let t, u = Lwt.task () in
+  ( Fut.await f @@ fun v ->
+    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
+  t
+
 let _ =
   Printexc.register_printer (function
     | Jv.Error e -> Some (Jstr.to_string (Jv.Error.message e))
@@ -499,8 +505,27 @@ let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
     } )
 *)
 
+let wait_for_service_worker =
+  let open Fut.Result_syntax in
+  let open Brr_webworkers.Service_worker in
+  let* r = Container.ready (Container.of_navigator Brr.G.navigator) in
+  match Registration.active r with
+  | None -> assert false
+  | Some r ->
+      if state r = State.activated then Fut.return (Ok ())
+      else
+        let fut, set = Fut.create () in
+        ignore
+          (Brr.Ev.listen Brr.Ev.statechange
+             (fun _ -> if state r = State.activated then set (Ok ()))
+             (as_target r));
+        fut
+
 let main () =
+  let** () = to_lwt wait_for_service_worker in
   let lat, lon, angle =
+    (*if true then (48.849418, 2.3674101, 0.)
+      else*)
     if true then (44.607649, 6.8204019, 0.)
       (*(44.607728, 6.821075, 0.)*)
       (* Col Girardin *)
@@ -604,5 +629,12 @@ let () =
          in
          current_orientation := { alpha; beta; gamma; screen })
        (Brr.Window.as_target Brr.G.window))
+
+let () =
+  let open Brr_webworkers.Service_worker in
+  ignore
+    (Container.register
+       (Container.of_navigator Brr.G.navigator)
+       (Jstr.v "service_worker.bc.js"))
 
 let () = Lwt.async main

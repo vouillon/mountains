@@ -1,0 +1,9 @@
+(env
+ (_
+  (js_of_ocaml
+   (compilation_mode whole_program)
+   (targets js))))
+
+(executables (names service_worker)
+ (libraries mountains yojson brr lwt)
+ (modes js))

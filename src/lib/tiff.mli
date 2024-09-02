@@ -11,8 +11,6 @@ module type READER = sig
   val inflate : chunk -> bytes -> unit Lwt.t
 end
 
-module Reader : READER
-
 type t = {
   width : int;
   height : int;

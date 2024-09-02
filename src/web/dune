@@ -20,6 +20,13 @@
    (run mkdir %{target})
    (run cp %{deps} %{target}))))
 
+(rule
+ (target service_worker.bc.js)
+ (alias all)
+ (deps service_worker/service_worker.bc.js)
+ (action
+  (copy %{deps} %{target})))
+
 (alias
  (name all)
  (deps index.html))
@@ -27,4 +34,4 @@
 (rule
  (alias web)
  (action (run python3 -m http.server -d .))
- (deps index.html data viewer.bc.js))
+ (deps index.html data viewer.bc.js service_worker.bc.js))
