@@ -66,9 +66,18 @@ module Make (R : Tiff.READER) = struct
         (min 1023 max_y - min_y);
       let t = Unix.gettimeofday () in
       for y = max 0 min_y to min 1023 max_y do
+        let x = max 0 min_x in
+        let w = min 1023 max_x - max 0 min_x + 1 in
+        Bigarray.Array1.blit
+          (Bigarray.Array1.sub Bigarray.Array2.(slice_left tile (1023 - y)) x w)
+          (Bigarray.Array1.sub
+             Bigarray.Array2.(slice_left heights (2049 - y + min_y))
+             (x - min_x) w)
+        (*
         for x = max 0 min_x to min 1023 max_x do
           heights.{2049 - y + min_y, x - min_x} <- tile.{1023 - y, x}
         done
+        *)
       done;
       Format.eprintf "COPYING TILE %f@." (Unix.gettimeofday () -. t);
       Lwt.return ()

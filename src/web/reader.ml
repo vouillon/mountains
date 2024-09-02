@@ -13,7 +13,6 @@ let select ~lat ~lon f =
   let* resp =
     to_lwt
     @@ url
-         ~init:(Request.init ~cache:Request.Cache.force_cache ())
          (Jstr.v
             (Printf.sprintf
                "data/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif" lat lon))
@@ -51,9 +50,6 @@ let inflate s b =
 
 let read_file f =
   let open Brr_io.Fetch in
-  let* resp =
-    to_lwt
-    @@ url ~init:(Request.init ~cache:Request.Cache.force_cache ()) (Jstr.v f)
-  in
+  let* resp = to_lwt @@ url (Jstr.v f) in
   let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
   Lwt.return Brr.Tarray.(to_string (of_buffer Uint8 buf))
