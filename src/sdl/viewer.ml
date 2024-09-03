@@ -589,18 +589,16 @@ let main () =
   let tile = Tiff.read_tile ch info tile_index in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
 *)
-  let** tile = Loader.f ~lat ~lon in
-  (*ZZZ*)
-  let x = 1025 in
-  let y = 1025 in
-  let tile_coord =
-    { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
-  in
-  let tile_coord' =
-    { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
-  in
   let tile_width = 2050 in
-  let tile_height = 2050 in
+  let tile_height = tile_width in
+  (* Check that it is a power of two *)
+  assert ((tile_width - 2) land (tile_width - 3) = 0);
+  let** tile = Loader.f ~size:tile_width ~lat ~lon in
+  let x = tile_width / 2 in
+  let y = tile_height / 2 in
+  let d = float (x - 1) /. 3600. in
+  let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
+  let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let points =
     let width = 3600 in
     let height = 3600 in

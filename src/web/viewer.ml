@@ -529,18 +529,16 @@ let main () =
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
-  let** tile = Loader.f ~lat ~lon in
-  (*ZZZ*)
-  let x = 1025 in
-  let y = 1025 in
   let tile_width = 2050 in
-  let tile_height = 2050 in
-  let tile_coord =
-    { Points.lon = lon -. (1024. /. 3600.); lat = lat -. (1024. /. 3600.) }
-  in
-  let tile_coord' =
-    { Points.lon = lon +. (1024. /. 3600.); lat = lat +. (1024. /. 3600.) }
-  in
+  let tile_height = tile_width in
+  (* Check that it is a power of two *)
+  assert ((tile_width - 2) land (tile_width - 3) = 0);
+  let** tile = Loader.f ~size:tile_width ~lat ~lon in
+  let x = tile_width / 2 in
+  let y = tile_height / 2 in
+  let d = float (x - 1) /. 3600. in
+  let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
+  let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let** points =
     let width = 3600 in
     let height = 3600 in

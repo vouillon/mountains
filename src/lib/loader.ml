@@ -1,6 +1,3 @@
-let target_size = 2048
-let size = target_size + 2
-
 let ( // ) x y =
   let q = x / y in
   let r = x mod y in
@@ -23,7 +20,7 @@ let rec iter_rev min max f =
 module Make (R : Tiff.READER) = struct
   module Tiff = Tiff.Make (R)
 
-  let f ~lat ~lon =
+  let f ~size ~lat ~lon =
     let tile_count = (3600 + 1024) / 1024 in
     let min_lat = truncate (lat *. 3600.) - (size / 2) in
     let min_lon = truncate (lon *. 3600.) - (size / 2) in
@@ -71,11 +68,11 @@ module Make (R : Tiff.READER) = struct
         Bigarray.Array1.blit
           (Bigarray.Array1.sub Bigarray.Array2.(slice_left tile (1023 - y)) x w)
           (Bigarray.Array1.sub
-             Bigarray.Array2.(slice_left heights (2049 - y + min_y))
+             Bigarray.Array2.(slice_left heights (size - 1 - y + min_y))
              (x - min_x) w)
         (*
         for x = max 0 min_x to min 1023 max_x do
-          heights.{2049 - y + min_y, x - min_x} <- tile.{1023 - y, x}
+          heights.{size - 1 - y + min_y, x - min_x} <- tile.{1023 - y, x}
         done
         *)
       done;
