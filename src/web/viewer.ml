@@ -309,16 +309,22 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
   in
   let points =
-    let vert = Matrix.({ x = 0.; y = 0.; z = 1.; w = 0. } *< transform) in
     List.filter_map
       (fun (pt, (x', y')) ->
+        let height' = tile.{y', x'} in
+        let dist =
+          sqrt
+            ((float (x' - x) ** 2.)
+            +. (float (y' - y) ** 2.)
+            +. ((height' -. height) ** 2.))
+        in
         let x = deltax *. float (x' - 1) in
         let y = deltay *. float (h - y') in
-        let z = tile.{y', x'} in
-        let r = Matrix.({ x; y; z; w = 1. } *< transform) in
+        let r = Matrix.({ x; y; z = height'; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
-        let h = (vert.x *. r.x /. r.z) +. (vert.y *. r.y /. r.z) in
-        if r.z > 0. then Some (pt, r.x /. r.z, r.y /. r.z, h) else None)
+        if r.z > 0. then
+          Some (pt, r.x /. r.z, r.y /. r.z, (height' -. height) /. dist)
+        else None)
       points
     |> List.sort (fun (_, _, _, h) (_, _, _, h') : int -> Stdlib.compare h' h)
   in
