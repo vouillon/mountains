@@ -33,7 +33,7 @@ let test
     let h' =
       ((dst_h -. src_h) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. src_h
     in
-    let res = d' > d -. 3. || h < h' in
+    let res = d' > 0.97 *. d || h < h' in
     (*    Format.eprintf "%g - %g %g - %b@." (d' /. d) h h' res;*)
     res
   in

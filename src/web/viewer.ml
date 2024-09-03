@@ -311,22 +311,13 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let height' = tile.{y', x'} in
-        let dist =
-          sqrt
-            ((float (x' - x) ** 2.)
-            +. (float (y' - y) ** 2.)
-            +. ((height' -. height) ** 2.))
-        in
         let x = deltax *. float (x' - 1) in
         let y = deltay *. float (h - y') in
-        let r = Matrix.({ x; y; z = height'; w = 1. } *< transform) in
+        let z = tile.{y', x'} in
+        let r = Matrix.({ x; y; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
-        if r.z > 0. then
-          Some (pt, r.x /. r.z, r.y /. r.z, (height' -. height) /. dist)
-        else None)
+        if r.z > 1. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
       points
-    |> List.sort (fun (_, _, _, h) (_, _, _, h') : int -> Stdlib.compare h' h)
   in
   let points =
     let pos = ref [] in
@@ -334,7 +325,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
     let ca = cos angle in
     let sa = sin angle in
     List.map
-      (fun (texture, x, y, _) ->
+      (fun (texture, x, y) ->
         let p = scale *. ((y *. ca) -. (x *. sa)) in
         let shown =
           if
@@ -473,13 +464,30 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
   let* text_pid = create_program ctx text_program in
   let points =
     List.map
-      (fun ({ Points.name; elevation; _ }, pos) ->
-        ( prepare_text ctx
+      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
+        let texture =
+          prepare_text ctx
             (match elevation with
             | None -> name
-            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation),
-          pos ))
+            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
+        in
+        let h =
+          let height' = tile.{y', x'} in
+          let dist =
+            sqrt
+              ((float (x' - x) ** 2.)
+              +. (float (y' - y) ** 2.)
+              +. ((height' -. height) ** 2.))
+          in
+          (height' -. height) /. dist
+        in
+        ((texture, pos), h))
       points
+  in
+  let points =
+    points
+    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
+    |> List.map fst
   in
   ( Lwt.async @@ fun () ->
     event_loop ctx (fun ~orientation ctx ->
