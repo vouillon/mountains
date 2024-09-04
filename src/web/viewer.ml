@@ -339,6 +339,8 @@ let prepare_text ctx text =
     Gl.unsigned_byte
     (Gl.Tex_image_source.of_canvas_el text_canvas);
   Gl.generate_mipmap ctx Gl.texture_2d;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
