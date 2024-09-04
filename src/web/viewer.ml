@@ -34,18 +34,24 @@ let terrain_program =
         uniform mat4 transform;
         uniform int w_mask;
         uniform int w_shift;
-        uniform vec2 delta;
-        in float height;
-        in mediump vec3 vertex_normal;
-        out mediump vec3 normal;
+        uniform mediump vec2 delta;
+        uniform sampler2D tile;
+        out mediump vec2 tangent;
         out mediump vec3 position;
         void main()
         {
-          float x = float(gl_VertexID & w_mask) * delta.x;
-          float y = float((gl_VertexID >> w_shift)) * delta.y;
-          float z = height;
-          normal = vertex_normal;
-          vec4 pos = transform * vec4(x, y, z, 1.0);
+          mediump ivec2 coord =
+            ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
+          mediump ivec2 tileCoord = ivec2(coord.x + 1, 2048 - coord.y);
+          float z = texelFetch(tile, tileCoord, 0).r;
+          mediump float tx =
+            (texelFetchOffset(tile, tileCoord, 0, ivec2(-1,0)).r -
+             texelFetchOffset(tile, tileCoord, 0, ivec2(1,0)).r);
+          mediump float ty =
+            (texelFetchOffset(tile, tileCoord, 0, ivec2(0,-1)).r -
+             texelFetchOffset(tile, tileCoord, 0, ivec2(0,1)).r);
+          tangent = vec2(tx, ty);
+          vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
           position = pos.xyz;
           gl_Position = proj * pos;
         }
@@ -53,10 +59,15 @@ let terrain_program =
     fragment_shader =
       {|#version 300 es
         precision mediump float;
+        uniform vec2 delta;
+        in mediump vec2 tangent;
         in mediump vec3 position;
-        in vec3 normal;
         out lowp vec4 color;
         void main() {
+          highp vec3 normal =
+            vec3(tangent.x * delta.y,
+                 - tangent.y * delta.x,
+                 2. * delta.x * delta.y);
           lowp float l =
             max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = vec3(0.3, 0.32, 0.19);
@@ -66,7 +77,7 @@ let terrain_program =
           color = vec4(mix(fog_color, l * terrain_color, fog_coeff), 1.);
         }
       |};
-    attributes = [ "height"; "vertex_normal" ];
+    attributes = [];
   }
 
 let triangle_program =
@@ -208,7 +219,7 @@ let instantiate ~size =
           obj [| ("env", obj [| ("memory", memory) |]) |];
         |])
 
-let precompute tile_height tile_width tile =
+let _precompute tile_height tile_width tile =
   let normals =
     Bigarray.(Array3.create Int8_signed C_layout)
       (tile_height - 2) (tile_width - 2) 3
@@ -292,6 +303,21 @@ let build_indices w w' h =
   Format.eprintf "BUILD INDICES %f@." (Unix.gettimeofday () -. t);
   is
 
+let make_tile_texture ctx tile =
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  assert (Bigarray.Array2.dim1 tile = 2050);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f
+    (Bigarray.Array2.dim1 tile)
+    (Bigarray.Array2.dim2 tile)
+    0 Gl.red Gl.float
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile))
+    0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tid
+
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
@@ -338,8 +364,8 @@ type orientation = {
   screen : float;
 }
 
-let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
-    ~height ~orientation ~points ~tile canvas ctx =
+let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
+    ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -430,10 +456,12 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
   Gl.uniform_matrix4fv ctx transform_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
   Gl.bind_vertex_array ctx (Some terrain_geo);
+  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
   Gl.draw_elements ctx Gl.triangle_strip
     ((2 * (h - 1) * (w + 1)) - 2)
     Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
+  Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
 
@@ -510,12 +538,10 @@ let event_loop ctx draw =
 
 (* Main *)
 
-let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
-    ctx =
+let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
   current_orientation := orientation;
   let terrain_geo =
-    create_geometry ctx ~indices:(build_indices w w h)
-      ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
+    create_geometry ctx ~indices:(build_indices w w h) ~buffers:[]
   in
   let text_geo =
     create_geometry ctx
@@ -525,6 +551,7 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
   let* terrain_pid = create_program ctx terrain_program in
   let* triangle_pid = create_program ctx triangle_program in
   let* text_pid = create_program ctx text_program in
+  let tile_texture = make_tile_texture ctx tile in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -554,8 +581,8 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile heights normals canvas
   in
   ( Lwt.async @@ fun () ->
     event_loop ctx (fun ~orientation ctx ->
-        draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~w ~h ~x ~y
-          ~orientation ~height ~tile ~points canvas ctx) );
+        draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo
+          ~w ~h ~x ~y ~orientation ~height ~tile ~points canvas ctx) );
   Ok ()
 
 let wait_for_service_worker =
@@ -640,7 +667,6 @@ let main () =
       points
   in
   let height = tile.{y, x} in
-  let** heights, normals = precompute tile_height tile_width tile in
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
@@ -652,7 +678,7 @@ let main () =
   match
     tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
       ~orientation:{ alpha = angle; beta = 90.; gamma = 0.; screen = 0. }
-      ~height ~points ~tile heights normals canvas ctx
+      ~height ~points ~tile canvas ctx
   with
   | Ok () -> Lwt.return ()
   | Error (`Msg msg) ->
