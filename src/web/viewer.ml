@@ -67,7 +67,7 @@ let terrain_program =
         void main() {
           highp vec3 normal =
             vec3(tangent.x * delta.y,
-                 - tangent.y * delta.x,
+                 tangent.y * delta.x,
                  2. * delta.x * delta.y);
           lowp float l =
             max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
