@@ -36,31 +36,34 @@ let terrain_program =
         uniform int w_shift;
         uniform vec2 delta;
         in float height;
-        in vec3 vertex_normal;
-        out vec3 normal;
-        out vec4 position;
+        in mediump vec3 vertex_normal;
+        out mediump vec3 normal;
+        out mediump vec3 position;
         void main()
         {
           float x = float(gl_VertexID & w_mask) * delta.x;
           float y = float((gl_VertexID >> w_shift)) * delta.y;
           float z = height;
           normal = vertex_normal;
-          position = transform * vec4(x, y, z, 1.0);
-          gl_Position = proj * position;
+          vec4 pos = transform * vec4(x, y, z, 1.0);
+          position = pos.xyz;
+          gl_Position = proj * pos;
         }
       |};
     fragment_shader =
       {|#version 300 es
-        precision highp float;
-        in vec4 position;
+        precision mediump float;
+        in mediump vec3 position;
         in vec3 normal;
-        out vec4 color;
+        out lowp vec4 color;
         void main() {
-          float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
-          vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
-          float fog_coeff = exp(length(position.xyz) * -1e-4);
-          vec3 fog_color = vec3(0.36, 0.45, 0.59);
-          color = vec4(mix(fog_color, terrain_color, fog_coeff), 1.);
+          lowp float l =
+            max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
+          lowp vec3 terrain_color = vec3(0.3, 0.32, 0.19);
+          lowp vec3 fog_color = vec3(0.36, 0.45, 0.59);
+          highp vec3 pos = position;
+          float fog_coeff = exp(length(pos) * -1e-4);
+          color = vec4(mix(fog_color, l * terrain_color, fog_coeff), 1.);
         }
       |};
     attributes = [ "height"; "vertex_normal" ];
@@ -187,6 +190,24 @@ let linearize3 a =
       reshape_1 (genarray_of_array3 a)
         (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
 
+let instantiate ~size =
+  let sz = (size + 65535) lsr 16 in
+  let _WebAssembly = Jv.(get global "WebAssembly") in
+  let file = Jstr.v "compute.wasm" in
+  let memory =
+    Jv.(new' (get _WebAssembly "Memory") [| obj [| ("initial", of_int sz) |] |])
+  in
+  Fut.of_promise
+    ~ok:(fun e ->
+      ( Brr.Tarray.Buffer.of_jv (Jv.get memory "buffer"),
+        Jv.(get (get e "instance") "exports") ))
+    Jv.(
+      call _WebAssembly "instantiateStreaming"
+        [|
+          call global "fetch" [| Jv.of_jstr file |];
+          obj [| ("env", obj [| ("memory", memory) |]) |];
+        |])
+
 let precompute tile_height tile_width tile =
   let normals =
     Bigarray.(Array3.create Int8_signed C_layout)
@@ -195,21 +216,63 @@ let precompute tile_height tile_width tile =
   let heights =
     Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
   in
-  let t = Unix.gettimeofday () in
-  for y = 1 to tile_height - 2 do
-    for x = 1 to tile_width - 2 do
-      let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
-      let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
-      let nz = 2. *. deltax *. deltay in
-      let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-      normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
-      normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
-      normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
-      heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
-    done
-  done;
-  Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
-  (linearize2 heights, linearize3 normals)
+  if true then (
+    to_lwt
+    @@
+    let tile_size = tile_height * tile_width * 4 in
+    let heights_size = (tile_height - 2) * (tile_width - 2) * 4 in
+    let normals_size = (tile_height - 2) * (tile_width - 2) * 3 in
+    let size = tile_size + heights_size + normals_size in
+    let open Fut.Result_syntax in
+    let+ memory, funcs = instantiate ~size in
+    let t = Unix.gettimeofday () in
+    Brr.Tarray.set_tarray
+      Brr.Tarray.(of_buffer Float32 memory)
+      ~dst:0
+      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile));
+    let t' = Unix.gettimeofday () in
+    ignore
+      (Jv.call funcs "precompute"
+         [|
+           Jv.of_int tile_width;
+           Jv.of_int tile_height;
+           Jv.of_float deltax;
+           Jv.of_float deltay;
+           Jv.of_int 0;
+           Jv.of_int tile_size;
+           Jv.of_int (tile_size + heights_size);
+         |]);
+    Format.eprintf "precompute (kernel) %f@." (Unix.gettimeofday () -. t');
+    Brr.Tarray.set_tarray
+      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 heights))
+      ~dst:0
+      Brr.Tarray.(
+        of_buffer ~byte_offset:tile_size ~length:(heights_size / 4) Float32
+          memory);
+    Brr.Tarray.set_tarray
+      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array3 normals))
+      ~dst:0
+      Brr.Tarray.(
+        of_buffer ~byte_offset:(tile_size + heights_size) ~length:normals_size
+          Int8 memory);
+    Format.eprintf "precompute %f@." (Unix.gettimeofday () -. t);
+    (linearize2 heights, linearize3 normals))
+  else
+    let t = Unix.gettimeofday () in
+    for y = 1 to tile_height - 2 do
+      for x = 1 to tile_width - 2 do
+        let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
+        let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
+        let nz = 2. *. deltax *. deltay in
+        let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
+        normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
+        normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
+        normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
+        heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
+      done
+    done;
+    Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
+    Lwt.return (linearize2 heights, linearize3 normals)
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
@@ -577,7 +640,7 @@ let main () =
       points
   in
   let height = tile.{y, x} in
-  let heights, normals = precompute tile_width tile_height tile in
+  let** heights, normals = precompute tile_height tile_width tile in
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in

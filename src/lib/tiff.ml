@@ -33,12 +33,14 @@ module Make (R : READER) = struct
 
   type entry = { typ : int; count : int32; offset : int32 }
 
+  let debug = false
+
   let read_ifd_entry ch =
     let* tag = read_uint16 ch in
     let* typ = read_uint16 ch in
     let* count = read_int32 ch in
     let* offset = read_int32 ch in
-    Format.eprintf "%d %d %ld %ld@." tag typ count offset;
+    if debug then Format.eprintf "%d %d %ld %ld@." tag typ count offset;
     Lwt.return (tag, { typ; count; offset })
 
   module IntMap = Map.Make (Int)
@@ -52,7 +54,7 @@ module Make (R : READER) = struct
   let read_ifd ch offset =
     R.seek ch (Int32.to_int offset);
     let* n = read_uint16 ch in
-    Format.eprintf "%d@." n;
+    if debug then Format.eprintf "%d@." n;
     let m = ref IntMap.empty in
     let* () =
       iter 0 n @@ fun _ ->
@@ -87,14 +89,14 @@ module Make (R : READER) = struct
     let* s = R.read_string ch 4 in
     assert (s = "II\042\000");
     let* offset = read_int32 ch in
-    Format.eprintf "%ld@." offset;
+    if debug then Format.eprintf "%ld@." offset;
     let* ifd = read_ifd ch offset in
     let width = ifd_uint16 256 ifd in
     let height = ifd_uint16 257 ifd in
-    Format.eprintf "size: %dx%d@." width height;
+    if debug then Format.eprintf "size: %dx%d@." width height;
     let tile_width = ifd_uint16 322 ifd in
     let tile_height = ifd_uint16 323 ifd in
-    Format.eprintf "tile size: %dx%d@." tile_width tile_height;
+    if debug then Format.eprintf "tile size: %dx%d@." tile_width tile_height;
     let* tile_offsets = ifd_int32s 324 ifd ch in
     let* tile_byte_counts = ifd_int32s 325 ifd ch in
     assert (ifd_uint16 258 ifd = 32);
@@ -121,7 +123,10 @@ module Make (R : READER) = struct
     done
 
   let decode_fp b w h =
+    let t = Unix.gettimeofday () in
     decode_delta b (w * 4) h;
+    Format.eprintf "DECODING DELTA %f@." (Unix.gettimeofday () -. t);
+    let t = Unix.gettimeofday () in
     let b' = Bytes.copy b in
     for i = 0 to h - 1 do
       let i = i * w * 4 in
@@ -133,19 +138,20 @@ module Make (R : READER) = struct
         done
       done
     done;
+    Format.eprintf "DECODING FP %f@." (Unix.gettimeofday () -. t);
     b'
 
   let read_tile ch
       { tile_width; tile_height; tile_offsets; tile_byte_counts; _ } i =
     Format.eprintf "READING TILE: %ld %ld@." tile_offsets.(i)
       tile_byte_counts.(i);
+    let t = Unix.gettimeofday () in
     R.seek ch (Int32.to_int tile_offsets.(i));
     let* s = R.read_chunk ch (Int32.to_int tile_byte_counts.(i)) in
     let b = Bytes.create (tile_width * tile_height * 4) in
     let* () = R.inflate s b in
-    let t = Unix.gettimeofday () in
+    Format.eprintf "READING TILE %f@." (Unix.gettimeofday () -. t);
     let b = decode_fp b tile_width tile_height in
-    Format.eprintf "DECODING FP %f@." (Unix.gettimeofday () -. t);
     let tile =
       Bigarray.(Array2.create Float32 C_layout) tile_height tile_width
     in

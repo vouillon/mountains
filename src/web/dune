@@ -34,4 +34,11 @@
 (rule
  (alias web)
  (action (run python3 -m http.server -d .))
- (deps index.html data viewer.bc.js service_worker.bc.js manifest.json icon192.png icon512.png))
+ (deps index.html data viewer.bc.js service_worker.bc.js manifest.json icon192.png icon512.png compute.wasm))
+
+(rule
+ (target compute.wasm)
+ (deps compute.c)
+ (mode promote)
+ (action
+  (run clang -Ofast -msimd128 --no-standard-libraries --target=wasm32  -Wl,--no-entry -Wl,--import-memory -Wa,--no-type-check -o %{target} %{deps})))

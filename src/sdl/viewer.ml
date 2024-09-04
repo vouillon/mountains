@@ -589,7 +589,7 @@ let main () =
   let tile = Tiff.read_tile ch info tile_index in
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
 *)
-  let tile_width = 2050 in
+  let tile_width = 4098 (*2050*) in
   let tile_height = tile_width in
   (* Check that it is a power of two *)
   assert ((tile_width - 2) land (tile_width - 3) = 0);
