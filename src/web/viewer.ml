@@ -289,16 +289,14 @@ let build_indices w w' h =
   let t = Unix.gettimeofday () in
   let is =
     Bigarray.(
-      Array1.create Bigarray.int32 c_layout ((2 * (h - 1) * (w + 1)) - 2))
+      Array1.create Bigarray.int32 c_layout (((h - 1) * ((2 * w) + 1)) - 1))
   in
   for i = 0 to h - 2 do
     for j = 0 to w - 1 do
-      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
-      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
+      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
+      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
     done;
-    if i > 0 then (
-      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i - 1) * w') + w - 1);
-      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int ((i + 1) * w'))
+    if i > 0 then is.{(i * ((2 * w) + 1)) - 1} <- Int32.of_int (-1)
   done;
   Format.eprintf "BUILD INDICES %f@." (Unix.gettimeofday () -. t);
   is
@@ -458,7 +456,7 @@ let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
   Gl.draw_elements ctx Gl.triangle_strip
-    ((2 * (h - 1) * (w + 1)) - 2)
+    (((h - 1) * ((2 * w) + 1)) - 1)
     Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
