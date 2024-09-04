@@ -32,6 +32,7 @@ let terrain_program =
       {|#version 300 es
         uniform mat4 proj;
         uniform mat4 transform;
+        uniform int w;
         uniform int w_mask;
         uniform int w_shift;
         uniform mediump vec2 delta;
@@ -42,7 +43,7 @@ let terrain_program =
         {
           mediump ivec2 coord =
             ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
-          mediump ivec2 tileCoord = ivec2(coord.x + 1, 2048 - coord.y);
+          mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
           float z = texelFetch(tile, tileCoord, 0).r;
           mediump float tx =
             (texelFetchOffset(tile, tileCoord, 0, ivec2(-1,0)).r -
@@ -304,7 +305,6 @@ let build_indices w w' h =
 let make_tile_texture ctx tile =
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  assert (Bigarray.Array2.dim1 tile = 2050);
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f
     (Bigarray.Array2.dim1 tile)
     (Bigarray.Array2.dim2 tile)
@@ -363,7 +363,7 @@ type orientation = {
 }
 
 let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
-    ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx =
+    ~w' ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -438,11 +438,13 @@ let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
   let width_shift_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_shift")
   in
-  Gl.uniform1i ctx width_shift_loc (truncate (log (float w) /. log 2.));
+  Gl.uniform1i ctx width_shift_loc (truncate (log (float w') /. log 2.));
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
   in
-  Gl.uniform1i ctx width_mask_loc (w - 1);
+  Gl.uniform1i ctx width_mask_loc (w' - 1);
+  let width_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
+  Gl.uniform1i ctx width_loc w;
   let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
   let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
@@ -536,10 +538,13 @@ let event_loop ctx draw =
 
 (* Main *)
 
+let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
 let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
   current_orientation := orientation;
+  let w' = next_power_of_two w 1 in
   let terrain_geo =
-    create_geometry ctx ~indices:(build_indices w w h) ~buffers:[]
+    create_geometry ctx ~indices:(build_indices w w' h) ~buffers:[]
   in
   let text_geo =
     create_geometry ctx
@@ -580,7 +585,7 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
   ( Lwt.async @@ fun () ->
     event_loop ctx (fun ~orientation ctx ->
         draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo
-          ~w ~h ~x ~y ~orientation ~height ~tile ~points canvas ctx) );
+          ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points canvas ctx) );
   Ok ()
 
 let wait_for_service_worker =
@@ -617,10 +622,10 @@ let main () =
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
-  let tile_width = 2050 in
+  let tile_width = 2048 in
   let tile_height = tile_width in
-  (* Check that it is a power of two *)
-  assert ((tile_width - 2) land (tile_width - 3) = 0);
+  (* Check that we are close to a power of two *)
+  assert (next_power_of_two tile_width 1 - tile_width < 16);
   let** tile = Loader.f ~size:tile_width ~lat ~lon in
   let x = tile_width / 2 in
   let y = tile_height / 2 in
