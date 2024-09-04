@@ -38,7 +38,7 @@ let terrain_program =
         uniform mediump vec2 delta;
         uniform sampler2D tile;
         out mediump vec2 tangent;
-        out mediump vec3 position;
+        out highp vec3 position;
         void main()
         {
           mediump ivec2 coord =
@@ -62,7 +62,7 @@ let terrain_program =
         precision mediump float;
         uniform vec2 delta;
         in mediump vec2 tangent;
-        in mediump vec3 position;
+        in highp vec3 position;
         out lowp vec4 color;
         void main() {
           highp vec3 normal =
@@ -73,8 +73,7 @@ let terrain_program =
             max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = vec3(0.3, 0.32, 0.19);
           lowp vec3 fog_color = vec3(0.36, 0.45, 0.59);
-          highp vec3 pos = position;
-          float fog_coeff = exp(length(pos) * -1e-4);
+          float fog_coeff = exp(length(position) * -1e-4);
           color = vec4(mix(fog_color, l * terrain_color, fog_coeff), 1.);
         }
       |};
