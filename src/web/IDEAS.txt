@@ -1,0 +1,59 @@
+- Compute gradients to a RG16F texture
+  Sample the texture in vertex shader to compute the normal
+
+- Better grid:
+    +--+--+
+    |\ | /|
+    | \|/ |
+    +--+--+
+    | /|\ |
+    |/ | \|
+    +--+--+
+
+- fast tif decoding
+
+  ;; Sum
+  (local.set $a
+     (i8x16.add (local.get $a)
+       (i16x8.shr_u (local.get a) (i32.const 8))))
+  (local.set $a
+     (i8x16.add (local.get $a)
+       (i32x4.shr_u (local.get a) (i32.const 16))))
+  (local.set $a
+     (i8x16.add (local.get $a)
+       (i64x2.shr_u (local.get a) (i32.const 32))))
+  (local.set $a
+     (i8x16.add (local.get $a)
+       (i8x16.swizzle (local.get $preva)
+        (v128.const i64x2 0x1010101010101010 0x0102030405060708)))
+  (local.set $a (i8x16.add (local.get $a)
+     (i8x16.swizzle (local.get $preva))
+        (v128.const i64x2 0x0f0f0f0f0f0f0f0f 0x0f0f0f0f0f0f0f0f)))
+  (local.set $preva (local.get $a)
+
+  ;; Transpose
+  (local.set $u
+     (i8x16.shuffle 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23
+        (local.get $a) (local.get $b))
+  (local.set $v
+     (i8x16.shuffle 8 24 9 25 10 26 11 27 12 28 13 29 14 30 15 31
+        (local.get $c) (local.get $d))
+  (local.set $w
+     (i8x16.shuffle 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23
+        (local.get $a) (local.get $b))
+  (local.set $t
+     (i8x16.shuffle 8 24 9 25 10 26 11 27 12 28 13 29 14 30 15 31
+        (local.get $c) (local.get $d))
+
+  (local.set $a
+     (i8x16.shuffle 0 1 16 17 2 3 18 19 4 5 20 21 6 7 22 23
+        (local.get $u) (local.get $w))
+  (local.set $b
+     (i8x16.shuffle 8 9 24 25 10 11 26 27 12 13 28 29 14 15 30 31
+        (local.get $u) (local.get $w))
+  (local.set $c
+     (i8x16.shuffle 0 1 16 17 2 3 18 19 4 5 20 21 6 7 22 23
+        (local.get $v) (local.get $t))
+  (local.set $b
+     (i8x16.shuffle 8 9 24 25 10 11 26 27 12 13 28 29 14 15 30 31
+        (local.get $v) (local.get $t))
