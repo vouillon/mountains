@@ -602,6 +602,7 @@ let compute_gradient ctx width height text_geo tile tile_texture =
   let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+  Gl.generate_mipmap ctx Gl.texture_2d;
 
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
