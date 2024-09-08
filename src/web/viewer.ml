@@ -11,8 +11,7 @@ let _ =
 
 module Loader = Loader.Make (Reader)
 
-let ( let** ) = Lwt.bind
-let ( let* ) = Result.bind
+let ( let* ) = Lwt.bind
 let pi = 4. *. atan 1.
 
 (* Shaders *)
@@ -37,6 +36,7 @@ let terrain_program =
         uniform int w_shift;
         uniform mediump vec2 delta;
         uniform sampler2D tile;
+        uniform mediump isampler2D gradient;
         out mediump vec2 tangent;
         out highp vec3 position;
         void main()
@@ -45,13 +45,8 @@ let terrain_program =
             ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
           mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
           float z = texelFetch(tile, tileCoord, 0).r;
-          mediump float tx =
-            (texelFetchOffset(tile, tileCoord, 0, ivec2(-1,0)).r -
-             texelFetchOffset(tile, tileCoord, 0, ivec2(1,0)).r);
-          mediump float ty =
-            (texelFetchOffset(tile, tileCoord, 0, ivec2(0,-1)).r -
-             texelFetchOffset(tile, tileCoord, 0, ivec2(0,1)).r);
-          tangent = vec2(tx, ty);
+          tangent = vec2(texelFetchOffset(gradient, tileCoord, 0, ivec2(-1,-1)))/100.;
+          tangent = vec2(texture(gradient, (2. * vec2(tileCoord) - 1.) / (2. * float(w))))/100.;
           vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
           position = pos.xyz;
           gl_Position = proj * pos;
@@ -165,15 +160,15 @@ let compile_shader ctx src typ =
   let sid = Gl.create_shader ctx typ in
   Gl.shader_source ctx sid (Jstr.v src);
   Gl.compile_shader ctx sid;
-  if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then Ok sid
+  if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then sid
   else
     let log = Gl.get_shader_info_log ctx sid in
     Gl.delete_shader ctx sid;
-    Error (`Msg (Jstr.to_string log))
+    failwith (Jstr.to_string log)
 
 let create_program ctx p =
-  let* vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
-  let* fid = compile_shader ctx p.fragment_shader Gl.fragment_shader in
+  let vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
+  let fid = compile_shader ctx p.fragment_shader Gl.fragment_shader in
   let pid = Gl.create_program ctx in
   Gl.attach_shader ctx pid vid;
   Gl.delete_shader ctx vid;
@@ -183,11 +178,11 @@ let create_program ctx p =
     (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
     p.attributes;
   Gl.link_program ctx pid;
-  if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then Ok pid
+  if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then pid
   else
     let log = Gl.get_program_info_log ctx pid in
     Gl.delete_program ctx pid;
-    Error (`Msg (Jstr.to_string log))
+    failwith (Jstr.to_string log)
 
 (* Geometry *)
 
@@ -363,8 +358,9 @@ type orientation = {
   screen : float;
 }
 
-let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
-    ~w' ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx =
+let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
+    text_pid text_geo ~w ~w' ~h ~x ~y ~height ~orientation ~points ~tile canvas
+    ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -456,8 +452,17 @@ let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
   in
   Gl.uniform_matrix4fv ctx transform_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in
+  let gradient_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "gradient")
+  in
+  Gl.uniform1i ctx tile_loc 0;
+  Gl.uniform1i ctx gradient_loc 1;
   Gl.bind_vertex_array ctx (Some terrain_geo);
+  Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
+  Gl.active_texture ctx Gl.texture1;
+  Gl.bind_texture ctx Gl.texture_2d (Some gradient_texture);
   Gl.draw_elements ctx Gl.triangle_strip
     (((h - 1) * ((2 * w) + 1)) - 1)
     Gl.unsigned_int 0;
@@ -465,6 +470,7 @@ let draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo ~w
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
+  Gl.active_texture ctx Gl.texture0;
 
   Gl.use_program ctx triangle_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
@@ -532,7 +538,7 @@ let event_loop ctx draw =
   let rec loop prev_orientation =
     let orientation = !current_orientation in
     if orientation <> prev_orientation then draw ~orientation ctx;
-    let** () = request_animation_frame () in
+    let* () = request_animation_frame () in
     loop orientation
   in
   loop { !current_orientation with alpha = !current_orientation.alpha -. 1. }
@@ -540,6 +546,67 @@ let event_loop ctx draw =
 (* Main *)
 
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let gradient_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out vec2 tileCoord;
+        uniform vec2 size;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          tileCoord = vec2(x, y) * (size - 1.) + vec2(1.5, 1.5);
+          gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform vec2 size;
+        in vec2 tileCoord;
+        uniform sampler2D tile;
+        out mediump ivec2 color;
+        void main() {
+          mediump float tx =
+            (texture(tile, (2. * (tileCoord + vec2(-1,0))) / (2. * (size + 2.))).r -
+             texture(tile, (2. * (tileCoord + vec2(1,0))) / (2. * (size + 2.))).r);
+          mediump float ty =
+            (texture(tile, (2. * (tileCoord + vec2(0,-1))) / (2. * (size + 2.))).r -
+             texture(tile, (2. * (tileCoord + vec2(0,1))) / (2. * (size + 2.))).r);
+          color = ivec2(tx * 100., ty * 100.);
+        }
+      |};
+    attributes = [];
+  }
+
+let compute_gradient ctx width height text_geo tile tile_texture =
+  assert (width = height);
+  Format.eprintf "SIZES %d %d@." width (Bigarray.Array2.dim1 tile);
+  let gradient_pid = create_program ctx gradient_program in
+  let tid = Gl.create_texture ctx in
+  let levels = truncate (log (float (next_power_of_two width 1))) in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg16i width height;
+  let fb = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
+  let attachmentPoint = Gl.color_attachment0 in
+  Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
+    0;
+  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
+  Gl.viewport ctx 0 0 width height;
+  Gl.use_program ctx gradient_pid;
+  Gl.bind_vertex_array ctx (Some text_geo);
+  let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
+  Gl.uniform2f ctx size_loc (float width) (float height);
+  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  Gl.bind_vertex_array ctx None;
+  tid
 
 let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
   current_orientation := orientation;
@@ -552,10 +619,11 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
-  let* terrain_pid = create_program ctx terrain_program in
-  let* triangle_pid = create_program ctx triangle_program in
-  let* text_pid = create_program ctx text_program in
+  let terrain_pid = create_program ctx terrain_program in
+  let triangle_pid = create_program ctx triangle_program in
+  let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
+  let gradient_texture = compute_gradient ctx w h text_geo tile tile_texture in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -583,11 +651,10 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
     |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
     |> List.map fst
   in
-  ( Lwt.async @@ fun () ->
-    event_loop ctx (fun ~orientation ctx ->
-        draw terrain_pid terrain_geo tile_texture triangle_pid text_pid text_geo
-          ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points canvas ctx) );
-  Ok ()
+  event_loop ctx (fun ~orientation ctx ->
+      draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
+        text_pid text_geo ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points
+        canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -606,7 +673,7 @@ let wait_for_service_worker =
         fut
 
 let main () =
-  let** () = to_lwt wait_for_service_worker in
+  let* () = to_lwt wait_for_service_worker in
   let lat, lon, angle =
     (*if true then (48.849418, 2.3674101, 0.)
       else*)
@@ -627,16 +694,16 @@ let main () =
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two tile_width 1 - tile_width < 16);
-  let** tile = Loader.f ~size:tile_width ~lat ~lon in
+  let* tile = Loader.f ~size:tile_width ~lat ~lon in
   let x = tile_width / 2 in
   let y = tile_height / 2 in
   let d = float (x - 1) /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
-  let** points =
+  let* points =
     let width = 3600 in
     let height = 3600 in
-    let** points = Reader.read_file "data/points.geojson" in
+    let* points = Reader.read_file "data/points.geojson" in
     (*
     let points =
       {|
@@ -679,15 +746,9 @@ let main () =
       (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
          (Brr_canvas.Canvas.of_el canvas))
   in
-  match
-    tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
-      ~orientation:{ alpha = angle; beta = 90.; gamma = 0.; screen = 0. }
-      ~height ~points ~tile canvas ctx
-  with
-  | Ok () -> Lwt.return ()
-  | Error (`Msg msg) ->
-      Brr.Console.log [ Jstr.v msg ];
-      Lwt.return ()
+  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
+    ~orientation:{ alpha = angle; beta = 90.; gamma = 0.; screen = 0. }
+    ~height ~points ~tile canvas ctx
 
 let () =
   let deviceorientation =
