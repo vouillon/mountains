@@ -37,7 +37,7 @@ let terrain_program =
         uniform mediump vec2 delta;
         uniform sampler2D tile;
         out highp vec3 position;
-        out mediump vec2 gradCoord;
+        out highp vec2 gradCoord;
         void main()
         {
           mediump ivec2 coord =
@@ -56,12 +56,13 @@ let terrain_program =
         uniform vec2 delta;
         uniform mediump sampler2D gradient;
         uniform mediump int w;
-        in mediump vec2 gradCoord;
+        in highp vec2 gradCoord;
         in highp vec3 position;
         out lowp vec4 color;
+
         void main() {
           mediump vec2 tangent =
-            vec2(texture(gradient, (2. * gradCoord - 1.) / (2. * float(w))));
+            vec2(texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))));
           highp vec3 normal =
             vec3(tangent.x * delta.y,
                  tangent.y * delta.x,
@@ -570,33 +571,34 @@ let gradient_program =
         uniform sampler2D tile;
         out mediump vec2 color;
         void main() {
+          highp vec2 coeff = 1. / (size + 2.);
           mediump float tx =
-            (texture(tile, (2. * (tileCoord + vec2(-1,0))) / (2. * (size + 2.))).r -
-             texture(tile, (2. * (tileCoord + vec2(1,0))) / (2. * (size + 2.))).r);
+            (texture(tile, (tileCoord + vec2(-1,0)) * coeff).r -
+             texture(tile, (tileCoord + vec2(1,0)) * coeff).r);
           mediump float ty =
-            (texture(tile, (2. * (tileCoord + vec2(0,-1))) / (2. * (size + 2.))).r -
-             texture(tile, (2. * (tileCoord + vec2(0,1))) / (2. * (size + 2.))).r);
+            (texture(tile, (tileCoord + vec2(0,-1)) * coeff).r -
+             texture(tile, (tileCoord + vec2(0,1)) * coeff).r);
           color = vec2(tx, ty);
         }
       |};
     attributes = [];
   }
 
-let compute_gradient ctx width height text_geo tile tile_texture =
+let compute_gradient ctx width height text_geo tile_texture =
   assert (width = height);
-  Format.eprintf "SIZES %d %d@." width (Bigarray.Array2.dim1 tile);
+
   ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t);
   ignore (Gl.get_extension ctx (Jstr.v "OES_texture_float_linear") : Jv.t);
+
   let gradient_pid = create_program ctx gradient_program in
   let tid = Gl.create_texture ctx in
-  let levels = truncate (log (float (next_power_of_two width 1))) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (*
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-*)
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
     Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  let levels =
+    truncate ((log (float (next_power_of_two width 1)) /. log 2.) +. 0.5)
+  in
   Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg16f width height;
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
@@ -610,12 +612,14 @@ let compute_gradient ctx width height text_geo tile tile_texture =
   let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
-
-  Gl.generate_mipmap ctx Gl.texture_2d;
-
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.bind_vertex_array ctx None;
+
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.generate_mipmap ctx Gl.texture_2d;
+  Gl.bind_texture ctx Gl.texture_2d None;
+
   tid
 
 let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
@@ -633,7 +637,7 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
-  let gradient_texture = compute_gradient ctx w h text_geo tile tile_texture in
+  let gradient_texture = compute_gradient ctx w h text_geo tile_texture in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -687,7 +691,7 @@ let main () =
   let lat, lon, angle =
     (*if true then (48.849418, 2.3674101, 0.)
       else*)
-    if true then (44.607649, 6.8204019, 0.)
+    if true then (44.607649, 6.8204019, 180.)
       (*(44.607728, 6.821075, 0.)*)
       (* Col Girardin *)
     else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
