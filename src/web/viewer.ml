@@ -31,22 +31,20 @@ let terrain_program =
       {|#version 300 es
         uniform mat4 proj;
         uniform mat4 transform;
-        uniform int w;
+        uniform mediump int w;
         uniform int w_mask;
         uniform int w_shift;
         uniform mediump vec2 delta;
         uniform sampler2D tile;
-        uniform mediump isampler2D gradient;
-        out mediump vec2 tangent;
         out highp vec3 position;
+        out mediump vec2 gradCoord;
         void main()
         {
           mediump ivec2 coord =
             ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
           mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
+          gradCoord = vec2(tileCoord);
           float z = texelFetch(tile, tileCoord, 0).r;
-          tangent = vec2(texelFetchOffset(gradient, tileCoord, 0, ivec2(-1,-1)))/100.;
-          tangent = vec2(texture(gradient, (2. * vec2(tileCoord) - 1.) / (2. * float(w))))/100.;
           vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
           position = pos.xyz;
           gl_Position = proj * pos;
@@ -56,10 +54,14 @@ let terrain_program =
       {|#version 300 es
         precision mediump float;
         uniform vec2 delta;
-        in mediump vec2 tangent;
+        uniform mediump sampler2D gradient;
+        uniform mediump int w;
+        in mediump vec2 gradCoord;
         in highp vec3 position;
         out lowp vec4 color;
         void main() {
+          mediump vec2 tangent =
+            vec2(texture(gradient, (2. * gradCoord - 1.) / (2. * float(w))));
           highp vec3 normal =
             vec3(tangent.x * delta.y,
                  tangent.y * delta.x,
@@ -566,7 +568,7 @@ let gradient_program =
         uniform vec2 size;
         in vec2 tileCoord;
         uniform sampler2D tile;
-        out mediump ivec2 color;
+        out mediump vec2 color;
         void main() {
           mediump float tx =
             (texture(tile, (2. * (tileCoord + vec2(-1,0))) / (2. * (size + 2.))).r -
@@ -574,7 +576,7 @@ let gradient_program =
           mediump float ty =
             (texture(tile, (2. * (tileCoord + vec2(0,-1))) / (2. * (size + 2.))).r -
              texture(tile, (2. * (tileCoord + vec2(0,1))) / (2. * (size + 2.))).r);
-          color = ivec2(tx * 100., ty * 100.);
+          color = vec2(tx, ty);
         }
       |};
     attributes = [];
@@ -583,13 +585,19 @@ let gradient_program =
 let compute_gradient ctx width height text_geo tile tile_texture =
   assert (width = height);
   Format.eprintf "SIZES %d %d@." width (Bigarray.Array2.dim1 tile);
+  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t);
+  ignore (Gl.get_extension ctx (Jstr.v "OES_texture_float_linear") : Jv.t);
   let gradient_pid = create_program ctx gradient_program in
   let tid = Gl.create_texture ctx in
   let levels = truncate (log (float (next_power_of_two width 1))) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  (*
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg16i width height;
+*)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg16f width height;
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
   let attachmentPoint = Gl.color_attachment0 in
@@ -602,6 +610,7 @@ let compute_gradient ctx width height text_geo tile tile_texture =
   let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+
   Gl.generate_mipmap ctx Gl.texture_2d;
 
   Gl.bind_framebuffer ctx Gl.framebuffer None;
