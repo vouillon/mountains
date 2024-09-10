@@ -64,8 +64,7 @@ let terrain_program =
           mediump vec2 tangent =
             vec2(texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))));
           highp vec3 normal =
-            vec3(tangent.x * delta.y,
-                 tangent.y * delta.x,
+            vec3(tangent * delta.yx,
                  2. * delta.x * delta.y);
           lowp float l =
             max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
@@ -587,9 +586,8 @@ let gradient_program =
 let compute_gradient ctx width height text_geo tile_texture =
   assert (width = height);
 
+  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_half_float") : Jv.t);
   ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t);
-  ignore (Gl.get_extension ctx (Jstr.v "OES_texture_float_linear") : Jv.t);
-
   let gradient_pid = create_program ctx gradient_program in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
@@ -691,7 +689,7 @@ let main () =
   let lat, lon, angle =
     (*if true then (48.849418, 2.3674101, 0.)
       else*)
-    if true then (44.607649, 6.8204019, 180.)
+    if true then (44.607649, 6.8204019, 220.)
       (*(44.607728, 6.821075, 0.)*)
       (* Col Girardin *)
     else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)

@@ -23,7 +23,10 @@ let use_cache_on_error event request =
   let open Fut.Syntax in
   let* response = Brr_io.Fetch.Ev.preload_response event in
   match response with
-  | Ok (Some response) -> Fut.return (Ok response)
+  | Ok (Some response) ->
+      let open Fut.Result_syntax in
+      let* () = put_in_cache request response in
+      Fut.return (Ok response)
   | Ok None | Error _ -> (
       let* response = Brr_io.Fetch.request request in
       match response with
