@@ -86,7 +86,7 @@ let () =
             Brr_io.Fetch.Cache.add_all cache
               (List.map
                  (fun url -> Brr_io.Fetch.Request.v (Jstr.v url))
-                 [ "."; "viewer.bc.js"; "viewer.bc.wasm" ])))
+                 [ "."; "viewer.bc.js" (*; "viewer.bc.wasm"*) ])))
        Brr.G.target)
 
 (*

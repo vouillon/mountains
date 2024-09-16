@@ -1,3 +1,5 @@
+- CORINE Land Cover + water from openstreetmap
+
 - Compute gradients to a RG16F texture
   Sample the texture in vertex shader to compute the normal
 
@@ -9,6 +11,24 @@
     | /|\ |
     |/ | \|
     +--+--+
+
+  126x126 grid + scaling/rotation/translation + seams
+  instanced multiple times
+
+  instance: scale, delta x y, (orientation)  <= 6 bytes
+
+     128x1 ==>  128 * 4 bytes
+
+    4096x4096   12 * 128x128
+    2048x2048   12 * 128x128
+    1024x1024   12 * 128x128
+     512x 512   12 * 128x128
+
+- Try 64x64 subgrids instanced 63*63 times
+  coord = ivec2(x >> 6, x & 0x37);
+  coord = coord << 6 + 32;
+
+- pass a mediump distance rather than position
 
 - fast tif decoding
 
