@@ -771,6 +771,18 @@ let main () =
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
+  let toggle_fullscreen _ =
+    match Brr.Document.fullscreen_element Brr.G.document with
+    | None ->
+        ignore
+          (Brr.El.request_fullscreen
+             ~opts:
+               (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
+                  ())
+             canvas)
+    | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
+  in
+  ignore Brr.(Ev.listen Ev.click toggle_fullscreen (El.as_target canvas));
   let ctx =
     Option.get
       (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
