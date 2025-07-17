@@ -684,12 +684,25 @@ let wait_for_service_worker =
              (as_target r));
         fut
 
-let main () =
-  let* () = to_lwt wait_for_service_worker in
-  let lat, lon, angle =
-    (*if true then (48.849418, 2.3674101, 0.)
+(*
+let get_position () =
+  let open Fut.Syntax in
+  let open Brr_io.Geolocation in
+  let opts = opts ~high_accuracy:true () in
+  let+ pos = get ~opts (of_navigator Brr.G.navigator) in
+  match pos with
+  | Ok pos -> Ok (Pos.latitude pos, Pos.longitude pos, 0.)
+  | Error _ -> assert false
+*)
+
+let get_position () =
+  let pos =
+    if true then (44.3950846, 6.7669714, 170.)
+    else if
+      (*if true then (48.849418, 2.3674101, 0.)
       else*)
-    if true then (44.607649, 6.8204019, 220.)
+      true
+    then (44.607649, 6.8204019, 220.)
       (*(44.607728, 6.821075, 0.)*)
       (* Col Girardin *)
     else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
@@ -702,6 +715,11 @@ let main () =
     else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
     else (44.789628, 6.670200, 66.)
   in
+  Fut.return (Ok pos)
+
+let main () =
+  let* () = to_lwt wait_for_service_worker in
+  let* lat, lon, angle = to_lwt (get_position ()) in
   let tile_width = 2048 in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
