@@ -1,15 +1,14 @@
 (env
  (_
-  (js_of_ocaml
-   (compilation_mode whole_program)
-   (submodes wasm))))
+  (wasm_of_ocaml
+   (compilation_mode whole_program))))
 
 (executables (names viewer)
  (libraries mountains yojson brr lwt)
- (modes js)
- (js_of_ocaml
+ (modes wasm)
+ (wasm_of_ocaml
   (javascript_files inflate.js)
-  (wasm_files inflate.js inflate.wat)))
+  (wasm_files inflate.wat)))
 
 (rule
  (target (dir data))
@@ -34,7 +33,7 @@
 (rule
  (alias web)
  (action (run python3 -m http.server -d .))
- (deps index.html data viewer.bc.js service_worker.bc.js manifest.json icon192.png icon512.png compute.wasm))
+ (deps index.html data viewer.bc.wasm.js service_worker.bc.js manifest.json icon192.png icon512.png compute.wasm))
 
 (rule
  (target compute.wasm)
