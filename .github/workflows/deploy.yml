@@ -1,0 +1,71 @@
+name: Deploy on Github Pages
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # Build job
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v4
+
+      - name: Set-up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3
+
+      - name: Set-up Binaryen
+        uses: Aandreba/setup-binaryen@v1.0.0
+        with:
+          token: ${{ github.token }}
+
+      - name: Install faked binaryen-bin package
+        run: opam install --fake binaryen-bin
+
+      - name: Install dependencies
+        run: |
+          opam pin add -n https://github.com/dbuenzli/brr.git
+          opam install brr lwt yojson wasm_of_ocaml-compiler
+
+      - name: Build
+        run: cd src/web && opam exec -- dune build @all
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _build/default/src/web
+
+#      - name: Create archive
+#        run: |
+#          (cd _build/default/src/web && tar cf - data icon*.png index.html manifest.json viewer.bc.wasm.* service_worker/service_worker.bc.js) > artifact.tar
+#
+#      - name: Upload
+#        uses: actions/upload-artifact@v4
+#        with:
+#          name: github-pages
+#          path: artifact.tar
+
+  # Deploy job
+  deploy:
+    needs: build
+
+    # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
+
+    # Deploy to the github-pages environment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    # Specify runner + deployment step
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 # or specific "vX.X.X" version tag for this action
