@@ -803,6 +803,24 @@ let () =
              (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
          in
          current_orientation := { alpha; beta; gamma; screen })
+       (Brr.Window.as_target Brr.G.window));
+  ignore
+    (Brr.Ev.listen Brr.Ev.keydown
+       (fun ev ->
+         match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
+         | "ArrowLeft" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 alpha = !current_orientation.alpha +. 5.;
+               }
+         | "ArrowRight" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 alpha = !current_orientation.alpha -. 5.;
+               }
+         | _ -> ())
        (Brr.Window.as_target Brr.G.window))
 
 let () =
