@@ -887,4 +887,9 @@ let () =
        (Container.of_navigator Brr.G.navigator)
        (Jstr.v "service_worker.bc.js"))
 
-let () = Lwt.async main
+let () =
+  Lwt.async (fun () ->
+      Lwt.catch main (fun e ->
+          (match e with Jv.Error e -> Brr.Console.error [ e ] | _ -> ());
+          display_message (Printexc.to_string e);
+          Lwt.fail e))
