@@ -747,7 +747,7 @@ let setup_events () =
   let deviceorientation =
     Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
   in
-  let start = ref true in
+  let state = ref `Init in
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
@@ -755,10 +755,12 @@ let setup_events () =
          let alpha = angle "alpha" in
          let beta = angle "beta" in
          let gamma = angle "gamma" in
-         if !start then (
-           start := false;
-           if beta < 90. then display_temporary_message "Raise your phone!")
-         else if beta >= 90. then remove_message ();
+         (match !state with
+         | `Init -> ()
+         | `Starting ->
+             state := `Started;
+             if beta < 90. then display_temporary_message "Raise your phone!"
+         | `Started -> if beta >= 90. then remove_message ());
          let screen =
            Jv.to_float
              (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
@@ -794,7 +796,8 @@ let setup_events () =
                  beta = min 120. (!current_orientation.beta +. 5.);
                }
          | _ -> ())
-       (Brr.Window.as_target Brr.G.window))
+       (Brr.Window.as_target Brr.G.window));
+  fun () -> state := `Starting
 
 let main () =
   let tile_width = 2048 in
@@ -804,6 +807,8 @@ let main () =
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
+  current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
+  let start = setup_events () in
   display_message "Loading...";
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
   if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
@@ -870,9 +875,8 @@ let main () =
       (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
          (Brr_canvas.Canvas.of_el canvas))
   in
-  current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
   remove_message ();
-  setup_events ();
+  start ();
   tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~points ~tile
     canvas ctx
 
