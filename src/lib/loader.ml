@@ -5,6 +5,10 @@ let ( // ) x y =
 
 let ( let* ) = Lwt.bind
 
+let rec parallel_iter min max f =
+  if min > max then Lwt.return ()
+  else Lwt.join [ f min; parallel_iter (min + 1) max f ]
+
 let rec iter min max f =
   if min > max then Lwt.return ()
   else
@@ -19,6 +23,27 @@ let rec iter_rev min max f =
 
 module Make (R : Tiff.READER) = struct
   module Tiff = Tiff.Make (R)
+
+  let in_range ~size ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =
+    let min_lat' = truncate (lat *. 3600.) - (size / 2) in
+    let min_lon' = truncate (lon *. 3600.) - (size / 2) in
+    let max_lat' = min_lat + size - 1 in
+    let max_lon' = min_lon + size - 1 in
+    min_lat <= min_lat' // 3600
+    && max_lat' // 3600 <= max_lat
+    && min_lon <= min_lon' // 3600
+    && max_lon' // 3600 <= max_lon
+
+  let prefetch ~size ~lat ~lon =
+    let min_lat = truncate (lat *. 3600.) - (size / 2) in
+    let min_lon = truncate (lon *. 3600.) - (size / 2) in
+    let max_lat = min_lat + size - 1 in
+    let max_lon = min_lon + size - 1 in
+    Format.eprintf "PREFETCH RANGE: %d %d %d %d@." (min_lat // 3600)
+      (max_lat // 3600) (min_lon // 3600) (max_lon // 3600);
+    parallel_iter (min_lat // 3600) (max_lat // 3600) @@ fun lat ->
+    parallel_iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
+    R.prefetch ~lat ~lon
 
   let f ~size ~lat ~lon =
     let tile_count = (3600 + 1024) / 1024 in

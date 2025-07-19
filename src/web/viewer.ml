@@ -685,41 +685,55 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  let pos =
-    if true then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
-    else if true then (48.849418, 2.3674101, 0.) (* Paris *)
-    else if true then (44.607649, 6.8204019, 220.) (* Col Girardin *)
-    else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
-    else if true then (44.207447, 6.906400, 40.)
-      (* Auron vers est vallée de la Tinée *)
-    else if true then (44.278358, 6.790589, 0.)
-    else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
-    else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
-    else if true then (44.73365, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
-    else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
-    else (44.789628, 6.670200, 66.)
-  in
-  Fut.return (Ok pos)
+  if true then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
+  else if true then (48.849418, 2.3674101, 0.) (* Paris *)
+  else if true then (44.607649, 6.8204019, 220.) (* Col Girardin *)
+  else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
+  else if true then (44.207447, 6.906400, 40.)
+    (* Auron vers est vallée de la Tinée *)
+  else if true then (44.278358, 6.790589, 0.)
+  else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
+  else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
+  else if true then (44.73365, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
+  else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
+  else (44.789628, 6.670200, 66.)
 
-let get_position () =
-  if true then get_preset_position ()
-  else
-    let open Fut.Syntax in
-    let open Brr_io.Geolocation in
-    let opts = opts ~high_accuracy:true () in
-    let+ pos = get ~opts (of_navigator Brr.G.navigator) in
-    match pos with
-    | Ok pos -> Ok (Pos.latitude pos, Pos.longitude pos, 0.)
-    | Error err -> Error (Jv.Error.v (Error.message err))
+let get_current_position ~size =
+  let open Fut.Syntax in
+  let open Brr_io.Geolocation in
+  let opts = opts ~high_accuracy:true () in
+  let+ pos = get ~opts (of_navigator Brr.G.navigator) in
+  match pos with
+  | Ok pos ->
+      let lat = Pos.latitude pos in
+      let lon = Pos.longitude pos in
+      if
+        Loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9 ~lat
+          ~lon
+      (*
+        || Loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
+             ~lat ~lon
+*)
+      then Some (lat, lon, 0.)
+      else None
+  | Error _ -> None
+
+let get_position ~size =
+  let open Fut.Syntax in
+  let+ loc = get_current_position ~size in
+  match loc with
+  | Some loc -> Ok (true, loc)
+  | None -> Ok (false, get_preset_position ())
 
 let main () =
-  let* () = to_lwt wait_for_service_worker in
-  let* lat, lon, angle = to_lwt (get_position ()) in
   let tile_width = 2048 in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two tile_width 1 - tile_width < 16);
+  let* () = to_lwt wait_for_service_worker in
+  let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
+  if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
   let y = tile_height / 2 in
   let d = float (x - 1) /. 3600. in

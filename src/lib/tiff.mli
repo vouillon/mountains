@@ -2,6 +2,7 @@ module type READER = sig
   type t
 
   val select : lat:int -> lon:int -> (t -> 'a Lwt.t) -> 'a Lwt.t
+  val prefetch : lat:int -> lon:int -> unit Lwt.t
   val seek : t -> int -> unit
   val read_string : t -> int -> string Lwt.t
 
