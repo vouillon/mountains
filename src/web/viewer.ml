@@ -820,6 +820,18 @@ let () =
                  !current_orientation with
                  alpha = !current_orientation.alpha -. 5.;
                }
+         | "ArrowDown" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 beta = max 60. (!current_orientation.beta -. 5.);
+               }
+         | "ArrowUp" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 beta = min 120. (!current_orientation.beta +. 5.);
+               }
          | _ -> ())
        (Brr.Window.as_target Brr.G.window))
 

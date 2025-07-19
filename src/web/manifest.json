@@ -1,4 +1,4 @@
-{"name":"Mountains",
+{"name":"Mountain Skyline",
  "start_url": ".",
  "icons": [
   {
@@ -11,4 +11,6 @@
     "sizes": "512x512",
     "type": "image/png"
   }],
- "display": "standalone"}
+ "background_color": "#464d2e",
+ "theme_color": "#5f8fd9",
+ "display": "fullscreen"}
