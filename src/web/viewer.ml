@@ -9,6 +9,21 @@ let _ =
     | Jv.Error e -> Some (Jstr.to_string (Jv.Error.message e))
     | _ -> None)
 
+let message = ref None
+
+let remove_message () =
+  match !message with
+  | Some msg ->
+      Brr.El.remove msg;
+      message := None
+  | None -> ()
+
+let display_message msg =
+  remove_message ();
+  let msg = Brr.El.(v (Jstr.v "div") [ txt (Jstr.v msg) ]) in
+  Brr.El.append_children (Brr.Document.body Brr.G.document) [ msg ];
+  message := Some msg
+
 module Loader = Loader.Make (Reader)
 
 let ( let* ) = Lwt.bind
@@ -663,6 +678,7 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
     |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
     |> List.map fst
   in
+  remove_message ();
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
         text_pid text_geo ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points
@@ -730,8 +746,10 @@ let main () =
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two tile_width 1 - tile_width < 16);
+  display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
+  display_message "Loading...";
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
   if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
