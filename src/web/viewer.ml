@@ -1,7 +1,9 @@
 let to_lwt f =
   let t, u = Lwt.task () in
   ( Fut.await f @@ fun v ->
-    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
+    match v with
+    | Ok v -> Lwt.wakeup u v
+    | Error err -> Lwt.wakeup_exn u (Jv.Error err) );
   t
 
 let _ =
