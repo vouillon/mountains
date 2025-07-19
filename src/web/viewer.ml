@@ -9,6 +9,7 @@ let _ =
     | Jv.Error e -> Some (Jstr.to_string (Jv.Error.message e))
     | _ -> None)
 
+let ( let* ) = Lwt.bind
 let message = ref None
 
 let remove_message () =
@@ -24,9 +25,12 @@ let display_message msg =
   Brr.El.append_children (Brr.Document.body Brr.G.document) [ msg ];
   message := Some msg
 
+let display_temporary_message msg =
+  display_message msg;
+  ignore (Brr.G.set_timeout ~ms:10000 remove_message)
+
 module Loader = Loader.Make (Reader)
 
-let ( let* ) = Lwt.bind
 let pi = 4. *. atan 1.
 
 (* Shaders *)
@@ -635,8 +639,7 @@ let compute_gradient ctx width height text_geo tile_texture =
 
   tid
 
-let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
-  current_orientation := orientation;
+let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   let w' = next_power_of_two w 1 in
   let terrain_geo =
     create_geometry ctx ~indices:(build_indices w w' h) ~buffers:[]
@@ -678,7 +681,6 @@ let tri ~w ~h ~x ~y ~orientation ~height ~points ~tile canvas ctx =
     |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
     |> List.map fst
   in
-  remove_message ();
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
         text_pid text_geo ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points
@@ -740,6 +742,59 @@ let get_position ~size =
   match loc with
   | Some loc -> Ok (true, loc)
   | None -> Ok (false, get_preset_position ())
+
+let setup_events () =
+  let deviceorientation =
+    Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
+  in
+  let start = ref true in
+  ignore
+    (Brr.Ev.listen deviceorientation
+       (fun ev ->
+         let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
+         let alpha = angle "alpha" in
+         let beta = angle "beta" in
+         let gamma = angle "gamma" in
+         if !start then (
+           start := false;
+           if beta < 90. then display_temporary_message "Raise your phone!")
+         else if beta >= 90. then remove_message ();
+         let screen =
+           Jv.to_float
+             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
+         in
+         current_orientation := { alpha; beta; gamma; screen })
+       (Brr.Window.as_target Brr.G.window));
+  ignore
+    (Brr.Ev.listen Brr.Ev.keydown
+       (fun ev ->
+         match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
+         | "ArrowLeft" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 alpha = !current_orientation.alpha +. 5.;
+               }
+         | "ArrowRight" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 alpha = !current_orientation.alpha -. 5.;
+               }
+         | "ArrowDown" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 beta = max 60. (!current_orientation.beta -. 5.);
+               }
+         | "ArrowUp" ->
+             current_orientation :=
+               {
+                 !current_orientation with
+                 beta = min 120. (!current_orientation.beta +. 5.);
+               }
+         | _ -> ())
+       (Brr.Window.as_target Brr.G.window))
 
 let main () =
   let tile_width = 2048 in
@@ -815,57 +870,11 @@ let main () =
       (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
          (Brr_canvas.Canvas.of_el canvas))
   in
-  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y
-    ~orientation:{ alpha = angle; beta = 90.; gamma = 0.; screen = 0. }
-    ~height ~points ~tile canvas ctx
-
-let () =
-  let deviceorientation =
-    Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
-  in
-  ignore
-    (Brr.Ev.listen deviceorientation
-       (fun ev ->
-         let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-         let alpha = angle "alpha" in
-         let beta = angle "beta" in
-         let gamma = angle "gamma" in
-         let screen =
-           Jv.to_float
-             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
-         in
-         current_orientation := { alpha; beta; gamma; screen })
-       (Brr.Window.as_target Brr.G.window));
-  ignore
-    (Brr.Ev.listen Brr.Ev.keydown
-       (fun ev ->
-         match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
-         | "ArrowLeft" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 alpha = !current_orientation.alpha +. 5.;
-               }
-         | "ArrowRight" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 alpha = !current_orientation.alpha -. 5.;
-               }
-         | "ArrowDown" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 beta = max 60. (!current_orientation.beta -. 5.);
-               }
-         | "ArrowUp" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 beta = min 120. (!current_orientation.beta +. 5.);
-               }
-         | _ -> ())
-       (Brr.Window.as_target Brr.G.window))
+  current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
+  remove_message ();
+  setup_events ();
+  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~points ~tile
+    canvas ctx
 
 let () =
   let open Brr_webworkers.Service_worker in
