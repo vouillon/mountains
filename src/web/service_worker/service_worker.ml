@@ -13,8 +13,9 @@ let use_cache_first request =
     Brr_io.Fetch.Cache.Storage.match' (Brr_io.Fetch.caches ()) request
   in
   match response with
-  | Some response -> Fut.return (Ok response)
-  | None ->
+  | Some response when Brr_io.Fetch.Response.status response = 200 ->
+      Fut.return (Ok response)
+  | _ ->
       let* response = Brr_io.Fetch.request request in
       let* () = put_in_cache request response in
       Fut.return (Ok response)
@@ -23,18 +24,18 @@ let use_cache_on_error event request =
   let open Fut.Syntax in
   let* response = Brr_io.Fetch.Ev.preload_response event in
   match response with
-  | Ok (Some response) ->
+  | Ok (Some response) when Brr_io.Fetch.Response.status response = 200 ->
       let open Fut.Result_syntax in
       let* () = put_in_cache request response in
       Fut.return (Ok response)
-  | Ok None | Error _ -> (
+  | Ok _ | Error _ -> (
       let* response = Brr_io.Fetch.request request in
       match response with
-      | Ok response ->
+      | Ok response when Brr_io.Fetch.Response.status response = 200 ->
           let open Fut.Result_syntax in
           let* () = put_in_cache request response in
           Fut.return (Ok response)
-      | Error _ -> (
+      | Ok _ | Error _ -> (
           let open Fut.Result_syntax in
           let* response =
             Brr_io.Fetch.Cache.Storage.match' (Brr_io.Fetch.caches ()) request
