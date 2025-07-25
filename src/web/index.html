@@ -4,7 +4,20 @@
 <meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#5f8fd9">
 <link rel="manifest" href="manifest.json" />
-<script src="viewer.bc.wasm.js"></script>
+<script>
+function loadScript(src) {
+  const script = document.createElement('script');
+  script.src = src;
+  script.type = 'text/javascript';
+  script.defer = true;
+  document.head.appendChild(script);
+}
+function isSafari() {
+  const ua = navigator.userAgent;
+  return /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
+}
+loadScript(isSafari()?'viewer.bc.js':'viewer.bc.wasm.js');
+</script>
 <style>
 html, body {
   height:100%;
