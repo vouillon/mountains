@@ -568,6 +568,24 @@ let event_loop ctx draw =
 
 (* Main *)
 
+let compute_gradient_cpu ctx width height tile =
+  let gradient = Bigarray.(Array3.create Float16 C_layout) width height 2 in
+  for i = 1 to height do
+    for j = 1 to width do
+      gradient.{i - 1, j - 1, 0} <- tile.{i, j - 1} -. tile.{i, j + 1};
+      gradient.{i - 1, j - 1, 1} <- tile.{i - 1, j} -. tile.{i + 1, j}
+    done
+  done;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg16f width height 0 Gl.rg Gl.half_float
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array3 gradient))
+    0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tid
+
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let gradient_program =
@@ -604,11 +622,9 @@ let gradient_program =
     attributes = [];
   }
 
-let compute_gradient ctx width height text_geo tile_texture =
+let compute_gradient_gpu ctx width height text_geo tile_texture =
   assert (width = height);
 
-  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_half_float") : Jv.t);
-  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t);
   let gradient_pid = create_program ctx gradient_program in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
@@ -641,6 +657,16 @@ let compute_gradient ctx width height text_geo tile_texture =
 
   tid
 
+let compute_gradient ctx width height text_geo tile tile_texture =
+  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_half_float") : Jv.t);
+  let accelerated_gradient =
+    Jv.is_some (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t)
+  in
+  Format.eprintf "COMPUTE GRADIENT ON GPU: %b@." accelerated_gradient;
+  if accelerated_gradient then
+    compute_gradient_gpu ctx width height text_geo tile_texture
+  else compute_gradient_cpu ctx width height tile
+
 let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   let w' = next_power_of_two w 1 in
   let terrain_geo =
@@ -655,7 +681,7 @@ let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
-  let gradient_texture = compute_gradient ctx w h text_geo tile_texture in
+  let gradient_texture = compute_gradient ctx w h text_geo tile tile_texture in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
