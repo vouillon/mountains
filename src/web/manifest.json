@@ -13,4 +13,5 @@
   }],
  "background_color": "#464d2e",
  "theme_color": "#5f8fd9",
- "display": "fullscreen"}
+ "display": "fullscreen",
+ "orientation": "natural"}

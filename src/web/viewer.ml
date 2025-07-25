@@ -412,9 +412,10 @@ let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
             *. cos (orientation.beta *. pi /. 180.))
             (sin (orientation.beta *. pi /. 180.))
   in
-  let proj =
-    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:0.1
+  let x_scale, y_scale =
+    if aspect < 1. then (scale /. aspect, scale) else (scale, scale *. aspect)
   in
+  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:0.1 in
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -505,14 +506,15 @@ let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
     (fun (_, x, y, shown) ->
-      let x = x *. scale /. aspect in
-      let y = y *. scale in
+      let x = x *. x_scale in
+      let y = y *. y_scale in
       let angle = if shown then -.pi /. 4. else 0. in
       let transform =
+        let sx = 0.6 *. text_height *. x_scale /. scale in
+        let sy = 0.6 *. text_height *. y_scale /. scale in
         Matrix.(
           rotate_z (angle +. (screen_inclination *. pi /. 180.))
-          * scale (0.6 *. text_height /. aspect) (0.6 *. text_height) 1.
-          * translate x y 0.)
+          * scale sx sy 1. * translate x y 0.)
       in
       Gl.uniform_matrix4fv ctx transform_loc false
         (Brr.Tarray.of_bigarray1 (Matrix.array transform));
@@ -533,14 +535,15 @@ let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
   List.iter
     (fun (texture, x, y, shown) ->
       if shown then
-        let x = x *. scale /. aspect in
-        let y = y *. scale in
+        let x = x *. x_scale in
+        let y = y *. y_scale in
         let transform =
+          let sx = text_height *. x_scale /. scale in
+          let sy = text_height *. y_scale /. scale in
           Matrix.(
             translate 0.7 (-0.5) 0.
             * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
-            * scale (text_height /. aspect) text_height 1.
-            * translate x y 0.)
+            * scale sx sy 1. * translate x y 0.)
         in
         draw_text ctx transform_loc transform texture)
     points;
