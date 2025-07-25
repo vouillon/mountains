@@ -413,7 +413,7 @@ let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
             (sin (orientation.beta *. pi /. 180.))
   in
   let proj =
-    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
+    Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:0.1
   in
   let points =
     List.filter_map
