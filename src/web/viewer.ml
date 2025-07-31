@@ -875,8 +875,12 @@ let main () =
     Lwt.return
       (Points.find tile_coord tile_coord' points
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-             let x = truncate ((lon -. tile_coord.lon) *. float width) in
-             let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+             let x =
+               truncate (((lon -. tile_coord.lon) *. float width) +. 0.5)
+             in
+             let y =
+               truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5)
+             in
              (pt, (x, y))))
   in
   let points =
