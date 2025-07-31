@@ -19,11 +19,6 @@
     "type": "image/png",
     "purpose": "maskable"
   }],
- "protocol_handlers": [
-  {
-    "protocol": "geo",
-    "url": "?loc=%s"
-  }],
  "background_color": "#464d2e",
  "theme_color": "#5f8fd9",
  "display": "fullscreen",
