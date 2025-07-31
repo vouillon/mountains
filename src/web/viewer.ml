@@ -55,7 +55,7 @@ let terrain_program =
         uniform mediump int w;
         uniform int w_mask;
         uniform int w_shift;
-        uniform mediump vec2 delta;
+        uniform highp vec2 delta;
         uniform sampler2D tile;
         out highp vec3 position;
         out highp vec2 gradCoord;
@@ -74,7 +74,7 @@ let terrain_program =
     fragment_shader =
       {|#version 300 es
         precision mediump float;
-        uniform vec2 delta;
+        uniform highp vec2 delta;
         uniform mediump sampler2D gradient;
         uniform mediump int w;
         in highp vec2 gradCoord;

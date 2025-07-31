@@ -4,6 +4,7 @@
 <meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#5f8fd9">
 <link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon192.png" />
 <script>
 function loadScript(src) {
   const script = document.createElement('script');
@@ -16,7 +17,7 @@ function isSafari() {
   const ua = navigator.userAgent;
   return /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
 }
-loadScript(isSafari()?'viewer.bc.js':'viewer.bc.wasm.js');
+loadScript(WebAssembly.JSTag?'viewer.bc.wasm.js':'viewer.bc.js');
 </script>
 <style>
 html, body {
