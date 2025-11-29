@@ -85,36 +85,46 @@ let terrain_program =
         uniform mat4 transform;
         uniform int w_mask;
         uniform int w_shift;
-        uniform vec2 delta;
-        in float height;
-        in vec3 vertex_normal;
-        out vec3 normal;
-        out vec4 position;
+        uniform mediump int w;
+        uniform highp vec2 delta;
+        uniform highp sampler2D tile;
+        out highp vec3 position;
+        out highp vec2 gradCoord;
         void main()
         {
-          float x = float(gl_VertexID & w_mask) * delta.x;
-          float y = float((gl_VertexID >> w_shift)) * delta.y;
-          float z = height;
-          normal = vertex_normal;
-          position = transform * vec4(x, y, z, 1.0);
-          gl_Position = proj * position;
+          mediump ivec2 coord = ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
+          mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
+          gradCoord = vec2(tileCoord);
+          highp float z = texelFetch(tile, tileCoord, 0).r;
+          highp vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
+          position = pos.xyz;
+          gl_Position = proj * pos;
         }
       |};
     fragment_shader =
       {|#version 300 es
         precision highp float;
-        in vec4 position;
-        in vec3 normal;
-        out vec4 color;
+        uniform highp vec2 delta;
+        uniform mediump sampler2D gradient;
+        uniform mediump int w;
+        in highp vec2 gradCoord;
+        in highp vec3 position;
+        out lowp vec4 color;
+
         void main() {
-          float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
-          vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
-          float fog_coeff = exp(length(position.xyz) * -1e-4);
-          vec3  fog_color  = vec3(0.36, 0.45, 0.59);
+          mediump vec2 tangent =
+            texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))).xy;
+          highp vec3 normal =
+            vec3(tangent * delta.yx,
+                 2. * delta.x * delta.y);
+          lowp float l = max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
+          lowp vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
+          highp float fog_coeff = exp(length(position.xyz) * -1e-4);
+          lowp vec3  fog_color  = vec3(0.36, 0.45, 0.59);
           color = vec4(mix(fog_color, terrain_color, fog_coeff),1.);
         }
       |};
-    attributes = [ "height"; "vertex_normal" ];
+    attributes = [];
   }
 
 let triangle_program =
@@ -165,6 +175,44 @@ let text_program =
     attributes = [];
   }
 
+let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let gradient_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out vec2 tileCoord;
+        uniform vec2 size;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          tileCoord = vec2(x, y) * (size - 1.) + vec2(1.5, 1.5);
+          gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform vec2 size;
+        in vec2 tileCoord;
+        uniform sampler2D tile;
+        out mediump vec2 color;
+        void main() {
+          highp vec2 coeff = 1. / (size + 2.);
+          mediump float tx =
+            (texture(tile, (tileCoord + vec2(-1,0)) * coeff).r -
+             texture(tile, (tileCoord + vec2(1,0)) * coeff).r);
+          mediump float ty =
+            (texture(tile, (tileCoord + vec2(0,-1)) * coeff).r -
+             texture(tile, (tileCoord + vec2(0,1)) * coeff).r);
+          color = vec2(tx, ty);
+        }
+      |};
+    attributes = [];
+  }
+
+
+
 (* OpenGL setup *)
 
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
@@ -192,9 +240,7 @@ let create_geometry ~indices ~buffers =
     Gl.vertex_attrib_pointer loc dim typ false 0 (`Offset 0);
     id
   in
-  let buffers =
-    List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers
-  in
+  let buffers = List.mapi (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers in
   Gl.bind_vertex_array 0;
   Gl.bind_buffer Gl.array_buffer 0;
   Gl.bind_buffer Gl.element_array_buffer 0;
@@ -246,53 +292,66 @@ let delete_program (Program pid) =
   Gl.delete_program pid;
   Ok ()
 
-let linearize2 a =
-  Buffer
-    Bigarray.(reshape_1 (genarray_of_array2 a) (Array2.dim1 a * Array2.dim2 a))
 
-let linearize3 a =
-  Buffer
-    Bigarray.(
-      reshape_1 (genarray_of_array3 a)
-        (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
 
 (* Geometry *)
 
-let precompute tile_height tile_width tile =
-  let normals =
-    Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 3
+let make_tile_texture tile =
+  let tid = get_int (Gl.gen_textures 1) in
+  Gl.bind_texture Gl.texture_2d tid;
+  let w = Bigarray.Array2.dim1 tile in
+  let h = Bigarray.Array2.dim2 tile in
+  Gl.tex_image2d Gl.texture_2d 0 Gl.r32f w h 0 Gl.red Gl.float
+    (`Data (Bigarray.reshape_1 (Bigarray.genarray_of_array2 tile) (w * h)));
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.bind_texture Gl.texture_2d 0;
+  tid
+
+let compute_gradient_gpu width height text_geo tile_texture =
+  assert (width = height);
+
+  let* gradient_pid = create_program gradient_program in
+  let tid = get_int (Gl.gen_textures 1) in
+  Gl.bind_texture Gl.texture_2d tid;
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.linear_mipmap_linear;
+  Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  let levels =
+    truncate ((log (float (next_power_of_two width 1)) /. log 2.) +. 0.5)
   in
-  let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
-  in
-  for y = 1 to tile_height - 2 do
-    for x = 1 to tile_width - 2 do
-      let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
-      let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
-      let nz = 2. *. deltax *. deltay in
-      let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-      normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
-      normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
-      normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
-      heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
-    done
-  done;
-  (linearize2 heights, linearize3 normals)
+  Gl.tex_storage2d Gl.texture_2d levels Gl.rg16f width height;
+  let fb = get_int (Gl.gen_framebuffers 1) in
+  Gl.bind_framebuffer Gl.framebuffer fb;
+  let attachmentPoint = Gl.color_attachment0 in
+  Gl.framebuffer_texture2d Gl.framebuffer attachmentPoint Gl.texture_2d tid 0;
+  Gl.bind_texture Gl.texture_2d tile_texture;
+  Gl.viewport 0 0 width height;
+  use_program gradient_pid;
+  bind_vertex_array text_geo;
+  let size_loc = get_uniform_location gradient_pid "size" in
+  Gl.uniform2f size_loc (float width) (float height);
+  Gl.draw_elements Gl.triangle_strip 4 Gl.unsigned_byte (`Offset 0);
+  Gl.bind_framebuffer Gl.framebuffer 0;
+  Gl.bind_texture Gl.texture_2d 0;
+  bind_vertex_array { vertex_array = 0; buffers = [] };
+
+  Gl.bind_texture Gl.texture_2d tid;
+  Gl.generate_mipmap Gl.texture_2d;
+  Gl.bind_texture Gl.texture_2d 0;
+
+  Ok (gradient_pid, tid)
 
 let build_indices w w' h =
   let is =
     Bigarray.(
-      Array1.create Bigarray.int32 c_layout ((2 * (h - 1) * (w + 1)) - 2))
+      Array1.create Bigarray.int32 c_layout (((h - 1) * ((2 * w) + 1)) - 1))
   in
   for i = 0 to h - 2 do
     for j = 0 to w - 1 do
-      is.{(i * (w + 1) * 2) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
-      is.{(i * (w + 1) * 2) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
+      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
+      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
     done;
-    if i > 0 then (
-      is.{(i * (w + 1) * 2) - 2} <- Int32.of_int (((i - 1) * w') + w - 1);
-      is.{(i * (w + 1) * 2) - 1} <- Int32.of_int ((i + 1) * w'))
+    if i > 0 then is.{(i * ((2 * w) + 1)) - 1} <- Int32.of_int (-1)
   done;
   is
 
@@ -313,7 +372,6 @@ let draw_text font transform_loc transform text =
       * rotate_z (pi /. 4.)
       * transform)
   in
-  let* () = Sdl.lock_surface surface in
   let a = Sdl.get_surface_pixels surface Bigarray.Int8_unsigned in
   let tid = get_int (Gl.gen_textures 1) in
   Gl.bind_texture Gl.texture_2d tid;
@@ -330,19 +388,30 @@ let draw_text font transform_loc transform text =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
-    ~h ~x ~y ~height ~angle ~points ~tile win =
+let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
+    text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height ~angle ~inclination
+    ~points ~tile win =
+  let transform =
+    Matrix.(
+      translate
+        (-.deltax *. float (x - 1))
+        (-.deltay *. float (h - y))
+        (-.height -. 2.)
+      * (rotate_z (angle *. pi /. 180.)
+        * rotate_x (-.inclination *. pi /. 180.)))
+  in
   let points : (Points.t * _ * _) list =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let z = tile.{y', x'} -. tile.{y, x} in
-        let x = deltax *. float (x' - x) in
-        let y = deltay *. float (y' - y) in
-        let angle = angle *. pi /. 180. in
-        let x' = (x *. cos angle) +. (y *. sin angle) in
-        let y' = (-.x *. sin angle) +. (y *. cos angle) in
-        let y' = -.y' in
-        if y' > 0. then Some (pt, x' /. y', z /. y') else None)
+        let x_world = deltax *. float (x' - 1) in
+        let y_world = deltay *. float (h - 1 - y') in
+        let z_world = tile.{y', x'} in
+        let r_view =
+          Matrix.({ x = x_world; y = y_world; z = z_world; w = 1. } *< transform)
+        in
+        if r_view.z < -1. (* near plane *) then
+          Some (pt, r_view.x /. -.r_view.z, r_view.y /. -.r_view.z)
+        else None)
       points
     |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
   in
@@ -365,20 +434,15 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   use_program terrain_pid;
   Gl.enable Gl.depth_test;
   Gl.enable Gl.cull_face_enum;
+  let w' = next_power_of_two w 1 in
   let width_shift_loc = get_uniform_location terrain_pid "w_shift" in
-  Gl.uniform1i width_shift_loc (truncate (log (float w) /. log 2.));
+  Gl.uniform1i width_shift_loc (truncate (log (float w') /. log 2.));
   let width_mask_loc = get_uniform_location terrain_pid "w_mask" in
-  Gl.uniform1i width_mask_loc (w - 1);
+  Gl.uniform1i width_mask_loc (w' - 1);
+  let width_loc = get_uniform_location terrain_pid "w" in
+  Gl.uniform1i width_loc w;
   let delta_loc = get_uniform_location terrain_pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
-  let transform =
-    Matrix.(
-      translate
-        (-.deltax *. float (x - 1))
-        (-.deltay *. float (h - y))
-        (-.height -. 2.)
-      * (rotate_z (angle *. pi /. 180.) * rotate_x (-.pi /. 2.)))
-  in
   let proj =
     Matrix.project ~x_scale:(scale /. aspect) ~y_scale:scale ~near_plane:1.
   in
@@ -386,13 +450,24 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font ~aspect ~w
   Gl.uniform_matrix4fv proj_loc 1 false (Matrix.array proj);
   let transform_loc = get_uniform_location terrain_pid "transform" in
   Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
+  let tile_loc = get_uniform_location terrain_pid "tile" in
+  let gradient_loc = get_uniform_location terrain_pid "gradient" in
+  Gl.uniform1i tile_loc 0;
+  Gl.uniform1i gradient_loc 1;
   bind_vertex_array terrain_geo;
+  Gl.active_texture Gl.texture0;
+  Gl.bind_texture Gl.texture_2d tile_texture;
+  Gl.active_texture Gl.texture1;
+  Gl.bind_texture Gl.texture_2d gradient_texture;
+  Gl.enable Gl.primitive_restart_fixed_index;
   Gl.draw_elements Gl.triangle_strip
-    ((2 * (h - 1) * (w + 1)) - 2)
+    (((h - 1) * ((2 * w) + 1)) - 1)
     Gl.unsigned_int (`Offset 0);
+  Gl.disable Gl.primitive_restart_fixed_index;
   Gl.bind_vertex_array 0;
   Gl.disable Gl.depth_test;
   Gl.disable Gl.cull_face_enum;
+  Gl.active_texture Gl.texture0;
 
   use_program triangle_pid;
   bind_vertex_array text_geo;
@@ -443,7 +518,8 @@ let reshape _win w h = Gl.viewport 0 0 w h
 
 let pp_opengl_info ppf () =
   let pp = Format.fprintf in
-  let pp_opt ppf = function
+  let pp_opt ppf =
+    function
     | None -> pp ppf "error"
     | Some s -> pp ppf "%s" s
   in
@@ -474,12 +550,12 @@ let destroy_window win ctx =
 
 (* Event loop *)
 
-let event_loop win angle draw =
+let event_loop win angle inclination draw =
   let e = Sdl.Event.create () in
   let key_scancode e = Sdl.Scancode.enum Sdl.Event.(get e keyboard_scancode) in
   let event e = Sdl.Event.(enum (get e typ)) in
   let window_event e = Sdl.Event.(window_event_enum (get e window_event_id)) in
-  let rec loop angle =
+  let rec loop angle inclination =
     let* () = Sdl.wait_event (Some e) in
     match event e with
     | `Quit -> Ok ()
@@ -487,56 +563,76 @@ let event_loop win angle draw =
     | `Key_down when key_scancode e = `Right ->
         let angle = angle +. 3. in
         let w, h = Sdl.get_window_size win in
-        draw ~aspect:(float w /. float h) ~angle win;
-        loop angle
+        draw ~aspect:(float w /. float h) ~angle ~inclination win;
+        loop angle inclination
     | `Key_down when key_scancode e = `Left ->
         let angle = angle -. 3. in
         let w, h = Sdl.get_window_size win in
-        draw ~aspect:(float w /. float h) ~angle win;
-        loop angle
+        draw ~aspect:(float w /. float h) ~angle ~inclination win;
+        loop angle inclination
+    | `Key_down when key_scancode e = `Up ->
+        let inclination = min 120. (inclination +. 3.) in
+        let w, h = Sdl.get_window_size win in
+        draw ~aspect:(float w /. float h) ~angle ~inclination win;
+        loop angle inclination
+    | `Key_down when key_scancode e = `Down ->
+        let inclination = max 60. (inclination -. 3.) in
+        let w, h = Sdl.get_window_size win in
+        draw ~aspect:(float w /. float h) ~angle ~inclination win;
+        loop angle inclination
     | `Window_event -> (
         match window_event e with
         | `Exposed | `Resized ->
             let w, h = Sdl.get_window_size win in
             reshape win w h;
-            draw ~aspect:(float w /. float h) ~angle win;
-            loop angle
-        | _ -> loop angle)
-    | _ -> loop angle
+            draw ~aspect:(float w /. float h) ~angle ~inclination win;
+            loop angle inclination
+        | _ -> loop angle inclination)
+    | _ -> loop angle inclination
   in
-  draw ~aspect:(640. /. 480.) ~angle win;
-  loop angle
+  draw ~aspect:(640. /. 480.) ~angle ~inclination win;
+  loop angle inclination
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile
-    heights normals =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile =
   let* () = Sdl.init Sdl.Init.video in
   let* font = load_font () in
   let* win, ctx = create_window ~gl in
+  let w' = next_power_of_two w 1 in
   let* terrain_geo =
-    create_geometry ~indices:(build_indices w w h)
-      ~buffers:[ (1, Gl.float, heights); (3, Gl.byte, normals) ]
+    create_geometry ~indices:(build_indices w w' h) ~buffers:[]
   in
   let* text_geo =
     create_geometry
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
+  let tile_texture = make_tile_texture tile in
+  let w_viewport, h_viewport = Sdl.gl_get_drawable_size win in
+  let* gradient_pid, gradient_texture =
+    compute_gradient_gpu w h text_geo tile_texture
+  in
+  reshape win w_viewport h_viewport;
   let* terrain_pid = create_program terrain_program in
   let* triangle_pid = create_program triangle_program in
   let* text_pid = create_program text_program in
+  let inclination = 90. in
   let* () =
-    event_loop win angle (fun ~aspect ~angle win ->
+    event_loop win angle inclination (fun ~aspect ~angle ~inclination win ->
         ignore
-          (draw terrain_pid terrain_geo triangle_pid text_pid text_geo ~font
-             ~aspect ~w ~h ~x ~y ~angle ~height ~tile ~points win))
+          (draw terrain_pid terrain_geo tile_texture gradient_texture
+             triangle_pid text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~angle
+             ~inclination ~height ~tile ~points win))
   in
   let* () = delete_program terrain_pid in
   let* () = delete_program triangle_pid in
   let* () = delete_program text_pid in
+  let* () = delete_program gradient_pid in
   let* () = delete_geometry terrain_geo in
   let* () = delete_geometry text_geo in
+  set_int (Gl.delete_textures 1) tile_texture;
+  set_int (Gl.delete_textures 1) gradient_texture;
   let* () = destroy_window win ctx in
   Sdl.quit ();
   Ok ()
@@ -555,31 +651,37 @@ let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
   let tile_lat =
     floor lat +. 1. -. (float (ty + 1) *. float tile_height /. float height)
   in
-  ( tile_index,
+  (
+    tile_index,
     x,
     y,
     { Points.lon = tile_lon; lat = tile_lat },
     {
       Points.lon = tile_lon +. (float tile_width /. float width);
       lat = tile_lat +. (float tile_height /. float height);
-    } )
+    }
+  )
 *)
 
 let main () =
-  let lat, lon, angle =
-    if true then (44.607649, 6.8204019, 0.)
-      (*(44.607728, 6.821075, 0.)*)
-      (* Col Girardin *)
-    else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
-    else if true then (44.207447, 6.906400, 40.)
-      (* Auron vers est vallée de la Tinée *)
-    else if true then (44.278358, 6.790589, 0.)
-    else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
-    else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
-    else if true then (44.73365, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
-    else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
-    else (44.789628, 6.670200, 66.)
+  let lat = ref 44.607649 in
+  let lon = ref 6.8204019 in
+  let angle = ref 0. in
+  let options =
+    [
+      ("-lat", Arg.Set_float lat, "Latitude of the viewer");
+      ("-lon", Arg.Set_float lon, "Longitude of the viewer");
+      ("-angle", Arg.Set_float angle, "Angle of the view");
+    ]
   in
+  let anon _ = ()
+  in
+  let exec = Filename.basename Sys.executable_name in
+  let usage =
+    Printf.sprintf "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec
+  in
+  Arg.parse (Arg.align options) anon usage;
+  let lat, lon, angle = (!lat, !lon, !angle) in
   (*
   let ch = open_in "Copernicus_DSM_COG_10_N44_00_E006_00_DEM.tif" in
   let ({ Tiff.width; height; tile_width; tile_height; _ } as info) =
@@ -616,17 +718,9 @@ let main () =
       points
   in
   let height = tile.{y, x} in
-  let heights, normals = precompute tile_width tile_height tile in
-  let exec = Filename.basename Sys.executable_name in
-  let usage =
-    Printf.sprintf "Usage: %s [OPTION]\n Tests Tgles3.\nOptions:" exec
-  in
-  let options = [] in
-  let anon _ = raise (Arg.Bad "no arguments are supported") in
-  Arg.parse (Arg.align options) anon usage;
   match
     tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
-      ~points ~tile heights normals
+      ~points ~tile
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->

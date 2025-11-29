@@ -12,6 +12,8 @@ let select ~lat ~lon f =
   close_in ch;
   Lwt.return res
 
+let prefetch ~lat:_ ~lon:_ = Lwt.return_unit
+
 let seek = seek_in
 let read_string ch n = Lwt.return (really_input_string ch n)
 
