@@ -94,7 +94,7 @@ let terrain_program =
             max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = pow(vec3(0.3, 0.32, 0.19), vec3(2.2));
           lowp vec3 fog_color = pow(vec3(0.36, 0.45, 0.59), vec3(2.2));
-          float fog_coeff = exp(length(position) * -3e-5);
+          float fog_coeff = exp(length(position) * -4e-5);
           lowp vec3 final_color = mix(fog_color, l * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
         }
