@@ -3,6 +3,7 @@
   (js_of_ocaml
    (compilation_mode whole_program))))
 
-(executables (names service_worker)
+(executables
+ (names service_worker)
  (libraries mountains yojson brr lwt)
  (modes js))

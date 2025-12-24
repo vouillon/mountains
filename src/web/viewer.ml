@@ -57,6 +57,7 @@ let terrain_program =
         uniform int w_shift;
         uniform highp vec2 delta;
         uniform sampler2D tile;
+        uniform sampler2D gradient;
         out highp vec3 position;
         out highp vec2 gradCoord;
         void main()
@@ -65,7 +66,9 @@ let terrain_program =
             ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
           mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
           gradCoord = vec2(tileCoord);
-          float z = texelFetch(tile, tileCoord, 0).r;
+//          highp float z = texelFetch(tile, tileCoord, 0).r;
+          highp vec2 encodedH = texelFetch(gradient, tileCoord + ivec2(-1, -1), 0).rg;
+          highp float z = ((encodedH.r * 256.0 + encodedH.g) / 257.0) * 9500.0 - 500.0;
           vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
           position = pos.xyz;
           gl_Position = proj * pos;
@@ -82,13 +85,13 @@ let terrain_program =
         out lowp vec4 color;
 
         void main() {
-          mediump vec2 tangent =
-            vec2(texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))));
-          highp vec3 normal =
-            vec3(tangent * delta.yx,
-                 2. * delta.x * delta.y);
+          mediump vec2 encodedN = 
+            texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))).ba;
+          highp vec3 normal;
+          normal.xy = encodedN * 2.0 - 1.0;
+          normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
           lowp float l =
-            max(dot(normalize(normal), normalize(vec3(-1, 1, 2))), 0.);
+            max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = vec3(0.3, 0.32, 0.19);
           lowp vec3 fog_color = vec3(0.36, 0.45, 0.59);
           float fog_coeff = exp(length(position) * -1e-4);
@@ -240,7 +243,7 @@ let instantiate ~size =
 let _precompute tile_height tile_width tile =
   let normals =
     Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 3
+      (tile_height - 2) (tile_width - 2) 2
   in
   let heights =
     Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
@@ -250,7 +253,7 @@ let _precompute tile_height tile_width tile =
     @@
     let tile_size = tile_height * tile_width * 4 in
     let heights_size = (tile_height - 2) * (tile_width - 2) * 4 in
-    let normals_size = (tile_height - 2) * (tile_width - 2) * 3 in
+    let normals_size = (tile_height - 2) * (tile_width - 2) * 2 in
     let size = tile_size + heights_size + normals_size in
     let open Fut.Result_syntax in
     let+ memory, funcs = instantiate ~size in
@@ -302,6 +305,7 @@ let _precompute tile_height tile_width tile =
     done;
     Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
     Lwt.return (linearize2 heights, linearize3 normals)
+(* TODO: Update fallback if keeping it, but plan is to delete *)
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
@@ -571,23 +575,7 @@ let event_loop ctx draw =
 
 (* Main *)
 
-let compute_gradient_cpu ctx width height tile =
-  let gradient = Bigarray.(Array3.create Float16 C_layout) width height 2 in
-  for i = 1 to height do
-    for j = 1 to width do
-      gradient.{i - 1, j - 1, 0} <- tile.{i, j - 1} -. tile.{i, j + 1};
-      gradient.{i - 1, j - 1, 1} <- tile.{i - 1, j} -. tile.{i + 1, j}
-    done
-  done;
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg16f width height 0 Gl.rg Gl.half_float
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array3 gradient))
-    0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  tid
+(* compute_gradient_cpu removed *)
 
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
@@ -608,18 +596,45 @@ let gradient_program =
       {|#version 300 es
         precision highp float;
         uniform vec2 size;
+        uniform vec2 delta;
         in vec2 tileCoord;
         uniform sampler2D tile;
-        out mediump vec2 color;
+        out mediump vec4 color;
+
+        float get_z(vec2 offset) {
+            return texture(tile, (tileCoord + offset) / (size + 2.)).r;
+        }
+
         void main() {
-          highp vec2 coeff = 1. / (size + 2.);
-          mediump float tx =
-            (texture(tile, (tileCoord + vec2(-1,0)) * coeff).r -
-             texture(tile, (tileCoord + vec2(1,0)) * coeff).r);
-          mediump float ty =
-            (texture(tile, (tileCoord + vec2(0,-1)) * coeff).r -
-             texture(tile, (tileCoord + vec2(0,1)) * coeff).r);
-          color = vec2(tx, ty);
+          // Sobel filter
+          float tl = get_z(vec2(-1, -1));
+          float t  = get_z(vec2( 0, -1));
+          float tr = get_z(vec2( 1, -1));
+          float l  = get_z(vec2(-1,  0));
+          float c  = get_z(vec2( 0,  0));
+          float r  = get_z(vec2( 1,  0));
+          float bl = get_z(vec2(-1,  1));
+          float b  = get_z(vec2( 0,  1));
+          float br = get_z(vec2( 1,  1));
+
+          float dX = tr + 2.0*r + br - (tl + 2.0*l + bl);
+          float dY = bl + 2.0*b + br - (tl + 2.0*t + tr);
+
+          // Normal vector
+          // Note: dX is dHeight/dPixelX * 8 (scaling of Sobel).
+          // We divide by (8 * deltax) to get slope.
+          vec3 n = normalize(vec3(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y), 1.0));
+
+          // Encode Normal (xy components to [0,1])
+          vec2 encN = n.xy * 0.5 + 0.5;
+
+          // Encode Height (-500 to 9000 -> 0 to 1)
+          float h_norm = clamp((c - (-500.0)) / 9500.0, 0.0, 1.0);
+          float h_val = floor(h_norm * 65535.0 + 0.5);
+          float h_high = floor(h_val / 256.0) / 255.0;
+          float h_low = floor(mod(h_val, 256.0)) / 255.0;
+
+          color = vec4(h_high, h_low, encN.x, encN.y);
         }
       |};
     attributes = [];
@@ -631,44 +646,42 @@ let compute_gradient_gpu ctx width height text_geo tile_texture =
   let gradient_pid = create_program ctx gradient_program in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  (* Linear is fine for RGBA8 *)
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  let levels =
-    truncate ((log (float (next_power_of_two width 1)) /. log 2.) +. 0.5)
-  in
-  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg16f width height;
+
+  (* Use RGBA8 (4 bytes per pixel) *)
+  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 width height;
+
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
   let attachmentPoint = Gl.color_attachment0 in
   Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
     0;
-  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
   Gl.viewport ctx 0 0 width height;
   Gl.use_program ctx gradient_pid;
+
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
+
   Gl.bind_vertex_array ctx (Some text_geo);
   let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
+
+  let delta_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "delta") in
+  Gl.uniform2f ctx delta_loc deltax deltay;
+
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.bind_vertex_array ctx None;
 
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.bind_texture ctx Gl.texture_2d None;
-
   tid
 
-let compute_gradient ctx width height text_geo tile tile_texture =
-  ignore (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_half_float") : Jv.t);
-  let accelerated_gradient =
-    Jv.is_some (Gl.get_extension ctx (Jstr.v "EXT_color_buffer_float") : Jv.t)
-  in
-  Format.eprintf "COMPUTE GRADIENT ON GPU: %b@." accelerated_gradient;
-  if accelerated_gradient then
-    compute_gradient_gpu ctx width height text_geo tile_texture
-  else compute_gradient_cpu ctx width height tile
+let compute_gradient ctx width height text_geo _tile tile_texture =
+  (* Use GPU path always *)
+  compute_gradient_gpu ctx width height text_geo tile_texture
 
 let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   let w' = next_power_of_two w 1 in
@@ -881,13 +894,11 @@ let main () =
     Lwt.return
       (Points.find tile_coord tile_coord' points
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-             let x =
-               truncate (((lon -. tile_coord.lon) *. float width) +. 0.5)
-             in
-             let y =
-               truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5)
-             in
-             (pt, (x, y))))
+          let x = truncate (((lon -. tile_coord.lon) *. float width) +. 0.5) in
+          let y =
+            truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5)
+          in
+          (pt, (x, y))))
   in
   let points =
     List.filter

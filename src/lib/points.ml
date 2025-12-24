@@ -16,25 +16,25 @@ let load d =
   let open Yojson.Safe.Util in
   d |> member "features" |> to_list
   |> List.map (fun d ->
-         match
-           ( d |> member "properties" |> member "name:fr" |> to_option to_string,
-             d |> member "properties" |> member "name" |> to_option to_string )
-         with
-         | None, None -> []
-         | Some name, _ | None, Some name ->
-             let coord =
-               match
-                 d |> member "geometry" |> member "coordinates" |> to_list
-                 |> List.map to_number
-               with
-               | [ lon; lat ] -> { lat; lon }
-               | _ -> assert false
-             in
-             let elevation =
-               d |> member "properties" |> member "ele" |> to_option to_string
-               |> Option.map (fun s -> truncate (float_of_string s +. 0.5))
-             in
-             [ { name; elevation; coord } ])
+      match
+        ( d |> member "properties" |> member "name:fr" |> to_option to_string,
+          d |> member "properties" |> member "name" |> to_option to_string )
+      with
+      | None, None -> []
+      | Some name, _ | None, Some name ->
+          let coord =
+            match
+              d |> member "geometry" |> member "coordinates" |> to_list
+              |> List.map to_number
+            with
+            | [ lon; lat ] -> { lat; lon }
+            | _ -> assert false
+          in
+          let elevation =
+            d |> member "properties" |> member "ele" |> to_option to_string
+            |> Option.map (fun s -> truncate (float_of_string s +. 0.5))
+          in
+          [ { name; elevation; coord } ])
   |> List.flatten
 
 let find { lat; lon } { lat = lat'; lon = lon' } d =
