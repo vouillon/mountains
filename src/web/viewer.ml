@@ -56,7 +56,7 @@ let terrain_program =
         uniform int w_mask;
         uniform int w_shift;
         uniform highp vec2 delta;
-        uniform sampler2D tile;
+//        uniform sampler2D tile;
         uniform sampler2D gradient;
         out highp vec3 position;
         out highp vec2 gradCoord;
@@ -64,10 +64,10 @@ let terrain_program =
         {
           mediump ivec2 coord =
             ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
-          mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
+          mediump ivec2 tileCoord = ivec2(coord.x, w - 1 - coord.y);
           gradCoord = vec2(tileCoord);
 //          highp float z = texelFetch(tile, tileCoord, 0).r;
-          highp vec2 encodedH = texelFetch(gradient, tileCoord + ivec2(-1, -1), 0).rg;
+          highp vec2 encodedH = texelFetch(gradient, tileCoord, 0).rg;
           highp float z = ((encodedH.r * 256.0 + encodedH.g) / 257.0) * 9500.0 - 500.0;
           vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
           position = pos.xyz;
@@ -86,7 +86,7 @@ let terrain_program =
 
         void main() {
           mediump vec2 encodedN = 
-            texture(gradient, (2. * gradCoord - 1.) * (1. / (2. * float(w)))).ba;
+            texture(gradient, (2. * gradCoord + 1.) * (1. / (2. * float(w)))).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -385,7 +385,7 @@ type orientation = {
   screen : float;
 }
 
-let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
+let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
     text_pid text_geo ~w ~w' ~h ~x ~y ~height ~orientation ~points ~tile canvas
     ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
@@ -480,15 +480,15 @@ let draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
   in
   Gl.uniform_matrix4fv ctx transform_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in
+  (*  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in*)
   let gradient_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "gradient")
   in
-  Gl.uniform1i ctx tile_loc 0;
+  (*  Gl.uniform1i ctx tile_loc 0;*)
   Gl.uniform1i ctx gradient_loc 1;
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.active_texture ctx Gl.texture0;
-  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
+  (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some gradient_texture);
   Gl.draw_elements ctx Gl.triangle_strip
