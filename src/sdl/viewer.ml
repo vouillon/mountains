@@ -93,7 +93,7 @@ let terrain_program =
         void main()
         {
           mediump ivec2 coord = ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
-          mediump ivec2 tileCoord = ivec2(coord.x + 1, w - coord.y);
+          mediump ivec2 tileCoord = ivec2(coord.x, w - 1 - coord.y);
           gradCoord = vec2(tileCoord);
           highp vec2 encodedH = texelFetch(gradient, tileCoord, 0).rg;
           highp float z = ((encodedH.r * 256.0 + encodedH.g) / 257.0) * 9500.0 - 500.0;
@@ -106,7 +106,7 @@ let terrain_program =
       {|#version 300 es
         precision highp float;
         uniform highp vec2 delta;
-        uniform mediump sampler2D gradient;
+        uniform highp sampler2D gradient;
         uniform mediump int w;
         in highp vec2 gradCoord;
         in highp vec3 position;
@@ -114,7 +114,7 @@ let terrain_program =
 
         void main() {
           mediump vec2 encodedN = 
-            texelFetch(gradient, ivec2(gradCoord), 0).ba;
+            texture(gradient, (2. * gradCoord + 1.) * (1. / (2. * float(w)))).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -201,7 +201,7 @@ let gradient_program =
         out mediump vec4 color;
 
         float get_z(vec2 offset) {
-            return texture(tile, (tileCoord + offset) / size).r;
+            return texture(tile, (tileCoord + offset) / (size + 2.)).r;
         }
 
         void main() {
