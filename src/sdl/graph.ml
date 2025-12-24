@@ -40,14 +40,13 @@ let () =
     Format.eprintf "%g %g - %g %g@." tile_coord.lat tile_coord.lon
       tile_coord'.lat tile_coord'.lon;
     let points =
-      Points.find tile_coord tile_coord'
+      Points.find tile_coord tile_coord' {|{"features": []}|}
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-             let x = truncate ((lon -. tile_coord.lon) *. float width) in
-             let y = truncate ((tile_coord'.lat -. lat) *. float height) in
-             Format.eprintf "%s - %g %g - %d %d - %g@." pt.Points.name lat lon x
-               y
-               tile.{y, x};
-             (pt, (x, y)))
+          let x = truncate ((lon -. tile_coord.lon) *. float width) in
+          let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+          Format.eprintf "%s - %g %g - %d %d - %g@." pt.Points.name lat lon x y
+            tile.{y, x};
+          (pt, (x, y)))
     in
     for y = 1 to tile_height - 2 do
       for x = 1 to tile_width - 2 do
@@ -78,7 +77,7 @@ let () =
   else
     let lat = 44.209067 in
     let lon = 6.9423065 in
-    let* tile = Loader.f ~lat ~lon in
+    let* tile = Loader.f ~size:2050 ~lat ~lon in
     Graphics.open_graph " 1024x1024";
     let tile_height = 2050 in
     let tile_width = 2050 in
@@ -109,14 +108,13 @@ let () =
     let points =
       let width = 3600 in
       let height = 3600 in
-      Points.find tile_coord tile_coord'
+      Points.find tile_coord tile_coord' {|{"features": []}|}
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-             let x = truncate ((lon -. tile_coord.lon) *. float width) in
-             let y = truncate ((tile_coord'.lat -. lat) *. float height) in
-             Format.eprintf "%s - %g %g - %d %d - %g@." pt.Points.name lat lon x
-               y
-               tile.{y, x};
-             (pt, (x, y)))
+          let x = truncate ((lon -. tile_coord.lon) *. float width) in
+          let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+          Format.eprintf "%s - %g %g - %d %d - %g@." pt.Points.name lat lon x y
+            tile.{y, x};
+          (pt, (x, y)))
     in
     List.iter
       (fun (_, (x, y)) ->
