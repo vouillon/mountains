@@ -119,10 +119,11 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
           lowp float l = max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
-          lowp vec3 terrain_color = l * vec3(0.3, 0.32, 0.19);
+          lowp vec3 terrain_color = l * pow(vec3(0.3, 0.32, 0.19), vec3(2.2));
           highp float fog_coeff = exp(length(position.xyz) * -1e-4);
-          lowp vec3  fog_color  = vec3(0.36, 0.45, 0.59);
-          color = vec4(mix(fog_color, terrain_color, fog_coeff),1.);
+          lowp vec3  fog_color  = pow(vec3(0.36, 0.45, 0.59), vec3(2.2));
+          lowp vec3 final_color = mix(fog_color, terrain_color, fog_coeff);
+          color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
         }
       |};
     attributes = [];
