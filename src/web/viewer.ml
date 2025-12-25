@@ -47,7 +47,25 @@ type program = {
 
 let n_sectors = 256
 let n_rings = 512
+
+type orientation = {
+  alpha : float;
+  beta : float;
+  gamma : float;
+  screen : float;
+}
+
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let compute_azimuth m =
+  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
+  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
+  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
+  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
+  let azimuth =
+    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
+  in
+  azimuth -. (pi /. 2.)
 
 let terrain_program =
   {
@@ -69,10 +87,11 @@ let terrain_program =
         out highp vec2 reliefCoord;
         void main()
         {
+          const float PI = 3.14159265359;
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) / sectors_div) * (3.14159 / 2.0) - (3.14159 / 4.0);
-          float angle = theta + snapped_alpha + (3.14159 / 2.0);
+          float theta = (float(sector) / sectors_div) * (PI / 2.0) - (PI / 4.0);
+          float angle = theta + snapped_alpha + (PI / 2.0);
           float r = 50000.0 * pow(float(ring) / rings_div, 2.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
@@ -110,7 +129,6 @@ let terrain_program =
     fragment_shader =
       {|#version 300 es
         precision mediump float;
-        uniform highp vec2 delta;
         uniform mediump sampler2D relief;
         uniform mediump int w;
         in highp vec2 reliefCoord;
@@ -413,13 +431,6 @@ let draw_text ctx transform_loc transform (tid, w, h) =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-type orientation = {
-  alpha : float;
-  beta : float;
-  gamma : float;
-  screen : float;
-}
-
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
     canvas ctx =
@@ -525,9 +536,9 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 
   (* Determine snapped alpha *)
   let sector_angle = pi /. 2. /. (float n_sectors /. 2.) in
-  let current_alpha_rad = orientation.alpha *. pi /. 180. in
+  let current_azimuth = compute_azimuth transform in
   let snapped_alpha =
-    floor ((current_alpha_rad /. sector_angle) +. 0.5) *. sector_angle
+    floor ((current_azimuth /. sector_angle) +. 0.5) *. sector_angle
   in
   let sa_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "snapped_alpha")
