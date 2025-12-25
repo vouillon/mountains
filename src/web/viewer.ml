@@ -56,20 +56,48 @@ let terrain_program =
         uniform int w_mask;
         uniform int w_shift;
         uniform highp vec2 delta;
+        uniform highp vec2 center_offset;
+        uniform highp float snapped_alpha;
 //        uniform sampler2D tile;
         uniform sampler2D gradient;
         out highp vec3 position;
         out highp vec2 gradCoord;
         void main()
         {
-          mediump ivec2 coord =
-            ivec2(gl_VertexID & w_mask, gl_VertexID >> w_shift);
-          mediump ivec2 tileCoord = ivec2(coord.x, w - 1 - coord.y);
-          gradCoord = vec2(tileCoord);
-//          highp float z = texelFetch(tile, tileCoord, 0).r;
-          highp vec2 encodedH = texelFetch(gradient, tileCoord, 0).rg;
-          highp float z = ((encodedH.r * 256.0 + encodedH.g) / 257.0) * 9500.0 - 500.0;
-          vec4 pos = transform * vec4(vec2(coord) * delta, z, 1.0);
+          int sector = gl_VertexID & w_mask;
+          int ring = gl_VertexID >> w_shift;
+          float theta = (float(sector) / 128.0) * (3.14159 / 2.0) - (3.14159 / 4.0);
+          float angle = theta + snapped_alpha + (3.14159 / 2.0);
+          float r = 25000.0 * pow(float(ring) / 511.0, 2.0);
+          highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
+          highp vec2 coord_meters = center_offset + pos_plane;
+          highp vec2 coord = coord_meters / delta;
+          // Manual bilinear interpolation for 2-byte height
+          highp vec2 tex_pos = vec2(coord.x, float(w) - 1.0 - coord.y);
+          tex_pos = clamp(tex_pos, 0.5, float(w) - 0.5);
+          
+          highp vec2 base_f = floor(tex_pos - 0.5);
+          highp ivec2 base = ivec2(base_f);
+          highp vec2 f = fract(tex_pos - 0.5);
+
+          highp int w_max = w - 1;
+          highp vec2 h00_enc = texelFetch(gradient, clamp(base + ivec2(0,0), 0, w_max), 0).rg;
+          highp vec2 h10_enc = texelFetch(gradient, clamp(base + ivec2(1,0), 0, w_max), 0).rg;
+          highp vec2 h01_enc = texelFetch(gradient, clamp(base + ivec2(0,1), 0, w_max), 0).rg;
+          highp vec2 h11_enc = texelFetch(gradient, clamp(base + ivec2(1,1), 0, w_max), 0).rg;
+
+          float h00 = ((h00_enc.r * 256.0 + h00_enc.g) / 257.0) * 9500.0 - 500.0;
+          float h10 = ((h10_enc.r * 256.0 + h10_enc.g) / 257.0) * 9500.0 - 500.0;
+          float h01 = ((h01_enc.r * 256.0 + h01_enc.g) / 257.0) * 9500.0 - 500.0;
+          float h11 = ((h11_enc.r * 256.0 + h11_enc.g) / 257.0) * 9500.0 - 500.0;
+
+          float h0 = mix(h00, h10, f.x);
+          float h1 = mix(h01, h11, f.x);
+          float z = mix(h0, h1, f.y);
+          
+          gradCoord = tex_pos;
+
+          vec4 pos = transform * vec4(pos_plane, z, 1.0);
           position = pos.xyz;
           gl_Position = proj * pos;
         }
@@ -387,8 +415,8 @@ type orientation = {
 }
 
 let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
-    text_pid text_geo ~w ~w' ~h ~x ~y ~height ~orientation ~points ~tile canvas
-    ctx =
+    text_pid text_geo ~w ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx
+    =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -400,10 +428,7 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let transform =
     Matrix.(
-      translate
-        (-.deltax *. float (x - 1))
-        (-.deltay *. float (h - y))
-        (-.height -. 2.)
+      translate 0. 0. (-.height -. 2.)
       * rotate_z (-.orientation.alpha *. pi /. 180.)
       * rotate_x (-.orientation.beta *. pi /. 180.)
       * rotate_y (-.orientation.gamma *. pi /. 180.)
@@ -424,10 +449,10 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let x = deltax *. float (x' - 1) in
-        let y = deltay *. float (h - y') in
+        let px = deltax *. float (x' - x) in
+        let py = deltay *. float (y - y') in
         let z = tile.{y', x'} in
-        let r = Matrix.({ x; y; z; w = 1. } *< transform) in
+        let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
         if r.z > 1. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
       points
@@ -460,15 +485,42 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
 
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
-  Gl.enable ctx Gl.cull_face';
+  (* Gl.enable ctx Gl.cull_face'; *)
+  (* Radial Grid Uniforms *)
+  (* Radial Grid Uniforms *)
+  let w_stride = 256 in
+  let w_mask_radial = w_stride - 1 in
+  let w_shift_radial = 8 in
+
   let width_shift_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_shift")
   in
-  Gl.uniform1i ctx width_shift_loc (truncate (log (float w') /. log 2.));
+  Gl.uniform1i ctx width_shift_loc w_shift_radial;
+
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
   in
-  Gl.uniform1i ctx width_mask_loc (w' - 1);
+  Gl.uniform1i ctx width_mask_loc w_mask_radial;
+
+  (* Determine snapped alpha *)
+  let sector_angle = pi /. 2. /. 128.0 in
+  let current_alpha_rad = orientation.alpha *. pi /. 180. in
+  let snapped_alpha =
+    floor ((current_alpha_rad /. sector_angle) +. 0.5) *. sector_angle
+  in
+  let sa_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "snapped_alpha")
+  in
+  Gl.uniform1f ctx sa_loc snapped_alpha;
+
+  (* Center Offset in world meters relative to tile origin *)
+  let center_offset_x = deltax *. float (x - 1) in
+  let center_offset_y = deltay *. float (h - 1 - y) in
+  let co_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "center_offset")
+  in
+  Gl.uniform2f ctx co_loc center_offset_x center_offset_y;
+
   let width_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
   Gl.uniform1i ctx width_loc w;
   let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
@@ -493,7 +545,7 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some gradient_texture);
   Gl.draw_elements ctx Gl.triangle_strip
-    (((h - 1) * ((2 * w) + 1)) - 1)
+    (((512 - 1) * ((2 * 129) + 1)) - 1) (* rings=512, sectors=129 *)
     Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -685,9 +737,11 @@ let compute_gradient ctx width height text_geo _tile tile_texture =
   compute_gradient_gpu ctx width height text_geo tile_texture
 
 let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
-  let w' = next_power_of_two w 1 in
   let terrain_geo =
-    create_geometry ctx ~indices:(build_indices w w' h) ~buffers:[]
+    let sectors = 129 in
+    let rings = 512 in
+    let w' = 256 in
+    create_geometry ctx ~indices:(build_indices sectors w' rings) ~buffers:[]
   in
   let text_geo =
     create_geometry ctx
@@ -730,8 +784,8 @@ let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
-        text_pid text_geo ~w ~w' ~h ~x ~y ~orientation ~height ~tile ~points
-        canvas ctx)
+        text_pid text_geo ~w ~h ~x ~y ~orientation ~height ~tile ~points canvas
+        ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
