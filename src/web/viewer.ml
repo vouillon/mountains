@@ -47,7 +47,25 @@ type program = {
 
 let n_sectors = 256
 let n_rings = 512
+
+type orientation = {
+  alpha : float;
+  beta : float;
+  gamma : float;
+  screen : float;
+}
+
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let compute_azimuth m =
+  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
+  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
+  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
+  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
+  let azimuth =
+    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
+  in
+  azimuth -. (pi /. 2.)
 
 let terrain_program =
   {
@@ -61,65 +79,91 @@ let terrain_program =
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
-        uniform highp float sectors_div;
-        uniform highp float rings_div;
-//        uniform sampler2D tile;
+        uniform highp float inv_sectors_div;
+        uniform highp float grid_k;
+        uniform highp float grid_base;
+        uniform highp float grid_scale;
+        uniform highp vec2 inv_delta;
+        uniform highp float inv_w;
+        uniform highp float inv_avg_delta;
         uniform sampler2D relief;
-        out highp vec3 position;
+        out highp float v_dist;
         out highp vec2 reliefCoord;
         void main()
         {
+          const float PI = 3.14159265359;
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) / sectors_div) * (3.14159 / 2.0) - (3.14159 / 4.0);
-          float angle = theta + snapped_alpha + (3.14159 / 2.0);
-          float r = 50000.0 * pow(float(ring) / rings_div, 2.0);
+          float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
+          float angle = theta + snapped_alpha + (PI / 2.0);
+          float r = grid_scale * (pow(grid_base, float(ring)) - 1.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
-          highp vec2 coord = coord_meters / delta;
-          // Manual bilinear interpolation for 2-byte height
-          highp vec2 tex_pos = vec2(coord.x, float(w) - 1.0 - coord.y);
-          tex_pos = clamp(tex_pos, 0.5, float(w) - 0.5);
+          highp vec2 coord = coord_meters * inv_delta;
           
-          highp vec2 base_f = floor(tex_pos - 0.5);
+          // Calculate approximate grid spacing in meters
+          // For exponential grid r = A(B^i - 1), dr = k(r + A), ds = kr
+          // k = grid_k, A = grid_scale
+          float grid_spacing = grid_k * (r + grid_scale);
+          
+          // LOD level
+          float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
+          int lod = int(lod_f); // Sample from the floor level
+          
+          // Texture Size at this LOD
+          ivec2 tex_size = textureSize(relief, lod);
+
+          // Manual bilinear interpolation for 2-byte height
+          // Normalized Coordinate (0..1)
+          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
+          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          
+          // Coordinate in LOD texels
+          highp vec2 lod_pos = norm_coord * vec2(tex_size);
+          
+          // Manual Bilinear Interpolation
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
+          
+          highp vec2 base_f = floor(lod_tex_pos - 0.5);
           highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(tex_pos - 0.5);
+          highp vec2 f = fract(lod_tex_pos - 0.5);
+          
+          highp ivec2 w_max = tex_size - 1;
+          
+          // Vectorized Fetch & Decode
+          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
+          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
 
-          highp int w_max = w - 1;
-          highp vec2 h00_enc = texelFetch(relief, clamp(base + ivec2(0,0), 0, w_max), 0).rg;
-          highp vec2 h10_enc = texelFetch(relief, clamp(base + ivec2(1,0), 0, w_max), 0).rg;
-          highp vec2 h01_enc = texelFetch(relief, clamp(base + ivec2(0,1), 0, w_max), 0).rg;
-          highp vec2 h11_enc = texelFetch(relief, clamp(base + ivec2(1,1), 0, w_max), 0).rg;
+          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
+          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
+          
+          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
 
-          float h00 = ((h00_enc.r * 256.0 + h00_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h10 = ((h10_enc.r * 256.0 + h10_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h01 = ((h01_enc.r * 256.0 + h01_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h11 = ((h11_enc.r * 256.0 + h11_enc.g) / 257.0) * 9500.0 - 500.0;
-
-          float h0 = mix(h00, h10, f.x);
-          float h1 = mix(h01, h11, f.x);
+          float h0 = mix(H.x, H.y, f.x);
+          float h1 = mix(H.z, H.w, f.x);
           float z = mix(h0, h1, f.y);
           
-          reliefCoord = tex_pos;
+          reliefCoord = norm_coord + (0.5 * inv_w);
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
-          position = pos.xyz;
+          v_dist = length(pos.xyz);
           gl_Position = proj * pos;
         }
       |};
     fragment_shader =
       {|#version 300 es
         precision mediump float;
-        uniform highp vec2 delta;
         uniform mediump sampler2D relief;
         uniform mediump int w;
         in highp vec2 reliefCoord;
-        in highp vec3 position;
+        in highp float v_dist;
         out lowp vec4 color;
 
         void main() {
           mediump vec2 encodedN = 
-            texture(relief, (2. * reliefCoord + 1.) * (1. / (2. * float(w)))).ba;
+            texture(relief, reliefCoord).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -127,7 +171,7 @@ let terrain_program =
             max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = pow(vec3(0.3, 0.32, 0.19), vec3(2.2));
           lowp vec3 fog_color = pow(vec3(0.36, 0.45, 0.59), vec3(2.2));
-          float fog_coeff = exp(length(position) * -4e-5);
+          float fog_coeff = exp(v_dist * -4e-5);
           lowp vec3 final_color = mix(fog_color, l * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
         }
@@ -344,18 +388,37 @@ let _precompute tile_height tile_width tile =
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
-  let is =
-    Bigarray.(
-      Array1.create Bigarray.int32 c_layout (((h - 1) * ((2 * w) + 1)) - 1))
+  let block_size = 32 in
+  let rec count_indices total jb =
+    if jb >= w - 1 then total
+    else
+      let je = min (jb + block_size) (w - 1) in
+      let num_strips = h - 1 in
+      let indices_per_strip = ((je - jb + 1) * 2) + 1 in
+      count_indices (total + (num_strips * indices_per_strip)) (jb + block_size)
   in
-  for i = 0 to h - 2 do
-    for j = 0 to w - 1 do
-      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
-      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
-    done;
-    if i > 0 then is.{(i * ((2 * w) + 1)) - 1} <- Int32.of_int (-1)
-  done;
-  Format.eprintf "BUILD INDICES %f@." (Unix.gettimeofday () -. t);
+  let total_size = count_indices 0 0 in
+  let is = Bigarray.(Array1.create Bigarray.int32 c_layout total_size) in
+  let idx = ref 0 in
+  let rec fill_indices jb =
+    if jb < w - 1 then (
+      let je = min (jb + block_size) (w - 1) in
+      for i = 0 to h - 2 do
+        for j = jb to je do
+          is.{!idx} <- Int32.of_int (j + (i * w'));
+          incr idx;
+          is.{!idx} <- Int32.of_int (j + ((i + 1) * w'));
+          incr idx
+        done;
+        is.{!idx} <- Int32.of_int (-1);
+        incr idx
+      done;
+      fill_indices (jb + block_size))
+  in
+  fill_indices 0;
+  Format.eprintf "BUILD INDICES %f (size %d)@."
+    (Unix.gettimeofday () -. t)
+    total_size;
   is
 
 let make_tile_texture ctx tile =
@@ -413,16 +476,9 @@ let draw_text ctx transform_loc transform (tid, w, h) =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-type orientation = {
-  alpha : float;
-  beta : float;
-  gamma : float;
-  screen : float;
-}
-
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    canvas ctx =
+    ~index_count canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -500,7 +556,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
 
-  (* Gl.enable ctx Gl.cull_face'; *)
+  Gl.enable ctx Gl.cull_face';
   (* Radial Grid Uniforms *)
   (* Radial Grid Uniforms *)
   let width_shift_loc =
@@ -509,14 +565,27 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx width_shift_loc w_shift_radial;
 
   let sectors_div_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "sectors_div")
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_sectors_div")
   in
-  Gl.uniform1f ctx sectors_div_loc (float n_sectors /. 2.);
+  Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
 
-  let rings_div_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "rings_div")
+  (* Exponential Grid Parameters *)
+  let grid_k = pi /. float n_sectors in
+  let height_term = exp (grid_k *. float (n_rings - 1)) in
+  let grid_base = exp grid_k in
+  let grid_scale = 50000. /. (height_term -. 1.) in
+
+  let grid_k_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_k") in
+  let grid_base_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_base")
   in
-  Gl.uniform1f ctx rings_div_loc (float (n_rings - 1));
+  let grid_scale_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_scale")
+  in
+
+  Gl.uniform1f ctx grid_k_loc grid_k;
+  Gl.uniform1f ctx grid_base_loc grid_base;
+  Gl.uniform1f ctx grid_scale_loc grid_scale;
 
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
@@ -524,10 +593,11 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx width_mask_loc w_mask_radial;
 
   (* Determine snapped alpha *)
-  let sector_angle = pi /. 2. /. (float n_sectors /. 2.) in
-  let current_alpha_rad = orientation.alpha *. pi /. 180. in
+  let sector_angle = grid_k in
+  (* Reuse k *)
+  let current_azimuth = compute_azimuth transform in
   let snapped_alpha =
-    floor ((current_alpha_rad /. sector_angle) +. 0.5) *. sector_angle
+    floor ((current_azimuth /. sector_angle) +. 0.5) *. sector_angle
   in
   let sa_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "snapped_alpha")
@@ -545,9 +615,18 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform2f ctx co_loc center_offset_x center_offset_y;
 
   let width_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
+  let inv_w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_w") in
   Gl.uniform1i ctx width_loc w;
-  let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
-  Gl.uniform2f ctx delta_loc deltax deltay;
+  Gl.uniform1f ctx inv_w_loc (1. /. float w);
+  let inv_delta_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_delta")
+  in
+  let inv_avg_delta_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_avg_delta")
+  in
+  Gl.uniform2f ctx inv_delta_loc (1. /. deltax) (1. /. deltay);
+  let avg_delta = (deltax +. deltay) *. 0.5 in
+  Gl.uniform1f ctx inv_avg_delta_loc (1. /. avg_delta);
   let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
   Gl.uniform_matrix4fv ctx proj_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array proj));
@@ -565,10 +644,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.draw_elements ctx Gl.triangle_strip
-    (((n_rings - 1) * ((2 * (n_sectors + 1)) + 1)) - 1)
-    (* rings=512, sectors=256 *)
-    Gl.unsigned_int 0;
+  Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
@@ -652,7 +728,67 @@ let event_loop ctx draw =
 
 (* compute_gradient_cpu removed *)
 
-let relief_program =
+let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let mipmap_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        precision highp float;
+        layout(location = 0) in vec3 position;
+        void main() {
+          gl_Position = vec4(position, 1.);
+        }|};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D source_texture;
+        uniform float base_k;
+        uniform float decay;
+        uniform int level; // Target level (unused in logic, but passed)
+        uniform int source_level; // Explicit source level
+        out vec4 frag_color;
+        void main() {
+          vec2 size = vec2(textureSize(source_texture, source_level));
+          ivec2 p00 = ivec2(gl_FragCoord.xy * 2.0 - 0.5);
+          
+          ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
+          ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+          ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+          ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
+          
+          vec4 h00_v = texelFetch(source_texture, c00, source_level);
+          vec4 h10_v = texelFetch(source_texture, c10, source_level);
+          vec4 h01_v = texelFetch(source_texture, c01, source_level);
+          vec4 h11_v = texelFetch(source_texture, c11, source_level);
+          
+          float h00 = h00_v.r + h00_v.g / 256.0;
+          float h10 = h10_v.r + h10_v.g / 256.0;
+          float h01 = h01_v.r + h01_v.g / 256.0;
+          float h11 = h11_v.r + h11_v.g / 256.0;
+          
+          float k = base_k / pow(2.0, float(level - 1));
+          float max_h = max(max(h00, h10), max(h01, h11));
+          float h_scale = 10000.0;
+          
+          float w00 = exp(k * (h00 - max_h) * h_scale);
+          float w10 = exp(k * (h10 - max_h) * h_scale);
+          float w01 = exp(k * (h01 - max_h) * h_scale);
+          float w11 = exp(k * (h11 - max_h) * h_scale);
+          
+          float sum_w = w00 + w10 + w01 + w11;
+          float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
+          vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
+          
+          float r = floor(h_avg * 255.0) / 255.0;
+          float g = (h_avg - r) * 256.0;
+          
+          frag_color = vec4(r, g, n_avg);
+        }|};
+    attributes = [ "position" ];
+  }
+
+let gradient_program =
   {
     vertex_shader =
       {|#version 300 es
@@ -713,10 +849,17 @@ let relief_program =
     attributes = [];
   }
 
-let compute_relief_gpu ctx width height text_geo tile_texture =
+let compute_relief ctx width height triangle_geo tile_texture =
   assert (width = height);
 
-  let relief_pid = create_program ctx relief_program in
+  let relief_pid = create_program ctx gradient_program in
+  (* Not used in shader explicitly yet, using pow directly *)
+  let max_level =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 (max width height)
+  in
+  let levels = max_level + 1 in
+
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
@@ -724,7 +867,7 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
 
   (* Use RGBA8 (4 bytes per pixel) *)
-  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 width height;
+  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
 
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
@@ -733,11 +876,11 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
     0;
   Gl.viewport ctx 0 0 width height;
   Gl.use_program ctx relief_pid;
-
+  (* Draw Gradient (Level 0) *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
-  Gl.bind_vertex_array ctx (Some text_geo);
+  Gl.bind_vertex_array ctx (Some triangle_geo);
   let size_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
 
@@ -746,35 +889,112 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
   let delta_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
 
-  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
+  (* Mipmap Generation Loop *)
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  (* Mipmap Generation Loop *)
+  let mipmap_pid = create_program ctx mipmap_program in
+  let pos_loc = Gl.get_attrib_location ctx mipmap_pid (Jstr.v "position") in
+  let level_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "level") in
+  let source_level_loc =
+    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_level")
+  in
+  let base_k_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "base_k") in
+  let decay_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "decay") in
+  let source_loc =
+    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_texture")
+  in
+
+  Gl.use_program ctx mipmap_pid;
+  Gl.bind_vertex_array ctx (Some triangle_geo);
+  let _ = pos_loc in
+  (* attributes bound by triangle_geo *)
+  Gl.uniform1i ctx source_loc 0;
+  Gl.uniform1f ctx base_k_loc 0.1;
+  Gl.uniform1f ctx decay_loc 0.5;
+
+  (* Not used in shader explicitly yet, using pow directly *)
+
+  (* Start from level 1 *)
+
+  (* Generate *)
+  (* Ensure sampling from Level N-1 restricted? No, texturing samples from BaseLevel -> MaxLevel. *)
+  (* To sample specifically from Level N-1, we might need to set GL_TEXTURE_BASE_LEVEL temporarily. *)
+  let rec loop level w h =
+    if level > max_level || w < 1 || h < 1 then ()
+    else (
+      (* Restrict sampling to N-1 *)
+      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level (level - 1); *)
+      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (level - 1); *)
+
+      (* Target Level N *)
+      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+        Gl.texture_2d tid level;
+
+      (* Changed relief_texture to tid *)
+      Gl.viewport ctx 0 0 w h;
+      Gl.uniform1i ctx level_loc level;
+      Gl.uniform1i ctx source_level_loc (level - 1);
+      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+
+      loop (level + 1) (w / 2) (h / 2))
+  in
+  loop 1 (width / 2) (height / 2);
+
+  (* Restore Texture Params *)
+  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0; *)
+  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000; *)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+
+  (* Restore Framebuffer *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Gl.bind_texture ctx Gl.texture_2d None;
+
   Gl.bind_vertex_array ctx None;
 
-  tid
-
-let compute_relief ctx width height text_geo _tile tile_texture =
-  (* Use GPU path always *)
-  compute_relief_gpu ctx width height text_geo tile_texture
+  (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
-  let terrain_geo =
+  let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
     let w' = next_power_of_two sectors 1 in
-    create_geometry ctx ~indices:(build_indices sectors w' rings) ~buffers:[]
+    let indices = build_indices sectors w' rings in
+    (create_geometry ctx ~indices ~buffers:[], indices)
   in
   let text_geo =
     create_geometry ctx
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
+  let triangle_geo =
+    let indices =
+      Bigarray.(Array1.of_array int8_unsigned c_layout [| 0; 1; 2; 1; 3; 2 |])
+    in
+    let positions =
+      let b = Bigarray.(Array1.create float32 c_layout 12) in
+      b.{0} <- -1.;
+      b.{1} <- 1.;
+      b.{2} <- 0.;
+      b.{3} <- 1.;
+      b.{4} <- 1.;
+      b.{5} <- 0.;
+      b.{6} <- -1.;
+      b.{7} <- -1.;
+      b.{8} <- 0.;
+      b.{9} <- 1.;
+      b.{10} <- -1.;
+      b.{11} <- 0.;
+      Buffer b
+    in
+    create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
+  in
   let terrain_pid = create_program ctx terrain_program in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
-  let relief_texture = compute_relief ctx w h text_geo tile tile_texture in
+  let relief_texture, _ = compute_relief ctx w h triangle_geo tile_texture in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -804,10 +1024,11 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
     |> List.map fst
   in
+  let index_count = Bigarray.Array1.dim indices in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points canvas ctx)
+        ~points ~index_count canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in

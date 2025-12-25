@@ -98,11 +98,12 @@ let terrain_program =
         out highp vec2 reliefCoord;
         void main()
         {
+          const float PI = 3.14159265359;
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
 
-          float theta = (float(sector) / sectors_div) * (3.14159 / 2.0) - (3.14159 / 4.0);
-          float angle = theta - snapped_alpha + (3.14159 / 2.0);
+          float theta = (float(sector) / sectors_div) * (PI / 2.0) - (PI / 4.0);
+          float angle = theta - snapped_alpha + (PI / 2.0);
           float r = 70000.0 * pow(float(ring) / rings_div, 2.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
@@ -140,7 +141,6 @@ let terrain_program =
     fragment_shader =
       {|#version 300 es
         precision highp float;
-        uniform highp vec2 delta;
         uniform highp sampler2D relief;
         uniform mediump int w;
         in highp vec2 reliefCoord;
