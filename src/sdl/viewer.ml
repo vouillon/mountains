@@ -69,7 +69,6 @@ let get_string len f =
 (* Shaders *)
 
 let deltay = 40_000. /. 360. /. 3600. *. 1000.
-let deltax = deltay *. cos (44. *. pi /. 180.)
 
 type program = {
   vertex_shader : string;
@@ -388,6 +387,8 @@ let compute_gradient_gpu width height text_geo tile_texture =
 
   bind_vertex_array text_geo;
 
+  (* Use a default lat for gradient or pass it? Gradient is precomputed. *)
+  let deltax = deltay *. cos (44. *. pi /. 180.) in
   let size_loc = get_uniform_location gradient_pid "size" in
   Gl.uniform2f size_loc (float width) (float height);
 
@@ -453,8 +454,9 @@ let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
-    text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height ~angle ~inclination
-    ~points ~tile win =
+    text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height ~lat ~lon ~angle
+    ~inclination ~points ~tile win =
+  let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
     Matrix.(
       translate 0. 0. (-.height -. 2.)
@@ -516,8 +518,10 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   Gl.uniform1f sa_loc snapped_alpha;
 
   (* Center Offset *)
-  let center_offset_x = deltax *. float (x - 1) in
-  let center_offset_y = deltay *. float (h - 1 - y) in
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float (h - 1 - y) +. off_y -. 1.5) in
   let co_loc = get_uniform_location terrain_pid "center_offset" in
   Gl.uniform2f co_loc center_offset_x center_offset_y;
 
@@ -676,7 +680,8 @@ let event_loop win angle inclination draw =
 
 (* Main *)
 
-let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile =
+let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~lat ~lon ~angle ~height ~points
+    ~tile =
   let* () = Sdl.init Sdl.Init.video in
   let* font = load_font () in
   let* win, ctx = create_window ~gl in
@@ -705,8 +710,8 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~angle ~height ~points ~tile =
     event_loop win angle inclination (fun ~aspect ~angle ~inclination win ->
         ignore
           (draw terrain_pid terrain_geo tile_texture gradient_texture
-             triangle_pid text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~angle
-             ~inclination ~height ~tile ~points win))
+             triangle_pid text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height
+             ~lat ~lon ~angle ~inclination ~points ~tile win))
   in
   let* () = delete_program terrain_pid in
   let* () = delete_program triangle_pid in
@@ -782,8 +787,8 @@ let main () =
   assert ((tile_width - 2) land (tile_width - 3) = 0);
   let** tile = Loader.f ~size:tile_width ~lat ~lon in
   let x = tile_width / 2 in
-  let y = tile_height / 2 in
-  let d = float (x - 1) /. 3600. in
+  let y = (tile_height / 2) - 1 in
+  let d = float x /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let points =
@@ -792,8 +797,14 @@ let main () =
     let points = read_file "data/points.geojson" in
     Points.find tile_coord tile_coord' points
     |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-        let x = truncate ((lon -. tile_coord.lon) *. float width) in
-        let y = truncate ((tile_coord'.lat -. lat) *. float height) in
+        let x =
+          min (tile_width - 1)
+            (truncate ((lon -. tile_coord.lon) *. float width))
+        in
+        let y =
+          min (tile_height - 1)
+            (truncate ((tile_coord'.lat -. lat) *. float height))
+        in
         (pt, (x, y)))
   in
   let points =
@@ -802,10 +813,22 @@ let main () =
         Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
       points
   in
-  let height = tile.{y, x} in
+  (* Bilinear interpolation for height *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let h00 = tile.{y, x} in
+  let h10 = tile.{y, x + 1} in
+  let h01 = tile.{y - 1, x} in
+  let h11 = tile.{y - 1, x + 1} in
+  let h0 = h00 +. (off_x *. (h10 -. h00)) in
+  let h1 = h01 +. (off_x *. (h11 -. h01)) in
+  let height = h0 +. (off_y *. (h1 -. h0)) in
+  Format.eprintf "ZZZ %f %f %f %f (%f %f) => %f@." h00 h10 h01 h11 off_x off_y
+    height;
+
   match
-    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~angle ~height
-      ~points ~tile
+    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~lat ~lon
+      ~angle ~height ~points ~tile
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->
