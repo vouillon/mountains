@@ -518,7 +518,7 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float (h - 1 - y) +. off_y -. 1.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
   let co_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "center_offset")
   in
@@ -741,7 +741,7 @@ let compute_gradient ctx width height text_geo _tile tile_texture =
   (* Use GPU path always *)
   compute_gradient_gpu ctx width height text_geo tile_texture
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+let tri ~w ~h:_ ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let terrain_geo =
     let sectors = 129 in
     let rings = 512 in
@@ -809,7 +809,7 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  if true then (44.607649, 6.8204019, 0.)
+  if true then (44.6075287, 6.8204019, 0.)
   else if false then
     (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
   else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)

@@ -454,7 +454,7 @@ let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
-    text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height ~lat ~lon ~angle
+    text_pid text_geo ~font ~aspect ~w ~h:_ ~x ~y ~height ~lat ~lon ~angle
     ~inclination ~points ~tile win =
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
@@ -521,7 +521,7 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float (h - 1 - y) +. off_y -. 1.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
   let co_loc = get_uniform_location terrain_pid "center_offset" in
   Gl.uniform2f co_loc center_offset_x center_offset_y;
 
@@ -752,8 +752,8 @@ let coordinates { Tiff.width; height; tile_width; tile_height; _ } lat lon =
 *)
 
 let main () =
-  let lat = ref 44.607649 in
-  let lon = ref 6.8204019 in
+  let lat = ref (*44.607649*) 44.6075287 in
+  let lon = ref (*6.8204019*) 6.8210935 in
   let angle = ref 0. in
   let options =
     [
