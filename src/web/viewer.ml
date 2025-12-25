@@ -415,7 +415,7 @@ type orientation = {
 }
 
 let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
-    text_pid text_geo ~w ~h ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
+    text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
     canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
@@ -741,7 +741,7 @@ let compute_gradient ctx width height text_geo _tile tile_texture =
   (* Use GPU path always *)
   compute_gradient_gpu ctx width height text_geo tile_texture
 
-let tri ~w ~h:_ ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let terrain_geo =
     let sectors = 129 in
     let rings = 512 in
@@ -809,7 +809,7 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  if true then (44.6075287, 6.8204019, 0.)
+  if true then (44.6075287, 6.8210935, 0.)
   else if false then
     (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
   else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)
@@ -982,7 +982,9 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
-  Format.eprintf "ZZZ %f %f %f %f => %f@." h00 h10 h01 h11 height;
+  Format.eprintf "ZZZ %f %f@." lat lon;
+  Format.eprintf "ZZZ %f %f %f %f (%f %f) => %f@." h00 h10 h01 h11 off_x off_y
+    height;
 
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
