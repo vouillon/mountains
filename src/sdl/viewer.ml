@@ -88,9 +88,9 @@ let terrain_program =
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
-        uniform highp sampler2D gradient;
+        uniform highp sampler2D relief;
         out highp vec3 position;
-        out highp vec2 gradCoord;
+        out highp vec2 reliefCoord;
         void main()
         {
           int sector = gl_VertexID & w_mask;
@@ -110,10 +110,10 @@ let terrain_program =
           highp vec2 f = fract(tex_pos - 0.5);
 
           highp int w_max = w - 1;
-          highp vec2 h00_enc = texelFetch(gradient, clamp(base + ivec2(0,0), 0, w_max), 0).rg;
-          highp vec2 h10_enc = texelFetch(gradient, clamp(base + ivec2(1,0), 0, w_max), 0).rg;
-          highp vec2 h01_enc = texelFetch(gradient, clamp(base + ivec2(0,1), 0, w_max), 0).rg;
-          highp vec2 h11_enc = texelFetch(gradient, clamp(base + ivec2(1,1), 0, w_max), 0).rg;
+          highp vec2 h00_enc = texelFetch(relief, clamp(base + ivec2(0,0), 0, w_max), 0).rg;
+          highp vec2 h10_enc = texelFetch(relief, clamp(base + ivec2(1,0), 0, w_max), 0).rg;
+          highp vec2 h01_enc = texelFetch(relief, clamp(base + ivec2(0,1), 0, w_max), 0).rg;
+          highp vec2 h11_enc = texelFetch(relief, clamp(base + ivec2(1,1), 0, w_max), 0).rg;
 
           float h00 = ((h00_enc.r * 256.0 + h00_enc.g) / 257.0) * 9500.0 - 500.0;
           float h10 = ((h10_enc.r * 256.0 + h10_enc.g) / 257.0) * 9500.0 - 500.0;
@@ -124,7 +124,7 @@ let terrain_program =
           float h1 = mix(h01, h11, f.x);
           float z = mix(h0, h1, f.y);
 
-          gradCoord = tex_pos;
+          reliefCoord = tex_pos;
           
           highp vec4 pos = transform * vec4(pos_plane, z, 1.0);
           position = pos.xyz;
@@ -135,15 +135,15 @@ let terrain_program =
       {|#version 300 es
         precision highp float;
         uniform highp vec2 delta;
-        uniform highp sampler2D gradient;
+        uniform highp sampler2D relief;
         uniform mediump int w;
-        in highp vec2 gradCoord;
+        in highp vec2 reliefCoord;
         in highp vec3 position;
         out lowp vec4 color;
 
         void main() {
           mediump vec2 encodedN = 
-            texture(gradient, (2. * gradCoord + 1.) * (1. / (2. * float(w)))).ba;
+            texture(relief, (2. * reliefCoord + 1.) * (1. / (2. * float(w)))).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -209,7 +209,7 @@ let text_program =
 let rec _next_power_of_two n p =
   if n <= p then p else _next_power_of_two n (p + p)
 
-let gradient_program =
+let relief_program =
   {
     vertex_shader =
       {|#version 300 es
@@ -365,10 +365,10 @@ let make_tile_texture tile =
   Gl.bind_texture Gl.texture_2d 0;
   tid
 
-let compute_gradient_gpu width height text_geo tile_texture =
+let compute_relief_gpu width height text_geo tile_texture =
   assert (width = height);
 
-  let* gradient_pid = create_program gradient_program in
+  let* relief_pid = create_program relief_program in
   let tid = get_int (Gl.gen_textures 1) in
   Gl.bind_texture Gl.texture_2d tid;
   Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.linear;
@@ -383,16 +383,16 @@ let compute_gradient_gpu width height text_geo tile_texture =
   Gl.framebuffer_texture2d Gl.framebuffer attachmentPoint Gl.texture_2d tid 0;
   Gl.viewport 0 0 width height;
 
-  use_program gradient_pid;
+  use_program relief_pid;
 
   bind_vertex_array text_geo;
 
   (* Use a default lat for gradient or pass it? Gradient is precomputed. *)
   let deltax = deltay *. cos (44. *. pi /. 180.) in
-  let size_loc = get_uniform_location gradient_pid "size" in
+  let size_loc = get_uniform_location relief_pid "size" in
   Gl.uniform2f size_loc (float width) (float height);
 
-  let delta_loc = get_uniform_location gradient_pid "delta" in
+  let delta_loc = get_uniform_location relief_pid "delta" in
   Gl.uniform2f delta_loc deltax deltay;
 
   Gl.active_texture Gl.texture0;
@@ -404,7 +404,7 @@ let compute_gradient_gpu width height text_geo tile_texture =
   Gl.bind_texture Gl.texture_2d 0;
   bind_vertex_array { vertex_array = 0; buffers = [] };
 
-  Ok (gradient_pid, tid)
+  Ok (relief_pid, tid)
 
 let build_indices w w' h =
   let is =
@@ -453,7 +453,7 @@ let draw_text font transform_loc transform text =
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
+let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~font ~aspect ~w ~h:_ ~x ~y ~height ~lat ~lon ~angle
     ~inclination ~points ~tile win =
   let deltax = deltay *. cos (lat *. pi /. 180.) in
@@ -537,14 +537,14 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   let transform_loc = get_uniform_location terrain_pid "transform" in
   Gl.uniform_matrix4fv transform_loc 1 false (Matrix.array transform);
   (* let tile_loc = get_uniform_location terrain_pid "tile" in *)
-  let gradient_loc = get_uniform_location terrain_pid "gradient" in
+  let relief_loc = get_uniform_location terrain_pid "relief" in
   (* Gl.uniform1i tile_loc 0; *)
-  Gl.uniform1i gradient_loc 1;
+  Gl.uniform1i relief_loc 1;
   bind_vertex_array terrain_geo;
   Gl.active_texture Gl.texture0;
   (* Gl.bind_texture Gl.texture_2d tile_texture; *)
   Gl.active_texture Gl.texture1;
-  Gl.bind_texture Gl.texture_2d gradient_texture;
+  Gl.bind_texture Gl.texture_2d relief_texture;
   Gl.enable Gl.primitive_restart_fixed_index;
   Gl.draw_elements Gl.triangle_strip
     (((512 - 1) * ((2 * 129) + 1)) - 1)
@@ -698,8 +698,8 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~lat ~lon ~angle ~height ~points
   in
   let tile_texture = make_tile_texture tile in
   let w_viewport, h_viewport = Sdl.gl_get_drawable_size win in
-  let* gradient_pid, gradient_texture =
-    compute_gradient_gpu w h text_geo tile_texture
+  let* relief_pid, relief_texture =
+    compute_relief_gpu w h text_geo tile_texture
   in
   reshape win w_viewport h_viewport;
   let* terrain_pid = create_program terrain_program in
@@ -709,18 +709,18 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~lat ~lon ~angle ~height ~points
   let* () =
     event_loop win angle inclination (fun ~aspect ~angle ~inclination win ->
         ignore
-          (draw terrain_pid terrain_geo tile_texture gradient_texture
-             triangle_pid text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height
-             ~lat ~lon ~angle ~inclination ~points ~tile win))
+          (draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
+             text_pid text_geo ~font ~aspect ~w ~h ~x ~y ~height ~lat ~lon
+             ~angle ~inclination ~points ~tile win))
   in
   let* () = delete_program terrain_pid in
   let* () = delete_program triangle_pid in
   let* () = delete_program text_pid in
-  let* () = delete_program gradient_pid in
+  let* () = delete_program relief_pid in
   let* () = delete_geometry terrain_geo in
   let* () = delete_geometry text_geo in
   set_int (Gl.delete_textures 1) tile_texture;
-  set_int (Gl.delete_textures 1) gradient_texture;
+  set_int (Gl.delete_textures 1) relief_texture;
   let* () = destroy_window win ctx in
   Sdl.quit ();
   Ok ()
