@@ -45,6 +45,10 @@ type program = {
   attributes : string list;
 }
 
+let n_sectors = 256
+let n_rings = 512
+let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
 let terrain_program =
   {
     vertex_shader =
@@ -57,6 +61,8 @@ let terrain_program =
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
+        uniform highp float sectors_div;
+        uniform highp float rings_div;
 //        uniform sampler2D tile;
         uniform sampler2D relief;
         out highp vec3 position;
@@ -65,9 +71,9 @@ let terrain_program =
         {
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) / 128.0) * (3.14159 / 2.0) - (3.14159 / 4.0);
+          float theta = (float(sector) / sectors_div) * (3.14159 / 2.0) - (3.14159 / 4.0);
           float angle = theta + snapped_alpha + (3.14159 / 2.0);
-          float r = 50000.0 * pow(float(ring) / 511.0, 2.0);
+          float r = 50000.0 * pow(float(ring) / rings_div, 2.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
           highp vec2 coord = coord_meters / delta;
@@ -435,6 +441,13 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       * rotate_y (-.orientation.gamma *. pi /. 180.)
       * rotate_z (orientation.screen *. pi /. 180.))
   in
+  (* Radial Grid calculation *)
+  let w_stride = next_power_of_two (n_sectors + 1) 1 in
+  let w_mask_radial = w_stride - 1 in
+  let w_shift_radial =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n lsr 1) in
+    log2 w_stride
+  in
   let screen_inclination =
     orientation.screen
     +. 180. /. pi
@@ -486,17 +499,24 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
+
   (* Gl.enable ctx Gl.cull_face'; *)
   (* Radial Grid Uniforms *)
   (* Radial Grid Uniforms *)
-  let w_stride = 256 in
-  let w_mask_radial = w_stride - 1 in
-  let w_shift_radial = 8 in
-
   let width_shift_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_shift")
   in
   Gl.uniform1i ctx width_shift_loc w_shift_radial;
+
+  let sectors_div_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "sectors_div")
+  in
+  Gl.uniform1f ctx sectors_div_loc (float n_sectors /. 2.);
+
+  let rings_div_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "rings_div")
+  in
+  Gl.uniform1f ctx rings_div_loc (float (n_rings - 1));
 
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
@@ -504,7 +524,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx width_mask_loc w_mask_radial;
 
   (* Determine snapped alpha *)
-  let sector_angle = pi /. 2. /. 128.0 in
+  let sector_angle = pi /. 2. /. (float n_sectors /. 2.) in
   let current_alpha_rad = orientation.alpha *. pi /. 180. in
   let snapped_alpha =
     floor ((current_alpha_rad /. sector_angle) +. 0.5) *. sector_angle
@@ -546,7 +566,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
   Gl.draw_elements ctx Gl.triangle_strip
-    (((512 - 1) * ((2 * 129) + 1)) - 1) (* rings=512, sectors=129 *)
+    (((n_rings - 1) * ((2 * (n_sectors + 1)) + 1)) - 1)
+    (* rings=512, sectors=256 *)
     Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -630,8 +651,6 @@ let event_loop ctx draw =
 (* Main *)
 
 (* compute_gradient_cpu removed *)
-
-let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let relief_program =
   {
@@ -741,9 +760,9 @@ let compute_relief ctx width height text_geo _tile tile_texture =
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let terrain_geo =
-    let sectors = 129 in
-    let rings = 512 in
-    let w' = 256 in
+    let sectors = n_sectors + 1 in
+    let rings = n_rings in
+    let w' = next_power_of_two sectors 1 in
     create_geometry ctx ~indices:(build_indices sectors w' rings) ~buffers:[]
   in
   let text_geo =

@@ -45,6 +45,9 @@ let read_file f =
 
 let ( let* ) = Result.bind
 let pi = 4. *. atan 1.
+let n_sectors = 256
+let n_rings = 512
+
 (* Helper functions. *)
 
 let bigarray_create k len = Bigarray.(Array1.create k c_layout len)
@@ -88,6 +91,8 @@ let terrain_program =
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
+        uniform highp float sectors_div;  // Replaces 128.0
+        uniform highp float rings_div;    // Replaces 511.0
         uniform highp sampler2D relief;
         out highp vec3 position;
         out highp vec2 reliefCoord;
@@ -95,9 +100,10 @@ let terrain_program =
         {
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) / 128.0) * (3.14159 / 2.0) - (3.14159 / 4.0);
+
+          float theta = (float(sector) / sectors_div) * (3.14159 / 2.0) - (3.14159 / 4.0);
           float angle = theta - snapped_alpha + (3.14159 / 2.0);
-          float r = 50000.0 * pow(float(ring) / 511.0, 2.0);
+          float r = 70000.0 * pow(float(ring) / rings_div, 2.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
           highp vec2 coord = coord_meters / delta;
@@ -468,6 +474,9 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         let x_world = deltax *. float (x' - x) in
         let y_world = deltay *. float (y - y') in
         let z_world = tile.{y', x'} in
+        Format.eprintf "AAA %s %g %f %f@." pt.Points.name
+          (sqrt ((x_world ** 2.) +. (y_world ** 2.)))
+          deltax deltay;
         let r_view =
           Matrix.(
             { x = x_world; y = y_world; z = z_world; w = 1. } *< transform)
@@ -499,17 +508,27 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (* Gl.enable Gl.cull_face_enum; *)
   (* Radial Grid Uniforms *)
   (* Radial Grid Uniforms *)
-  let w_stride = 256 in
+  (* Radial Grid Uniforms *)
+  let w_stride = _next_power_of_two (n_sectors + 1) 1 in
   let w_mask_radial = w_stride - 1 in
-  let w_shift_radial = 8 in
+  let w_shift_radial =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n lsr 1) in
+    log2 w_stride
+  in
 
   let width_shift_loc = get_uniform_location terrain_pid "w_shift" in
   Gl.uniform1i width_shift_loc w_shift_radial;
   let width_mask_loc = get_uniform_location terrain_pid "w_mask" in
   Gl.uniform1i width_mask_loc w_mask_radial;
 
+  let sectors_div_loc = get_uniform_location terrain_pid "sectors_div" in
+  Gl.uniform1f sectors_div_loc (float n_sectors /. 2.);
+
+  let rings_div_loc = get_uniform_location terrain_pid "rings_div" in
+  Gl.uniform1f rings_div_loc (float (n_rings - 1));
+
   (* Determine snapped alpha *)
-  let sector_angle = pi /. 2. /. 128.0 in
+  let sector_angle = pi /. 2. /. (float n_sectors /. 2.) in
   let current_alpha_rad = angle *. pi /. 180. in
   let snapped_alpha =
     floor ((current_alpha_rad /. sector_angle) +. 0.5) *. sector_angle
@@ -547,7 +566,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_texture Gl.texture_2d relief_texture;
   Gl.enable Gl.primitive_restart_fixed_index;
   Gl.draw_elements Gl.triangle_strip
-    (((512 - 1) * ((2 * 129) + 1)) - 1)
+    (((n_rings - 1) * ((2 * (n_sectors + 1)) + 1)) - 1)
     Gl.unsigned_int (`Offset 0);
   Gl.disable Gl.primitive_restart_fixed_index;
   Gl.bind_vertex_array 0;
@@ -686,9 +705,9 @@ let tri ~gl:((_maj, _min) as gl) ~w ~h ~x ~y ~lat ~lon ~angle ~height ~points
   let* font = load_font () in
   let* win, ctx = create_window ~gl in
   let* terrain_geo =
-    let sectors = 129 in
-    let rings = 512 in
-    let w' = 256 in
+    let sectors = n_sectors + 1 in
+    let rings = n_rings in
+    let w' = _next_power_of_two sectors 1 in
     create_geometry ~indices:(build_indices sectors w' rings) ~buffers:[]
   in
   let* text_geo =
