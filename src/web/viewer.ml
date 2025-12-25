@@ -38,7 +38,6 @@ let pi = 4. *. atan 1.
 (* Shaders *)
 
 let deltay = 40_000. /. 360. /. 3600. *. 1000.
-let deltax = deltay *. cos (44. *. pi /. 180.)
 
 type program = {
   vertex_shader : string;
@@ -277,6 +276,7 @@ let _precompute tile_height tile_width tile =
   let heights =
     Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
   in
+  let deltax = deltay *. cos (44. *. pi /. 180.) in
   if true then (
     to_lwt
     @@
@@ -415,8 +415,8 @@ type orientation = {
 }
 
 let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
-    text_pid text_geo ~w ~h ~x ~y ~height ~orientation ~points ~tile canvas ctx
-    =
+    text_pid text_geo ~w ~h ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
+    canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -426,6 +426,7 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
     Brr_canvas.Canvas.set_h canvas canvas_height;
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
+  let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
     Matrix.(
       translate 0. 0. (-.height -. 2.)
@@ -514,8 +515,10 @@ let draw terrain_pid terrain_geo _tile_texture gradient_texture triangle_pid
   Gl.uniform1f ctx sa_loc snapped_alpha;
 
   (* Center Offset in world meters relative to tile origin *)
-  let center_offset_x = deltax *. float (x - 1) in
-  let center_offset_y = deltay *. float (h - 1 - y) in
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float (h - 1 - y) +. off_y -. 1.5) in
   let co_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "center_offset")
   in
@@ -721,6 +724,8 @@ let compute_gradient_gpu ctx width height text_geo tile_texture =
   let size_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
 
+  (* Use default 44.0 latitude for gradient *)
+  let deltax = deltay *. cos (44. *. pi /. 180.) in
   let delta_loc = Gl.get_uniform_location ctx gradient_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
 
@@ -736,7 +741,7 @@ let compute_gradient ctx width height text_geo _tile tile_texture =
   (* Use GPU path always *)
   compute_gradient_gpu ctx width height text_geo tile_texture
 
-let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let terrain_geo =
     let sectors = 129 in
     let rings = 512 in
@@ -784,8 +789,8 @@ let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
   in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture gradient_texture triangle_pid
-        text_pid text_geo ~w ~h ~x ~y ~orientation ~height ~tile ~points canvas
-        ctx)
+        text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
+        ~points canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -804,7 +809,9 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  if false then (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
+  if true then (44.607649, 6.8204019, 0.)
+  else if false then
+    (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
   else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)
   else if true then (44.536194, 6.804142, 0.)
   else if true then (44.527946, 6.802877, 0.)
@@ -905,10 +912,10 @@ let setup_events () =
   fun () -> state := `Starting
 
 let main () =
-  let tile_width = 2048 in
+  let tile_width = 4098 in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
-  assert (next_power_of_two tile_width 1 - tile_width < 16);
+  assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
@@ -918,8 +925,8 @@ let main () =
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
   if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
-  let y = tile_height / 2 in
-  let d = float (x - 1) /. 3600. in
+  let y = (tile_height / 2) - 1 in
+  let d = float x /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let* points =
@@ -949,9 +956,13 @@ let main () =
     Lwt.return
       (Points.find tile_coord tile_coord' points
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-          let x = truncate (((lon -. tile_coord.lon) *. float width) +. 0.5) in
+          let x =
+            min (tile_width - 1)
+              (truncate (((lon -. tile_coord.lon) *. float width) +. 0.5))
+          in
           let y =
-            truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5)
+            min (tile_height - 1)
+              (truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5))
           in
           (pt, (x, y))))
   in
@@ -961,7 +972,18 @@ let main () =
         Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
       points
   in
-  let height = tile.{y, x} in
+  (* Bilinear interpolation for height *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let h00 = tile.{y, x} in
+  let h10 = tile.{y, x + 1} in
+  let h01 = tile.{y - 1, x} in
+  let h11 = tile.{y - 1, x + 1} in
+  let h0 = h00 +. (off_x *. (h10 -. h00)) in
+  let h1 = h01 +. (off_x *. (h11 -. h01)) in
+  let height = h0 +. (off_y *. (h1 -. h0)) in
+  Format.eprintf "ZZZ %f %f %f %f => %f@." h00 h10 h01 h11 height;
+
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
@@ -984,8 +1006,8 @@ let main () =
   in
   remove_message ();
   start ();
-  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~points ~tile
-    canvas ctx
+  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
+    ~tile canvas ctx
 
 let () =
   let open Brr_webworkers.Service_worker in
