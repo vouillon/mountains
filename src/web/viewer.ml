@@ -87,7 +87,7 @@ let terrain_program =
         uniform highp float inv_w;
         uniform highp float inv_avg_delta;
         uniform highp int max_lod;
-        uniform sampler2D relief;
+        uniform mediump sampler2D relief;
         out highp float v_dist;
         out highp float v_h;
         out highp vec2 reliefCoord;
@@ -811,27 +811,37 @@ let mipmap_program =
       {|#version 300 es
         precision highp float;
         layout(location = 0) in vec3 position;
+        out highp vec2 v_uv;
         void main() {
+          v_uv = position.xy * 0.5 + 0.5;
           gl_Position = vec4(position, 1.);
         }|};
     fragment_shader =
       {|#version 300 es
         precision highp float;
         uniform sampler2D source_texture;
+        uniform vec2 source_size;
         uniform float base_k;
         uniform float decay;
         uniform int level; // Target level (unused in logic, but passed)
         uniform int source_level; // Explicit source level
+        in highp vec2 v_uv;
         out vec4 frag_color;
         void main() {
-          vec2 size = vec2(textureSize(source_texture, source_level));
-          ivec2 p00 = ivec2(gl_FragCoord.xy * 2.0 - 0.5);
+          vec2 size = source_size;
+          // Map UV to Source Pixel Coordinates
+          // v_uv points to center of the 2x2 block in source
+          ivec2 p = ivec2(v_uv * size);
+          
+          // Force alignment to even coordinates (top-left of 2x2 block)
+          ivec2 p00 = (p / 2) * 2;
           
           ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
           ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
           ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
           ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
           
+          // Source is main texture at source_level
           vec4 h00_v = texelFetch(source_texture, c00, source_level);
           vec4 h10_v = texelFetch(source_texture, c10, source_level);
           vec4 h01_v = texelFetch(source_texture, c01, source_level);
@@ -842,7 +852,7 @@ let mipmap_program =
           float h01 = h01_v.r + h01_v.g / 256.0;
           float h11 = h11_v.r + h11_v.g / 256.0;
           
-          float k = base_k / pow(2.0, float(level - 1));
+          float k = base_k;
           float max_h = max(max(h00, h10), max(h01, h11));
           float h_scale = 10000.0;
           
@@ -859,6 +869,34 @@ let mipmap_program =
           float g = (h_avg - r) * 256.0;
           
           frag_color = vec4(r, g, n_avg);
+        }|};
+    attributes = [ "position" ];
+  }
+
+let copy_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        layout(location = 0) in vec3 position;
+        out mediump vec2 v_uv;
+        void main() {
+          v_uv = position.xy * 0.5 + 0.5;
+          gl_Position = vec4(position, 1.);
+        }|};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D source;
+        uniform int level;
+        uniform vec2 source_size;
+        in mediump vec2 v_uv;
+        out vec4 color;
+        void main() {
+          // Robust 1:1 Copy using UVs + Explicit Level
+          // Works now that MinFilter is Mipmap-compatible
+          ivec2 p = ivec2(v_uv * source_size);
+          p = clamp(p, ivec2(0), ivec2(source_size) - 1);
+          color = texelFetch(source, p, level);
         }|};
     attributes = [ "position" ];
   }
@@ -937,9 +975,12 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
   (* Linear is fine for RGBA8 *)
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
 
   (* Use RGBA8 (4 bytes per pixel) *)
   Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
@@ -970,8 +1011,8 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   (* Mipmap Generation Loop *)
   let mipmap_pid = create_program ctx mipmap_program in
-  let pos_loc = Gl.get_attrib_location ctx mipmap_pid (Jstr.v "position") in
-  let level_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "level") in
+  let copy_pid = create_program ctx copy_program in
+  (* Locations for Mipmap Program *)
   let source_level_loc =
     Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_level")
   in
@@ -980,14 +1021,29 @@ let compute_relief ctx width height triangle_geo tile_texture =
   let source_loc =
     Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_texture")
   in
+  let mipmap_size_loc =
+    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_size")
+  in
 
-  Gl.use_program ctx mipmap_pid;
+  (* Locations for Copy Program *)
+  let copy_source_loc =
+    Gl.get_uniform_location ctx copy_pid (Jstr.v "source")
+  in
+  let copy_level_loc = Gl.get_uniform_location ctx copy_pid (Jstr.v "level") in
+  let copy_size_loc =
+    Gl.get_uniform_location ctx copy_pid (Jstr.v "source_size")
+  in
+
   Gl.bind_vertex_array ctx (Some triangle_geo);
-  let _ = pos_loc in
-  (* attributes bound by triangle_geo *)
+
+  (* Common Uniforms *)
+  Gl.use_program ctx mipmap_pid;
   Gl.uniform1i ctx source_loc 0;
   Gl.uniform1f ctx base_k_loc 0.1;
   Gl.uniform1f ctx decay_loc 0.5;
+
+  Gl.use_program ctx copy_pid;
+  Gl.uniform1i ctx copy_source_loc 0;
 
   (* Not used in shader explicitly yet, using pow directly *)
 
@@ -1005,42 +1061,57 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (* Temporary texture for ping-ponging to avoid feedback loop *)
   let temp_tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  (* Allocate initial temp storage (will be resized by copy_tex_image_2d) *)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  (* Allocate initial temp storage ONCE (full size) *)
+  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 width height;
   Gl.bind_texture ctx Gl.texture_2d None;
 
   let rec loop level w h =
     if level > max_level || w < 1 || h < 1 then ()
     else (
       (* 1. Copy Source (Level N-1) to Temp Texture *)
-      (* Bind FBO to Source Level (N-1) *)
+
+      (* Bind FBO to Temp Texture *)
       Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
-        Gl.texture_2d tid (level - 1);
+        Gl.texture_2d temp_tid 0;
 
-      (* Bind Temp Texture *)
-      Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
+      (* Bind Source: tid *)
+      Gl.bind_texture ctx Gl.texture_2d (Some tid);
 
-      (* Copy FBO content to Temp Texture *)
-      (* Note: w*2, h*2 is the size of the source level *)
-      Gl.copy_tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 0 0 (w * 2) (h * 2) 0;
+      (* Use Copy Program *)
+      Gl.use_program ctx copy_pid;
+      Gl.uniform1i ctx copy_source_loc 0;
+      Gl.uniform1i ctx copy_level_loc (level - 1);
+      (* Source size is previous level size *)
+      Gl.uniform2f ctx copy_size_loc (float (w * 2)) (float (h * 2));
 
-      (* 2. Render to Dest (Level N) *)
-      (* Bind FBO to Dest Level (N) *)
+      Gl.viewport ctx 0 0 (w * 2) (h * 2);
+      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+
+      (* 2. Downsample Temp(0) -> tid(N) *)
+
+      (* Bind FBO to Dest: tid(N) *)
       Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
         Gl.texture_2d tid level;
 
-      (* Bind Temp Texture as Source *)
+      (* Bind Source: Temp *)
       Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
+
+      (* Use Mipmap Program *)
+      Gl.use_program ctx mipmap_pid;
       Gl.uniform1i ctx source_loc 0;
 
-      (* Unit 0 bound to temp_tid *)
-
-      (* Render *)
-      Gl.viewport ctx 0 0 w h;
-      Gl.uniform1i ctx level_loc level;
+      let source_w = float (w * 2) in
+      let source_h = float (h * 2) in
+      Gl.uniform2f ctx mipmap_size_loc source_w source_h;
       Gl.uniform1i ctx source_level_loc 0;
-      (* Temp texture always has data at level 0 *)
+
+      (* Temp is Level 0 *)
+      Gl.viewport ctx 0 0 w h;
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
       check_err ();
@@ -1050,11 +1121,11 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   Gl.delete_texture ctx temp_tid;
 
-  (* Restore Texture Params *)
-  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0; *)
-  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000; *)
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
+  (* Restore Texture Params - Not modified inside loop anymore *)
+  (* Gl.bind_texture ctx Gl.texture_2d (Some tid);
+     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
+     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000;
+     Gl.bind_texture ctx Gl.texture_2d None; *)
 
   (* Restore Framebuffer *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
