@@ -394,8 +394,8 @@ let build_indices w w' h =
   in
   for i = 0 to h - 2 do
     for j = 0 to w - 1 do
-      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + (i * w'));
-      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + ((i + 1) * w'))
+      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + ((i + 1) * w'));
+      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + (i * w'))
     done;
     if i > 0 then is.{(i * ((2 * w) + 1)) - 1} <- Int32.of_int (-1)
   done;
@@ -537,7 +537,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
 
-  (* Gl.enable ctx Gl.cull_face'; *)
+  Gl.enable ctx Gl.cull_face';
   (* Radial Grid Uniforms *)
   (* Radial Grid Uniforms *)
   let width_shift_loc =
