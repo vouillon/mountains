@@ -79,74 +79,75 @@ let terrain_program =
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
-        uniform highp float sectors_div;
-        uniform highp float rings_div;
-//        uniform sampler2D tile;
+        uniform highp float inv_sectors_div;
+        uniform highp float inv_rings_sq;
+        uniform highp vec2 inv_delta;
+        uniform highp float inv_w;
+        uniform highp float inv_avg_delta;
         uniform sampler2D relief;
-        out highp vec3 position;
+        out highp float v_dist;
         out highp vec2 reliefCoord;
         void main()
         {
           const float PI = 3.14159265359;
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) / sectors_div) * (PI / 2.0) - (PI / 4.0);
+          float ring_sq = float(ring) * float(ring); // optimization: pre-calculate sq
+          float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
           float angle = theta + snapped_alpha + (PI / 2.0);
-          float r = 50000.0 * pow(float(ring) / rings_div, 2.0);
+          float r = 50000.0 * float(ring_sq) * inv_rings_sq;
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
-          highp vec2 coord = coord_meters / delta;
-          // Manual bilinear interpolation for 2-byte height
-          highp vec2 tex_pos = vec2(coord.x, float(w) - 1.0 - coord.y);
-          tex_pos = clamp(tex_pos, 0.5, float(w) - 0.5);
+          highp vec2 coord = coord_meters * inv_delta;
           
           // Calculate approximate grid spacing in meters
-          float dr_ring = 2.0 * 50000.0 * float(ring) / (rings_div * rings_div);
-          float ds_sector = r * (PI / (sectors_div * 2.0)); // arc length
+          float dr_ring = 2.0 * 50000.0 * float(ring) * inv_rings_sq;
+          float ds_sector = r * (PI * inv_sectors_div); // arc length
           float grid_spacing = max(dr_ring, ds_sector);
           
-          // Texture spacing (meters per texel)
-          float avg_delta = (delta.x + delta.y) / 2.0;
-
           // LOD level
-          float lod_f = max(0.0, log2(grid_spacing / avg_delta));
+          float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
           int lod = int(lod_f); // Sample from the floor level
           
           // Texture Size at this LOD
           ivec2 tex_size = textureSize(relief, lod);
-          
+
+          // Manual bilinear interpolation for 2-byte height
           // Normalized Coordinate (0..1)
-          highp vec2 norm_coord = tex_pos / float(w);
+          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
+          norm_coord = clamp(norm_coord, 0.0, 1.0);
           
           // Coordinate in LOD texels
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
           
           // Manual Bilinear Interpolation
-          tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
           
-          highp vec2 base_f = floor(tex_pos - 0.5);
+          highp vec2 base_f = floor(lod_tex_pos - 0.5);
           highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(tex_pos - 0.5);
+          highp vec2 f = fract(lod_tex_pos - 0.5);
           
           highp ivec2 w_max = tex_size - 1;
-          highp vec2 h00_enc = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
-          highp vec2 h10_enc = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
-          highp vec2 h01_enc = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
-          highp vec2 h11_enc = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
           
-          float h00 = ((h00_enc.r * 256.0 + h00_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h10 = ((h10_enc.r * 256.0 + h10_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h01 = ((h01_enc.r * 256.0 + h01_enc.g) / 257.0) * 9500.0 - 500.0;
-          float h11 = ((h11_enc.r * 256.0 + h11_enc.g) / 257.0) * 9500.0 - 500.0;
+          // Vectorized Fetch & Decode
+          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
+          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+
+          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
+          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
           
-          float h0 = mix(h00, h10, f.x);
-          float h1 = mix(h01, h11, f.x);
+          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
+
+          float h0 = mix(H.x, H.y, f.x);
+          float h1 = mix(H.z, H.w, f.x);
           float z = mix(h0, h1, f.y);
           
-          reliefCoord = norm_coord + (0.5 / float(w));
+          reliefCoord = norm_coord + (0.5 * inv_w);
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
-          position = pos.xyz;
+          v_dist = length(pos.xyz);
           gl_Position = proj * pos;
         }
       |};
@@ -156,7 +157,7 @@ let terrain_program =
         uniform mediump sampler2D relief;
         uniform mediump int w;
         in highp vec2 reliefCoord;
-        in highp vec3 position;
+        in highp float v_dist;
         out lowp vec4 color;
 
         void main() {
@@ -169,7 +170,7 @@ let terrain_program =
             max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
           lowp vec3 terrain_color = pow(vec3(0.3, 0.32, 0.19), vec3(2.2));
           lowp vec3 fog_color = pow(vec3(0.36, 0.45, 0.59), vec3(2.2));
-          float fog_coeff = exp(length(position) * -4e-5);
+          float fog_coeff = exp(v_dist * -4e-5);
           lowp vec3 final_color = mix(fog_color, l * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
         }
@@ -544,14 +545,18 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx width_shift_loc w_shift_radial;
 
   let sectors_div_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "sectors_div")
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_sectors_div")
   in
-  Gl.uniform1f ctx sectors_div_loc (float n_sectors /. 2.);
+  Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
 
-  let rings_div_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "rings_div")
+  let inv_rings_sq =
+    let r = float (n_rings - 1) in
+    1. /. (r *. r)
   in
-  Gl.uniform1f ctx rings_div_loc (float (n_rings - 1));
+  let inv_rings_sq_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_rings_sq")
+  in
+  Gl.uniform1f ctx inv_rings_sq_loc inv_rings_sq;
 
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
@@ -580,9 +585,18 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform2f ctx co_loc center_offset_x center_offset_y;
 
   let width_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
+  let inv_w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_w") in
   Gl.uniform1i ctx width_loc w;
-  let delta_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "delta") in
-  Gl.uniform2f ctx delta_loc deltax deltay;
+  Gl.uniform1f ctx inv_w_loc (1. /. float w);
+  let inv_delta_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_delta")
+  in
+  let inv_avg_delta_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_avg_delta")
+  in
+  Gl.uniform2f ctx inv_delta_loc (1. /. deltax) (1. /. deltay);
+  let avg_delta = (deltax +. deltay) *. 0.5 in
+  Gl.uniform1f ctx inv_avg_delta_loc (1. /. avg_delta);
   let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
   Gl.uniform_matrix4fv ctx proj_loc false
     (Brr.Tarray.of_bigarray1 (Matrix.array proj));
