@@ -996,26 +996,59 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (* Generate *)
   (* Ensure sampling from Level N-1 restricted? No, texturing samples from BaseLevel -> MaxLevel. *)
   (* To sample specifically from Level N-1, we might need to set GL_TEXTURE_BASE_LEVEL temporarily. *)
+  (* Check error *)
+  let check_err () =
+    let err = Gl.get_error ctx in
+    if err <> Gl.no_error then Format.eprintf "GL ERROR %d@." err
+  in
+
+  (* Temporary texture for ping-ponging to avoid feedback loop *)
+  let temp_tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  (* Allocate initial temp storage (will be resized by copy_tex_image_2d) *)
+  Gl.bind_texture ctx Gl.texture_2d None;
+
   let rec loop level w h =
     if level > max_level || w < 1 || h < 1 then ()
     else (
-      (* Restrict sampling to N-1 *)
-      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level (level - 1); *)
-      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (level - 1); *)
+      (* 1. Copy Source (Level N-1) to Temp Texture *)
+      (* Bind FBO to Source Level (N-1) *)
+      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+        Gl.texture_2d tid (level - 1);
 
-      (* Target Level N *)
+      (* Bind Temp Texture *)
+      Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
+
+      (* Copy FBO content to Temp Texture *)
+      (* Note: w*2, h*2 is the size of the source level *)
+      Gl.copy_tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 0 0 (w * 2) (h * 2) 0;
+
+      (* 2. Render to Dest (Level N) *)
+      (* Bind FBO to Dest Level (N) *)
       Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
         Gl.texture_2d tid level;
 
-      (* Changed relief_texture to tid *)
+      (* Bind Temp Texture as Source *)
+      Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
+      Gl.uniform1i ctx source_loc 0;
+
+      (* Unit 0 bound to temp_tid *)
+
+      (* Render *)
       Gl.viewport ctx 0 0 w h;
       Gl.uniform1i ctx level_loc level;
-      Gl.uniform1i ctx source_level_loc (level - 1);
+      Gl.uniform1i ctx source_level_loc 0;
+      (* Temp texture always has data at level 0 *)
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
+      check_err ();
       loop (level + 1) (w / 2) (h / 2))
   in
   loop 1 (width / 2) (height / 2);
+
+  Gl.delete_texture ctx temp_tid;
 
   (* Restore Texture Params *)
   (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0; *)
