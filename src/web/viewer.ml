@@ -388,18 +388,37 @@ let _precompute tile_height tile_width tile =
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
-  let is =
-    Bigarray.(
-      Array1.create Bigarray.int32 c_layout (((h - 1) * ((2 * w) + 1)) - 1))
+  let block_size = 32 in
+  let rec count_indices total jb =
+    if jb >= w - 1 then total
+    else
+      let je = min (jb + block_size) (w - 1) in
+      let num_strips = h - 1 in
+      let indices_per_strip = ((je - jb + 1) * 2) + 1 in
+      count_indices (total + (num_strips * indices_per_strip)) (jb + block_size)
   in
-  for i = 0 to h - 2 do
-    for j = 0 to w - 1 do
-      is.{(i * ((2 * w) + 1)) + (j * 2) + 1} <- Int32.of_int (j + ((i + 1) * w'));
-      is.{(i * ((2 * w) + 1)) + (j * 2)} <- Int32.of_int (j + (i * w'))
-    done;
-    if i > 0 then is.{(i * ((2 * w) + 1)) - 1} <- Int32.of_int (-1)
-  done;
-  Format.eprintf "BUILD INDICES %f@." (Unix.gettimeofday () -. t);
+  let total_size = count_indices 0 0 in
+  let is = Bigarray.(Array1.create Bigarray.int32 c_layout total_size) in
+  let idx = ref 0 in
+  let rec fill_indices jb =
+    if jb < w - 1 then (
+      let je = min (jb + block_size) (w - 1) in
+      for i = 0 to h - 2 do
+        for j = jb to je do
+          is.{!idx} <- Int32.of_int (j + (i * w'));
+          incr idx;
+          is.{!idx} <- Int32.of_int (j + ((i + 1) * w'));
+          incr idx
+        done;
+        is.{!idx} <- Int32.of_int (-1);
+        incr idx
+      done;
+      fill_indices (jb + block_size))
+  in
+  fill_indices 0;
+  Format.eprintf "BUILD INDICES %f (size %d)@."
+    (Unix.gettimeofday () -. t)
+    total_size;
   is
 
 let make_tile_texture ctx tile =
@@ -459,7 +478,7 @@ let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    canvas ctx =
+    ~index_count canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -625,10 +644,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.draw_elements ctx Gl.triangle_strip
-    (((n_rings - 1) * ((2 * (n_sectors + 1)) + 1)) - 1)
-    (* rings=512, sectors=256 *)
-    Gl.unsigned_int 0;
+  Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
@@ -940,11 +956,12 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
-  let terrain_geo =
+  let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
     let w' = next_power_of_two sectors 1 in
-    create_geometry ctx ~indices:(build_indices sectors w' rings) ~buffers:[]
+    let indices = build_indices sectors w' rings in
+    (create_geometry ctx ~indices ~buffers:[], indices)
   in
   let text_geo =
     create_geometry ctx
@@ -1007,10 +1024,11 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
     |> List.map fst
   in
+  let index_count = Bigarray.Array1.dim indices in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points canvas ctx)
+        ~points ~index_count canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
