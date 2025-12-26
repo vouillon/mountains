@@ -80,7 +80,9 @@ let terrain_program =
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
         uniform highp float inv_sectors_div;
-        uniform highp float inv_rings_sq;
+        uniform highp float grid_k;
+        uniform highp float grid_base;
+        uniform highp float grid_scale;
         uniform highp vec2 inv_delta;
         uniform highp float inv_w;
         uniform highp float inv_avg_delta;
@@ -92,18 +94,17 @@ let terrain_program =
           const float PI = 3.14159265359;
           int sector = gl_VertexID & w_mask;
           int ring = gl_VertexID >> w_shift;
-          float ring_sq = float(ring) * float(ring); // optimization: pre-calculate sq
           float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
           float angle = theta + snapped_alpha + (PI / 2.0);
-          float r = 50000.0 * float(ring_sq) * inv_rings_sq;
+          float r = grid_scale * (pow(grid_base, float(ring)) - 1.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
           highp vec2 coord = coord_meters * inv_delta;
           
           // Calculate approximate grid spacing in meters
-          float dr_ring = 2.0 * 50000.0 * float(ring) * inv_rings_sq;
-          float ds_sector = r * (PI * inv_sectors_div); // arc length
-          float grid_spacing = max(dr_ring, ds_sector);
+          // For exponential grid r = A(B^i - 1), dr = k(r + A), ds = kr
+          // k = grid_k, A = grid_scale
+          float grid_spacing = grid_k * (r + grid_scale);
           
           // LOD level
           float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
@@ -549,14 +550,23 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   in
   Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
 
-  let inv_rings_sq =
-    let r = float (n_rings - 1) in
-    1. /. (r *. r)
+  (* Exponential Grid Parameters *)
+  let grid_k = pi /. float n_sectors in
+  let height_term = exp (grid_k *. float (n_rings - 1)) in
+  let grid_base = exp grid_k in
+  let grid_scale = 50000. /. (height_term -. 1.) in
+
+  let grid_k_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_k") in
+  let grid_base_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_base")
   in
-  let inv_rings_sq_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_rings_sq")
+  let grid_scale_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_scale")
   in
-  Gl.uniform1f ctx inv_rings_sq_loc inv_rings_sq;
+
+  Gl.uniform1f ctx grid_k_loc grid_k;
+  Gl.uniform1f ctx grid_base_loc grid_base;
+  Gl.uniform1f ctx grid_scale_loc grid_scale;
 
   let width_mask_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
@@ -564,7 +574,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx width_mask_loc w_mask_radial;
 
   (* Determine snapped alpha *)
-  let sector_angle = pi /. 2. /. (float n_sectors /. 2.) in
+  let sector_angle = grid_k in
+  (* Reuse k *)
   let current_azimuth = compute_azimuth transform in
   let snapped_alpha =
     floor ((current_azimuth /. sector_angle) +. 0.5) *. sector_angle
