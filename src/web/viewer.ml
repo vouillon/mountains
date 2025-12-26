@@ -116,7 +116,7 @@ let terrain_program =
           ivec2 tex_size = textureSize(relief, lod);
           
           // Normalized Coordinate (0..1)
-          highp vec2 norm_coord = (tex_pos + 0.5) / float(w);
+          highp vec2 norm_coord = tex_pos / float(w);
           
           // Coordinate in LOD texels
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
@@ -143,7 +143,7 @@ let terrain_program =
           float h1 = mix(h01, h11, f.x);
           float z = mix(h0, h1, f.y);
           
-          reliefCoord = norm_coord;
+          reliefCoord = norm_coord + (0.5 / float(w));
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
           position = pos.xyz;
