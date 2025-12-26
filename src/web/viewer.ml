@@ -100,26 +100,50 @@ let terrain_program =
           highp vec2 tex_pos = vec2(coord.x, float(w) - 1.0 - coord.y);
           tex_pos = clamp(tex_pos, 0.5, float(w) - 0.5);
           
+          // Calculate approximate grid spacing in meters
+          float dr_ring = 2.0 * 50000.0 * float(ring) / (rings_div * rings_div);
+          float ds_sector = r * (PI / (sectors_div * 2.0)); // arc length
+          float grid_spacing = max(dr_ring, ds_sector);
+          
+          // Texture spacing (meters per texel)
+          float avg_delta = (delta.x + delta.y) / 2.0;
+
+          // LOD level
+          float lod_f = max(0.0, log2(grid_spacing / avg_delta));
+          int lod = int(lod_f); // Sample from the floor level
+          
+          // Texture Size at this LOD
+          ivec2 tex_size = textureSize(relief, lod);
+          
+          // Normalized Coordinate (0..1)
+          highp vec2 norm_coord = (tex_pos + 0.5) / float(w);
+          
+          // Coordinate in LOD texels
+          highp vec2 lod_pos = norm_coord * vec2(tex_size);
+          
+          // Manual Bilinear Interpolation
+          tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
+          
           highp vec2 base_f = floor(tex_pos - 0.5);
           highp ivec2 base = ivec2(base_f);
           highp vec2 f = fract(tex_pos - 0.5);
-
-          highp int w_max = w - 1;
-          highp vec2 h00_enc = texelFetch(relief, clamp(base + ivec2(0,0), 0, w_max), 0).rg;
-          highp vec2 h10_enc = texelFetch(relief, clamp(base + ivec2(1,0), 0, w_max), 0).rg;
-          highp vec2 h01_enc = texelFetch(relief, clamp(base + ivec2(0,1), 0, w_max), 0).rg;
-          highp vec2 h11_enc = texelFetch(relief, clamp(base + ivec2(1,1), 0, w_max), 0).rg;
-
+          
+          highp ivec2 w_max = tex_size - 1;
+          highp vec2 h00_enc = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
+          highp vec2 h10_enc = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
+          highp vec2 h01_enc = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
+          highp vec2 h11_enc = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+          
           float h00 = ((h00_enc.r * 256.0 + h00_enc.g) / 257.0) * 9500.0 - 500.0;
           float h10 = ((h10_enc.r * 256.0 + h10_enc.g) / 257.0) * 9500.0 - 500.0;
           float h01 = ((h01_enc.r * 256.0 + h01_enc.g) / 257.0) * 9500.0 - 500.0;
           float h11 = ((h11_enc.r * 256.0 + h11_enc.g) / 257.0) * 9500.0 - 500.0;
-
+          
           float h0 = mix(h00, h10, f.x);
           float h1 = mix(h01, h11, f.x);
           float z = mix(h0, h1, f.y);
           
-          reliefCoord = tex_pos;
+          reliefCoord = norm_coord;
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
           position = pos.xyz;
@@ -137,7 +161,7 @@ let terrain_program =
 
         void main() {
           mediump vec2 encodedN = 
-            texture(relief, (2. * reliefCoord + 1.) * (1. / (2. * float(w)))).ba;
+            texture(relief, reliefCoord).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -669,39 +693,38 @@ let mipmap_program =
   {
     vertex_shader =
       {|#version 300 es
-        in vec3 position;
-        out highp vec2 tex_coord;
+        precision highp float;
+        layout(location = 0) in vec3 position;
         void main() {
-          gl_Position = vec4(position, 1.0);
-          tex_coord = position.xy * 0.5 + 0.5;
+          gl_Position = vec4(position, 1.);
         }|};
     fragment_shader =
       {|#version 300 es
         precision highp float;
         uniform sampler2D source_texture;
-        uniform int level;
         uniform float base_k;
         uniform float decay;
+        uniform int level; // Target level (unused in logic, but passed)
+        uniform int source_level; // Explicit source level
         out vec4 frag_color;
-
         void main() {
-          vec2 size = vec2(textureSize(source_texture, 0));
-          vec2 p00 = gl_FragCoord.xy * 2.0 - 0.5;
-          vec2 p10 = p00 + vec2(1.0, 0.0);
-          vec2 p01 = p00 + vec2(0.0, 1.0);
-          vec2 p11 = p00 + vec2(1.0, 1.0);
+          vec2 size = vec2(textureSize(source_texture, source_level));
+          ivec2 p00 = ivec2(gl_FragCoord.xy * 2.0 - 0.5);
           
-          p00 /= size; p10 /= size; p01 /= size; p11 /= size;
+          ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
+          ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+          ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+          ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
           
-          vec4 c00 = texture(source_texture, p00);
-          vec4 c10 = texture(source_texture, p10);
-          vec4 c01 = texture(source_texture, p01);
-          vec4 c11 = texture(source_texture, p11);
+          vec4 h00_v = texelFetch(source_texture, c00, source_level);
+          vec4 h10_v = texelFetch(source_texture, c10, source_level);
+          vec4 h01_v = texelFetch(source_texture, c01, source_level);
+          vec4 h11_v = texelFetch(source_texture, c11, source_level);
           
-          float h00 = c00.r + c00.g / 256.0;
-          float h10 = c10.r + c10.g / 256.0;
-          float h01 = c01.r + c01.g / 256.0;
-          float h11 = c11.r + c11.g / 256.0;
+          float h00 = h00_v.r + h00_v.g / 256.0;
+          float h10 = h10_v.r + h10_v.g / 256.0;
+          float h01 = h01_v.r + h01_v.g / 256.0;
+          float h11 = h11_v.r + h11_v.g / 256.0;
           
           float k = base_k / pow(2.0, float(level - 1));
           float max_h = max(max(h00, h10), max(h01, h11));
@@ -714,7 +737,7 @@ let mipmap_program =
           
           float sum_w = w00 + w10 + w01 + w11;
           float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
-          vec2 n_avg = (c00.ba + c10.ba + c01.ba + c11.ba) * 0.25;
+          vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
           
           float r = floor(h_avg * 255.0) / 255.0;
           float g = (h_avg - r) * 256.0;
@@ -828,10 +851,14 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
   (* Mipmap Generation Loop *)
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
   (* Mipmap Generation Loop *)
   let mipmap_pid = create_program ctx mipmap_program in
   let pos_loc = Gl.get_attrib_location ctx mipmap_pid (Jstr.v "position") in
   let level_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "level") in
+  let source_level_loc =
+    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_level")
+  in
   let base_k_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "base_k") in
   let decay_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "decay") in
   let source_loc =
@@ -857,8 +884,8 @@ let compute_relief ctx width height triangle_geo tile_texture =
     if level > max_level || w < 1 || h < 1 then ()
     else (
       (* Restrict sampling to N-1 *)
-      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level (level - 1);
-      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (level - 1);
+      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level (level - 1); *)
+      (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (level - 1); *)
 
       (* Target Level N *)
       Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
@@ -867,15 +894,16 @@ let compute_relief ctx width height triangle_geo tile_texture =
       (* Changed relief_texture to tid *)
       Gl.viewport ctx 0 0 w h;
       Gl.uniform1i ctx level_loc level;
-      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_short 0;
+      Gl.uniform1i ctx source_level_loc (level - 1);
+      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
       loop (level + 1) (w / 2) (h / 2))
   in
   loop 1 (width / 2) (height / 2);
 
   (* Restore Texture Params *)
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000;
+  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0; *)
+  (* Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000; *)
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
     Gl.linear_mipmap_linear;
 
