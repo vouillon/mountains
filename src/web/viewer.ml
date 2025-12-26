@@ -86,8 +86,10 @@ let terrain_program =
         uniform highp vec2 inv_delta;
         uniform highp float inv_w;
         uniform highp float inv_avg_delta;
+        uniform highp int max_lod;
         uniform sampler2D relief;
         out highp float v_dist;
+        out highp float v_h;
         out highp vec2 reliefCoord;
         void main()
         {
@@ -108,7 +110,9 @@ let terrain_program =
           
           // LOD level
           float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
-          int lod = int(lod_f); // Sample from the floor level
+          int lod = min(int(lod_f), max_lod);
+          
+          // Texture Size at this LOD
           
           // Texture Size at this LOD
           ivec2 tex_size = textureSize(relief, lod);
@@ -149,6 +153,7 @@ let terrain_program =
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
           v_dist = length(pos.xyz);
+          v_h = z;
           gl_Position = proj * pos;
         }
       |};
@@ -156,9 +161,11 @@ let terrain_program =
       {|#version 300 es
         precision mediump float;
         uniform mediump sampler2D relief;
+        uniform mediump sampler2D noise;
         uniform mediump int w;
         in highp vec2 reliefCoord;
         in highp float v_dist;
+        in highp float v_h;
         out lowp vec4 color;
 
         void main() {
@@ -167,12 +174,44 @@ let terrain_program =
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
-          lowp float l =
-            max(dot(normal, normalize(vec3(-1, 1, 2))), 0.);
-          lowp vec3 terrain_color = pow(vec3(0.3, 0.32, 0.19), vec3(2.2));
-          lowp vec3 fog_color = pow(vec3(0.36, 0.45, 0.59), vec3(2.2));
-          float fog_coeff = exp(v_dist * -4e-5);
-          lowp vec3 final_color = mix(fog_color, l * terrain_color, fog_coeff);
+          
+          lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
+          lowp float lighting = 0.1 + 0.9 * l; // Deeper shadows (Ambient 0.1)
+          
+          // Biome Colors (Vibrant & Darker to counteract Gamma)
+          lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
+          lowp vec3 c_grass = vec3(0.1, 0.4, 0.15); // Deep Vibrant Green
+          lowp vec3 c_rock  = vec3(0.3, 0.28, 0.25); // Darker Rock
+          lowp vec3 c_snow  = vec3(0.95, 0.95, 0.98); // White
+          
+          // Slope Factor (0 = flat, 1 = vertical)
+          float slope = 1.0 - normal.z;
+          
+          // Mixing Logic
+          vec3 terrain_color;
+          
+          if (v_h < 0.0) {
+             terrain_color = c_water;
+          } else {
+             // Base: Grass
+             terrain_color = c_grass;
+             
+
+             // Slope: Grass -> Rock
+             // mix when slope > 0.2, fully rock at 0.5
+             float rock_mixin = smoothstep(0.15, 0.5, slope);
+             terrain_color = mix(terrain_color, c_rock, rock_mixin);
+          }
+          
+          // Noise Modulation
+          lowp vec3 noise_val = texture(noise, reliefCoord * 40.0).rgb;
+          terrain_color = terrain_color * (0.8 + 0.4 * noise_val);
+
+          // Match fog to clear color (0.37, 0.56, 0.85)
+          lowp vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
+          float fog_coeff = exp(v_dist * -3e-5); // Slightly clearer fog
+          
+          lowp vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
         }
       |};
@@ -433,6 +472,30 @@ let make_tile_texture ctx tile =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
   Gl.bind_texture ctx Gl.texture_2d None;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tid
+
+let make_noise_texture ctx =
+  let size = 256 in
+  let data =
+    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 3))
+  in
+  for i = 0 to (size * size * 3) - 1 do
+    data.{i} <- Random.int 256
+  done;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb size size 0 Gl.rgb Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+    0;
+  Gl.generate_mipmap ctx Gl.texture_2d;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
+  Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
@@ -478,7 +541,7 @@ let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count canvas ctx =
+    ~index_count ~noise_texture canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -614,10 +677,18 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   in
   Gl.uniform2f ctx co_loc center_offset_x center_offset_y;
 
-  let width_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
+  let w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
   let inv_w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_w") in
-  Gl.uniform1i ctx width_loc w;
+  let max_lod_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "max_lod")
+  in
+  Gl.uniform1i ctx w_loc w;
   Gl.uniform1f ctx inv_w_loc (1. /. float w);
+  let max_lod =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 w
+  in
+  Gl.uniform1i ctx max_lod_loc max_lod;
   let inv_delta_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_delta")
   in
@@ -637,13 +708,17 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
   (*  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in*)
   let relief_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "relief") in
+  let noise_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "noise") in
   (*  Gl.uniform1i ctx tile_loc 0;*)
   Gl.uniform1i ctx relief_loc 1;
+  Gl.uniform1i ctx noise_loc 2;
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.active_texture ctx Gl.texture0;
   (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.active_texture ctx Gl.texture2;
+  Gl.bind_texture ctx Gl.texture_2d (Some noise_texture);
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -1025,10 +1100,11 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
+  let noise_texture = make_noise_texture ctx in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points ~index_count canvas ctx)
+        ~points ~index_count ~noise_texture canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
