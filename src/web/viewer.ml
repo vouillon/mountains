@@ -45,8 +45,8 @@ type program = {
   attributes : string list;
 }
 
-let n_sectors = 256
-let n_rings = 512
+let n_sectors = 512
+let n_rings = 1024
 
 type orientation = {
   alpha : float;
@@ -162,6 +162,7 @@ let terrain_program =
         precision mediump float;
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
+        uniform mediump sampler2D ao; // Added AO
         uniform mediump int w;
         in highp vec2 reliefCoord;
         in highp float v_dist;
@@ -176,8 +177,8 @@ let terrain_program =
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
           
           lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
-          lowp float lighting = 0.1 + 0.9 * l; // Deeper shadows (Ambient 0.1)
-          
+          lowp float lighting = 0.2 + 0.8 * l; // Deeper shadows (Ambient 0.1)
+
           // Biome Colors (Vibrant & Darker to counteract Gamma)
           lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
           lowp vec3 c_grass = vec3(0.1, 0.4, 0.15); // Deep Vibrant Green
@@ -196,7 +197,6 @@ let terrain_program =
              // Base: Grass
              terrain_color = c_grass;
              
-
              // Slope: Grass -> Rock
              // mix when slope > 0.2, fully rock at 0.5
              float rock_mixin = smoothstep(0.15, 0.5, slope);
@@ -207,6 +207,10 @@ let terrain_program =
           lowp vec3 noise_val = texture(noise, reliefCoord * 40.0).rgb;
           terrain_color = terrain_color * (0.8 + 0.4 * noise_val);
 
+          // AO Modulation
+          lowp float occlusion = texture(ao, reliefCoord).r;
+          terrain_color = terrain_color * occlusion;
+ 
           // Match fog to clear color (0.37, 0.56, 0.85)
           lowp vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
           float fog_coeff = exp(v_dist * -3e-5); // Slightly clearer fog
@@ -265,6 +269,161 @@ let text_program =
         out vec4 color;
         void main() {
           color = texture(tex, texture_coord);
+        }
+      |};
+    attributes = [];
+  }
+
+let ao_bake_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out vec2 uv;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          uv = vec2(x, y);
+          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 0.0, 1.0);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D relief;
+        uniform int width;
+        uniform float scale; // Added scale uniform
+        in vec2 uv;
+        out float occlusion;
+
+        const float PI = 3.14159265;
+
+        // Decode height from RG channels (same as terrain shader)
+        float decode_height(vec2 c) {
+          return (c.r * 256.0 + c.g) * ((1.0/257.0) * 9500.0) - 500.0;
+        }
+
+        vec3 get_pos(vec2 coord) {
+          float h = decode_height(texture(relief, coord).rg);
+          // Reconstruct World Position
+          // UV * Width * Scale = World Meters
+          return vec3(coord * float(width) * scale, h);
+        }
+
+        // Pseudo-random noise
+        float rand(vec2 co){
+            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        }
+
+        void main() {
+          float dist_step = 1.0 / float(width); 
+          
+          // Center Height
+          float h_center = decode_height(texture(relief, uv).rg);
+          
+          float AO = 0.0;
+          float R_uv = 150.0 * dist_step; // ~150 pixels radius in UV space
+          
+          // Precompute world distance for one step 
+          // R_pixels = 150.0. 
+          // R_world = 150.0 * scale.
+          // step_len_uv = R_uv / 16.0
+          // step_len_world = (150.0 * scale) / 16.0
+          float step_dist_world = (150.0 * scale) / 16.0;
+          
+          // Jitter
+          float random_val = rand(gl_FragCoord.xy);
+          float random_angle = random_val * 2.0 * PI;
+          
+          float directions = 8.0;
+          float steps = 16.0; 
+          
+          for (float d = 0.0; d < 8.0; d++) {
+             float angle = random_angle + (d / 8.0) * 2.0 * PI;
+             vec2 dir = vec2(cos(angle), sin(angle));
+             
+             // Maximize Tangent (Height Diff / Dist) instead of Angle
+             // Initialize to small value (tan(-89deg))
+             float max_tan = -100.0;
+             float max_obj_s = 0.0;
+             
+             for (float s = 1.0; s <= 16.0; s++) {
+                vec2 sample_uv = uv + dir * (s / 16.0) * R_uv;
+                
+                // Boundary check
+                if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
+                
+                float h_sample = decode_height(texture(relief, sample_uv).rg);
+                float h_diff = h_sample - h_center;
+                float dist = s * step_dist_world;
+                
+                float tan_s = h_diff / dist;
+                
+                if (tan_s > max_tan) {
+                   max_tan = tan_s;
+                   max_obj_s = s;
+                }
+             }
+             
+             // Convert max_tan back to sin(horizon_angle)
+             float sin_horizon = max_tan / sqrt(1.0 + max_tan * max_tan);
+             
+             // Distance Attenuation
+             // 1.0 - (dist / max_dist)^2
+             float dist_ratio = max_obj_s / 16.0;
+             float attenuation = 1.0 - dist_ratio * dist_ratio;
+             
+             AO += max(0.0, sin_horizon) * max(0.0, attenuation);
+          }
+          
+          AO = AO / 8.0; 
+          
+          occlusion = 1.0 - AO; // Output visibility
+        }
+      |};
+    attributes = [];
+  }
+
+let ao_blur_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out vec2 uv;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          uv = vec2(x, y);
+          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 0.0, 1.0);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision mediump float;
+        uniform sampler2D ao_tex;
+        uniform vec2 inv_res;
+        in vec2 uv;
+        out float color;
+
+        void main() {
+          float result = 0.0;
+          // 3x3 Gaussian
+          // 1 2 1
+          // 2 4 2
+          // 1 2 1
+          // Div 16
+          float k[9];
+          k[0]=1.; k[1]=2.; k[2]=1.;
+          k[3]=2.; k[4]=4.; k[5]=2.;
+          k[6]=1.; k[7]=2.; k[8]=1.;
+          
+          int idx = 0;
+          for (int y=-1; y<=1; y++) {
+             for (int x=-1; x<=1; x++) {
+                vec2 offset = vec2(float(x), float(y)) * inv_res;
+                result += texture(ao_tex, uv + offset).r * k[idx];
+                idx++;
+             }
+          }
+          color = result / 16.0;
         }
       |};
     attributes = [];
@@ -498,6 +657,79 @@ let make_noise_texture ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
+let compute_ao ctx width height scale relief_texture =
+  (* Helper to create FBO and R8 Texture *)
+  let create_r8_target w h =
+    let tid = Gl.create_texture ctx in
+    Gl.bind_texture ctx Gl.texture_2d (Some tid);
+    Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 w h;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+    tid
+  in
+
+  let bake_pid = create_program ctx ao_bake_program in
+  let blur_pid = create_program ctx ao_blur_program in
+
+  let ao_bake_tex = create_r8_target width height in
+  let ao_final_tex = create_r8_target width height in
+
+  let fbo = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+
+  (* PASS 1: Bake AO *)
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    ao_bake_tex 0;
+
+  Gl.viewport ctx 0 0 width height;
+  Gl.use_program ctx bake_pid;
+
+  let relief_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "relief") in
+  let width_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "width") in
+  let scale_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "scale") in
+
+  Gl.uniform1i ctx relief_loc 0;
+  Gl.uniform1i ctx width_loc width;
+  Gl.uniform1f ctx scale_loc scale;
+
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+
+  (* Fullscreen Quad *)
+
+  (* PASS 2: Blur AO *)
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    ao_final_tex 0;
+
+  Gl.use_program ctx blur_pid;
+
+  let ao_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "ao_tex") in
+  let inv_res_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "inv_res") in
+
+  Gl.uniform1i ctx ao_loc 0;
+  Gl.uniform2f ctx inv_res_loc (1.0 /. float width) (1.0 /. float height);
+
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some ao_bake_tex);
+
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+
+  (* Cleanup *)
+  Gl.delete_framebuffer ctx fbo;
+  Gl.delete_texture ctx ao_bake_tex;
+  Gl.delete_program ctx bake_pid;
+  Gl.delete_program ctx blur_pid;
+
+  (* Restore State *)
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.bind_texture ctx Gl.texture_2d None;
+
+  ao_final_tex
+
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
@@ -541,7 +773,7 @@ let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count ~noise_texture canvas ctx =
+    ~index_count ~noise_texture ~ao_texture canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -709,9 +941,15 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (*  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in*)
   let relief_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "relief") in
   let noise_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "noise") in
+  let ao_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "ao") in
+  (* AO Uniform *)
+
   (*  Gl.uniform1i ctx tile_loc 0;*)
   Gl.uniform1i ctx relief_loc 1;
   Gl.uniform1i ctx noise_loc 2;
+  Gl.uniform1i ctx ao_loc 3;
+
+  (* AO Texture Unit 3 *)
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.active_texture ctx Gl.texture0;
   (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
@@ -719,6 +957,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
   Gl.active_texture ctx Gl.texture2;
   Gl.bind_texture ctx Gl.texture_2d (Some noise_texture);
+  Gl.active_texture ctx Gl.texture3;
+  Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
+
+  (* Bind AO *)
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -1205,10 +1447,13 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   in
   let index_count = Bigarray.Array1.dim indices in
   let noise_texture = make_noise_texture ctx in
+  let scale = deltay in
+  (* Approx 30m per pixel *)
+  let ao_texture = compute_ao ctx w h scale relief_texture in
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points ~index_count ~noise_texture canvas ctx)
+        ~points ~index_count ~noise_texture ~ao_texture canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -1227,7 +1472,8 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  if true then (44.6075287, 6.8210935, 0.)
+  if false then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
+  else if true then (44.6075287, 6.8210935, 0.)
   else if false then
     (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
   else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)
@@ -1376,11 +1622,11 @@ let main () =
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
           let x =
             min (tile_width - 1)
-              (truncate (((lon -. tile_coord.lon) *. float width) +. 0.5))
+              (truncate ((lon -. tile_coord.lon) *. float width))
           in
           let y =
             min (tile_height - 1)
-              (truncate (((tile_coord'.lat -. lat) *. float height) +. 0.5))
+              (truncate ((tile_coord'.lat -. lat) *. float height))
           in
           (pt, (x, y))))
   in
