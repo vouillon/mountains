@@ -663,7 +663,68 @@ let event_loop ctx draw =
 
 (* compute_gradient_cpu removed *)
 
-let relief_program =
+let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+
+let mipmap_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        in vec3 position;
+        out highp vec2 tex_coord;
+        void main() {
+          gl_Position = vec4(position, 1.0);
+          tex_coord = position.xy * 0.5 + 0.5;
+        }|};
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D source_texture;
+        uniform int level;
+        uniform float base_k;
+        uniform float decay;
+        out vec4 frag_color;
+
+        void main() {
+          vec2 size = vec2(textureSize(source_texture, 0));
+          vec2 p00 = gl_FragCoord.xy * 2.0 - 0.5;
+          vec2 p10 = p00 + vec2(1.0, 0.0);
+          vec2 p01 = p00 + vec2(0.0, 1.0);
+          vec2 p11 = p00 + vec2(1.0, 1.0);
+          
+          p00 /= size; p10 /= size; p01 /= size; p11 /= size;
+          
+          vec4 c00 = texture(source_texture, p00);
+          vec4 c10 = texture(source_texture, p10);
+          vec4 c01 = texture(source_texture, p01);
+          vec4 c11 = texture(source_texture, p11);
+          
+          float h00 = c00.r + c00.g / 256.0;
+          float h10 = c10.r + c10.g / 256.0;
+          float h01 = c01.r + c01.g / 256.0;
+          float h11 = c11.r + c11.g / 256.0;
+          
+          float k = base_k / pow(2.0, float(level - 1));
+          float max_h = max(max(h00, h10), max(h01, h11));
+          float h_scale = 10000.0;
+          
+          float w00 = exp(k * (h00 - max_h) * h_scale);
+          float w10 = exp(k * (h10 - max_h) * h_scale);
+          float w01 = exp(k * (h01 - max_h) * h_scale);
+          float w11 = exp(k * (h11 - max_h) * h_scale);
+          
+          float sum_w = w00 + w10 + w01 + w11;
+          float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
+          vec2 n_avg = (c00.ba + c10.ba + c01.ba + c11.ba) * 0.25;
+          
+          float r = floor(h_avg * 255.0) / 255.0;
+          float g = (h_avg - r) * 256.0;
+          
+          frag_color = vec4(r, g, n_avg);
+        }|};
+    attributes = [ "position" ];
+  }
+
+let gradient_program =
   {
     vertex_shader =
       {|#version 300 es
@@ -724,10 +785,17 @@ let relief_program =
     attributes = [];
   }
 
-let compute_relief_gpu ctx width height text_geo tile_texture =
+let compute_relief ctx width height triangle_geo tile_texture =
   assert (width = height);
 
-  let relief_pid = create_program ctx relief_program in
+  let relief_pid = create_program ctx gradient_program in
+  (* Not used in shader explicitly yet, using pow directly *)
+  let max_level =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 (max width height)
+  in
+  let levels = max_level + 1 in
+
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
@@ -735,7 +803,7 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
 
   (* Use RGBA8 (4 bytes per pixel) *)
-  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 width height;
+  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
 
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
@@ -744,11 +812,11 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
     0;
   Gl.viewport ctx 0 0 width height;
   Gl.use_program ctx relief_pid;
-
+  (* Draw Gradient (Level 0) *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
-  Gl.bind_vertex_array ctx (Some text_geo);
+  Gl.bind_vertex_array ctx (Some triangle_geo);
   let size_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "size") in
   Gl.uniform2f ctx size_loc (float width) (float height);
 
@@ -757,17 +825,66 @@ let compute_relief_gpu ctx width height text_geo tile_texture =
   let delta_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "delta") in
   Gl.uniform2f ctx delta_loc deltax deltay;
 
-  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
+  (* Mipmap Generation Loop *)
+  (* Mipmap Generation Loop *)
+  let mipmap_pid = create_program ctx mipmap_program in
+  let pos_loc = Gl.get_attrib_location ctx mipmap_pid (Jstr.v "position") in
+  let level_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "level") in
+  let base_k_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "base_k") in
+  let decay_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "decay") in
+  let source_loc =
+    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_texture")
+  in
+
+  Gl.use_program ctx mipmap_pid;
+  Gl.bind_vertex_array ctx (Some triangle_geo);
+  let _ = pos_loc in
+  (* attributes bound by triangle_geo *)
+  Gl.uniform1i ctx source_loc 0;
+  Gl.uniform1f ctx base_k_loc 0.1;
+  Gl.uniform1f ctx decay_loc 0.5;
+
+  (* Not used in shader explicitly yet, using pow directly *)
+
+  (* Start from level 1 *)
+
+  (* Generate *)
+  (* Ensure sampling from Level N-1 restricted? No, texturing samples from BaseLevel -> MaxLevel. *)
+  (* To sample specifically from Level N-1, we might need to set GL_TEXTURE_BASE_LEVEL temporarily. *)
+  let rec loop level w h =
+    if level > max_level || w < 1 || h < 1 then ()
+    else (
+      (* Restrict sampling to N-1 *)
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level (level - 1);
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (level - 1);
+
+      (* Target Level N *)
+      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+        Gl.texture_2d tid level;
+
+      (* Changed relief_texture to tid *)
+      Gl.viewport ctx 0 0 w h;
+      Gl.uniform1i ctx level_loc level;
+      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_short 0;
+
+      loop (level + 1) (w / 2) (h / 2))
+  in
+  loop 1 (width / 2) (height / 2);
+
+  (* Restore Texture Params *)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+
+  (* Restore Framebuffer *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Gl.bind_texture ctx Gl.texture_2d None;
+
   Gl.bind_vertex_array ctx None;
 
-  tid
-
-let compute_relief ctx width height text_geo _tile tile_texture =
-  (* Use GPU path always *)
-  compute_relief_gpu ctx width height text_geo tile_texture
+  (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let terrain_geo =
@@ -781,11 +898,33 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
+  let triangle_geo =
+    let indices =
+      Bigarray.(Array1.of_array int8_unsigned c_layout [| 0; 1; 2; 1; 3; 2 |])
+    in
+    let positions =
+      let b = Bigarray.(Array1.create float32 c_layout 12) in
+      b.{0} <- -1.;
+      b.{1} <- 1.;
+      b.{2} <- 0.;
+      b.{3} <- 1.;
+      b.{4} <- 1.;
+      b.{5} <- 0.;
+      b.{6} <- -1.;
+      b.{7} <- -1.;
+      b.{8} <- 0.;
+      b.{9} <- 1.;
+      b.{10} <- -1.;
+      b.{11} <- 0.;
+      Buffer b
+    in
+    create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
+  in
   let terrain_pid = create_program ctx terrain_program in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
-  let relief_texture = compute_relief ctx w h text_geo tile tile_texture in
+  let relief_texture, _ = compute_relief ctx w h triangle_geo tile_texture in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
