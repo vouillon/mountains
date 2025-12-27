@@ -91,6 +91,8 @@ let terrain_program =
         out highp float v_dist;
         out highp float v_h;
         out highp vec2 reliefCoord;
+        out highp vec3 v_world_pos; // CSM
+
         void main()
         {
           const float PI = 3.14159265359;
@@ -150,6 +152,7 @@ let terrain_program =
           float z = mix(h0, h1, f.y);
           
           reliefCoord = norm_coord + (0.5 * inv_w);
+          v_world_pos = vec3(coord_meters, z);
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
           v_dist = length(pos.xyz);
@@ -162,12 +165,37 @@ let terrain_program =
         precision mediump float;
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
-        uniform mediump sampler2D ao; // Added AO
+        uniform mediump sampler2D ao;
+        uniform mediump sampler2DArrayShadow shadow_map; // CSM
+        uniform mat4 shadow_matrices[3];
+        uniform float shadow_splits[3];
         uniform mediump int w;
         in highp vec2 reliefCoord;
         in highp float v_dist;
         in highp float v_h;
+        in highp vec3 v_world_pos;
         out lowp vec4 color;
+
+        highp float calculateShadow(highp vec3 world_pos, highp float view_z) {
+          int layer = 2;
+          if (view_z < shadow_splits[0]) layer = 0;
+          else if (view_z < shadow_splits[1]) layer = 1;
+          
+          highp vec4 shadow_pos = shadow_matrices[layer] * vec4(world_pos, 1.0);
+          highp vec3 shadow_coord = shadow_pos.xyz / shadow_pos.w;
+          shadow_coord = shadow_coord * 0.5 + 0.5; // NDC -1..1 -> 0..1
+          
+          if (shadow_coord.x < 0.0 || shadow_coord.x > 1.0 || 
+              shadow_coord.y < 0.0 || shadow_coord.y > 1.0 || 
+              shadow_coord.z > 1.0) return 1.0; 
+
+          // Bias
+          float bias = 0.0005;
+          if (layer == 1) bias = 0.001; 
+          if (layer == 2) bias = 0.002;
+          
+          return texture(shadow_map, vec4(shadow_coord.xy, float(layer), shadow_coord.z - bias)); 
+        }
 
         void main() {
           mediump vec2 encodedN = 
@@ -177,7 +205,10 @@ let terrain_program =
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
           
           lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
-          lowp float lighting = 0.2 + 0.8 * l; // Deeper shadows (Ambient 0.1)
+          
+          // Shadowmap
+          highp float shadow = calculateShadow(v_world_pos, v_dist);
+          lowp float lighting = 0.2 + 0.8 * l * shadow; // Ambient + Light * Shadow
 
           // Biome Colors (Vibrant & Darker to counteract Gamma)
           lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
@@ -429,6 +460,62 @@ let ao_blur_program =
     attributes = [];
   }
 
+[@@@warning "-32"]
+
+let shadow_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        uniform mat4 shadow_view_proj;
+        uniform mediump int w;
+        uniform int w_mask;
+        uniform int w_shift;
+        uniform highp vec2 delta;
+        uniform highp vec2 center_offset;
+        uniform highp float snapped_alpha;
+        uniform highp float inv_sectors_div;
+        uniform highp float grid_k;
+        uniform highp float grid_base;
+        uniform highp float grid_scale;
+        uniform highp vec2 inv_delta;
+        uniform highp float inv_w;
+        uniform mediump sampler2D relief;
+        
+        void main()
+        {
+          const float PI = 3.14159265359;
+          int sector = gl_VertexID & w_mask;
+          int ring = gl_VertexID >> w_shift;
+          float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
+          float angle = theta + snapped_alpha + (PI / 2.0);
+          
+          float r_index = float(ring); 
+          float r = grid_base * pow(grid_k, r_index);
+          
+          float x = r * cos(angle);
+          float y = r * sin(angle);
+          
+          vec2 world_pos = vec2(x, y) + center_offset;
+          
+          // Compute relief coordinate
+          vec2 relief_uv = (world_pos * inv_delta) * inv_w;
+          
+          // Decode Height
+          mediump vec2 encodedH = texture(relief, relief_uv).rg;
+          float h = (encodedH.r * 256.0 + encodedH.g) * ((1.0/257.0) * 9500.0) - 500.0;
+          
+          gl_Position = shadow_view_proj * vec4(world_pos, h, 1.0);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        void main() {
+           // Depth is written automatically
+        }
+      |};
+    attributes = [];
+  }
+
 (* OpenGL setup *)
 
 module Gl = Brr_canvas.Gl
@@ -657,6 +744,267 @@ let make_noise_texture ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
+[@@@warning "-32"]
+
+let create_shadow_map ctx width height layers =
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d_array (Some tid);
+  Gl.tex_storage3d ctx Gl.texture_2d_array 1 Gl.depth_component24 width height
+    layers;
+
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
+
+  (* Hardware PCF *)
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
+    Gl.compare_ref_to_texture;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_func Gl.lequal;
+
+  Gl.bind_texture ctx Gl.texture_2d_array None;
+  tid
+
+let create_shadow_fbo ctx shadow_map =
+  let fbo = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment shadow_map
+    0 0;
+
+  (* Initially attach layer 0 *)
+
+  (* No color buffer *)
+  Gl.draw_buffers ctx [ Gl.none ];
+  Gl.read_buffer ctx Gl.none;
+
+  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
+  if status <> Gl.framebuffer_complete then
+    Format.eprintf "Shadow FBO incomplete: %d@." status;
+
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  fbo
+
+let calculate_shadow_matrices ~view_proj ~splits ~light_dir ~shadow_map_size =
+  let inv_view_proj = Matrix.inverse view_proj in
+  let corners =
+    [|
+      { Matrix.x = -1.; y = -1.; z = -1.; w = 1. };
+      { Matrix.x = 1.; y = -1.; z = -1.; w = 1. };
+      { Matrix.x = 1.; y = 1.; z = -1.; w = 1. };
+      { Matrix.x = -1.; y = 1.; z = -1.; w = 1. };
+      { Matrix.x = -1.; y = -1.; z = 1.; w = 1. };
+      { Matrix.x = 1.; y = -1.; z = 1.; w = 1. };
+      { Matrix.x = 1.; y = 1.; z = 1.; w = 1. };
+      { Matrix.x = -1.; y = 1.; z = 1.; w = 1. };
+    |]
+  in
+  (* Transform corners to world space *)
+  let world_corners =
+    Array.map
+      (fun c ->
+        let v = Matrix.(inv_view_proj *> c) in
+        { Matrix.x = v.x /. v.w; y = v.y /. v.w; z = v.z /. v.w; w = 1. })
+      corners
+  in
+
+  let matrices = Array.make 3 (Array.make 16 0.) in
+
+  for i = 0 to 2 do
+    (* Interpolate corners for split i *)
+    (* Near plane is splits.(i), Far is splits.(i+1) ... wait, splits array usually [near, mid, far, veryfar] 
+       Let's assume input splits is [near, mid, far_boundary] relative to camera near/far? 
+       Actually standard approach using 0..1 range in Z might be easier if we knew camera Near/Far.
+       Let's assume splits are 0.0 .. 1.0 ratios for simplicity? No, implementation plan said 50m, 400m...
+       If we use ratios of the ViewSpace depth? 
+       We need to interpolate between Near Corners and Far Corners.
+       
+       Let's assume linear interpolation of World Corners is sufficient approximation for Ortho split? 
+       Actually, standard CSM splits the view frustum.
+       
+       Simplification: Just compute bounding box of the whole sub-frustum.
+    *)
+
+    (* Recompute corners for this split distance? 
+       Or just take the subset of the camera frustum corresponding to [d_near, d_far].
+       To do this precisely we need transform from View Space. 
+       Let's implicitly assume we calculate centers and radius.
+    *)
+
+    (* Center of split frustum *)
+    (* 0.0 is fractional distance? *)
+    (* Let's assume passed splits are ratios 0..1 for now. 
+       0.0 = Near Plane, 1.0 = Far Plane. 
+    *)
+    let d_near = if i = 0 then 0. else splits.(i - 1) in
+    let d_far = splits.(i) in
+
+    let center = { Matrix.x = 0.; y = 0.; z = 0.; w = 0. } in
+    let center =
+      Array.fold_left
+        (fun acc j ->
+          let near_corner = world_corners.(j) in
+          let far_corner = world_corners.(j + 4) in
+          let c_near =
+            Matrix.
+              {
+                x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_near);
+                y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_near);
+                z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_near);
+                w = 1.;
+              }
+          in
+          let c_far =
+            Matrix.
+              {
+                x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_far);
+                y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_far);
+                z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_far);
+                w = 1.;
+              }
+          in
+          Matrix.
+            {
+              x = acc.x +. c_near.x +. c_far.x;
+              y = acc.y +. c_near.y +. c_far.y;
+              z = acc.z +. c_near.z +. c_far.z;
+              w = 0.;
+            })
+        center [| 0; 1; 2; 3 |]
+    in
+    let center =
+      {
+        Matrix.x = center.x /. 8.;
+        y = center.y /. 8.;
+        z = center.z /. 8.;
+        w = 1.;
+      }
+    in
+
+    (* Radius *)
+    let radius =
+      let r2 = ref 0. in
+      for j = 0 to 3 do
+        let near_corner = world_corners.(j) in
+        let far_corner = world_corners.(j + 4) in
+        let c_near =
+          Matrix.
+            {
+              x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_near);
+              y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_near);
+              z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_near);
+              w = 1.;
+            }
+        in
+        let c_far =
+          Matrix.
+            {
+              x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_far);
+              y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_far);
+              z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_far);
+              w = 1.;
+            }
+        in
+        let d2_near =
+          ((c_near.x -. center.x) ** 2.)
+          +. ((c_near.y -. center.y) ** 2.)
+          +. ((c_near.z -. center.z) ** 2.)
+        in
+        let d2_far =
+          ((c_far.x -. center.x) ** 2.)
+          +. ((c_far.y -. center.y) ** 2.)
+          +. ((c_far.z -. center.z) ** 2.)
+        in
+        r2 := max !r2 (max d2_near d2_far)
+      done;
+      sqrt !r2
+    in
+
+    (* Snap radius to something stable? Or assume radius calc is stable. 
+       Radius is view-dependent if rotating alone, but camera movement changes it.
+       Ceil radius to avoid jitter?
+       let radius = ceil(radius *. 16.) /. 16.; 
+    *)
+    let radius = ceil radius in
+
+    (* Light View Matrix *)
+    (* Ensure light view is consistent. Look from center - light_dir * radius towards center *)
+    let eye =
+      Matrix.
+        {
+          x = center.x -. (light_dir.x *. radius);
+          y = center.y -. (light_dir.y *. radius);
+          z = center.z -. (light_dir.z *. radius);
+          w = 1.;
+        }
+    in
+    let up = { Matrix.x = 0.; y = 1.; z = 0.; w = 0. } in
+    let view = Matrix.look_at ~eye ~center ~up in
+
+    (* Project Center to Light Space to snap *)
+    (*
+    let center_ls = Matrix.(view *> center) in 
+    let texel_size = (2.0 *. radius) /. float(shadow_map_size) in
+    let snaped_x = floor(center_ls.x /. texel_size) *. texel_size in
+    let snaped_y = floor(center_ls.y /. texel_size) *. texel_size in
+    
+    Actually, we snap the 'min/max' bounds of the projection.
+    Since we center the projection on 'center', the bounds are [-r, r].
+    *)
+
+    (* Construct Proj *)
+    let proj =
+      Matrix.ortho ~left:(-.radius) ~right:radius ~bottom:(-.radius) ~top:radius
+        ~near:0. ~far:(2. *. radius)
+    in
+
+    (* Combine *)
+    let m = Matrix.(proj * view) in
+
+    (* Texel Snapping via Shadow Matrix translation adjustment *)
+    let shadow_origin = Matrix.(m *> { x = 0.; y = 0.; z = 0.; w = 1. }) in
+    let shadow_origin =
+      {
+        Matrix.x = shadow_origin.x *. float shadow_map_size /. 2.;
+        y = shadow_origin.y *. float shadow_map_size /. 2.;
+        z = 0.;
+        w = 0.;
+      }
+    in
+
+    let rounded_origin =
+      {
+        Matrix.x = floor shadow_origin.x;
+        y = floor shadow_origin.y;
+        z = 0.;
+        w = 0.;
+      }
+    in
+    let round_offset =
+      {
+        Matrix.x = rounded_origin.x -. shadow_origin.x;
+        y = rounded_origin.y -. shadow_origin.y;
+        z = 0.;
+        w = 0.;
+      }
+    in
+    let round_offset =
+      {
+        Matrix.x = round_offset.x *. 2. /. float shadow_map_size;
+        y = round_offset.y *. 2. /. float shadow_map_size;
+        z = 0.;
+        w = 0.;
+      }
+    in
+
+    (* Apply offset to projection? No, just add translation matrix *)
+    (* Or modify m directly *)
+    (* m[3][0] += ... *)
+    (* Let's just create a small translation *)
+    let snap = Matrix.translate round_offset.x round_offset.y 0. in
+    matrices.(i) <- Matrix.(snap * m)
+  done;
+  matrices
+
 let compute_ao ctx width height scale relief_texture =
   (* Helper to create FBO and R8 Texture *)
   let create_r8_target w h =
@@ -768,12 +1116,124 @@ let draw_text ctx transform_loc transform (tid, w, h) =
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
   Gl.bind_texture ctx Gl.texture_2d None
 
+let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
+    ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ~snapped_alpha
+    ctx =
+  let width = Brr_canvas.Gl.drawing_buffer_width ctx in
+  let height = Brr_canvas.Gl.drawing_buffer_height ctx in
+  let deltax = deltay *. cos (lat *. pi /. 180.) in
+
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
+  Gl.viewport ctx 0 0 2048 2048;
+
+  Gl.use_program ctx shadow_pid;
+
+  let w_stride = next_power_of_two (n_sectors + 1) 1 in
+  let w_mask_radial = w_stride - 1 in
+  let w_shift_radial =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 w_stride
+  in
+
+  let w_mask_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask") in
+  Gl.uniform1i ctx w_mask_loc w_mask_radial;
+
+  let w_shift_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift") in
+  Gl.uniform1i ctx w_shift_loc w_shift_radial;
+
+  let sectors_div_loc =
+    Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div")
+  in
+  Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
+
+  let grid_k = pi /. float n_sectors in
+  let height_term = exp (grid_k *. float (n_rings - 1)) in
+  let grid_base = exp grid_k in
+  let grid_scale = 50000. /. (height_term -. 1.) in
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
+    grid_k;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_base"))
+    grid_base;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
+    grid_scale;
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
+    snapped_alpha;
+
+  Gl.uniform2f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
+    (1. /. deltax) (1. /. deltay);
+  let avg_delta = (deltax +. deltay) *. 0.5 in
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
+    (1. /. avg_delta);
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
+    (1. /. float w);
+
+  let max_lod =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 w
+  in
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "max_lod"))
+    max_lod;
+
+  (* Bind Relief Texture *)
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief")) 0;
+
+  (* Center Offset *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  Gl.uniform2f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "center_offset"))
+    center_offset_x center_offset_y;
+
+  Gl.bind_vertex_array ctx (Some terrain_geo);
+
+  Gl.enable ctx Gl.depth_test;
+  Gl.enable ctx Gl.cull_face';
+
+  (* Front face culling *)
+  (* Shadows might need Polygon Offset to reduce acne? 
+     Gl.enable ctx Gl.polygon_offset_fill;
+     Gl.polygon_offset ctx 1.0 1.0;
+  *)
+  for layer = 0 to 2 do
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
+      shadow_map 0 layer;
+    Gl.clear ctx Gl.depth_buffer_bit;
+
+    let svp_loc =
+      Gl.get_uniform_location ctx shadow_pid (Jstr.v "shadow_view_proj")
+    in
+    Gl.uniform_matrix4fv ctx svp_loc false
+      (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
+
+    Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+  done;
+
+  (* Gl.disable ctx Gl.polygon_offset_fill; *)
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.viewport ctx 0 0 width height
+
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count ~noise_texture ~ao_texture canvas ctx =
+    ~index_count ~noise_texture ~ao_texture ~shadow_pid ~shadow_fbo ~shadow_map
+    canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -844,6 +1304,29 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         (texture, x, y, shown))
       points
   in
+
+  (* SHADOW PASS *)
+  let grid_k = pi /. float n_sectors in
+  let current_azimuth = compute_azimuth transform in
+  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
+
+  let light_dir =
+    let len = sqrt (1. +. 1. +. 4.) in
+    Matrix.{ x = -1. /. len; y = 1. /. len; z = 2. /. len; w = 0. }
+  in
+  let view_proj = Matrix.(proj * transform) in
+  let z_far = 50000. in
+  let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
+  let splits_dist = [| 50.; 400.; 4000. |] in
+
+  let shadow_matrices =
+    calculate_shadow_matrices ~view_proj ~splits:splits_ratios ~light_dir
+      ~shadow_map_size:2048
+  in
+
+  draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
+    ~splits:splits_ratios ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat
+    ~lon ~w ~snapped_alpha ctx;
 
   Gl.clear_color ctx 0.37 0.56 0.85 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
@@ -959,6 +1442,36 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_texture ctx Gl.texture_2d (Some noise_texture);
   Gl.active_texture ctx Gl.texture3;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
+  Gl.active_texture ctx Gl.texture4;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
+
+  (* Shadow Uniforms *)
+  let sm_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_matrices")
+  in
+  let flat_matrices =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (3 * 16)
+  in
+  for k = 0 to 2 do
+    let m = Matrix.array shadow_matrices.(k) in
+    for j = 0 to 15 do
+      Bigarray.Array1.set flat_matrices ((k * 16) + j) (Bigarray.Array1.get m j)
+    done
+  done;
+  Gl.uniform_matrix4fv ctx sm_loc false (Brr.Tarray.of_bigarray1 flat_matrices);
+
+  let ss_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_splits")
+  in
+  let splits_ba =
+    Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout splits_dist
+  in
+  Gl.uniform1fv ctx ss_loc (Brr.Tarray.of_bigarray1 splits_ba);
+
+  let smap_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_map")
+  in
+  Gl.uniform1i ctx smap_loc 4;
 
   (* Bind AO *)
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
@@ -1450,10 +1963,15 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let scale = deltay in
   (* Approx 30m per pixel *)
   let ao_texture = compute_ao ctx w h scale relief_texture in
+  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_fbo = create_shadow_fbo ctx shadow_map in
+  let shadow_pid = create_program ctx shadow_program in
+
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points ~index_count ~noise_texture ~ao_texture canvas ctx)
+        ~points ~index_count ~noise_texture ~ao_texture ~shadow_pid ~shadow_fbo
+        ~shadow_map canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
