@@ -228,7 +228,7 @@ let terrain_program =
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
           // DEBUG MODE: 1=normal, 1=cascade colors, 2=proj_coords debug
-          #define DEBUG_SHADOWS 1
+          #define DEBUG_SHADOWS 2
           
           #if DEBUG_SHADOWS == 2
           // Show proj_coords: R=x, G=y, B=in_bounds
@@ -873,8 +873,9 @@ let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
   (* Simple Cascades based on Splits *)
   for i = 0 to 2 do
     (* Shadow map radius: 1.5x the split distance for margin *)
+    (* Larger cascades for coarse 20-30m grid cells *)
     let split_radius =
-      if i = 0 then 500.0 else if i = 1 then 2500.0 else 10000.0
+      if i = 0 then 2000.0 else if i = 1 then 8000.0 else 25000.0
     in
     let shadow_radius = split_radius *. 1.5 in
 
@@ -1358,8 +1359,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let view_proj = Matrix.(proj * transform) in
   let z_far = 50000. in
   let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
-  (* Splits must match shadow matrix radii: 500, 2500, 10000 *)
-  let splits_dist = [| 500.; 2500.; 10000. |] in
+  (* Splits must match shadow matrix radii: 2000, 8000, 25000 *)
+  let splits_dist = [| 2000.; 8000.; 25000. |] in
 
   (* Calculate World Center for Shadows *)
   (* Use z=0 since both shadow map terrain and lookup use absolute heights *)
