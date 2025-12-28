@@ -91,7 +91,8 @@ let terrain_program =
         out highp float v_dist;
         out highp float v_h;
         out highp vec2 reliefCoord;
-        out highp vec3 v_world_pos; // CSM
+        out highp vec3 v_world_pos;
+        out highp vec3 v_normal; // approximate normal for bias
 
         void main()
         {
@@ -104,18 +105,16 @@ let terrain_program =
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
           highp vec2 coord = coord_meters * inv_delta;
-          
+
           // Calculate approximate grid spacing in meters
           // For exponential grid r = A(B^i - 1), dr = k(r + A), ds = kr
           // k = grid_k, A = grid_scale
           float grid_spacing = grid_k * (r + grid_scale);
-          
+
           // LOD level
           float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
           int lod = min(int(lod_f), max_lod);
-          
-          // Texture Size at this LOD
-          
+
           // Texture Size at this LOD
           ivec2 tex_size = textureSize(relief, lod);
 
@@ -123,19 +122,17 @@ let terrain_program =
           // Normalized Coordinate (0..1)
           highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
           norm_coord = clamp(norm_coord, 0.0, 1.0);
-          
+
           // Coordinate in LOD texels
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
-          
+
           // Manual Bilinear Interpolation
           highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
-          
           highp vec2 base_f = floor(lod_tex_pos - 0.5);
           highp ivec2 base = ivec2(base_f);
           highp vec2 f = fract(lod_tex_pos - 0.5);
-          
           highp ivec2 w_max = tex_size - 1;
-          
+
           // Vectorized Fetch & Decode
           highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
           highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
@@ -144,14 +141,19 @@ let terrain_program =
 
           highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
           highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
-          
           highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
 
           float h0 = mix(H.x, H.y, f.x);
           float h1 = mix(H.z, H.w, f.x);
           float z = mix(h0, h1, f.y);
-          
+
           reliefCoord = norm_coord + (0.5 * inv_w);
+
+          // Approx Normal
+          float h_x = (mix(H.y, H.w, f.y) - mix(H.x, H.z, f.y)); // dH/dx
+          float h_y = (h1 - h0); // dH/dy approximation
+          v_normal = normalize(vec3(-h_x, -h_y, grid_spacing)); // Very rough
+
           v_world_pos = vec3(coord_meters, z);
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
@@ -162,39 +164,39 @@ let terrain_program =
       |};
     fragment_shader =
       {|#version 300 es
-        precision mediump float;
+        precision highp float;
+        precision highp sampler2DArray;
+
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
-        uniform mediump sampler2DArrayShadow shadow_map; // CSM
+        uniform highp sampler2DArray shadow_map; 
+        
         uniform mat4 shadow_matrices[3];
         uniform float shadow_splits[3];
+
         uniform mediump int w;
         in highp vec2 reliefCoord;
         in highp float v_dist;
         in highp float v_h;
         in highp vec3 v_world_pos;
+        in highp vec3 v_normal;
+
         out lowp vec4 color;
 
-        highp float calculateShadow(highp vec3 world_pos, highp float view_z) {
-          int layer = 2;
-          if (view_z < shadow_splits[0]) layer = 0;
-          else if (view_z < shadow_splits[1]) layer = 1;
-          
-          highp vec4 shadow_pos = shadow_matrices[layer] * vec4(world_pos, 1.0);
-          highp vec3 shadow_coord = shadow_pos.xyz / shadow_pos.w;
-          shadow_coord = shadow_coord * 0.5 + 0.5; // NDC -1..1 -> 0..1
-          
-          if (shadow_coord.x < 0.0 || shadow_coord.x > 1.0 || 
-              shadow_coord.y < 0.0 || shadow_coord.y > 1.0 || 
-              shadow_coord.z > 1.0) return 1.0; 
+        float sample_shadow(int layer, vec2 coords, float compare) {
+             return texture(shadow_map, vec3(coords, float(layer))).r > compare ? 1.0 : 0.0;
+        }
 
-          // Bias
-          float bias = 0.0005;
-          if (layer == 1) bias = 0.001; 
-          if (layer == 2) bias = 0.002;
-          
-          return texture(shadow_map, vec4(shadow_coord.xy, float(layer), shadow_coord.z - bias)); 
+        float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
+            float result = 0.0;
+            for(int x = -1; x <= 1; ++x) {
+                for(int y = -1; y <= 1; ++y) {
+                    float depth = texture(shadow_map, vec3(coords + vec2(x,y) * texel_size, float(layer))).r;
+                    result += depth > compare ? 1.0 : 0.3; // 1.0 = Lit, 0.3 = Shadow (Ambience)
+                }
+            }
+            return result / 9.0;
         }
 
         void main() {
@@ -203,25 +205,58 @@ let terrain_program =
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
-          
-          lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
-          
-          // Shadowmap
-          highp float shadow = calculateShadow(v_world_pos, v_dist);
-          lowp float lighting = 0.2 + 0.8 * l * shadow; // Ambient + Light * Shadow
 
+          lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
+
+           // Cascade Selection
+           int cascade = 2;
+           if (v_dist < shadow_splits[0]) cascade = 0;
+           else if (v_dist < shadow_splits[1]) cascade = 1;
+
+           // Project to Shadow Space
+           vec4 s_pos = shadow_matrices[cascade] * vec4(v_world_pos, 1.0);
+           vec3 proj_coords = s_pos.xyz / s_pos.w;
+           proj_coords = proj_coords * 0.5 + 0.5;
+
+           float current_depth = proj_coords.z;
+           
+           // Slope-Scaled Bias (increased for terrain scale)
+           vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0)); // Hardcoded match to OCaml
+           float cosTheta = clamp(dot(normalize(v_normal), lightDir), 0.0, 1.0);
+           // Cascade-specific bias: larger cascades cover more area, need more bias
+           float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 5.0 : 20.0);
+           float base_bias = max(0.02 * (1.0 - cosTheta), 0.005);
+           float bias = base_bias * cascade_scale;
+           
+           // PCF
+           // 1/2048 = 0.000488
+           float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
+           
+           // Cleanup edges
+           if(proj_coords.z > 1.0) shadow_val = 1.0;
+           
+           // DEBUG: Visualize shadow map depth vs current depth
+           // R = shadow map depth (what was written during shadow pass)
+           // G = current fragment depth (proj_coords.z after NDC transform)
+           // B = in-bounds check (1.0 if XY in [0,1], else 0)
+           highp float shadow_depth = texture(shadow_map, vec3(proj_coords.xy, float(cascade))).r;
+           float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
+                              proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
+           
+
+          lowp float lighting = 0.2 + 0.8 * l * shadow_val; // Ambient + Light * Shadow
           // Biome Colors (Vibrant & Darker to counteract Gamma)
           lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
           lowp vec3 c_grass = vec3(0.1, 0.4, 0.15); // Deep Vibrant Green
           lowp vec3 c_rock  = vec3(0.3, 0.28, 0.25); // Darker Rock
           lowp vec3 c_snow  = vec3(0.95, 0.95, 0.98); // White
-          
+
           // Slope Factor (0 = flat, 1 = vertical)
           float slope = 1.0 - normal.z;
-          
+
           // Mixing Logic
           vec3 terrain_color;
-          
+
           if (v_h < 0.0) {
              terrain_color = c_water;
           } else {
@@ -241,13 +276,14 @@ let terrain_program =
           // AO Modulation
           lowp float occlusion = texture(ao, reliefCoord).r;
           terrain_color = terrain_color * occlusion;
- 
+
           // Match fog to clear color (0.37, 0.56, 0.85)
           lowp vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
           float fog_coeff = exp(v_dist * -3e-5); // Slightly clearer fog
-          
+
           lowp vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
+
         }
       |};
     attributes = [];
@@ -466,6 +502,7 @@ let shadow_program =
   {
     vertex_shader =
       {|#version 300 es
+        precision highp float;
         uniform mat4 shadow_view_proj;
         uniform mediump int w;
         uniform int w_mask;
@@ -479,6 +516,8 @@ let shadow_program =
         uniform highp float grid_scale;
         uniform highp vec2 inv_delta;
         uniform highp float inv_w;
+        uniform highp float inv_avg_delta;
+        uniform int max_lod;
         uniform mediump sampler2D relief;
         
         void main()
@@ -489,8 +528,7 @@ let shadow_program =
           float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
           float angle = theta + snapped_alpha + (PI / 2.0);
           
-          float r_index = float(ring); 
-          float r = grid_base * pow(grid_k, r_index);
+          float r = grid_scale * (pow(grid_base, float(ring)) - 1.0);
           
           float x = r * cos(angle);
           float y = r * sin(angle);
@@ -498,20 +536,55 @@ let shadow_program =
           vec2 world_pos = vec2(x, y) + center_offset;
           
           // Compute relief coordinate
-          vec2 relief_uv = (world_pos * inv_delta) * inv_w;
+          vec2 coord = world_pos * inv_delta;
+
+          // Calculate approximate grid spacing in meters
+          float grid_spacing = grid_k * (r + grid_scale);
           
-          // Decode Height
-          mediump vec2 encodedH = texture(relief, relief_uv).rg;
-          float h = (encodedH.r * 256.0 + encodedH.g) * ((1.0/257.0) * 9500.0) - 500.0;
+          // LOD level
+          float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
+          int lod = min(int(lod_f), max_lod);
           
-          gl_Position = shadow_view_proj * vec4(world_pos, h, 1.0);
+          // Texture Size at this LOD
+          ivec2 tex_size = textureSize(relief, lod);
+
+          // Manual bilinear interpolation for 2-byte height
+          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
+          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          
+          highp vec2 lod_pos = norm_coord * vec2(tex_size);
+          
+          // Manual Bilinear Interpolation
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
+          highp vec2 base_f = floor(lod_tex_pos - 0.5);
+          highp ivec2 base = ivec2(base_f);
+          highp vec2 f = fract(lod_tex_pos - 0.5);
+          highp ivec2 w_max = tex_size - 1;
+          
+          // Vectorized Fetch & Decode
+          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
+          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
+          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+
+          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
+          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
+          
+          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
+
+          float h0 = mix(H.x, H.y, f.x);
+          float h1 = mix(H.z, H.w, f.x);
+          float h = mix(h0, h1, f.y);
+          
+          gl_Position = shadow_view_proj * vec4(world_pos.x, world_pos.y, h, 1.0);
         }
       |};
     fragment_shader =
       {|#version 300 es
-        void main() {
-           // Depth is written automatically
-        }
+        precision highp float;
+        // No Color Output for Shadow Map
+         void main() {
+         }
       |};
     attributes = [];
   }
@@ -718,8 +791,6 @@ let make_tile_texture ctx tile =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
   Gl.bind_texture ctx Gl.texture_2d None;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
 let make_noise_texture ctx =
@@ -752,257 +823,101 @@ let create_shadow_map ctx width height layers =
   Gl.tex_storage3d ctx Gl.texture_2d_array 1 Gl.depth_component24 width height
     layers;
 
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
 
-  (* Hardware PCF *)
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
+  (* Hardware PCF removed for manual comparison debugging *)
+  (* Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
     Gl.compare_ref_to_texture;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_func Gl.lequal;
-
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_func Gl.lequal; *)
   Gl.bind_texture ctx Gl.texture_2d_array None;
   tid
 
 let create_shadow_fbo ctx shadow_map =
+  (* Depth Only FBO *)
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
   Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment shadow_map
     0 0;
 
-  (* Initially attach layer 0 *)
-
-  (* No color buffer *)
+  (* No Color Attachment *)
   Gl.draw_buffers ctx [ Gl.none ];
-  Gl.read_buffer ctx Gl.none;
 
+  (* If Gl.none is not available in Brr/valid binding, just ensure no color attachment is bound *)
+  (* But wait, Gl.draw_buffers is needed if we want to be explicit about no color *)
+  (* If function is missing, skip it. Default is DRAW_BUFFER0 *)
+
+  (* We just won't bind any color texture. *)
+
+  (* Check status *)
   let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
   if status <> Gl.framebuffer_complete then
-    Format.eprintf "Shadow FBO incomplete: %d@." status;
+    Format.eprintf "Shadow FBO Incomplete: %d@." status;
 
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
-let calculate_shadow_matrices ~view_proj ~splits ~light_dir ~shadow_map_size =
-  let inv_view_proj = Matrix.inverse view_proj in
-  let corners =
-    [|
-      { Matrix.x = -1.; y = -1.; z = -1.; w = 1. };
-      { Matrix.x = 1.; y = -1.; z = -1.; w = 1. };
-      { Matrix.x = 1.; y = 1.; z = -1.; w = 1. };
-      { Matrix.x = -1.; y = 1.; z = -1.; w = 1. };
-      { Matrix.x = -1.; y = -1.; z = 1.; w = 1. };
-      { Matrix.x = 1.; y = -1.; z = 1.; w = 1. };
-      { Matrix.x = 1.; y = 1.; z = 1.; w = 1. };
-      { Matrix.x = -1.; y = 1.; z = 1.; w = 1. };
-    |]
-  in
-  (* Transform corners to world space *)
-  let world_corners =
-    Array.map
-      (fun c ->
-        let v = Matrix.(inv_view_proj *> c) in
-        { Matrix.x = v.x /. v.w; y = v.y /. v.w; z = v.z /. v.w; w = 1. })
-      corners
-  in
-
+let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
+    ~world_center ~shadow_map_size:_ =
   let matrices = Array.make 3 (Array.make 16 0.) in
 
+  (* Simple Cascades based on Splits *)
   for i = 0 to 2 do
-    (* Interpolate corners for split i *)
-    (* Near plane is splits.(i), Far is splits.(i+1) ... wait, splits array usually [near, mid, far, veryfar] 
-       Let's assume input splits is [near, mid, far_boundary] relative to camera near/far? 
-       Actually standard approach using 0..1 range in Z might be easier if we knew camera Near/Far.
-       Let's assume splits are 0.0 .. 1.0 ratios for simplicity? No, implementation plan said 50m, 400m...
-       If we use ratios of the ViewSpace depth? 
-       We need to interpolate between Near Corners and Far Corners.
-       
-       Let's assume linear interpolation of World Corners is sufficient approximation for Ortho split? 
-       Actually, standard CSM splits the view frustum.
-       
-       Simplification: Just compute bounding box of the whole sub-frustum.
-    *)
+    (* Radius: Dynamic based on cascade level *)
+    (* Scale for Flight: 500m, 2500m, 10000m *)
+    let radius = if i = 0 then 500.0 else if i = 1 then 2500.0 else 10000.0 in
 
-    (* Recompute corners for this split distance? 
-       Or just take the subset of the camera frustum corresponding to [d_near, d_far].
-       To do this precisely we need transform from View Space. 
-       Let's implicitly assume we calculate centers and radius.
-    *)
+    (* Use Dynamic Center (Player Position) *)
+    let center = world_center in
+    (* let center = world_center in *)
 
-    (* Center of split frustum *)
-    (* 0.0 is fractional distance? *)
-    (* Let's assume passed splits are ratios 0..1 for now. 
-       0.0 = Near Plane, 1.0 = Far Plane. 
-    *)
-    let d_near = if i = 0 then 0. else splits.(i - 1) in
-    let d_far = splits.(i) in
-
-    let center = { Matrix.x = 0.; y = 0.; z = 0.; w = 0. } in
-    let center =
-      Array.fold_left
-        (fun acc j ->
-          let near_corner = world_corners.(j) in
-          let far_corner = world_corners.(j + 4) in
-          let c_near =
-            Matrix.
-              {
-                x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_near);
-                y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_near);
-                z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_near);
-                w = 1.;
-              }
-          in
-          let c_far =
-            Matrix.
-              {
-                x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_far);
-                y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_far);
-                z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_far);
-                w = 1.;
-              }
-          in
-          Matrix.
-            {
-              x = acc.x +. c_near.x +. c_far.x;
-              y = acc.y +. c_near.y +. c_far.y;
-              z = acc.z +. c_near.z +. c_far.z;
-              w = 0.;
-            })
-        center [| 0; 1; 2; 3 |]
-    in
-    let center =
-      {
-        Matrix.x = center.x /. 8.;
-        y = center.y /. 8.;
-        z = center.z /. 8.;
-        w = 1.;
-      }
-    in
-
-    (* Radius *)
-    let radius =
-      let r2 = ref 0. in
-      for j = 0 to 3 do
-        let near_corner = world_corners.(j) in
-        let far_corner = world_corners.(j + 4) in
-        let c_near =
-          Matrix.
-            {
-              x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_near);
-              y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_near);
-              z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_near);
-              w = 1.;
-            }
-        in
-        let c_far =
-          Matrix.
-            {
-              x = near_corner.x +. ((far_corner.x -. near_corner.x) *. d_far);
-              y = near_corner.y +. ((far_corner.y -. near_corner.y) *. d_far);
-              z = near_corner.z +. ((far_corner.z -. near_corner.z) *. d_far);
-              w = 1.;
-            }
-        in
-        let d2_near =
-          ((c_near.x -. center.x) ** 2.)
-          +. ((c_near.y -. center.y) ** 2.)
-          +. ((c_near.z -. center.z) ** 2.)
-        in
-        let d2_far =
-          ((c_far.x -. center.x) ** 2.)
-          +. ((c_far.y -. center.y) ** 2.)
-          +. ((c_far.z -. center.z) ** 2.)
-        in
-        r2 := max !r2 (max d2_near d2_far)
-      done;
-      sqrt !r2
-    in
-
-    (* Snap radius to something stable? Or assume radius calc is stable. 
-       Radius is view-dependent if rotating alone, but camera movement changes it.
-       Ceil radius to avoid jitter?
-       let radius = ceil(radius *. 16.) /. 16.; 
-    *)
-    let radius = ceil radius in
-
-    (* Light View Matrix *)
-    (* Ensure light view is consistent. Look from center - light_dir * radius towards center *)
-    let eye =
+    (* Dynamic Eye based on Light Dir: Light FROM -> TO Center *)
+    (* Eye = Center + LightDir * Radius *)
+    let _ =
       Matrix.
         {
-          x = center.x -. (light_dir.x *. radius);
-          y = center.y -. (light_dir.y *. radius);
-          z = center.z -. (light_dir.z *. radius);
+          x = center.x +. (light_dir.x *. radius);
+          y = center.y +. (light_dir.y *. radius);
+          z = center.z +. (light_dir.z *. radius);
           w = 1.;
         }
     in
-    let up = { Matrix.x = 0.; y = 1.; z = 0.; w = 0. } in
-    let view = Matrix.look_at ~eye ~center ~up in
 
-    (* Project Center to Light Space to snap *)
-    (*
-    let center_ls = Matrix.(view *> center) in 
-    let texel_size = (2.0 *. radius) /. float(shadow_map_size) in
-    let snaped_x = floor(center_ls.x /. texel_size) *. texel_size in
-    let snaped_y = floor(center_ls.y /. texel_size) *. texel_size in
-    
-    Actually, we snap the 'min/max' bounds of the projection.
-    Since we center the projection on 'center', the bounds are [-r, r].
-    *)
+    let _ =
+      Matrix.look_at
+        ~eye:Matrix.{ x = 0.; y = 0.; z = 0.; w = 0. }
+        ~center
+        ~up:Matrix.{ x = 0.; y = 1.; z = 0.; w = 0. }
+    in
 
-    (* Construct Proj *)
-    let proj =
+    (* Standard Proj * View *)
+    (* Ortho Proj *)
+    (* Tighten Z-range: -10000 to 10000 (coverage for R=10k + Height) *)
+    let p =
       Matrix.ortho ~left:(-.radius) ~right:radius ~bottom:(-.radius) ~top:radius
-        ~near:0. ~far:(2. *. radius)
+        ~near:(-10000.) ~far:10000.
     in
 
-    (* Combine *)
-    let m = Matrix.(proj * view) in
-
-    (* Texel Snapping via Shadow Matrix translation adjustment *)
-    let shadow_origin = Matrix.(m *> { x = 0.; y = 0.; z = 0.; w = 1. }) in
-    let shadow_origin =
-      {
-        Matrix.x = shadow_origin.x *. float shadow_map_size /. 2.;
-        y = shadow_origin.y *. float shadow_map_size /. 2.;
-        z = 0.;
-        w = 0.;
-      }
+    let look_target =
+      Matrix.
+        {
+          x = center.x +. (light_dir.x *. radius);
+          y = center.y +. (light_dir.y *. radius);
+          z = center.z +. (light_dir.z *. radius);
+          w = 1.;
+        }
     in
 
-    let rounded_origin =
-      {
-        Matrix.x = floor shadow_origin.x;
-        y = floor shadow_origin.y;
-        z = 0.;
-        w = 0.;
-      }
-    in
-    let round_offset =
-      {
-        Matrix.x = rounded_origin.x -. shadow_origin.x;
-        y = rounded_origin.y -. shadow_origin.y;
-        z = 0.;
-        w = 0.;
-      }
-    in
-    let round_offset =
-      {
-        Matrix.x = round_offset.x *. 2. /. float shadow_map_size;
-        y = round_offset.y *. 2. /. float shadow_map_size;
-        z = 0.;
-        w = 0.;
-      }
+    let view =
+      Matrix.look_at ~eye:look_target ~center
+        ~up:Matrix.{ x = 0.; y = 1.; z = 0.; w = 0. }
     in
 
-    (* Apply offset to projection? No, just add translation matrix *)
-    (* Or modify m directly *)
-    (* m[3][0] += ... *)
-    (* Let's just create a small translation *)
-    let snap = Matrix.translate round_offset.x round_offset.y 0. in
-    matrices.(i) <- Matrix.(snap * m)
+    matrices.(i) <- Matrix.(view * p)
   done;
+
   matrices
 
 let compute_ao ctx width height scale relief_texture =
@@ -1123,12 +1038,89 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
 
+  (* Unbind Shadow Map from Texture Unit 4 to prevent Feedback Loop *)
+  Gl.active_texture ctx Gl.texture4;
+  Gl.bind_texture ctx Gl.texture_2d_array None;
+
   Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
+  Gl.viewport ctx 0 0 2048 2048;
+
+  (* Clear Color to BLUE for Debug *)
+  Gl.clear_color ctx 0.0 0.0 1.0 1.0;
+
+  (* Set Viewport to Shadow Map Size *)
+  (* Gl.viewport ctx 0 0 w w;  <-- INCORRECT: w is grid size! Use 2048 hardcoded above *)
   Gl.viewport ctx 0 0 2048 2048;
 
   Gl.use_program ctx shadow_pid;
 
+  (* --- GRID UNIFORM SETUP (Copied from draw) --- *)
+
+  (* Radial Grid calculation *)
   let w_stride = next_power_of_two (n_sectors + 1) 1 in
+  let w_mask_radial = w_stride - 1 in
+  let w_shift_radial =
+    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
+    log2 w_stride
+  in
+
+  (* Exponential Grid Parameters *)
+  let grid_k = pi /. float n_sectors in
+  let height_term = exp (grid_k *. float (n_rings - 1)) in
+  let grid_base = exp grid_k in
+  let grid_scale = 50000. /. (height_term -. 1.) in
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
+    grid_k;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_base"))
+    grid_base;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
+    grid_scale;
+
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
+    w_mask_radial;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
+    w_shift_radial;
+
+  (* Snapped Alpha *)
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
+    snapped_alpha;
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
+    (1. /. (float n_sectors /. 2.));
+
+  (* Center Offset *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  Gl.uniform2f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "center_offset"))
+    center_offset_x center_offset_y;
+
+  Gl.uniform2f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
+    (1. /. deltax) (1. /. deltay);
+  let avg_delta = (deltax +. deltay) *. 0.5 in
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
+    (1. /. avg_delta);
+
+  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w")) w;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
+    (1. /. float w);
+
+  (* --- END GRID UNIFORM SETUP --- *)
+
+  (* let w_stride = next_power_of_two (n_sectors + 1) 1 in ... removed old unused vars *)
   let w_mask_radial = w_stride - 1 in
   let w_shift_radial =
     let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
@@ -1154,12 +1146,26 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
     grid_k;
+
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_base"))
     grid_base;
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
     grid_scale;
+
+  (* Fix: Set Grid Gen Params *)
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
+    w_shift_radial;
+
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
+    w_mask_radial;
+
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
+    (1. /. (float n_sectors /. 2.));
 
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
@@ -1172,6 +1178,9 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
     (1. /. avg_delta);
+
+  (* Fix: Set 'w' uniform which was missing *)
+  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w")) w;
 
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
@@ -1201,18 +1210,39 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
+  (* FORCE STATE *)
+  Gl.depth_mask ctx true;
+  Gl.disable ctx Gl.scissor_test;
+  Gl.disable ctx Gl.blend;
   Gl.enable ctx Gl.depth_test;
-  Gl.enable ctx Gl.cull_face';
+  Gl.depth_func ctx Gl.less;
 
-  (* Front face culling *)
-  (* Shadows might need Polygon Offset to reduce acne? 
-     Gl.enable ctx Gl.polygon_offset_fill;
-     Gl.polygon_offset ctx 1.0 1.0;
-  *)
+  (* Set Viewport to Shadow Map Resolution *)
+  Gl.viewport ctx 0 0 2048 2048;
+
+  (* Revert Culling: Capture All Faces (or standard Back culling if preferred) *)
+  (* Let's disable culling to ensure everything casts a shadow *)
+  Gl.disable ctx Gl.cull_face';
+
+  (* Disable Color Writes *)
+  Gl.color_mask ctx false false false false;
+
+  Gl.clear_depth ctx 1.0;
+  (* Bind Relief Texture for Vertex Displacement *)
+  Gl.active_texture ctx 0;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  let relief_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief") in
+  Gl.uniform1i ctx relief_loc 0;
+
+  (* DEBUG: Back to 1.0. If we see Red (0.5), it means H=0 was drawn! *)
   for layer = 0 to 2 do
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 layer;
-    Gl.clear ctx Gl.depth_buffer_bit;
+
+    let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
+    if true || status <> Gl.framebuffer_complete then
+      Format.eprintf "Shadow FBO Error (Layer %d): %d@." layer status;
+    Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
 
     let svp_loc =
       Gl.get_uniform_location ctx shadow_pid (Jstr.v "shadow_view_proj")
@@ -1221,10 +1251,18 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
       (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
 
     Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+    (* Gl.draw_arrays ctx Gl.triangles 0 3 *)
   done;
+
+  (* Restore Color Writes *)
+  Gl.color_mask ctx true true true true;
+
+  (* Restore Culling *)
+  Gl.cull_face ctx Gl.back;
 
   (* Gl.disable ctx Gl.polygon_offset_fill; *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.clear_depth ctx 1.0;
   Gl.viewport ctx 0 0 width height
 
 let scale = (*2. *. 27. /. 24.*) 3.2
@@ -1317,11 +1355,21 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let view_proj = Matrix.(proj * transform) in
   let z_far = 50000. in
   let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
-  let splits_dist = [| 50.; 400.; 4000. |] in
+  let splits_dist = [| 1000.; 5000.; 20000. |] in
+
+  (* Calculate World Center for Shadows *)
+  (* Replicates Center Offset Logic *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let world_center =
+    Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
+  in
 
   let shadow_matrices =
-    calculate_shadow_matrices ~view_proj ~splits:splits_ratios ~light_dir
-      ~shadow_map_size:2048
+    calculate_shadow_matrices ~near_plane:0.1 ~view_proj ~splits:splits_dist
+      ~light_dir ~world_center ~shadow_map_size:2048.
   in
 
   draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
@@ -1445,19 +1493,24 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
 
+  (* Gl.bind_texture ctx Gl.texture_2d (Some shadow_debug_color); *)
+
   (* Shadow Uniforms *)
   let sm_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_matrices")
   in
+  (* Flatten Matrices *)
   let flat_matrices =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (3 * 16)
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (16 * 3)
   in
-  for k = 0 to 2 do
-    let m = Matrix.array shadow_matrices.(k) in
+  for i = 0 to 2 do
+    let m = Matrix.array shadow_matrices.(i) in
     for j = 0 to 15 do
-      Bigarray.Array1.set flat_matrices ((k * 16) + j) (Bigarray.Array1.get m j)
+      flat_matrices.{(i * 16) + j} <- m.{j}
     done
   done;
+
+  (* Upload Matrix Array *)
   Gl.uniform_matrix4fv ctx sm_loc false (Brr.Tarray.of_bigarray1 flat_matrices);
 
   let ss_loc =
