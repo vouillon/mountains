@@ -214,9 +214,9 @@ let terrain_program =
           // Slope-Scaled Bias (increased for terrain scale)
           vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
-          // Cascade-specific bias: larger cascades cover more area, need more bias
-          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 5.0 : 20.0);
-          float base_bias = max(0.02 * (1.0 - cosTheta), 0.005);
+          // Cascade-specific bias: modest scaling for larger cascades
+          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 2.0 : 4.0);
+          float base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
           float bias = base_bias * cascade_scale;
           
           // PCF Shadow (texel size = 1/2048)
@@ -225,6 +225,25 @@ let terrain_program =
           // Cleanup edges
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
+          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug
+          #define DEBUG_SHADOWS 1
+          
+          #if DEBUG_SHADOWS == 2
+          // Show depth comparison: R=shadow_depth, G=current_depth, B=in_bounds
+          float shadow_depth = texture(shadow_map, vec3(proj_coords.xy, float(cascade))).r;
+          float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
+                             proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
+          color = vec4(shadow_depth, current_depth, in_bounds, 1.0);
+          #elif DEBUG_SHADOWS == 1
+          // Cascade colors: Red=near, Green=mid, Blue=far, Magenta=beyond
+          vec3 cascade_color;
+          if (v_dist < shadow_splits[0]) cascade_color = vec3(1.0, 0.3, 0.3);      // Red
+          else if (v_dist < shadow_splits[1]) cascade_color = vec3(0.3, 1.0, 0.3); // Green
+          else if (v_dist < shadow_splits[2]) cascade_color = vec3(0.3, 0.3, 1.0); // Blue
+          else cascade_color = vec3(1.0, 0.3, 1.0);                                 // Magenta (beyond)
+          // Show shadow intensity within cascade color
+          color = vec4(cascade_color * shadow_val * (0.8 + 0.2 * l), 1.0);
+          #else
 
           lowp float lighting = 0.2 + 0.8 * l * shadow_val; // Ambient + Light * Shadow
           // Biome Colors (Vibrant & Darker to counteract Gamma)
@@ -265,7 +284,8 @@ let terrain_program =
 
           lowp vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
-
+          
+          #endif
         }
       |};
     attributes = [];
@@ -847,47 +867,33 @@ let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
 
   (* Simple Cascades based on Splits *)
   for i = 0 to 2 do
-    (* Radius: Dynamic based on cascade level *)
-    (* Scale for Flight: 500m, 2500m, 10000m *)
-    let radius = if i = 0 then 500.0 else if i = 1 then 2500.0 else 10000.0 in
+    (* Shadow map radius: 1.5x the split distance for margin *)
+    let split_radius =
+      if i = 0 then 500.0 else if i = 1 then 2500.0 else 10000.0
+    in
+    let shadow_radius = split_radius *. 1.5 in
 
-    (* Use Dynamic Center (Player Position) *)
-    let center = world_center in
-    (* let center = world_center in *)
-
-    (* Dynamic Eye based on Light Dir: Light FROM -> TO Center *)
-    (* Eye = Center + LightDir * Radius *)
-    let _ =
-      Matrix.
-        {
-          x = center.x +. (light_dir.x *. radius);
-          y = center.y +. (light_dir.y *. radius);
-          z = center.z +. (light_dir.z *. radius);
-          w = 1.;
-        }
+    (* Center at world position, with average terrain height *)
+    let center =
+      Matrix.{ x = world_center.x; y = world_center.y; z = 2500.; w = 1. }
     in
 
-    let _ =
-      Matrix.look_at
-        ~eye:Matrix.{ x = 0.; y = 0.; z = 0.; w = 0. }
-        ~center
-        ~up:Matrix.{ x = 0.; y = 1.; z = 0.; w = 0. }
-    in
-
-    (* Standard Proj * View *)
-    (* Ortho Proj *)
-    (* Tighten Z-range: -10000 to 10000 (coverage for R=10k + Height) *)
+    (* Ortho Proj with reasonable depth range *)
     let p =
-      Matrix.ortho ~left:(-.radius) ~right:radius ~bottom:(-.radius) ~top:radius
-        ~near:(-10000.) ~far:10000.
+      Matrix.ortho ~left:(-.shadow_radius) ~right:shadow_radius
+        ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:0.
+        ~far:30000. (* Positive Z range only *)
     in
 
+    (* Eye position: fixed distance along light direction *)
+    let eye_distance = 15000. in
+    (* Fixed distance for consistent depth *)
     let look_target =
       Matrix.
         {
-          x = center.x +. (light_dir.x *. radius);
-          y = center.y +. (light_dir.y *. radius);
-          z = center.z +. (light_dir.z *. radius);
+          x = center.x +. (light_dir.x *. eye_distance);
+          y = center.y +. (light_dir.y *. eye_distance);
+          z = center.z +. (light_dir.z *. eye_distance);
           w = 1.;
         }
     in
@@ -1014,8 +1020,8 @@ let draw_text ctx transform_loc transform (tid, w, h) =
   Gl.bind_texture ctx Gl.texture_2d None
 
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
-    ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ~snapped_alpha
-    ctx =
+    ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w
+    ~snapped_alpha:_ ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
@@ -1069,10 +1075,10 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
     w_shift_radial;
 
-  (* Snapped Alpha *)
+  (* Snapped Alpha: Use 0.0 for shadow pass (view-independent) *)
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
-    snapped_alpha;
+    0.0;
 
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
@@ -1151,7 +1157,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
 
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
-    snapped_alpha;
+    0.0;
 
   Gl.uniform2f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
@@ -1216,14 +1222,21 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   let relief_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief") in
   Gl.uniform1i ctx relief_loc 0;
 
-  (* DEBUG: Back to 1.0. If we see Red (0.5), it means H=0 was drawn! *)
+  (* Render shadow map with 4 rotations to cover full 360° terrain *)
+  let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
+  let snapped_alpha_loc =
+    Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha")
+  in
+
   for layer = 0 to 2 do
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 layer;
 
     let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-    if true || status <> Gl.framebuffer_complete then
+    if status <> Gl.framebuffer_complete then
       Format.eprintf "Shadow FBO Error (Layer %d): %d@." layer status;
+
+    (* Clear depth once per layer *)
     Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
 
     let svp_loc =
@@ -1232,8 +1245,11 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     Gl.uniform_matrix4fv ctx svp_loc false
       (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
 
-    Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
-    (* Gl.draw_arrays ctx Gl.triangles 0 3 *)
+    (* Render 4 rotations to cover full terrain *)
+    for rotation = 0 to 3 do
+      Gl.uniform1f ctx snapped_alpha_loc rotation_angles.(rotation);
+      Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+    done
   done;
 
   (* Restore Color Writes *)
@@ -1337,10 +1353,11 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let view_proj = Matrix.(proj * transform) in
   let z_far = 50000. in
   let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
-  let splits_dist = [| 1000.; 5000.; 20000. |] in
+  (* Splits must match shadow matrix radii: 500, 2500, 10000 *)
+  let splits_dist = [| 500.; 2500.; 10000. |] in
 
   (* Calculate World Center for Shadows *)
-  (* Replicates Center Offset Logic *)
+  (* Use z=0 since both shadow map terrain and lookup use absolute heights *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
@@ -1542,6 +1559,25 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       else Gl.uniform4f ctx color_loc 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
+  Gl.bind_vertex_array ctx None;
+
+  (* Light direction indicator (yellow sun in top-left corner) *)
+  (* Light comes FROM direction (-1, 1, 2), project to 2D: roughly upper-left *)
+  (* Rotate with current_azimuth so it shows correct direction relative to view *)
+  let light_2d_angle = atan2 1. (-1.) in
+  let sun_transform =
+    let sun_size = 0.08 in
+    Matrix.(
+      translate (-0.85) 0.85 0. (* top-left corner *)
+      * rotate_z (light_2d_angle -. (pi /. 2.) -. current_azimuth)
+      * scale sun_size sun_size 1.)
+  in
+  Gl.uniform_matrix4fv ctx transform_loc false
+    (Brr.Tarray.of_bigarray1 (Matrix.array sun_transform));
+  Gl.uniform4f ctx color_loc 1. 0.9 0.2 1.;
+  (* yellow *)
+  Gl.bind_vertex_array ctx (Some text_geo);
+  Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0;
   Gl.bind_vertex_array ctx None;
   Gl.disable ctx Gl.blend;
 
