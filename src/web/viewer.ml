@@ -164,7 +164,7 @@ let terrain_program =
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
-        uniform highp sampler2DArray shadow_map; 
+        uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
         
         uniform mat4 shadow_matrices[3];
         uniform float shadow_splits[3];
@@ -177,15 +177,16 @@ let terrain_program =
         out lowp vec4 color;
 
         float sample_shadow(int layer, vec2 coords, float compare) {
-             return texture(shadow_map, vec3(coords, float(layer))).r > compare ? 1.0 : 0.0;
+             // Hardware shadow comparison with bilinear filtering
+             return texture(shadow_map, vec4(coords, float(layer), compare));
         }
 
         float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
             float result = 0.0;
+            // 3x3 PCF with hardware bilinear filtering (36 effective samples)
             for(int x = -1; x <= 1; ++x) {
                 for(int y = -1; y <= 1; ++y) {
-                    float depth = texture(shadow_map, vec3(coords + vec2(x,y) * texel_size, float(layer))).r;
-                    result += depth > compare ? 1.0 : 0.; // 1.0 = Lit, 0.0 = Shadow
+                    result += texture(shadow_map, vec4(coords + vec2(x,y) * texel_size, float(layer), compare));
                 }
             }
             return result / 9.0;
@@ -217,18 +218,18 @@ let terrain_program =
           // Slope-Scaled Bias (increased for terrain scale)
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
           // Cascade-specific bias: modest scaling for larger cascades
-          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 2.0 : 0.1);
+          float cascade_scale = (cascade == 0) ? 0.15 : ((cascade == 1) ? 0.25 : 0.20);
           float base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
           float bias = base_bias * cascade_scale;
           
           // PCF Shadow (texel size = 1/2048)
           float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
           
-          // Cleanup edges
+          // Force lit beyond depth far plane (XY handled by 1-pixel border)
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
           // DEBUG MODE: 1=normal, 1=cascade colors, 2=proj_coords debug
-          #define DEBUG_SHADOWS 2
+          #define DEBUG_SHADOWS 0
           
           #if DEBUG_SHADOWS == 2
           // Show proj_coords: R=x, G=y, B=in_bounds
@@ -830,15 +831,16 @@ let create_shadow_map ctx width height layers =
   Gl.tex_storage3d ctx Gl.texture_2d_array 1 Gl.depth_component24 width height
     layers;
 
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
+  (* Linear filter for smooth shadow edges with hardware comparison *)
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
 
-  (* Hardware PCF removed for manual comparison debugging *)
-  (* Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
+  (* Enable hardware shadow comparison for sampler2DArrayShadow *)
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
     Gl.compare_ref_to_texture;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_func Gl.lequal; *)
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_func Gl.lequal;
   Gl.bind_texture ctx Gl.texture_2d_array None;
   tid
 
@@ -1033,19 +1035,10 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array None;
 
+  (* Setup FBO and viewport *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
   Gl.viewport ctx 0 0 2048 2048;
-
-  (* Clear Color to BLUE for Debug *)
-  Gl.clear_color ctx 0.0 0.0 1.0 1.0;
-
-  (* Set Viewport to Shadow Map Size *)
-  (* Gl.viewport ctx 0 0 w w;  <-- INCORRECT: w is grid size! Use 2048 hardcoded above *)
-  Gl.viewport ctx 0 0 2048 2048;
-
   Gl.use_program ctx shadow_pid;
-
-  (* --- GRID UNIFORM SETUP (Copied from draw) --- *)
 
   (* Radial Grid calculation *)
   let w_stride = next_power_of_two (n_sectors + 1) 1 in
@@ -1060,7 +1053,18 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   let height_term = exp (grid_k *. float (n_rings - 1)) in
   let grid_base = exp grid_k in
   let grid_scale = 50000. /. (height_term -. 1.) in
+  let avg_delta = (deltax +. deltay) *. 0.5 in
 
+  (* Set all uniforms once *)
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
+    w_mask_radial;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
+    w_shift_radial;
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
+    (1. /. (float n_sectors /. 2.));
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
     grid_k;
@@ -1070,109 +1074,13 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
     grid_scale;
-
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
-    w_mask_radial;
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
-    w_shift_radial;
-
-  (* Snapped Alpha: Use 0.0 for shadow pass (view-independent) *)
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
-    0.0;
-
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
-    (1. /. (float n_sectors /. 2.));
-
-  (* Center Offset *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
-  Gl.uniform2f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "center_offset"))
-    center_offset_x center_offset_y;
-
   Gl.uniform2f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
     (1. /. deltax) (1. /. deltay);
-  let avg_delta = (deltax +. deltay) *. 0.5 in
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
     (1. /. avg_delta);
-
   Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w")) w;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
-    (1. /. float w);
-
-  (* --- END GRID UNIFORM SETUP --- *)
-
-  (* let w_stride = next_power_of_two (n_sectors + 1) 1 in ... removed old unused vars *)
-  let w_mask_radial = w_stride - 1 in
-  let w_shift_radial =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 w_stride
-  in
-
-  let w_mask_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask") in
-  Gl.uniform1i ctx w_mask_loc w_mask_radial;
-
-  let w_shift_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift") in
-  Gl.uniform1i ctx w_shift_loc w_shift_radial;
-
-  let sectors_div_loc =
-    Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div")
-  in
-  Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
-
-  let grid_k = pi /. float n_sectors in
-  let height_term = exp (grid_k *. float (n_rings - 1)) in
-  let grid_base = exp grid_k in
-  let grid_scale = 50000. /. (height_term -. 1.) in
-
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
-    grid_k;
-
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_base"))
-    grid_base;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
-    grid_scale;
-
-  (* Fix: Set Grid Gen Params *)
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
-    w_shift_radial;
-
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
-    w_mask_radial;
-
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
-    (1. /. (float n_sectors /. 2.));
-
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha"))
-    0.0;
-
-  Gl.uniform2f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
-    (1. /. deltax) (1. /. deltay);
-  let avg_delta = (deltax +. deltay) *. 0.5 in
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
-    (1. /. avg_delta);
-
-  (* Fix: Set 'w' uniform which was missing *)
-  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w")) w;
-
   Gl.uniform1f ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
     (1. /. float w);
@@ -1185,11 +1093,6 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "max_lod"))
     max_lod;
 
-  (* Bind Relief Texture *)
-  Gl.active_texture ctx Gl.texture0;
-  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief")) 0;
-
   (* Center Offset *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
@@ -1199,35 +1102,30 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "center_offset"))
     center_offset_x center_offset_y;
 
+  (* Bind Relief Texture *)
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief")) 0;
+
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
-  (* FORCE STATE *)
+  (* Setup render state *)
   Gl.depth_mask ctx true;
   Gl.disable ctx Gl.scissor_test;
   Gl.disable ctx Gl.blend;
   Gl.enable ctx Gl.depth_test;
   Gl.depth_func ctx Gl.less;
-
-  (* Set Viewport to Shadow Map Resolution *)
-  Gl.viewport ctx 0 0 2048 2048;
-
-  Gl.enable ctx Gl.cull_face';
-  Gl.cull_face ctx Gl.front;
-
-  (* Disable Color Writes *)
+  Gl.disable ctx Gl.cull_face';
   Gl.color_mask ctx false false false false;
-
   Gl.clear_depth ctx 1.0;
-  (* Bind Relief Texture for Vertex Displacement *)
-  Gl.active_texture ctx 0;
-  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  let relief_loc = Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief") in
-  Gl.uniform1i ctx relief_loc 0;
 
   (* Render shadow map with 4 rotations to cover full 360° terrain *)
   let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
   let snapped_alpha_loc =
     Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha")
+  in
+  let svp_loc =
+    Gl.get_uniform_location ctx shadow_pid (Jstr.v "shadow_view_proj")
   in
 
   for layer = 0 to 2 do
@@ -1238,12 +1136,14 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     if status <> Gl.framebuffer_complete then
       Format.eprintf "Shadow FBO Error (Layer %d): %d@." layer status;
 
-    (* Clear depth once per layer *)
+    (* Clear full texture including 1-pixel border with depth=1.0 *)
+    Gl.disable ctx Gl.scissor_test;
     Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
 
-    let svp_loc =
-      Gl.get_uniform_location ctx shadow_pid (Jstr.v "shadow_view_proj")
-    in
+    (* Enable scissor to render only inner area, leaving 1-pixel border *)
+    Gl.enable ctx Gl.scissor_test;
+    Gl.scissor ctx 1 1 2046 2046;
+
     Gl.uniform_matrix4fv ctx svp_loc false
       (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
 
@@ -1251,16 +1151,14 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
     for rotation = 0 to 3 do
       Gl.uniform1f ctx snapped_alpha_loc rotation_angles.(rotation);
       Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
-    done
+    done;
+
+    Gl.disable ctx Gl.scissor_test
   done;
 
-  (* Restore Color Writes *)
+  (* Restore state *)
   Gl.color_mask ctx true true true true;
-
-  (* Restore Culling *)
   Gl.cull_face ctx Gl.back;
-
-  (* Gl.disable ctx Gl.polygon_offset_fill; *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.clear_depth ctx 1.0;
   Gl.viewport ctx 0 0 width height
