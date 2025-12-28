@@ -185,7 +185,7 @@ let terrain_program =
             for(int x = -1; x <= 1; ++x) {
                 for(int y = -1; y <= 1; ++y) {
                     float depth = texture(shadow_map, vec3(coords + vec2(x,y) * texel_size, float(layer))).r;
-                    result += depth > compare ? 1.0 : 0.3; // 1.0 = Lit, 0.3 = Shadow (Ambience)
+                    result += depth > compare ? 1.0 : 0.; // 1.0 = Lit, 0.0 = Shadow
                 }
             }
             return result / 9.0;
@@ -197,7 +197,10 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
-          lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
+//          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
+          vec3 lightDir = normalize(vec3(-4, 2., 1.0));
+
+          lowp float l = max(0.0, dot(normal, lightDir));
 
           // Cascade Selection
           int cascade = 2;
@@ -212,10 +215,9 @@ let terrain_program =
           float current_depth = proj_coords.z;
           
           // Slope-Scaled Bias (increased for terrain scale)
-          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
           // Cascade-specific bias: modest scaling for larger cascades
-          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 2.0 : 4.0);
+          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 2.0 : 0.1);
           float base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
           float bias = base_bias * cascade_scale;
           
@@ -225,27 +227,30 @@ let terrain_program =
           // Cleanup edges
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
-          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug
+          // DEBUG MODE: 1=normal, 1=cascade colors, 2=proj_coords debug
           #define DEBUG_SHADOWS 1
           
           #if DEBUG_SHADOWS == 2
-          // Show depth comparison: R=shadow_depth, G=current_depth, B=in_bounds
-          float shadow_depth = texture(shadow_map, vec3(proj_coords.xy, float(cascade))).r;
+          // Show proj_coords: R=x, G=y, B=in_bounds
           float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
                              proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
-          color = vec4(shadow_depth, current_depth, in_bounds, 1.0);
+          color = vec4(proj_coords.x, proj_coords.y, in_bounds, 1.0);
           #elif DEBUG_SHADOWS == 1
           // Cascade colors: Red=near, Green=mid, Blue=far, Magenta=beyond
           vec3 cascade_color;
           if (v_dist < shadow_splits[0]) cascade_color = vec3(1.0, 0.3, 0.3);      // Red
           else if (v_dist < shadow_splits[1]) cascade_color = vec3(0.3, 1.0, 0.3); // Green
           else if (v_dist < shadow_splits[2]) cascade_color = vec3(0.3, 0.3, 1.0); // Blue
-          else cascade_color = vec3(1.0, 0.3, 1.0);                                 // Magenta (beyond)
+          else {
+            float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
+                               proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
+            cascade_color = vec3(1.0, 0.3, 1.0 - in_bounds);                                 // Magenta (beyond)
+          }
           // Show shadow intensity within cascade color
-          color = vec4(cascade_color * shadow_val * (0.8 + 0.2 * l), 1.0);
+          color = vec4(cascade_color * (0.7 * shadow_val + 0.3) * (0.8 + 0.2 * l), 1.0);
           #else
 
-          lowp float lighting = 0.2 + 0.8 * l * shadow_val; // Ambient + Light * Shadow
+          lowp float lighting = 0.3 + 0.7 * l * shadow_val; // Ambient + Light * Shadow
           // Biome Colors (Vibrant & Darker to counteract Gamma)
           lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
           lowp vec3 c_grass = vec3(0.1, 0.4, 0.15); // Deep Vibrant Green
@@ -873,27 +878,24 @@ let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
     in
     let shadow_radius = split_radius *. 1.5 in
 
-    (* Center at world position, with average terrain height *)
-    let center =
-      Matrix.{ x = world_center.x; y = world_center.y; z = 2500.; w = 1. }
-    in
+    (* Use world_center with z=0 (terrain uses absolute heights) *)
+    let center = world_center in
 
-    (* Ortho Proj with reasonable depth range *)
+    (* Ortho Proj: scale depth range with shadow radius *)
+    let depth_range = max 10000. (shadow_radius *. 2.) in
     let p =
       Matrix.ortho ~left:(-.shadow_radius) ~right:shadow_radius
-        ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:0.
-        ~far:30000. (* Positive Z range only *)
+        ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:(-.depth_range)
+        ~far:depth_range
     in
 
-    (* Eye position: fixed distance along light direction *)
-    let eye_distance = 15000. in
-    (* Fixed distance for consistent depth *)
+    (* Eye position along light direction from center *)
     let look_target =
       Matrix.
         {
-          x = center.x +. (light_dir.x *. eye_distance);
-          y = center.y +. (light_dir.y *. eye_distance);
-          z = center.z +. (light_dir.z *. eye_distance);
+          x = center.x +. (light_dir.x *. shadow_radius);
+          y = center.y +. (light_dir.y *. shadow_radius);
+          z = center.z +. (light_dir.z *. shadow_radius);
           w = 1.;
         }
     in
@@ -1208,9 +1210,8 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   (* Set Viewport to Shadow Map Resolution *)
   Gl.viewport ctx 0 0 2048 2048;
 
-  (* Revert Culling: Capture All Faces (or standard Back culling if preferred) *)
-  (* Let's disable culling to ensure everything casts a shadow *)
-  Gl.disable ctx Gl.cull_face';
+  Gl.enable ctx Gl.cull_face';
+  Gl.cull_face ctx Gl.front;
 
   (* Disable Color Writes *)
   Gl.color_mask ctx false false false false;
@@ -1347,8 +1348,12 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
 
   let light_dir =
-    let len = sqrt (1. +. 1. +. 4.) in
-    Matrix.{ x = -1. /. len; y = 1. /. len; z = 2. /. len; w = 0. }
+    (*
+    let m = Matrix.{ x = -1.; y = 1.; z = 2.; w = 0. } in
+*)
+    let m = Matrix.{ x = -4.; y = -2.; z = 1.; w = 0. } in
+    let len = sqrt ((m.x *. m.x) +. (m.y *. m.y) +. (m.z *. m.z)) in
+    Matrix.{ x = m.x /. len; y = m.y /. len; z = m.z /. len; w = 0. }
   in
   let view_proj = Matrix.(proj * transform) in
   let z_far = 50000. in
