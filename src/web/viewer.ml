@@ -92,7 +92,6 @@ let terrain_program =
         out highp float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
-        out highp vec3 v_normal; // approximate normal for bias
 
         void main()
         {
@@ -149,11 +148,6 @@ let terrain_program =
 
           reliefCoord = norm_coord + (0.5 * inv_w);
 
-          // Approx Normal
-          float h_x = (mix(H.y, H.w, f.y) - mix(H.x, H.z, f.y)); // dH/dx
-          float h_y = (h1 - h0); // dH/dy approximation
-          v_normal = normalize(vec3(-h_x, -h_y, grid_spacing)); // Very rough
-
           v_world_pos = vec3(coord_meters, z);
 
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
@@ -175,12 +169,10 @@ let terrain_program =
         uniform mat4 shadow_matrices[3];
         uniform float shadow_splits[3];
 
-        uniform mediump int w;
         in highp vec2 reliefCoord;
         in highp float v_dist;
         in highp float v_h;
         in highp vec3 v_world_pos;
-        in highp vec3 v_normal;
 
         out lowp vec4 color;
 
@@ -200,49 +192,39 @@ let terrain_program =
         }
 
         void main() {
-          mediump vec2 encodedN = 
-            texture(relief, reliefCoord).ba;
+          mediump vec2 encodedN = texture(relief, reliefCoord).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
           lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
 
-           // Cascade Selection
-           int cascade = 2;
-           if (v_dist < shadow_splits[0]) cascade = 0;
-           else if (v_dist < shadow_splits[1]) cascade = 1;
+          // Cascade Selection
+          int cascade = 2;
+          if (v_dist < shadow_splits[0]) cascade = 0;
+          else if (v_dist < shadow_splits[1]) cascade = 1;
 
-           // Project to Shadow Space
-           vec4 s_pos = shadow_matrices[cascade] * vec4(v_world_pos, 1.0);
-           vec3 proj_coords = s_pos.xyz / s_pos.w;
-           proj_coords = proj_coords * 0.5 + 0.5;
+          // Project to Shadow Space
+          vec4 s_pos = shadow_matrices[cascade] * vec4(v_world_pos, 1.0);
+          vec3 proj_coords = s_pos.xyz / s_pos.w;
+          proj_coords = proj_coords * 0.5 + 0.5;
 
-           float current_depth = proj_coords.z;
-           
-           // Slope-Scaled Bias (increased for terrain scale)
-           vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0)); // Hardcoded match to OCaml
-           float cosTheta = clamp(dot(normalize(v_normal), lightDir), 0.0, 1.0);
-           // Cascade-specific bias: larger cascades cover more area, need more bias
-           float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 5.0 : 20.0);
-           float base_bias = max(0.02 * (1.0 - cosTheta), 0.005);
-           float bias = base_bias * cascade_scale;
-           
-           // PCF
-           // 1/2048 = 0.000488
-           float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
-           
-           // Cleanup edges
-           if(proj_coords.z > 1.0) shadow_val = 1.0;
-           
-           // DEBUG: Visualize shadow map depth vs current depth
-           // R = shadow map depth (what was written during shadow pass)
-           // G = current fragment depth (proj_coords.z after NDC transform)
-           // B = in-bounds check (1.0 if XY in [0,1], else 0)
-           highp float shadow_depth = texture(shadow_map, vec3(proj_coords.xy, float(cascade))).r;
-           float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
-                              proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
-           
+          float current_depth = proj_coords.z;
+          
+          // Slope-Scaled Bias (increased for terrain scale)
+          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
+          float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
+          // Cascade-specific bias: larger cascades cover more area, need more bias
+          float cascade_scale = (cascade == 0) ? 1.0 : ((cascade == 1) ? 5.0 : 20.0);
+          float base_bias = max(0.02 * (1.0 - cosTheta), 0.005);
+          float bias = base_bias * cascade_scale;
+          
+          // PCF Shadow (texel size = 1/2048)
+          float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
+          
+          // Cleanup edges
+          if (proj_coords.z > 1.0) shadow_val = 1.0;
+
 
           lowp float lighting = 0.2 + 0.8 * l * shadow_val; // Ambient + Light * Shadow
           // Biome Colors (Vibrant & Darker to counteract Gamma)
