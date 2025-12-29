@@ -514,19 +514,31 @@ let ao_blur_program =
       |};
     fragment_shader =
       {|#version 300 es
-        precision mediump float;
+        precision highp float;
         uniform sampler2D ao_tex;
+        uniform sampler2D relief;
         uniform vec2 inv_res;
         in vec2 uv;
         out float color;
 
+        // Height decode (same as other shaders)
+        float decode_height(vec2 c) {
+          return (c.r * 256.0 + c.g) * ((1.0/257.0) * 9500.0) - 500.0;
+        }
+
         void main() {
           float result = 0.0;
-          // 3x3 Gaussian
-          // 1 2 1
-          // 2 4 2
-          // 1 2 1
-          // Div 16
+          float weight_sum = 0.0;
+          
+          // Center height for bilateral comparison
+          float h_center = decode_height(texture(relief, uv).rg);
+          
+          // Bilateral blur: Gaussian spatial + height similarity
+          // Height sigma: ~50m (samples with >50m difference get low weight)
+          float h_sigma = 50.0;
+          float h_sigma_sq2 = 2.0 * h_sigma * h_sigma;
+          
+          // 3x3 Gaussian spatial weights
           float k[9];
           k[0]=1.; k[1]=2.; k[2]=1.;
           k[3]=2.; k[4]=4.; k[5]=2.;
@@ -535,12 +547,22 @@ let ao_blur_program =
           int idx = 0;
           for (int y=-1; y<=1; y++) {
              for (int x=-1; x<=1; x++) {
-                vec2 offset = vec2(float(x), float(y)) * inv_res;
-                result += texture(ao_tex, uv + offset).r * k[idx];
+                vec2 sample_uv = uv + vec2(float(x), float(y)) * inv_res;
+                float ao_sample = texture(ao_tex, sample_uv).r;
+                float h_sample = decode_height(texture(relief, sample_uv).rg);
+                
+                // Height difference weight (bilateral term)
+                float h_diff = h_sample - h_center;
+                float h_weight = exp(-(h_diff * h_diff) / h_sigma_sq2);
+                
+                // Combined weight: spatial * height similarity
+                float w = k[idx] * h_weight;
+                result += ao_sample * w;
+                weight_sum += w;
                 idx++;
              }
           }
-          color = result / 16.0;
+          color = result / weight_sum;
         }
       |};
     attributes = [];
@@ -1000,20 +1022,29 @@ let compute_ao ctx width height scale relief_texture =
 
   (* Fullscreen Quad *)
 
-  (* PASS 2: Blur AO *)
+  (* PASS 2: Blur AO with bilateral filter *)
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
     ao_final_tex 0;
 
   Gl.use_program ctx blur_pid;
 
   let ao_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "ao_tex") in
+  let relief_blur_loc =
+    Gl.get_uniform_location ctx blur_pid (Jstr.v "relief")
+  in
   let inv_res_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "inv_res") in
 
   Gl.uniform1i ctx ao_loc 0;
+  Gl.uniform1i ctx relief_blur_loc 1;
   Gl.uniform2f ctx inv_res_loc (1.0 /. float width) (1.0 /. float height);
 
+  (* Bind AO bake texture on unit 0 *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_bake_tex);
+
+  (* Bind relief texture on unit 1 for bilateral comparison *)
+  Gl.active_texture ctx Gl.texture1;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
