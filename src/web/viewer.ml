@@ -208,7 +208,7 @@ let terrain_program =
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
 //          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
-          vec3 lightDir = normalize(vec3(4, -2., 1.0));
+          vec3 lightDir = normalize(vec3(-4, 2., 1.0));
 
           lowp float l = max(0.0, dot(normal, lightDir));
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
@@ -364,9 +364,23 @@ bias = base_bias * cascade_scale;
              // Combined occlusion for rocks (geometric + micro)
              float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
              
-             // Base: Grass with simple noise modulation
+             // Grass colors for variation
+             vec3 c_grass_lush = vec3(0.08, 0.42, 0.12);   // Deep green (low altitude)
+             vec3 c_grass_mid = vec3(0.15, 0.38, 0.10);    // Medium green
+             vec3 c_grass_dry = vec3(0.30, 0.35, 0.12);    // Yellow-brown (high altitude/dry)
+             
+             // Height-based grass color (smooth transition)
+             float height_factor = smoothstep(800.0, 2000.0, v_h);  // 800m=lush, 2000m=dry
+             vec3 c_grass_height = mix(c_grass_lush, c_grass_dry, height_factor);
+             
+             // Patchy color mixing using large-scale noise
+             vec3 patch_noise = texture(noise, reliefCoord * 5.0).rgb;  // Large patches
+             float patch_factor = patch_noise.r;  // Use one channel for variation
+             vec3 c_grass_patchy = mix(c_grass_height, c_grass_mid, patch_factor * 0.5);
+             
+             // Fine noise for micro-variation
              vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
-             vec3 grass_color = c_grass * (0.8 + 0.4 * grass_noise);
+             vec3 grass_color = c_grass_patchy * (0.85 + 0.3 * grass_noise);
              
              // Rock color: base color with high-contrast texture modulation
              vec3 rock_color = c_rock * (-1. + 5.0 * rock_lum);  // Strong contrast
@@ -1508,7 +1522,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     (*
     let m = Matrix.{ x = -1.; y = 1.; z = 2.; w = 0. } in
 *)
-    let m = Matrix.{ x = 4.; y = 2.; z = 1.; w = 0. } in
+    let m = Matrix.{ x = -4.; y = -2.; z = 1.; w = 0. } in
     let len = sqrt ((m.x *. m.x) +. (m.y *. m.y) +. (m.z *. m.z)) in
     Matrix.{ x = m.x /. len; y = m.y /. len; z = m.z /. len; w = 0. }
   in
