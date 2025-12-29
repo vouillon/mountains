@@ -211,9 +211,14 @@ let terrain_program =
 
           // Normal offset bias: offset position along normal before shadow lookup
           // Larger offset for steeper slopes and larger cascades
-          float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-          float normal_offset_scale = (cascade == 0) ? 5.0 : ((cascade == 1) ? 15.0 : 50.0);
-          vec3 offset_pos = v_world_pos + normal * sinTheta * normal_offset_scale;
+//          float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+//          float normal_offset_scale = (cascade == 0) ? 5.0 : ((cascade == 1) ? 15.0 : 50.0);
+//          vec3 offset_pos = v_world_pos + normal * sinTheta * normal_offset_scale;
+          float slopeScale = 1. - cosTheta;
+          float texelSize = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
+          float normalOffset = texelSize * slopeScale;
+          vec3 offset_pos = v_world_pos + normal * normalOffset;
+//offset_pos = v_world_pos;
 
           // Project to Shadow Space with offset position
           vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
@@ -226,6 +231,12 @@ let terrain_program =
           float cascade_scale = (cascade == 0) ? 0.1 : ((cascade == 1) ? 0.15 : 0.15);
           float base_bias = max(0.005 * (1.0 - cosTheta), 0.001);
           float bias = base_bias * cascade_scale;
+bias = 0.0015;
+/*
+  cascade_scale = (cascade == 0) ? 0.15 : ((cascade == 1) ? 0.25 : 0.20);
+  base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
+bias = base_bias * cascade_scale;
+*/
           
           // PCF Shadow (texel size = 1/2048)
           float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
@@ -234,7 +245,7 @@ let terrain_program =
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
           // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug
-          #define DEBUG_SHADOWS 1
+          #define DEBUG_SHADOWS 0
           
           #if DEBUG_SHADOWS == 2
           // Show proj_coords: R=x, G=y, B=in_bounds
