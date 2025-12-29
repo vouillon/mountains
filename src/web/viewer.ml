@@ -342,6 +342,9 @@ bias = base_bias * cascade_scale;
              // Triplanar blend for normal perturbation
              vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
              
+             // Rock luminance (needed for micro-occlusion)
+             float rock_lum = dot(rock_tex, vec3(0.3, 0.3, 0.3));
+             
              // Simple detail normal blending: perturb terrain normal's XY with rock detail
              // This avoids complex swizzling and works well for mostly-vertical rock faces
              float detail_strength = rock_mixin * 3.0;  // Only on rocky slopes
@@ -349,13 +352,25 @@ bias = base_bias * cascade_scale;
              perturbed.xy += rock_detail.xy * detail_strength;
              final_normal = normalize(perturbed);
              
+             // Geometric occlusion: surfaces pointing down (into crevices) are darker
+             // rock_detail.z < 1.0 means normal tilts away from straight up
+             float geometric_ao = 0.5 + 0.5 * rock_detail.z;  // Map z from [-1,1] to [0,1]
+             geometric_ao = geometric_ao * geometric_ao;  // Square for more contrast
+             
+             // Micro-occlusion from texture: darker areas = crevices
+             // Invert so low luminance (dark crevices) = low occlusion
+             float micro_ao = 0.5 + 0.5 * rock_lum;  // rock_lum is already 0-1 range
+             
+             // Combined occlusion for rocks (geometric + micro)
+             float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
+             
              // Base: Grass with simple noise modulation
              vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
              vec3 grass_color = c_grass * (0.8 + 0.4 * grass_noise);
              
              // Rock color: base color with high-contrast texture modulation
-             float rock_lum = dot(rock_tex, vec3(0.3, 0.3, 0.3));  // Average luminance
              vec3 rock_color = c_rock * (-1. + 5.0 * rock_lum);  // Strong contrast
+             rock_color *= rock_ao;  // Apply micro/geometric occlusion
              
              // Slope: Grass -> Rock (triplanar kicks in on steep areas)
              terrain_color = mix(grass_color, rock_color, rock_mixin);
