@@ -345,11 +345,19 @@ bias = base_bias * cascade_scale;
              // Rock luminance (needed for micro-occlusion)
              float rock_lum = dot(rock_tex, vec3(0.3, 0.3, 0.3));
              
-             // Simple detail normal blending: perturb terrain normal's XY with rock detail
-             // This avoids complex swizzling and works well for mostly-vertical rock faces
-             float detail_strength = rock_mixin * 3.0;  // Only on rocky slopes
+             // Grass normal sampling (larger scale, subtler bumps)
+             float grass_tex_scale = 0.005;  // Larger features for grass
+             vec2 grass_uv = v_world_pos.xy * grass_tex_scale;
+             vec3 grass_normal_sample = texture(rock_normal_map, grass_uv).rgb * 2.0 - 1.0;
+             
+             // Blend grass and rock detail based on slope
+             float grass_strength = (1.0 - rock_mixin) * 0.8;  // Subtle on grass
+             float rock_strength = rock_mixin * 3.0;           // Strong on rocks
+             
+             // Combined normal perturbation
              vec3 perturbed = normal;
-             perturbed.xy += rock_detail.xy * detail_strength;
+             perturbed.xy += grass_normal_sample.xy * grass_strength;
+             perturbed.xy += rock_detail.xy * rock_strength;
              final_normal = normalize(perturbed);
              
              // Geometric occlusion: surfaces pointing down (into crevices) are darker
