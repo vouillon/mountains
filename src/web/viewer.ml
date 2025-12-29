@@ -392,7 +392,19 @@ bias = base_bias * cascade_scale;
           
           // Calculate lighting with final blended normal
           float final_l = max(0.0, dot(final_normal, lightDir));
-          lowp float lighting = 0.3 + 0.7 * final_l * shadow_val; // Ambient + Light * Shadow
+          
+          // Hemisphere ambient lighting: sky from above, ground bounce from below
+          vec3 sky_color = vec3(0.4, 0.5, 0.7);      // Blue-ish sky ambient
+          vec3 ground_color = vec3(0.15, 0.12, 0.08); // Warm brown ground bounce
+          float sky_factor = final_normal.z * 0.5 + 0.5;  // Map [-1,1] to [0,1]
+          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.35;
+          
+          // Direct light (warm sunlight)
+          vec3 sun_color = vec3(1.0, 0.95, 0.85);
+          vec3 direct = sun_color * final_l * shadow_val * 0.75;
+          
+          // Combined lighting
+          vec3 lighting = ambient + direct;
 
           // AO Modulation
           lowp float occlusion = texture(ao, reliefCoord).r;
