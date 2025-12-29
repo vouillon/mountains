@@ -207,8 +207,8 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
-//          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
-          vec3 lightDir = normalize(vec3(-4, 2., 1.0));
+          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
+//          vec3 lightDir = normalize(vec3(-4, 2., 1.0));
 
           lowp float l = max(0.0, dot(normal, lightDir));
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
@@ -1539,10 +1539,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
 
   let light_dir =
-    (*
     let m = Matrix.{ x = -1.; y = 1.; z = 2.; w = 0. } in
-*)
+    (*
     let m = Matrix.{ x = -4.; y = -2.; z = 1.; w = 0. } in
+*)
     let len = sqrt ((m.x *. m.x) +. (m.y *. m.y) +. (m.z *. m.z)) in
     Matrix.{ x = m.x /. len; y = m.y /. len; z = m.z /. len; w = 0. }
   in
