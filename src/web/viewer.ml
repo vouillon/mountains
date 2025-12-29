@@ -1341,7 +1341,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
   let grid_k = pi /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
   let grid_base = exp grid_k in
-  let grid_scale = 50000. /. (height_term -. 1.) in
+  let grid_scale = 70000. /. (height_term -. 1.) in
   let avg_delta = (deltax +. deltay) *. 0.5 in
 
   (* Set all uniforms once *)
@@ -1515,21 +1515,21 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
     let ca = cos angle in
     let sa = sin angle in
-    List.map
+    List.filter_map
       (fun (texture, x, y) ->
         let p = scale *. ((y *. ca) -. (x *. sa)) in
         let shown =
           if
             not
               (List.exists
-                 (fun p' -> abs_float (p' -. p) < 0.8 (*ZZZ*) *. text_height)
+                 (fun p' -> abs_float (p' -. p) < 0.8 *. text_height)
                  !pos)
           then (
             pos := p :: !pos;
             true)
           else false
         in
-        (texture, x, y, shown))
+        if shown then Some (texture, x, y, shown) else None)
       points
   in
 
@@ -1598,7 +1598,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let grid_k = pi /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
   let grid_base = exp grid_k in
-  let grid_scale = 50000. /. (height_term -. 1.) in
+  let grid_scale = 70000. /. (height_term -. 1.) in
 
   let grid_k_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_k") in
   let grid_base_loc =
@@ -1768,25 +1768,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       else Gl.uniform4f ctx color_loc 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
-  Gl.bind_vertex_array ctx None;
-
-  (* Light direction indicator (yellow sun in top-left corner) *)
-  (* Light comes FROM direction (-1, 1, 2), project to 2D: roughly upper-left *)
-  (* Rotate with current_azimuth so it shows correct direction relative to view *)
-  let light_2d_angle = atan2 1. (-1.) in
-  let sun_transform =
-    let sun_size = 0.08 in
-    Matrix.(
-      translate (-0.85) 0.85 0. (* top-left corner *)
-      * rotate_z (light_2d_angle -. (pi /. 2.) -. current_azimuth)
-      * scale sun_size sun_size 1.)
-  in
-  Gl.uniform_matrix4fv ctx transform_loc false
-    (Brr.Tarray.of_bigarray1 (Matrix.array sun_transform));
-  Gl.uniform4f ctx color_loc 1. 0.9 0.2 1.;
-  (* yellow *)
-  Gl.bind_vertex_array ctx (Some text_geo);
-  Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0;
   Gl.bind_vertex_array ctx None;
   Gl.disable ctx Gl.blend;
 
@@ -2217,7 +2198,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
             (match elevation with
             | None -> name
             | Some elevation ->
-                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;
+                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
                 Printf.sprintf "%s (%dm)" name elevation)
         in
         let h =
