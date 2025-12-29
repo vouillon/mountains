@@ -71,11 +71,13 @@ let terrain_program =
   {
     vertex_shader =
       {|#version 300 es
+        precision highp float;  // Ensure all floats use high precision (critical for mobile)
+        precision highp int;
         uniform mat4 proj;
         uniform mat4 transform;
-        uniform mediump int w;
-        uniform int w_mask;
-        uniform int w_shift;
+        uniform highp int w;      // Must be highp for accurate coord calculations
+        uniform highp int w_mask;
+        uniform highp int w_shift;
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
@@ -92,6 +94,7 @@ let terrain_program =
         out highp float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
+        out highp float v_ring;  // For debug visualization
 
         void main()
         {
@@ -100,7 +103,9 @@ let terrain_program =
           int ring = gl_VertexID >> w_shift;
           float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
           float angle = theta + snapped_alpha + (PI / 2.0);
-          float r = grid_scale * (pow(grid_base, float(ring)) - 1.0);
+          // Use exp(k*ring) instead of pow(base, ring) for more consistent cross-platform behavior
+          // For ring=0, exp(0.0)-1.0 = 0.0 exactly
+          highp float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
           highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
           highp vec2 coord_meters = center_offset + pos_plane;
           highp vec2 coord = coord_meters * inv_delta;
@@ -108,10 +113,10 @@ let terrain_program =
           // Calculate approximate grid spacing in meters
           // For exponential grid r = A(B^i - 1), dr = k(r + A), ds = kr
           // k = grid_k, A = grid_scale
-          float grid_spacing = grid_k * (r + grid_scale);
+          highp float grid_spacing = grid_k * (r + grid_scale);
 
           // LOD level
-          float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
+          highp float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
           int lod = min(int(lod_f), max_lod);
 
           // Texture Size at this LOD
@@ -142,9 +147,9 @@ let terrain_program =
           highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
           highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
 
-          float h0 = mix(H.x, H.y, f.x);
-          float h1 = mix(H.z, H.w, f.x);
-          float z = mix(h0, h1, f.y);
+          highp float h0 = mix(H.x, H.y, f.x);
+          highp float h1 = mix(H.z, H.w, f.x);
+          highp float z = mix(h0, h1, f.y);
 
           reliefCoord = norm_coord + (0.5 * inv_w);
 
@@ -153,6 +158,7 @@ let terrain_program =
           vec4 pos = transform * vec4(pos_plane, z, 1.0);
           v_dist = length(pos.xyz);
           v_h = z;
+          v_ring = float(ring);
           gl_Position = proj * pos;
         }
       |};
@@ -173,6 +179,7 @@ let terrain_program =
         in highp float v_dist;
         in highp float v_h;
         in highp vec3 v_world_pos;
+        in highp float v_ring;  // For debug visualization
 
         out lowp vec4 color;
 
@@ -244,7 +251,7 @@ bias = base_bias * cascade_scale;
           // Force lit beyond depth far plane (XY handled by 1-pixel border)
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
-          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug
+          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug, 3=ring colors, 4=texcoords
           #define DEBUG_SHADOWS 0
           
           #if DEBUG_SHADOWS == 2
@@ -252,6 +259,26 @@ bias = base_bias * cascade_scale;
           float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
                              proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
           color = vec4(proj_coords.x, proj_coords.y, in_bounds, 1.0);
+          #elif DEBUG_SHADOWS == 4
+          // Show texture coordinates: use fractional part scaled for fine detail
+          // R = fract(texcoord.x * 100), G = fract(texcoord.y * 100), B = ring marker
+          vec2 tc = reliefCoord * 100.0;  // Scale to show fine detail
+          float ring_marker = (mod(v_ring, 10.0) < 0.5) ? 0.5 : 0.0;  // Mark every 10th ring
+          color = vec4(fract(tc.x), fract(tc.y), ring_marker, 1.0);
+          #elif DEBUG_SHADOWS == 3
+          // Ring visualization: cycle through colors for each ring
+          // Ring 0=red, 1=yellow, 2=green, 3=cyan, 4=blue, 5=magenta, etc.
+          float hue = mod(v_ring, 6.0) / 6.0;
+          vec3 ring_color;
+          if (hue < 1.0/6.0) ring_color = vec3(1.0, hue * 6.0, 0.0);           // R->Y
+          else if (hue < 2.0/6.0) ring_color = vec3(1.0 - (hue - 1.0/6.0) * 6.0, 1.0, 0.0); // Y->G
+          else if (hue < 3.0/6.0) ring_color = vec3(0.0, 1.0, (hue - 2.0/6.0) * 6.0);       // G->C
+          else if (hue < 4.0/6.0) ring_color = vec3(0.0, 1.0 - (hue - 3.0/6.0) * 6.0, 1.0); // C->B
+          else if (hue < 5.0/6.0) ring_color = vec3((hue - 4.0/6.0) * 6.0, 0.0, 1.0);       // B->M
+          else ring_color = vec3(1.0, 0.0, 1.0 - (hue - 5.0/6.0) * 6.0);                     // M->R
+          // Make ring 0 extra bright/distinct
+          if (v_ring < 0.5) ring_color = vec3(1.0, 0.0, 0.0);
+          color = vec4(ring_color * l, 1.0);
           #elif DEBUG_SHADOWS == 1
           // Cascade colors: Red=near, Green=mid, Blue=far, Magenta=beyond
           vec3 cascade_color;
@@ -301,7 +328,7 @@ bias = base_bias * cascade_scale;
 
           // Match fog to clear color (0.37, 0.56, 0.85)
           lowp vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
-          float fog_coeff = exp(v_dist * -3e-5); // Slightly clearer fog
+          float fog_coeff = exp(v_dist * -2e-5); // Slightly clearer fog
 
           lowp vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
@@ -526,10 +553,11 @@ let shadow_program =
     vertex_shader =
       {|#version 300 es
         precision highp float;
+        precision highp int;
         uniform mat4 shadow_view_proj;
-        uniform mediump int w;
-        uniform int w_mask;
-        uniform int w_shift;
+        uniform highp int w;      // Must be highp for accurate coord calculations
+        uniform highp int w_mask;
+        uniform highp int w_shift;
         uniform highp vec2 delta;
         uniform highp vec2 center_offset;
         uniform highp float snapped_alpha;
@@ -550,8 +578,8 @@ let shadow_program =
           int ring = gl_VertexID >> w_shift;
           float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
           float angle = theta + snapped_alpha + (PI / 2.0);
-          
-          float r = grid_scale * (pow(grid_base, float(ring)) - 1.0);
+          // Use exp(k*ring) instead of pow for consistent cross-platform behavior
+          float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
           
           float x = r * cos(angle);
           float y = r * sin(angle);
