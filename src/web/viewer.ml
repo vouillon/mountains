@@ -202,24 +202,29 @@ let terrain_program =
           vec3 lightDir = normalize(vec3(-4, 2., 1.0));
 
           lowp float l = max(0.0, dot(normal, lightDir));
+          float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
 
           // Cascade Selection
           int cascade = 2;
           if (v_dist < shadow_splits[0]) cascade = 0;
           else if (v_dist < shadow_splits[1]) cascade = 1;
 
-          // Project to Shadow Space
-          vec4 s_pos = shadow_matrices[cascade] * vec4(v_world_pos, 1.0);
+          // Normal offset bias: offset position along normal before shadow lookup
+          // Larger offset for steeper slopes and larger cascades
+          float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+          float normal_offset_scale = (cascade == 0) ? 5.0 : ((cascade == 1) ? 15.0 : 50.0);
+          vec3 offset_pos = v_world_pos + normal * sinTheta * normal_offset_scale;
+
+          // Project to Shadow Space with offset position
+          vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
           vec3 proj_coords = s_pos.xyz / s_pos.w;
           proj_coords = proj_coords * 0.5 + 0.5;
 
           float current_depth = proj_coords.z;
           
-          // Slope-Scaled Bias (increased for terrain scale)
-          float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
-          // Cascade-specific bias: modest scaling for larger cascades
-          float cascade_scale = (cascade == 0) ? 0.15 : ((cascade == 1) ? 0.25 : 0.20);
-          float base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
+          // Slope-Scaled Bias (reduced since normal offset handles steep slopes)
+          float cascade_scale = (cascade == 0) ? 0.1 : ((cascade == 1) ? 0.15 : 0.15);
+          float base_bias = max(0.005 * (1.0 - cosTheta), 0.001);
           float bias = base_bias * cascade_scale;
           
           // PCF Shadow (texel size = 1/2048)
@@ -228,8 +233,8 @@ let terrain_program =
           // Force lit beyond depth far plane (XY handled by 1-pixel border)
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
-          // DEBUG MODE: 1=normal, 1=cascade colors, 2=proj_coords debug
-          #define DEBUG_SHADOWS 0
+          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug
+          #define DEBUG_SHADOWS 1
           
           #if DEBUG_SHADOWS == 2
           // Show proj_coords: R=x, G=y, B=in_bounds
@@ -250,7 +255,6 @@ let terrain_program =
           // Show shadow intensity within cascade color
           color = vec4(cascade_color * (0.7 * shadow_val + 0.3) * (0.8 + 0.2 * l), 1.0);
           #else
-
           lowp float lighting = 0.3 + 0.7 * l * shadow_val; // Ambient + Light * Shadow
           // Biome Colors (Vibrant & Darker to counteract Gamma)
           lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
@@ -1166,6 +1170,9 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+(* Track whether shadows have been rendered - only render once per session *)
+let shadow_rendered = ref false
+
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
     ~index_count ~noise_texture ~ao_texture ~shadow_pid ~shadow_fbo ~shadow_map
@@ -1275,9 +1282,13 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       ~light_dir ~world_center ~shadow_map_size:2048.
   in
 
-  draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
-    ~splits:splits_ratios ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat
-    ~lon ~w ~snapped_alpha ctx;
+  (* Render shadows once on first frame *)
+  if not !shadow_rendered then begin
+    shadow_rendered := true;
+    draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
+      ~splits:splits_ratios ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat
+      ~lon ~w ~snapped_alpha ctx
+  end;
 
   Gl.clear_color ctx 0.37 0.56 0.85 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
