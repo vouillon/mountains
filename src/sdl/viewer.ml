@@ -754,6 +754,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture noise_texture
       points
     |> List.sort (fun (_, _, y) (_, _, y') : int -> Stdlib.compare y' y)
   in
+  Format.eprintf "POINTS(1) %d@." (List.length points);
   let points =
     let pos = ref [] in
     List.filter
@@ -766,6 +767,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture noise_texture
         else false)
       points
   in
+  Format.eprintf "POINTS(2) %d@." (List.length points);
 
   Gl.clear_color 0.37 0.56 0.85 1.;
   Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
