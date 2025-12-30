@@ -289,8 +289,21 @@ let process_tile db_path output_dir tile_name =
                                   .triangulate_multi clipped_verts
                                     [| clipped_poly |]
                                 with Invalid_argument msg ->
-                                  Printf.printf "Triangulation failed: %s\n%!"
-                                    msg;
+                                  Printf.printf "Triangulation failed: %s\n" msg;
+                                  Printf.printf
+                                    "  Clipped Verts: %d floats (%d pts)\n"
+                                    (Array.length clipped_verts)
+                                    (Array.length clipped_verts / 2);
+                                  Printf.printf "  Outer: start=%d len=%d\n"
+                                    clipped_poly.outer.start
+                                    clipped_poly.outer.len;
+                                  Array.iteri
+                                    (fun i h ->
+                                      Printf.printf
+                                        "  Hole %d: start=%d len=%d\n" i h.start
+                                        h.len)
+                                    clipped_poly.holes;
+                                  Printf.printf "%!";
                                   [||]
                               in
 

@@ -52,18 +52,24 @@ module Geometry = struct
   let signed_area_range (verts : float array) start len =
     if len < 3 then 0.0
     else
+      (* Robust area calculation using relative coordinates to avoid precision loss *)
+      let ref_x = get_x verts start in
+      let ref_y = get_y verts start in
       let acc = ref 0.0 in
       for i = 0 to len - 1 do
         let i1 = start + i in
         let i2 = if i = len - 1 then start else start + i + 1 in
-        let p1x, p1y = (get_x verts i1, get_y verts i1) in
-        let p2x, p2y = (get_x verts i2, get_y verts i2) in
-        acc := !acc +. ((p2x -. p1x) *. (p2y +. p1y))
+        (* Shift to local coordinates relative to first vertex *)
+        let p1x, p1y = (get_x verts i1 -. ref_x, get_y verts i1 -. ref_y) in
+        let p2x, p2y = (get_x verts i2 -. ref_x, get_y verts i2 -. ref_y) in
+        (* Standard Shoelace term: x1*y2 - x2*y1 *)
+        acc := !acc +. ((p1x *. p2y) -. (p2x *. p1y))
       done;
-      !acc
+      !acc *. 0.5
 
   let is_ccw_range (verts : float array) start len =
-    signed_area_range verts start len < 0.0
+    (* Counter-Clockwise polygon has POSITIVE area with standard Shoelace *)
+    signed_area_range verts start len > 0.0
 
   let find_rightmost_idx_range (verts : float array) start len =
     if len = 0 then start
@@ -137,7 +143,6 @@ module PolygonList = struct
     while !again || !curr != !end_node do
       again := false;
       (* Check if valid ring (>=3) before simplifying *)
-      (* We can't easily check length here efficiently, so rely on local topo *)
       let i = !curr in
       let prev_i = t.prev.(i) in
       let next_i = t.next.(i) in
@@ -150,7 +155,7 @@ module PolygonList = struct
 
         let p1x, p1y = (Geometry.get_x verts p1, Geometry.get_y verts p1) in
         let p2x, p2y = (Geometry.get_x verts p2, Geometry.get_y verts p2) in
-        let p3x, p3y = (Geometry.get_x verts p3, Geometry.get_y verts p3) in
+        (* p3 coords retrieved implicitly inside cross_product calls *)
 
         let is_dup = p1x = p2x && p1y = p2y in
         let is_collinear =
@@ -467,6 +472,9 @@ module Triangulator = struct
       incr iterations;
       let i = !curr in
       if active.(i) && is_ear i then begin
+        if !out_idx + 2 >= Array.length out_buffer then
+          Printf.printf "ERROR: out_buffer overflow (1)! out_idx=%d len=%d\n%!"
+            !out_idx (Array.length out_buffer);
         out_buffer.(!out_idx) <- vert_idx.(prev.(i));
         out_buffer.(!out_idx + 1) <- vert_idx.(i);
         out_buffer.(!out_idx + 2) <- vert_idx.(next.(i));
@@ -487,13 +495,18 @@ module Triangulator = struct
        let loop = ref true in
        while !loop do
          let n = next.(!i) in
-         if n = !i then loop := false
+         let p = prev.(!i) in
+         (* FIXED: Stop if 2 nodes remaining *)
+         if n = !i || n = p then loop := false
          else (
-           out_buffer.(!out_idx) <- vert_idx.(prev.(!i));
+           if !out_idx + 2 >= Array.length out_buffer then
+             Printf.printf
+               "ERROR: out_buffer overflow (2)! out_idx=%d len=%d\n%!" !out_idx
+               (Array.length out_buffer);
+           out_buffer.(!out_idx) <- vert_idx.(p);
            out_buffer.(!out_idx + 1) <- vert_idx.(!i);
            out_buffer.(!out_idx + 2) <- vert_idx.(n);
            out_idx := !out_idx + 3;
-           let p = prev.(!i) in
            next.(p) <- n;
            prev.(n) <- p;
            i := n;
@@ -502,6 +515,7 @@ module Triangulator = struct
 
     !out_idx
 
+  (* Revised triangulate_single that avoids dead nodes *)
   let triangulate_single (verts : float array) polygon out_buffer start_offset =
     let outer_len = polygon.outer.len in
     let num_holes = Array.length polygon.holes in
@@ -523,60 +537,56 @@ module Triangulator = struct
           outer_ccw
       in
 
-      (* Filter outer *)
       let curr_outer_node =
         ref (PolygonList.filter_points verts poly_list outer_start_node)
       in
 
       if num_holes > 0 then begin
-        let holes_meta =
-          Array.mapi
-            (fun i h ->
-              let max_x_idx =
-                Geometry.find_rightmost_idx_range verts h.start h.len
-              in
-              (i, get_x verts max_x_idx))
-            polygon.holes
-        in
-        Array.sort (fun (_, x1) (_, x2) -> compare x2 x1) holes_meta;
+        let processed_holes = Array.make num_holes (0, 0.0) in
+        (* Correct Logic: Filter hole first, then find max_x node on active list *)
+        for i = 0 to num_holes - 1 do
+          let h = polygon.holes.(i) in
+          if h.len > 0 then (
+            let data_is_ccw = Geometry.is_ccw_range verts h.start h.len in
+            let hole_start =
+              PolygonList.init_ring poly_list h.start h.len (not data_is_ccw)
+            in
+            let filtered_start =
+              PolygonList.filter_points verts poly_list hole_start
+            in
+
+            (* Find max X on filtered ring *)
+            let max_x = ref (get_x verts poly_list.vert_idx.(filtered_start)) in
+            let max_node = ref filtered_start in
+            let curr = ref poly_list.next.(filtered_start) in
+
+            (* Loop until we hit start again *)
+            while !curr <> filtered_start do
+              let vx = get_x verts poly_list.vert_idx.(!curr) in
+              if vx > !max_x then (
+                max_x := vx;
+                max_node := !curr);
+              curr := poly_list.next.(!curr)
+            done;
+            processed_holes.(i) <- (!max_node, !max_x))
+          else processed_holes.(i) <- (-1, neg_infinity)
+        done;
+
+        (* Sort holes by max X desc *)
+        Array.sort (fun (_, x1) (_, x2) -> compare x2 x1) processed_holes;
 
         Array.iter
-          (fun (h_idx, _) ->
-            let h = polygon.holes.(h_idx) in
-            if h.len > 0 then begin
-              let max_idx_global =
-                Geometry.find_rightmost_idx_range verts h.start h.len
-              in
-              let data_is_ccw = Geometry.is_ccw_range verts h.start h.len in
-
-              let hole_node_start =
-                PolygonList.init_ring poly_list h.start h.len (not data_is_ccw)
-              in
-
-              (* Filter hole *)
-              let hole_node_start =
-                PolygonList.filter_points verts poly_list hole_node_start
-              in
-
-              let offset_needed = max_idx_global - h.start in
-              let bridge_node =
-                if not data_is_ccw then
-                  hole_node_start + (h.len - 1 - offset_needed)
-                else hole_node_start + offset_needed
-              in
-
+          (fun (bridge_node, _) ->
+            if bridge_node <> -1 then
               curr_outer_node :=
                 merge_hole_into_outer verts bridge_node !curr_outer_node
-                  poly_list
-            end)
-          holes_meta
+                  poly_list)
+          processed_holes
       end;
 
-      (* Filter merged result again to clean up bridge *)
       curr_outer_node :=
         PolygonList.filter_points verts poly_list !curr_outer_node;
 
-      (* FIXED: Calculate actual node count for the active linked list *)
       let active_count = PolygonList.count_nodes poly_list !curr_outer_node in
 
       triangulate_dll verts !curr_outer_node poly_list active_count out_buffer
