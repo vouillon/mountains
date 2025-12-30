@@ -1,6 +1,6 @@
 (* render_clc.ml *)
 (* Compile command:
-   ocamlfind ocamlopt -package tsdl,tgles3,sqlite3,str,bigarray -linkpkg wkb_decode.ml earcut.ml render_clc.ml -o render_clc
+   ocamlfind ocamlopt -package tsdl,tgles3,bigarray -linkpkg render_clc.ml -o render_clc
 *)
 
 open Tsdl
@@ -10,6 +10,8 @@ open Bigarray
 (* --- 1. Palette Definition --- *)
 let raw_palette =
   [
+    ("0", 255, 0, 255);
+    (* Fallback Magenta *)
     ("111", 230, 0, 77);
     ("112", 255, 0, 0);
     ("121", 204, 77, 242);
@@ -60,7 +62,8 @@ let code_map = Hashtbl.create 64
 
 let () =
   List.iteri
-    (fun i (code, _, _, _) -> Hashtbl.add code_map code (i + 1))
+    (fun i (code, _, _, _) ->
+      Hashtbl.add code_map (try int_of_string code with _ -> 0) i)
     raw_palette
 
 let get_code_index code =
@@ -68,12 +71,10 @@ let get_code_index code =
 
 let create_palette_texture () =
   let buf = Array1.create int8_unsigned c_layout (256 * 3) in
-  Array1.set buf 0 128;
-  Array1.set buf 1 128;
-  Array1.set buf 2 128;
+  Array1.fill buf 0;
   List.iteri
     (fun i (_, r, g, b) ->
-      let idx = (i + 1) * 3 in
+      let idx = i * 3 in
       Array1.set buf idx r;
       Array1.set buf (idx + 1) g;
       Array1.set buf (idx + 2) b)
@@ -84,14 +85,20 @@ let create_palette_texture () =
 let vertex_shader_src =
   "\n\
    #version 300 es\n\
-   layout(location = 0) in vec2 in_norm_pos;\n\
+   layout(location = 0) in vec2 in_norm_pos; // 0..1 from u16 0..65535\n\
    layout(location = 1) in int in_color_idx;\n\
-   uniform vec2 u_mult;\n\
-   uniform vec2 u_add;\n\
+   uniform vec2 u_range; // tile dim in deg\n\
+   uniform vec2 u_min;   // tile origin in deg\n\
+   uniform vec2 u_view_scale;\n\
+   uniform vec2 u_view_offset;\n\
    flat out int v_idx;\n\
    void main() {\n\
-  \    vec2 pos = in_norm_pos * u_mult + u_add;\n\
-  \    gl_Position = vec4(pos, 0.0, 1.0);\n\
+  \    // map 0..1 to tile coords (deg)\n\
+  \    vec2 world_pos = in_norm_pos * u_range + u_min;\n\
+  \    // map world to screen\n\
+  \    vec2 screen_pos = (world_pos - u_view_offset) * u_view_scale * 2.0;\n\
+  \    // aspect ratio correction is handled in u_view_scale logic on CPU\n\
+  \    gl_Position = vec4(screen_pos, 0.0, 1.0);\n\
   \    v_idx = in_color_idx;\n\
    }\n"
 
@@ -104,25 +111,187 @@ let fragment_shader_src =
    out vec4 out_color;\n\
    void main() { out_color = texelFetch(u_palette, ivec2(v_idx, 0), 0); }\n"
 
-(* --- 3. Helpers --- *)
-let get_wkb_from_gpkg_blob blob_str =
-  let len = String.length blob_str in
-  if len < 8 || String.sub blob_str 0 2 <> "GP" then None
-  else
-    let flags = Char.code blob_str.[3] in
-    let env = (flags lsr 1) land 0x07 in
-    let header_len =
-      match env with 1 -> 40 | 2 | 3 -> 56 | 4 -> 72 | _ -> 8
-    in
-    if len < header_len then None
-    else Some (String.sub blob_str header_len (len - header_len))
+(* --- 3. CLC Loading --- *)
 
-let get_approx_area geom =
-  let bbox = Wkb_decode.get_bbox geom in
-  let w = bbox.Wkb_decode.max_x -. bbox.Wkb_decode.min_x in
-  let h = bbox.Wkb_decode.max_y -. bbox.Wkb_decode.min_y in
-  w *. h
+type tile_header = {
+  count : int;
+  min_lon : float;
+  min_lat : float;
+  scale_x : float;
+  scale_y : float;
+}
 
+(* Helper to read f64 bits as float *)
+let read_f64_as_float ic =
+  let b0 = Int64.of_int (input_byte ic) in
+  let b1 = Int64.of_int (input_byte ic) in
+  let b2 = Int64.of_int (input_byte ic) in
+  let b3 = Int64.of_int (input_byte ic) in
+  let b4 = Int64.of_int (input_byte ic) in
+  let b5 = Int64.of_int (input_byte ic) in
+  let b6 = Int64.of_int (input_byte ic) in
+  let b7 = Int64.of_int (input_byte ic) in
+  let bits =
+    Int64.logor
+      (Int64.logor
+         (Int64.logor
+            (Int64.logor
+               (Int64.logor
+                  (Int64.logor
+                     (Int64.logor b0 (Int64.shift_left b1 8))
+                     (Int64.shift_left b2 16))
+                  (Int64.shift_left b3 24))
+               (Int64.shift_left b4 32))
+            (Int64.shift_left b5 40))
+         (Int64.shift_left b6 48))
+      (Int64.shift_left b7 56)
+  in
+  Int64.float_of_bits bits
+
+let load_clc file =
+  Printf.printf "Loading %s...\n%!" file;
+  let ic = open_in_bin file in
+
+  let magic = really_input_string ic 4 in
+  if magic <> "CLC1" then failwith "Invalid magic";
+
+  let count = input_binary_int ic in
+  let min_lon = read_f64_as_float ic in
+  let min_lat = read_f64_as_float ic in
+  let scale_x = read_f64_as_float ic in
+  let scale_y = read_f64_as_float ic in
+
+  Printf.printf "Header: count=%d, origin=(%.2f, %.2f) scale=(%.2f, %.2f)\n%!"
+    count min_lon min_lat scale_x scale_y;
+
+  (* Buffers to accumulate geometry *)
+  let all_pos = ref [] in
+  (* (u16 * u16) list *)
+  let all_col = ref [] in
+  (* u8 list *)
+  let all_idx = ref [] in
+  (* int list *)
+  let total_verts = ref 0 in
+
+  let unknown_codes = Hashtbl.create 5 in
+
+  for i = 1 to count do
+    let start_pos = pos_in ic in
+    let code = input_byte ic in
+    (* Read u32 counts *)
+    let b0 = input_byte ic in
+    let b1 = input_byte ic in
+    let b2 = input_byte ic in
+    let b3 = input_byte ic in
+    let num_tris = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
+
+    let b0 = input_byte ic in
+    let b1 = input_byte ic in
+    let b2 = input_byte ic in
+    let b3 = input_byte ic in
+    let num_verts = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
+
+    if i <= 30 then
+      Printf.printf "Reading Feature %d at 0x%X: Code %d, Tris %d, Verts %d\n%!"
+        i start_pos code num_tris num_verts;
+
+    (* Check code *)
+    if not (Hashtbl.mem code_map code) then
+      if not (Hashtbl.mem unknown_codes code) then (
+        Printf.printf
+          "Warning: Unknown CLC Code %d (0x%X) at feature start 0x%X (feature \
+           %d)\n"
+          code code start_pos i;
+        Hashtbl.add unknown_codes code true);
+
+    (* Read streams *)
+    let high_x = Bytes.create num_verts in
+    let low_x = Bytes.create num_verts in
+    let high_y = Bytes.create num_verts in
+    let low_y = Bytes.create num_verts in
+
+    really_input ic high_x 0 num_verts;
+    really_input ic low_x 0 num_verts;
+    really_input ic high_y 0 num_verts;
+    really_input ic low_y 0 num_verts;
+
+    let indices_bytes = Bytes.create (num_tris * 3 * 2) in
+    really_input ic indices_bytes 0 (num_tris * 3 * 2);
+
+    (* Decode Vertices *)
+    let base_v = !total_verts in
+
+    for i = 0 to num_verts - 1 do
+      let hx = Char.code (Bytes.get high_x i) in
+      let lx = Char.code (Bytes.get low_x i) in
+      let qx = lx lor (hx lsl 8) in
+
+      let hy = Char.code (Bytes.get high_y i) in
+      let ly = Char.code (Bytes.get low_y i) in
+      let qy = ly lor (hy lsl 8) in
+
+      all_pos := (qx, qy) :: !all_pos;
+      all_col := code :: !all_col
+    done;
+
+    total_verts := !total_verts + num_verts;
+
+    (* Decode Indices *)
+    for i = 0 to (num_tris * 3) - 1 do
+      let b0 = Char.code (Bytes.get indices_bytes (i * 2)) in
+      let b1 = Char.code (Bytes.get indices_bytes ((i * 2) + 1)) in
+      let idx = b0 lor (b1 lsl 8) in
+      all_idx := (base_v + idx) :: !all_idx
+    done
+  done;
+  close_in ic;
+
+  Printf.printf "Decoded: %d verts, %d indices\n%!" !total_verts
+    (List.length !all_idx);
+
+  (* Convert to Bigarrays *)
+  let n_verts = !total_verts in
+  let n_indices = List.length !all_idx in
+
+  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
+  let arr_col = Array1.create int8_unsigned c_layout n_verts in
+  let arr_ebo = Array1.create int32 c_layout n_indices in
+
+  (* Lists are reversed relative to processing order. Arrays should match. *)
+  (* Filling from back restores order *)
+  let rec fill_pos idx lst =
+    match lst with
+    | [] -> ()
+    | (x, y) :: tl ->
+        Array1.set arr_pos (idx - 1) y;
+        (* Y at odd *)
+        Array1.set arr_pos (idx - 2) x;
+        (* X at even *)
+        fill_pos (idx - 2) tl
+  in
+  fill_pos (n_verts * 2) !all_pos;
+
+  let rec fill_col idx lst =
+    match lst with
+    | [] -> ()
+    | c :: tl ->
+        Array1.set arr_col (idx - 1) (get_code_index c);
+        fill_col (idx - 1) tl
+  in
+  fill_col n_verts !all_col;
+
+  let rec fill_idx idx lst =
+    match lst with
+    | [] -> ()
+    | i :: tl ->
+        Array1.set arr_ebo (idx - 1) (Int32.of_int i);
+        fill_idx (idx - 1) tl
+  in
+  fill_idx n_indices !all_idx;
+
+  (n_indices, arr_pos, arr_col, arr_ebo, min_lon, min_lat, scale_x, scale_y)
+
+(* --- 4. GL Helper --- *)
 let get_iv get_fn obj param =
   let buf = Array1.create int32 c_layout 1 in
   get_fn obj param buf;
@@ -143,7 +312,7 @@ let compile_shader type_ src =
   Gl.shader_source s src;
   Gl.compile_shader s;
   if get_iv Gl.get_shaderiv s Gl.compile_status = Gl.false_ then (
-    Printf.printf "Shader: %s\n"
+    Printf.printf "Shader err: %s\n"
       (get_log Gl.get_shaderiv Gl.get_shader_info_log s);
     exit 1);
   s
@@ -154,7 +323,7 @@ let create_program vs fs =
   Gl.attach_shader p fs;
   Gl.link_program p;
   if get_iv Gl.get_programiv p Gl.link_status = Gl.false_ then (
-    Printf.printf "Link: %s\n"
+    Printf.printf "Link err: %s\n"
       (get_log Gl.get_programiv Gl.get_program_info_log p);
     exit 1);
   p
@@ -168,320 +337,78 @@ let () =
   | Ok () -> (
       ignore (Sdl.gl_set_attribute Sdl.Gl.multisamplebuffers 1);
       ignore (Sdl.gl_set_attribute Sdl.Gl.multisamplesamples 4);
-
       ignore
         (Sdl.gl_set_attribute Sdl.Gl.context_profile_mask
            Sdl.Gl.context_profile_es);
       ignore (Sdl.gl_set_attribute Sdl.Gl.context_major_version 3);
       ignore (Sdl.gl_set_attribute Sdl.Gl.context_minor_version 0);
-      ignore (Sdl.gl_set_attribute Sdl.Gl.depth_size 24);
 
-      let w_width, w_height = (1000, 800) in
-      match
-        Sdl.create_window "CLC Viewer (Robust Earcut)" ~w:w_width ~h:w_height
-          Sdl.Window.opengl
-      with
+      match Sdl.create_window "CLC Viewer" ~w:1000 ~h:800 Sdl.Window.opengl with
       | Error (`Msg e) ->
           Printf.printf "%s\n" e;
           exit 1
       | Ok window ->
           let _ctx =
             match Sdl.gl_create_context window with
-            | Error _ -> exit 1
             | Ok c -> c
+            | Error _ -> exit 1
           in
           ignore (Sdl.gl_set_swap_interval 1);
 
-          (* CHANGED: Cache name for Earcut version *)
-          let cache_file = "clc_earcut.cache" in
-          let db_file = "clc2018-R93.gpkg" in
-
-          let min_x, min_y, max_x, max_y =
-            (ref 0., ref 0., ref 100., ref 100.)
+          (* Load Data *)
+          let file =
+            if Array.length Sys.argv > 1 then Sys.argv.(1)
+            else "data/clc/N45E006.clc"
+          in
+          let ( index_count,
+                data_pos,
+                data_col,
+                data_ebo,
+                t_min_x,
+                t_min_y,
+                t_scale_x,
+                t_scale_y ) =
+            load_clc file
           in
 
-          let index_count, data_pos, data_idx, data_ebo =
-            if Sys.file_exists cache_file then (
-              Printf.printf "Loading cache %s...\n%!" cache_file;
-              let ic = open_in_bin cache_file in
-              min_x := input_value ic;
-              min_y := input_value ic;
-              max_x := input_value ic;
-              max_y := input_value ic;
-              let v_count : int = input_value ic in
-              let d_pos : (int, int16_unsigned_elt, c_layout) Array1.t =
-                input_value ic
-              in
-              let d_idx : (int, int8_unsigned_elt, c_layout) Array1.t =
-                input_value ic
-              in
-              let i_count : int = input_value ic in
-              let d_ebo : (int32, int32_elt, c_layout) Array1.t =
-                input_value ic
-              in
-              close_in ic;
-              Printf.printf "Cache loaded (%d indices).\n%!" i_count;
-              (i_count, d_pos, d_idx, d_ebo))
-            else (
-              Printf.printf "Processing GeoPackage...\n%!";
-              min_x := infinity;
-              min_y := infinity;
-              max_x := neg_infinity;
-              max_y := neg_infinity;
-
-              let db = Sqlite3.db_open db_file in
-              let sql_meta =
-                "SELECT table_name, column_name FROM gpkg_geometry_columns \
-                 LIMIT 1"
-              in
-              let stmt = Sqlite3.prepare db sql_meta in
-              let table, geom_col =
-                match Sqlite3.step stmt with
-                | Sqlite3.Rc.ROW ->
-                    ( Sqlite3.Data.to_string_exn (Sqlite3.column stmt 0),
-                      Sqlite3.Data.to_string_exn (Sqlite3.column stmt 1) )
-                | _ -> failwith "No table"
-              in
-              ignore (Sqlite3.finalize stmt);
-
-              Printf.printf "Buffering & Calculating BBox...\n%!";
-              let feature_list = ref [] in
-              let sql_query =
-                Printf.sprintf "SELECT Code_18, %s FROM %s" geom_col table
-              in
-              let stmt_query = Sqlite3.prepare db sql_query in
-
-              let rec fetch () =
-                match Sqlite3.step stmt_query with
-                | Sqlite3.Rc.ROW ->
-                    let code =
-                      Sqlite3.Data.to_string_exn (Sqlite3.column stmt_query 0)
-                    in
-                    (match Sqlite3.column stmt_query 1 with
-                    | Sqlite3.Data.BLOB raw -> (
-                        match get_wkb_from_gpkg_blob raw with
-                        | Some wkb -> (
-                            match Wkb_decode.decode_wkb wkb with
-                            | Some geom ->
-                                let b = Wkb_decode.get_bbox geom in
-                                if b.Wkb_decode.min_x < !min_x then
-                                  min_x := b.Wkb_decode.min_x;
-                                if b.Wkb_decode.min_y < !min_y then
-                                  min_y := b.Wkb_decode.min_y;
-                                if b.Wkb_decode.max_x > !max_x then
-                                  max_x := b.Wkb_decode.max_x;
-                                if b.Wkb_decode.max_y > !max_y then
-                                  max_y := b.Wkb_decode.max_y;
-                                let area =
-                                  (b.Wkb_decode.max_x -. b.Wkb_decode.min_x)
-                                  *. (b.Wkb_decode.max_y -. b.Wkb_decode.min_y)
-                                in
-                                feature_list :=
-                                  (area, code, geom) :: !feature_list
-                            | _ -> ())
-                        | _ -> ())
-                    | _ -> ());
-                    fetch ()
-                | _ -> ()
-              in
-              fetch ();
-              ignore (Sqlite3.finalize stmt_query);
-
-              Printf.printf "Global Bounds: x[%.2f, %.2f] y[%.2f, %.2f]\n%!"
-                !min_x !max_x !min_y !max_y;
-              Printf.printf "Sorting...\n%!";
-              let sorted =
-                List.sort
-                  (fun (a1, _, _) (a2, _, _) -> compare a1 a2)
-                  !feature_list
-              in
-
-              Printf.printf
-                "Quantizing, Cleaning & Triangulating (Earcut)...\n%!";
-              let lst_pos = ref [] in
-              let lst_col = ref [] in
-              let v_count = ref 0 in
-              let lst_ebo = ref [] in
-              let i_count = ref 0 in
-
-              let range_x = !max_x -. !min_x in
-              let range_y = !max_y -. !min_y in
-
-              List.iter
-                (fun (_, code, geom) ->
-                  let idx = get_code_index code in
-                  let quant v min_v range =
-                    int_of_float ((v -. min_v) /. range *. 65535.)
-                  in
-
-                  (* Robust Processing Function *)
-                  let process_poly rings =
-                    (* 1. Pre-process Rings: Quantize, Dedup, Close *)
-                    let valid_rings =
-                      List.fold_left
-                        (fun acc r ->
-                          (* A. Quantize *)
-                          let q_pts =
-                            List.map
-                              (fun p ->
-                                ( quant p.Wkb_decode.x !min_x range_x,
-                                  quant p.Wkb_decode.y !min_y range_y ))
-                              r
-                          in
-
-                          (* B. Deduplicate Adjacent *)
-                          let rec dedup out = function
-                            | [] -> List.rev out
-                            | (x, y) :: tl -> (
-                                match out with
-                                | (lx, ly) :: _ when lx = x && ly = y ->
-                                    dedup out tl
-                                | _ -> dedup ((x, y) :: out) tl)
-                          in
-                          let unique = dedup [] q_pts in
-
-                          (* C. Check Validity (at least 3 points) *)
-                          match unique with
-                          | [] -> acc
-                          | hd :: _ ->
-                              (* D. Handle Closed Rings (remove last if same as first) *)
-                              let rec remove_closing = function
-                                | [] -> []
-                                | [ last ] -> if last = hd then [] else [ last ]
-                                | h :: t -> h :: remove_closing t
-                              in
-                              let clean = remove_closing unique in
-
-                              if List.length clean >= 3 then clean :: acc
-                              else acc)
-                        [] rings
-                    in
-                    (* Ensure list order corresponds to Outer -> Holes (fold_left reverses, so we reverse back) *)
-                    let valid_rings = List.rev valid_rings in
-
-                    (* 2. Triangulate if Outer ring exists *)
-                    match valid_rings with
-                    | [] -> ()
-                    | _ ->
-                        (* Prepare input for Earcut: Convert integer points to Earcut.point floats *)
-                        let e_rings =
-                          List.map
-                            (fun r ->
-                              List.map
-                                (fun (x, y) ->
-                                  {
-                                    Earcut.x = float_of_int x;
-                                    y = float_of_int y;
-                                  })
-                                r)
-                            valid_rings
-                        in
-
-                        (* CALL EARCUT *)
-                        let indices = Earcut.triangulate e_rings in
-
-                        (* 3. Store Results *)
-                        let base_index = !v_count in
-
-                        (* Earcut indices refer to the flattened vertex list. 
-                   We must iterate the rings in the exact same order to populate VBO. *)
-                        List.iter
-                          (fun r ->
-                            List.iter
-                              (fun (x, y) ->
-                                lst_pos := y :: x :: !lst_pos;
-                                lst_col := idx :: !lst_col;
-                                incr v_count)
-                              r)
-                          valid_rings;
-
-                        List.iter
-                          (fun i ->
-                            lst_ebo := (base_index + i) :: !lst_ebo;
-                            incr i_count)
-                          indices
-                  in
-
-                  match geom with
-                  | Wkb_decode.Polygon rings -> process_poly rings
-                  | Wkb_decode.MultiPolygon polys ->
-                      List.iter process_poly polys
-                  | _ -> ())
-                sorted;
-
-              let arr_pos =
-                Array1.create int16_unsigned c_layout (!v_count * 2)
-              in
-              let arr_col = Array1.create int8_unsigned c_layout !v_count in
-              let rec fill_p idx lst =
-                match lst with
-                | [] -> ()
-                | h :: t ->
-                    Array1.set arr_pos idx h;
-                    fill_p (idx - 1) t
-              in
-              fill_p ((!v_count * 2) - 1) !lst_pos;
-              let rec fill_c idx lst =
-                match lst with
-                | [] -> ()
-                | h :: t ->
-                    Array1.set arr_col idx h;
-                    fill_c (idx - 1) t
-              in
-              fill_c (!v_count - 1) !lst_col;
-              let arr_ebo = Array1.create int32 c_layout !i_count in
-              let rec fill_e idx lst =
-                match lst with
-                | [] -> ()
-                | h :: t ->
-                    Array1.set arr_ebo idx (Int32.of_int h);
-                    fill_e (idx - 1) t
-              in
-              fill_e (!i_count - 1) !lst_ebo;
-
-              Printf.printf "Saving...\n%!";
-              let oc = open_out_bin cache_file in
-              output_value oc !min_x;
-              output_value oc !min_y;
-              output_value oc !max_x;
-              output_value oc !max_y;
-              output_value oc !v_count;
-              output_value oc arr_pos;
-              output_value oc arr_col;
-              output_value oc !i_count;
-              output_value oc arr_ebo;
-              close_out oc;
-              (!i_count, arr_pos, arr_col, arr_ebo))
-          in
+          (* Calculate range from scale: scale = 65535 / range => range = 65535 / scale *)
+          let range_x = 65535.0 /. t_scale_x in
+          let range_y = 65535.0 /. t_scale_y in
 
           let vs = compile_shader Gl.vertex_shader vertex_shader_src in
           let fs = compile_shader Gl.fragment_shader fragment_shader_src in
           let prog = create_program vs fs in
           Gl.use_program prog;
 
+          (* Uniforms *)
+          let u_range = Gl.get_uniform_location prog "u_range" in
+          let u_min = Gl.get_uniform_location prog "u_min" in
+          let u_view_scale = Gl.get_uniform_location prog "u_view_scale" in
+          let u_view_offset = Gl.get_uniform_location prog "u_view_offset" in
+          let u_palette = Gl.get_uniform_location prog "u_palette" in
+
+          (* Texture *)
           let palette_data = create_palette_texture () in
           let texs = Array1.create int32 c_layout 1 in
           Gl.gen_textures 1 texs;
-          let tex_id = Int32.to_int (Array1.get texs 0) in
           Gl.active_texture Gl.texture0;
-          Gl.bind_texture Gl.texture_2d tex_id;
+          Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
           Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.nearest;
           Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
           Gl.tex_image2d Gl.texture_2d 0 Gl.rgb8 256 1 0 Gl.rgb Gl.unsigned_byte
             (`Data palette_data);
-          Gl.uniform1i (Gl.get_uniform_location prog "u_palette") 0;
+          Gl.uniform1i u_palette 0;
 
+          (* Buffers *)
           let vaos = Array1.create int32 c_layout 1 in
           Gl.gen_vertex_arrays 1 vaos;
-          let vao = Int32.to_int (Array1.get vaos 0) in
-          Gl.bind_vertex_array vao;
+          Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
+
           let vbos = Array1.create int32 c_layout 3 in
           Gl.gen_buffers 3 vbos;
-          let vbo_pos, vbo_col, ebo_id =
-            ( Int32.to_int (Array1.get vbos 0),
-              Int32.to_int (Array1.get vbos 1),
-              Int32.to_int (Array1.get vbos 2) )
-          in
+          let vbo_pos = Int32.to_int (Array1.get vbos 0) in
+          let vbo_col = Int32.to_int (Array1.get vbos 1) in
+          let vbo_ebo = Int32.to_int (Array1.get vbos 2) in
 
           Gl.bind_buffer Gl.array_buffer vbo_pos;
           Gl.buffer_data Gl.array_buffer
@@ -492,97 +419,70 @@ let () =
 
           Gl.bind_buffer Gl.array_buffer vbo_col;
           Gl.buffer_data Gl.array_buffer
-            (Gl.bigarray_byte_size data_idx)
-            (Some data_idx) Gl.static_draw;
+            (Gl.bigarray_byte_size data_col)
+            (Some data_col) Gl.static_draw;
           Gl.enable_vertex_attrib_array 1;
           Gl.vertex_attrib_ipointer 1 1 Gl.unsigned_byte 0 (`Offset 0);
 
-          Gl.bind_buffer Gl.element_array_buffer ebo_id;
+          Gl.bind_buffer Gl.element_array_buffer vbo_ebo;
           Gl.buffer_data Gl.element_array_buffer
             (Gl.bigarray_byte_size data_ebo)
             (Some data_ebo) Gl.static_draw;
 
+          (* Interaction State *)
           let zoom = ref 1.0 in
-          let cx, cy =
-            (ref ((!min_x +. !max_x) /. 2.), ref ((!min_y +. !max_y) /. 2.))
-          in
-          let range_x, range_y = (!max_x -. !min_x, !max_y -. !min_y) in
-          let aspect = float w_width /. float w_height in
-          let base_sx, base_sy =
-            if range_x > range_y *. aspect then
-              (2. /. range_x, 2. /. range_x *. aspect)
-            else (2. /. range_y /. aspect, 2. /. range_y)
-          in
-
-          let u_mult, u_add =
-            ( Gl.get_uniform_location prog "u_mult",
-              Gl.get_uniform_location prog "u_add" )
-          in
+          let cx = ref (t_min_x +. (range_x /. 2.0)) in
+          let cy = ref (t_min_y +. (range_y /. 2.0)) in
           let drag = ref false in
+          let w_width, w_height = (1000, 800) in
 
           Gl.enable Gl.depth_test;
-          Gl.depth_func Gl.less;
-
-          Printf.printf
-            "Controls: Scroll/Pinch to Zoom, Drag to Pan, Space to Reset\n%!";
+          Gl.clear_color 0.1 0.1 0.1 1.0;
 
           let rec loop () =
             let e = Sdl.Event.create () in
-            match Sdl.wait_event (Some e) with
-            | Error _ -> exit 1
-            | Ok () ->
-                let rec process_event e =
-                  match Sdl.Event.(enum (get e typ)) with
-                  | `Quit -> exit 0
-                  | `Mouse_wheel ->
-                      let y = Sdl.Event.(get e mouse_wheel_y) in
-                      zoom := !zoom *. if y > 0 then 1.1 else 0.9
-                  | `Multi_gesture ->
-                      zoom :=
-                        !zoom
-                        *. (1.0
-                           +. (Sdl.Event.(get e multi_gesture_ddist) *. 2.0))
-                  | `Mouse_button_down -> drag := true
-                  | `Mouse_button_up -> drag := false
-                  | `Mouse_motion ->
-                      if !drag then (
-                        let dx = float Sdl.Event.(get e mouse_motion_xrel)
-                        and dy = float Sdl.Event.(get e mouse_motion_yrel) in
-                        cx :=
-                          !cx
-                          -. (dx /. float w_width *. 2.0 /. (base_sx *. !zoom));
-                        cy :=
-                          !cy
-                          -. -.dy /. float w_height *. 2.0 /. (base_sy *. !zoom))
-                  | `Key_down -> (
-                      match Sdl.Event.(get e keyboard_keycode) with
-                      | k when k = Sdl.K.escape -> exit 0
-                      | k when k = Sdl.K.space ->
-                          zoom := 1.0;
-                          cx := (!min_x +. !max_x) /. 2.;
-                          cy := (!min_y +. !max_y) /. 2.
-                      | _ -> ())
-                  | _ -> ()
-                in
-                process_event e;
-                let rec drain () =
-                  if Sdl.poll_event (Some e) then (
-                    process_event e;
-                    drain ())
-                in
-                drain ();
+            let rec drain () =
+              if Sdl.poll_event (Some e) then (
+                (match Sdl.Event.(enum (get e typ)) with
+                | `Quit -> exit 0
+                | `Key_down ->
+                    if Sdl.Event.(get e keyboard_keycode) = Sdl.K.escape then
+                      exit 0
+                | `Mouse_wheel ->
+                    let y = Sdl.Event.(get e mouse_wheel_y) in
+                    zoom := !zoom *. if y > 0 then 1.1 else 0.9
+                | `Mouse_button_down -> drag := true
+                | `Mouse_button_up -> drag := false
+                | `Mouse_motion ->
+                    if !drag then (
+                      let dx = float Sdl.Event.(get e mouse_motion_xrel) in
+                      let dy = float Sdl.Event.(get e mouse_motion_yrel) in
+                      (* Adjust pan speed based on zoom *)
+                      cx := !cx -. (dx /. float w_width *. range_x /. !zoom);
+                      cy := !cy +. (dy /. float w_height *. range_y /. !zoom))
+                | _ -> ());
+                drain ())
+            in
+            drain ();
 
-                let sx, sy = (base_sx *. !zoom, base_sy *. !zoom) in
-                Gl.uniform2f u_mult (range_x *. sx) (range_y *. sy);
-                Gl.uniform2f u_add
-                  ((!min_x -. !cx) *. sx)
-                  ((!min_y -. !cy) *. sy);
+            Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-                Gl.clear_color 0.1 0.1 0.1 1.0;
-                Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
-                Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
-                  (`Offset 0);
-                Sdl.gl_swap_window window;
-                loop ()
+            let aspect = float w_width /. float w_height in
+            let sx, sy =
+              if range_x > range_y *. aspect then
+                (!zoom /. range_x, !zoom /. range_x *. aspect)
+              else (!zoom /. range_y /. aspect, !zoom /. range_y)
+            in
+
+            Gl.uniform2f u_range range_x range_y;
+            Gl.uniform2f u_min t_min_x t_min_y;
+            Gl.uniform2f u_view_scale sx sy;
+            Gl.uniform2f u_view_offset !cx !cy;
+
+            Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
+              (`Offset 0);
+
+            Sdl.gl_swap_window window;
+            loop ()
           in
           loop ())
