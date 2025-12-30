@@ -153,7 +153,7 @@ let load_clc file =
   let ic = open_in_bin file in
 
   let magic = really_input_string ic 4 in
-  if magic <> "CLC1" then failwith "Invalid magic";
+  if magic <> "CLC2" then failwith "Invalid magic";
 
   let count = input_binary_int ic in
   let min_lon = read_f64_as_float ic in
@@ -175,80 +175,120 @@ let load_clc file =
 
   let unknown_codes = Hashtbl.create 5 in
 
+  let read_stream () =
+    let b0 = input_byte ic in
+    let b1 = input_byte ic in
+    let b2 = input_byte ic in
+    let b3 = input_byte ic in
+    let comp_len = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
+    let compressed = really_input_string ic comp_len in
+
+    let uncompress_string str =
+      let input_pos = ref 0 in
+      let len = String.length str in
+      let input_cb buf =
+        let n = min (Bytes.length buf) (len - !input_pos) in
+        if n > 0 then (
+          Bytes.blit_string str !input_pos buf 0 n;
+          input_pos := !input_pos + n);
+        n
+      in
+      let out_buf = Buffer.create (String.length str * 4) in
+      let output_cb buf n = Buffer.add_subbytes out_buf buf 0 n in
+      Zlib.uncompress input_cb output_cb;
+      Buffer.contents out_buf
+    in
+    uncompress_string compressed
+  in
+
+  Printf.printf "Reading Global Streams...\n%!";
+  let meta_str = read_stream () in
+  let high_x = read_stream () in
+  let low_x = read_stream () in
+  let high_y = read_stream () in
+  let low_y = read_stream () in
+  let indices_str = read_stream () in
+  close_in ic;
+  Printf.printf "Streams Read. Parsing Metadata...\n%!";
+
+  (* Decode Vertices *)
+  let prev_x = ref 0 in
+  let prev_y = ref 0 in
+  let total_verts_acc = ref 0 in
+  let total_tris_acc = ref 0 in
+
+  let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
+
+  (* We need to iterate over metadata to know feature boundaries if we want to assign codes.
+     Actually, we can just iterate the meta stream. *)
+  let meta_pos = ref 0 in
+  let v_pos = ref 0 in
+  let i_pos = ref 0 in
+
+  (* We need to know when to stop. We have 'count' features (placeholder was 0, but we backpatched it). *)
+  (* The loop below runs 'count' times *)
+  let read_u16_meta () =
+    let b0 = Char.code meta_str.[!meta_pos] in
+    let b1 = Char.code meta_str.[!meta_pos + 1] in
+    meta_pos := !meta_pos + 2;
+    b0 lor (b1 lsl 8)
+  in
+
   for i = 1 to count do
-    let start_pos = pos_in ic in
-    (* Read Code: Changed to u16 *)
-    let c0 = input_byte ic in
-    let c1 = input_byte ic in
-    let code = c0 lor (c1 lsl 8) in
-
-    (* Read u32 counts *)
-    let b0 = input_byte ic in
-    let b1 = input_byte ic in
-    let b2 = input_byte ic in
-    let b3 = input_byte ic in
-    let num_tris = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
-
-    let b0 = input_byte ic in
-    let b1 = input_byte ic in
-    let b2 = input_byte ic in
-    let b3 = input_byte ic in
-    let num_verts = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
-
-    if i <= 30 then
-      Printf.printf "Reading Feature %d at 0x%X: Code %d, Tris %d, Verts %d\n%!"
-        i start_pos code num_tris num_verts;
+    let code = read_u16_meta () in
+    let v_count = read_u16_meta () in
+    let t_count = read_u16_meta () in
 
     (* Check code *)
     if not (Hashtbl.mem code_map code) then
       if not (Hashtbl.mem unknown_codes code) then (
-        Printf.printf
-          "Warning: Unknown CLC Code %d (0x%X) at feature start 0x%X (feature \
-           %d)\n"
-          code code start_pos i;
+        Printf.printf "Warning: Unknown CLC Code %d \n" code;
         Hashtbl.add unknown_codes code true);
 
-    (* Read streams *)
-    let high_x = Bytes.create num_verts in
-    let low_x = Bytes.create num_verts in
-    let high_y = Bytes.create num_verts in
-    let low_y = Bytes.create num_verts in
+    (* Decode Vertices for this feature *)
+    (* Note: prev_x/y reset per feature or global?
+       Standard delta is usually per-feature for random access, 
+       but my Encoder implementation did:
+         let prev_x = ref 0 in ... for i=0 to num_verts ...
+       So it resets per feature. Correct.
+    *)
+    prev_x := 0;
+    prev_y := 0;
 
-    really_input ic high_x 0 num_verts;
-    really_input ic low_x 0 num_verts;
-    really_input ic high_y 0 num_verts;
-    really_input ic low_y 0 num_verts;
-
-    let indices_bytes = Bytes.create (num_tris * 3 * 2) in
-    really_input ic indices_bytes 0 (num_tris * 3 * 2);
-
-    (* Decode Vertices *)
     let base_v = !total_verts in
 
-    for i = 0 to num_verts - 1 do
-      let hx = Char.code (Bytes.get high_x i) in
-      let lx = Char.code (Bytes.get low_x i) in
-      let qx = lx lor (hx lsl 8) in
+    for k = 0 to v_count - 1 do
+      let idx = !v_pos + k in
+      let hx = Char.code high_x.[idx] in
+      let lx = Char.code low_x.[idx] in
+      let zx = lx lor (hx lsl 8) in
+      let sdx = zigzag_decode zx in
+      let qx = (!prev_x + sdx) land 0xFFFF in
+      prev_x := qx;
 
-      let hy = Char.code (Bytes.get high_y i) in
-      let ly = Char.code (Bytes.get low_y i) in
-      let qy = ly lor (hy lsl 8) in
+      let hy = Char.code high_y.[idx] in
+      let ly = Char.code low_y.[idx] in
+      let zy = ly lor (hy lsl 8) in
+      let sdy = zigzag_decode zy in
+      let qy = (!prev_y + sdy) land 0xFFFF in
+      prev_y := qy;
 
       all_pos := (qx, qy) :: !all_pos;
       all_col := code :: !all_col
     done;
-
-    total_verts := !total_verts + num_verts;
+    v_pos := !v_pos + v_count;
+    total_verts := !total_verts + v_count;
 
     (* Decode Indices *)
-    for i = 0 to (num_tris * 3) - 1 do
-      let b0 = Char.code (Bytes.get indices_bytes (i * 2)) in
-      let b1 = Char.code (Bytes.get indices_bytes ((i * 2) + 1)) in
-      let idx = b0 lor (b1 lsl 8) in
-      all_idx := (base_v + idx) :: !all_idx
-    done
+    for k = 0 to (t_count * 3) - 1 do
+      let idx = !i_pos + k in
+      let b0 = Char.code indices_str.[idx * 2] in
+      let b1 = Char.code indices_str.[(idx * 2) + 1] in
+      let val_ = b0 lor (b1 lsl 8) in
+      all_idx := (base_v + val_) :: !all_idx
+    done;
+    i_pos := !i_pos + (t_count * 3)
   done;
-  close_in ic;
 
   Printf.printf "Decoded: %d verts, %d indices\n%!" !total_verts
     (List.length !all_idx);

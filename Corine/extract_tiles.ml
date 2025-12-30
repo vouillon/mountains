@@ -20,6 +20,8 @@ let parse_tile_string str =
 
 module Encoder = struct
   type t = {
+    (* We write raw bytes to these buffers, then compress them later *)
+    meta : Buffer.t; (* Code, VCount, TCount *)
     high_x : Buffer.t;
     low_x : Buffer.t;
     high_y : Buffer.t;
@@ -29,6 +31,7 @@ module Encoder = struct
 
   let create () =
     {
+      meta = Buffer.create 1024;
       high_x = Buffer.create 1024;
       low_x = Buffer.create 1024;
       high_y = Buffer.create 1024;
@@ -42,9 +45,18 @@ module Encoder = struct
     write_u8 buf (v land 0xFF);
     write_u8 buf ((v lsr 8) land 0xFF)
 
+  let zigzag_encode n = (n lsl 1) lxor (n asr 31)
+
+  let encode_meta t code v_count t_count =
+    write_u16 t.meta code;
+    write_u16 t.meta v_count;
+    write_u16 t.meta t_count
+
   let encode_vertices t (verts : float array) num_verts (min_x, min_y)
       (scale_x, scale_y) =
-    let count = ref 0 in
+    let prev_x = ref 0 in
+    let prev_y = ref 0 in
+
     for i = 0 to num_verts - 1 do
       let x = verts.(i * 2) in
       let y = verts.((i * 2) + 1) in
@@ -57,23 +69,67 @@ module Encoder = struct
       let qx = max 0 (min 65535 qx) in
       let qy = max 0 (min 65535 qy) in
 
-      (* Split Bytes (Absolute) *)
-      (* We write High/Low of the absolute encoded value *)
-      write_u8 t.low_x (qx land 0xFF);
-      write_u8 t.high_x ((qx lsr 8) land 0xFF);
+      (* Delta Encoding (Modular u16) *)
+      let dx = (qx - !prev_x) land 0xFFFF in
+      let dy = (qy - !prev_y) land 0xFFFF in
+      prev_x := qx;
+      prev_y := qy;
 
-      write_u8 t.low_y (qy land 0xFF);
-      write_u8 t.high_y ((qy lsr 8) land 0xFF);
+      (* Interpret as signed 16-bit for ZigZag *)
+      let sdx = if dx >= 0x8000 then dx - 0x10000 else dx in
+      let sdy = if dy >= 0x8000 then dy - 0x10000 else dy in
 
-      incr count
-    done;
-    !count
+      (* ZigZag Encoding *)
+      let zx = zigzag_encode sdx in
+      let zy = zigzag_encode sdy in
+
+      (* Split Bytes *)
+      write_u8 t.low_x (zx land 0xFF);
+      write_u8 t.high_x ((zx lsr 8) land 0xFF);
+
+      write_u8 t.low_y (zy land 0xFF);
+      write_u8 t.high_y ((zy lsr 8) land 0xFF)
+    done
 
   let encode_indices t indices count =
     (* Ensure we only write 'count' indices *)
+    (* Delta compression for indices? Usually not worth it for triangle lists unless strip.
+       We leave indices raw u16 for now, or delta?
+       Let's stick to raw u16 for simplicity, Gzip will handle patterns. *)
     for i = 0 to count - 1 do
       write_u16 t.indices indices.(i)
     done
+
+  (* Using 'Zlib.compress' if available? *)
+  (* Dune file lists 'zip'. This usually refers to camlzip.
+     Camlzip has 'Zlib' module. *)
+  let compress_string str =
+    let input_pos = ref 0 in
+    let len = String.length str in
+    let input_cb buf =
+      let n = min (Bytes.length buf) (len - !input_pos) in
+      if n > 0 then (
+        Bytes.blit_string str !input_pos buf 0 n;
+        input_pos := !input_pos + n);
+      n
+    in
+    let out_buf = Buffer.create 1024 in
+    let output_cb buf n = Buffer.add_subbytes out_buf buf 0 n in
+    Zlib.compress input_cb output_cb;
+    Buffer.contents out_buf
+
+  let write_block out_ch buf =
+    let raw_str = Buffer.contents buf in
+    let compressed = compress_string raw_str in
+    let comp_len = String.length compressed in
+
+    (* Write Compressed Length (u32) *)
+    output_byte out_ch (comp_len land 0xFF);
+    output_byte out_ch ((comp_len lsr 8) land 0xFF);
+    output_byte out_ch ((comp_len lsr 16) land 0xFF);
+    output_byte out_ch ((comp_len lsr 24) land 0xFF);
+
+    output_string out_ch compressed
 end
 
 (* --- Main Pipeline --- *)
@@ -84,7 +140,7 @@ let process_tile db_path output_dir tile_name =
     lon;
 
   (* Define Bounds with Margin *)
-  let margin_deg = 1.0 /. 3600.0 in
+  let margin_deg = 0.05 in
   (* 1 pixel margin *)
   let min_lat = lat -. margin_deg in
   let max_lat = lat +. 1.0 +. margin_deg in
@@ -107,6 +163,11 @@ let process_tile db_path output_dir tile_name =
       Proj_3035.wgs84_to_laea max_lon min_lat;
       Proj_3035.wgs84_to_laea max_lon max_lat;
       Proj_3035.wgs84_to_laea min_lon max_lat;
+      (* Sample Edge Midpoints to handle curvature *)
+      Proj_3035.wgs84_to_laea ((min_lon +. max_lon) /. 2.0) min_lat;
+      Proj_3035.wgs84_to_laea ((min_lon +. max_lon) /. 2.0) max_lat;
+      Proj_3035.wgs84_to_laea min_lon ((min_lat +. max_lat) /. 2.0);
+      Proj_3035.wgs84_to_laea max_lon ((min_lat +. max_lat) /. 2.0);
     ]
   in
 
@@ -154,7 +215,7 @@ let process_tile db_path output_dir tile_name =
   let out_ch = open_out_bin output_file_path in
 
   (* Write Header Placeholder (Magic + Count + Bounds) *)
-  output_string out_ch "CLC1";
+  output_string out_ch "CLC2";
   output_binary_int out_ch 0;
 
   (* Count placeholder *)
@@ -268,7 +329,7 @@ let process_tile db_path output_dir tile_name =
                             {
                               Geometry_types.outer =
                                 {
-                                  start = 0;
+                                  Geometry_types.start = 0;
                                   len = Array.length outer_verts / 2;
                                 };
                               holes = proper_holes;
@@ -280,7 +341,9 @@ let process_tile db_path output_dir tile_name =
                             Polygon_clipping.Clipper.clip_polygon flat_verts
                               proper_poly clipper_region
                           with
-                          | None -> ()
+                          | None ->
+                              Printf.printf
+                                "  Dropped feature (clipped out)\n%!"
                           | Some (clipped_verts, clipped_poly) ->
                               (* 4. Triangulate *)
                               let tris =
@@ -289,21 +352,8 @@ let process_tile db_path output_dir tile_name =
                                   .triangulate_multi clipped_verts
                                     [| clipped_poly |]
                                 with Invalid_argument msg ->
-                                  Printf.printf "Triangulation failed: %s\n" msg;
-                                  Printf.printf
-                                    "  Clipped Verts: %d floats (%d pts)\n"
-                                    (Array.length clipped_verts)
-                                    (Array.length clipped_verts / 2);
-                                  Printf.printf "  Outer: start=%d len=%d\n"
-                                    clipped_poly.outer.start
-                                    clipped_poly.outer.len;
-                                  Array.iteri
-                                    (fun i h ->
-                                      Printf.printf
-                                        "  Hole %d: start=%d len=%d\n" i h.start
-                                        h.len)
-                                    clipped_poly.holes;
-                                  Printf.printf "%!";
+                                  Printf.printf "Triangulation failed: %s\n%!"
+                                    msg;
                                   [||]
                               in
 
@@ -344,42 +394,24 @@ let process_tile db_path output_dir tile_name =
                                   Array.of_list final_verts_list
                                 in
 
-                                (* Encode *)
+                                (* Encode into Global Buffer *)
                                 incr entry_count;
-                                (* Code: u16 *)
-                                output_byte out_ch (code land 0xFF);
-                                output_byte out_ch ((code lsr 8) land 0xFF);
-
-                                (* Store raw data in buffers *)
                                 let v_count = !next_idx in
                                 let i_count = Array.length final_indices in
-
                                 (* ALIGNMENT FIX: Ensure we only write 3*N indices *)
                                 let tri_count_val = i_count / 3 in
                                 let valid_i_count = tri_count_val * 3 in
 
+                                (* Write Meta *)
+                                Encoder.encode_meta encoder code v_count
+                                  tri_count_val;
+
                                 if !entry_count <= 10 then
                                   Printf.printf
-                                    "Writing Feature %d: Code %d, Tris %d, \
+                                    "Processed Feature %d: Code %d, Tris %d, \
                                      Verts %d\n\
                                      %!"
                                     !entry_count code tri_count_val v_count;
-
-                                (* Write num_triangles (u32) *)
-                                output_byte out_ch (tri_count_val land 0xFF);
-                                output_byte out_ch
-                                  ((tri_count_val lsr 8) land 0xFF);
-                                output_byte out_ch
-                                  ((tri_count_val lsr 16) land 0xFF);
-                                output_byte out_ch
-                                  ((tri_count_val lsr 24) land 0xFF);
-
-                                (* Encode payload *)
-                                Buffer.clear encoder.high_x;
-                                Buffer.clear encoder.low_x;
-                                Buffer.clear encoder.high_y;
-                                Buffer.clear encoder.low_y;
-                                Buffer.clear encoder.indices;
 
                                 let _ =
                                   Encoder.encode_vertices encoder final_verts
@@ -389,19 +421,7 @@ let process_tile db_path output_dir tile_name =
                                   Encoder.encode_indices encoder final_indices
                                     valid_i_count
                                 in
-
-                                (* Write num_vertices (u32) *)
-                                output_byte out_ch (v_count land 0xFF);
-                                output_byte out_ch ((v_count lsr 8) land 0xFF);
-                                output_byte out_ch ((v_count lsr 16) land 0xFF);
-                                output_byte out_ch ((v_count lsr 24) land 0xFF);
-
-                                (* Write Streams *)
-                                Buffer.output_buffer out_ch encoder.high_x;
-                                Buffer.output_buffer out_ch encoder.low_x;
-                                Buffer.output_buffer out_ch encoder.high_y;
-                                Buffer.output_buffer out_ch encoder.low_y;
-                                Buffer.output_buffer out_ch encoder.indices))
+                                ()))
                         float_polys
                 | None -> ()
               end
@@ -415,6 +435,17 @@ let process_tile db_path output_dir tile_name =
   in
 
   process_rows ();
+
+  (* Write Global Streams *)
+  Printf.printf "Compressing and Writing Global Streams...\n%!";
+  Encoder.write_block out_ch encoder.meta;
+  Encoder.write_block out_ch encoder.high_x;
+  Encoder.write_block out_ch encoder.low_x;
+  Encoder.write_block out_ch encoder.high_y;
+  Encoder.write_block out_ch encoder.low_y;
+  Encoder.write_block out_ch encoder.indices;
+
+  Printf.printf "Streams Written.\n%!";
 
   (* Backpatch count *)
   seek_out out_ch 4;
