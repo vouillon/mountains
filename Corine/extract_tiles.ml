@@ -177,233 +177,228 @@ let process_tile db_path output_dir tile_name =
   write_float64 scale_y;
 
   let rec process_rows () =
-    if !entry_count >= 30 then ()
-    else
-      match Sqlite3.step stmt with
-      | Sqlite3.Rc.ROW ->
-          let shape_blob = Sqlite3.column stmt 0 in
-          let code_str = Sqlite3.Data.to_string_exn (Sqlite3.column stmt 1) in
-          let code = try int_of_string code_str with _ -> 0 in
+    match Sqlite3.step stmt with
+    | Sqlite3.Rc.ROW ->
+        let shape_blob = Sqlite3.column stmt 0 in
+        let code_str = Sqlite3.Data.to_string_exn (Sqlite3.column stmt 1) in
+        let code = try int_of_string code_str with _ -> 0 in
 
-          begin match shape_blob with
-          | Sqlite3.Data.BLOB b ->
-              let wkb_opt = Some b in
-              begin match wkb_opt with
-              | Some raw -> begin
-                  match Wkb_decode.decode_wkb raw with
-                  | Some geom ->
-                      (* 1. Convert Geometry to float array (MultiPolygon) *)
-                      let polys =
-                        match geom with
-                        | Wkb_decode.Polygon rings -> [| rings |]
-                        | Wkb_decode.MultiPolygon polys -> Array.of_list polys
-                        | _ -> [||]
+        begin match shape_blob with
+        | Sqlite3.Data.BLOB b ->
+            let wkb_opt = Some b in
+            begin match wkb_opt with
+            | Some raw -> begin
+                match Wkb_decode.decode_wkb raw with
+                | Some geom ->
+                    (* 1. Convert Geometry to float array (MultiPolygon) *)
+                    let polys =
+                      match geom with
+                      | Wkb_decode.Polygon rings -> [| rings |]
+                      | Wkb_decode.MultiPolygon polys -> Array.of_list polys
+                      | _ -> [||]
+                    in
+
+                    if Array.length polys > 0 then
+                      (* Convert WKB list of points to native 'flat' float array for tools *)
+                      (* AND Reproject on the fly *)
+                      let float_polys =
+                        Array.map
+                          (fun rings ->
+                            let outer_pts =
+                              List.concat
+                                (List.map
+                                   (fun (p : Wkb_decode.point) ->
+                                     let lon, lat =
+                                       Proj_3035.laea_to_wgs84 p.x p.y
+                                     in
+                                     [ lon; lat ])
+                                   (List.hd rings))
+                            in
+
+                            let hole_list = List.tl rings in
+                            let raw_holes =
+                              Array.of_list
+                                (List.map
+                                   (fun ring ->
+                                     let pts =
+                                       List.concat
+                                         (List.map
+                                            (fun (p : Wkb_decode.point) ->
+                                              let lon, lat =
+                                                Proj_3035.laea_to_wgs84 p.x p.y
+                                              in
+                                              [ lon; lat ])
+                                            ring)
+                                     in
+                                     Array.of_list pts)
+                                   hole_list)
+                            in
+
+                            (Array.of_list outer_pts, raw_holes))
+                          polys
                       in
 
-                      if Array.length polys > 0 then
-                        (* Convert WKB list of points to native 'flat' float array for tools *)
-                        (* AND Reproject on the fly *)
-                        let float_polys =
-                          Array.map
-                            (fun rings ->
-                              let outer_pts =
-                                List.concat
-                                  (List.map
-                                     (fun (p : Wkb_decode.point) ->
-                                       let lon, lat =
-                                         Proj_3035.laea_to_wgs84 p.x p.y
-                                       in
-                                       [ lon; lat ])
-                                     (List.hd rings))
+                      (* 2. Flatten for Clipping *)
+                      Array.iter
+                        (fun (outer_verts, hole_arrays) ->
+                          let total_len =
+                            Array.length outer_verts
+                            + Array.fold_left
+                                (fun acc h -> acc + Array.length h)
+                                0 hole_arrays
+                          in
+                          let flat_verts = Array.make total_len 0.0 in
+                          Array.blit outer_verts 0 flat_verts 0
+                            (Array.length outer_verts);
+                          let offset = ref (Array.length outer_verts) in
+
+                          let proper_holes =
+                            Array.map
+                              (fun raw_h ->
+                                Array.blit raw_h 0 flat_verts !offset
+                                  (Array.length raw_h);
+                                let start = !offset / 2 in
+                                let len = Array.length raw_h / 2 in
+                                offset := !offset + (len * 2);
+                                { Geometry_types.start; len })
+                              hole_arrays
+                          in
+
+                          let proper_poly =
+                            {
+                              Geometry_types.outer =
+                                {
+                                  start = 0;
+                                  len = Array.length outer_verts / 2;
+                                };
+                              holes = proper_holes;
+                            }
+                          in
+
+                          (* 3. Clip *)
+                          match
+                            Polygon_clipping.Clipper.clip_polygon flat_verts
+                              proper_poly clipper_region
+                          with
+                          | None -> ()
+                          | Some (clipped_verts, clipped_poly) ->
+                              (* 4. Triangulate *)
+                              let tris =
+                                try
+                                  Polygon_triangulation.Triangulator
+                                  .triangulate_multi clipped_verts
+                                    [| clipped_poly |]
+                                with Invalid_argument msg ->
+                                  Printf.printf "Triangulation failed: %s\n%!"
+                                    msg;
+                                  [||]
                               in
 
-                              let hole_list = List.tl rings in
-                              let raw_holes =
-                                Array.of_list
-                                  (List.map
-                                     (fun ring ->
-                                       let pts =
-                                         List.concat
-                                           (List.map
-                                              (fun (p : Wkb_decode.point) ->
-                                                let lon, lat =
-                                                  Proj_3035.laea_to_wgs84 p.x
-                                                    p.y
-                                                in
-                                                [ lon; lat ])
-                                              ring)
-                                       in
-                                       Array.of_list pts)
-                                     hole_list)
-                              in
+                              if Array.length tris > 0 then (
+                                (* 5. Reorder & Encode *)
+                                let n_old = Array.length clipped_verts / 2 in
+                                let map = Array.make n_old (-1) in
+                                let new_verts_dyn = ref [] in
+                                let next_idx = ref 0 in
+                                let new_indices_rev = ref [] in
 
-                              (Array.of_list outer_pts, raw_holes))
-                            polys
-                        in
+                                for i = 0 to Array.length tris - 1 do
+                                  let old_idx = tris.(i) in
+                                  if old_idx >= 0 && old_idx < Array.length map
+                                  then (
+                                    if map.(old_idx) = -1 then (
+                                      map.(old_idx) <- !next_idx;
+                                      let vx = clipped_verts.(old_idx * 2) in
+                                      let vy =
+                                        clipped_verts.((old_idx * 2) + 1)
+                                      in
+                                      new_verts_dyn :=
+                                        vy :: vx :: !new_verts_dyn;
+                                      (* Store reverse for now *)
+                                      incr next_idx);
+                                    new_indices_rev :=
+                                      map.(old_idx) :: !new_indices_rev)
+                                done;
 
-                        (* 2. Flatten for Clipping *)
-                        Array.iter
-                          (fun (outer_verts, hole_arrays) ->
-                            let total_len =
-                              Array.length outer_verts
-                              + Array.fold_left
-                                  (fun acc h -> acc + Array.length h)
-                                  0 hole_arrays
-                            in
-                            let flat_verts = Array.make total_len 0.0 in
-                            Array.blit outer_verts 0 flat_verts 0
-                              (Array.length outer_verts);
-                            let offset = ref (Array.length outer_verts) in
-
-                            let proper_holes =
-                              Array.map
-                                (fun raw_h ->
-                                  Array.blit raw_h 0 flat_verts !offset
-                                    (Array.length raw_h);
-                                  let start = !offset / 2 in
-                                  let len = Array.length raw_h / 2 in
-                                  offset := !offset + (len * 2);
-                                  { Geometry_types.start; len })
-                                hole_arrays
-                            in
-
-                            let proper_poly =
-                              {
-                                Geometry_types.outer =
-                                  {
-                                    start = 0;
-                                    len = Array.length outer_verts / 2;
-                                  };
-                                holes = proper_holes;
-                              }
-                            in
-
-                            (* 3. Clip *)
-                            match
-                              Polygon_clipping.Clipper.clip_polygon flat_verts
-                                proper_poly clipper_region
-                            with
-                            | None -> ()
-                            | Some (clipped_verts, clipped_poly) ->
-                                (* 4. Triangulate *)
-                                let tris =
-                                  try
-                                    Polygon_triangulation.Triangulator
-                                    .triangulate_multi clipped_verts
-                                      [| clipped_poly |]
-                                  with Invalid_argument msg ->
-                                    Printf.printf "Triangulation failed: %s\n%!"
-                                      msg;
-                                    [||]
+                                let final_indices =
+                                  Array.of_list (List.rev !new_indices_rev)
+                                in
+                                let final_verts_list =
+                                  List.rev !new_verts_dyn
+                                in
+                                (* x,y, x,y... *)
+                                let final_verts =
+                                  Array.of_list final_verts_list
                                 in
 
-                                if Array.length tris > 0 then (
-                                  (* 5. Reorder & Encode *)
-                                  let n_old = Array.length clipped_verts / 2 in
-                                  let map = Array.make n_old (-1) in
-                                  let new_verts_dyn = ref [] in
-                                  let next_idx = ref 0 in
-                                  let new_indices_rev = ref [] in
+                                (* Encode *)
+                                incr entry_count;
+                                (* Code: u16 *)
+                                output_byte out_ch (code land 0xFF);
+                                output_byte out_ch ((code lsr 8) land 0xFF);
 
-                                  for i = 0 to Array.length tris - 1 do
-                                    let old_idx = tris.(i) in
-                                    if
-                                      old_idx >= 0 && old_idx < Array.length map
-                                    then (
-                                      if map.(old_idx) = -1 then (
-                                        map.(old_idx) <- !next_idx;
-                                        let vx = clipped_verts.(old_idx * 2) in
-                                        let vy =
-                                          clipped_verts.((old_idx * 2) + 1)
-                                        in
-                                        new_verts_dyn :=
-                                          vy :: vx :: !new_verts_dyn;
-                                        (* Store reverse for now *)
-                                        incr next_idx);
-                                      new_indices_rev :=
-                                        map.(old_idx) :: !new_indices_rev)
-                                  done;
+                                (* Store raw data in buffers *)
+                                let v_count = !next_idx in
+                                let i_count = Array.length final_indices in
 
-                                  let final_indices =
-                                    Array.of_list (List.rev !new_indices_rev)
-                                  in
-                                  let final_verts_list =
-                                    List.rev !new_verts_dyn
-                                  in
-                                  (* x,y, x,y... *)
-                                  let final_verts =
-                                    Array.of_list final_verts_list
-                                  in
+                                (* ALIGNMENT FIX: Ensure we only write 3*N indices *)
+                                let tri_count_val = i_count / 3 in
+                                let valid_i_count = tri_count_val * 3 in
 
-                                  (* Encode *)
-                                  incr entry_count;
-                                  (* Code byte *)
-                                  output_byte out_ch code;
+                                if !entry_count <= 10 then
+                                  Printf.printf
+                                    "Writing Feature %d: Code %d, Tris %d, \
+                                     Verts %d\n\
+                                     %!"
+                                    !entry_count code tri_count_val v_count;
 
-                                  (* Store raw data in buffers *)
-                                  let v_count = !next_idx in
-                                  let i_count = Array.length final_indices in
+                                (* Write num_triangles (u32) *)
+                                output_byte out_ch (tri_count_val land 0xFF);
+                                output_byte out_ch
+                                  ((tri_count_val lsr 8) land 0xFF);
+                                output_byte out_ch
+                                  ((tri_count_val lsr 16) land 0xFF);
+                                output_byte out_ch
+                                  ((tri_count_val lsr 24) land 0xFF);
 
-                                  (* ALIGNMENT FIX: Ensure we only write 3*N indices *)
-                                  let tri_count_val = i_count / 3 in
-                                  let valid_i_count = tri_count_val * 3 in
+                                (* Encode payload *)
+                                Buffer.clear encoder.high_x;
+                                Buffer.clear encoder.low_x;
+                                Buffer.clear encoder.high_y;
+                                Buffer.clear encoder.low_y;
+                                Buffer.clear encoder.indices;
 
-                                  (* Debug Print *)
-                                  if !entry_count <= 30 then
-                                    Printf.printf
-                                      "Writing Feature %d: Code %d, Tris %d, \
-                                       Verts %d\n\
-                                       %!"
-                                      !entry_count code tri_count_val v_count;
+                                let _ =
+                                  Encoder.encode_vertices encoder final_verts
+                                    v_count (min_lon, min_lat) (scale_x, scale_y)
+                                in
+                                let _ =
+                                  Encoder.encode_indices encoder final_indices
+                                    valid_i_count
+                                in
 
-                                  (* Write num_triangles (u32) *)
-                                  output_byte out_ch (tri_count_val land 0xFF);
-                                  output_byte out_ch
-                                    ((tri_count_val lsr 8) land 0xFF);
-                                  output_byte out_ch
-                                    ((tri_count_val lsr 16) land 0xFF);
-                                  output_byte out_ch
-                                    ((tri_count_val lsr 24) land 0xFF);
+                                (* Write num_vertices (u32) *)
+                                output_byte out_ch (v_count land 0xFF);
+                                output_byte out_ch ((v_count lsr 8) land 0xFF);
+                                output_byte out_ch ((v_count lsr 16) land 0xFF);
+                                output_byte out_ch ((v_count lsr 24) land 0xFF);
 
-                                  (* Encode payload *)
-                                  Buffer.clear encoder.high_x;
-                                  Buffer.clear encoder.low_x;
-                                  Buffer.clear encoder.high_y;
-                                  Buffer.clear encoder.low_y;
-                                  Buffer.clear encoder.indices;
-
-                                  let _ =
-                                    Encoder.encode_vertices encoder final_verts
-                                      v_count (min_lon, min_lat)
-                                      (scale_x, scale_y)
-                                  in
-                                  let _ =
-                                    Encoder.encode_indices encoder final_indices
-                                      valid_i_count
-                                  in
-
-                                  (* Write num_vertices (u32) *)
-                                  output_byte out_ch (v_count land 0xFF);
-                                  output_byte out_ch ((v_count lsr 8) land 0xFF);
-                                  output_byte out_ch ((v_count lsr 16) land 0xFF);
-                                  output_byte out_ch ((v_count lsr 24) land 0xFF);
-
-                                  (* Write Streams *)
-                                  Buffer.output_buffer out_ch encoder.high_x;
-                                  Buffer.output_buffer out_ch encoder.low_x;
-                                  Buffer.output_buffer out_ch encoder.high_y;
-                                  Buffer.output_buffer out_ch encoder.low_y;
-                                  Buffer.output_buffer out_ch encoder.indices))
-                          float_polys
-                  | None -> ()
-                end
-              | None -> ()
+                                (* Write Streams *)
+                                Buffer.output_buffer out_ch encoder.high_x;
+                                Buffer.output_buffer out_ch encoder.low_x;
+                                Buffer.output_buffer out_ch encoder.high_y;
+                                Buffer.output_buffer out_ch encoder.low_y;
+                                Buffer.output_buffer out_ch encoder.indices))
+                        float_polys
+                | None -> ()
               end
-          | _ -> ()
-          end;
-          process_rows ()
-      | Sqlite3.Rc.DONE -> ()
-      | _ -> failwith "DB Error"
+            | None -> ()
+            end
+        | _ -> ()
+        end;
+        process_rows ()
+    | Sqlite3.Rc.DONE -> ()
+    | _ -> failwith "DB Error"
   in
 
   process_rows ();
