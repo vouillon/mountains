@@ -8,6 +8,38 @@ type geometry =
   | MultiPolygon of point list list list (* List of Polygons *)
   | Unknown of int * string
 
+(* --- Bounding Box --- *)
+
+type bbox = { min_x : float; min_y : float; max_x : float; max_y : float }
+
+let empty_bbox =
+  {
+    min_x = infinity;
+    min_y = infinity;
+    max_x = neg_infinity;
+    max_y = neg_infinity;
+  }
+
+let combine_bbox b p =
+  {
+    min_x = min b.min_x p.x;
+    min_y = min b.min_y p.y;
+    max_x = max b.max_x p.x;
+    max_y = max b.max_y p.y;
+  }
+
+let get_bbox geom =
+  let rec from_points points acc = List.fold_left combine_bbox acc points in
+  let rec from_rings rings acc =
+    List.fold_left (fun acc ring -> from_points ring acc) acc rings
+  in
+  match geom with
+  | Point p -> combine_bbox empty_bbox p
+  | Polygon rings -> from_rings rings empty_bbox
+  | MultiPolygon polys ->
+      List.fold_left (fun acc rings -> from_rings rings acc) empty_bbox polys
+  | Unknown _ -> empty_bbox
+
 (* --- Binary Reading Helpers --- *)
 
 type cursor = {
@@ -65,7 +97,8 @@ let read_float c =
 let parse_type_info raw_type =
   let wkbZ = 0x80000000 in
   let wkbM = 0x40000000 in
-  let wkbSRID = 0x20000000 in
+
+  (* let wkbSRID = 0x20000000 in - Unused *)
   (* Only in EWKB, but good to know *)
 
   (* Handle ISO WKB Z/M values (1000 range) vs Extended WKB *)
