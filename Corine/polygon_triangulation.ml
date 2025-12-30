@@ -268,6 +268,18 @@ end
 module Triangulator = struct
   open Geometry
 
+  let verbose = ref false
+
+  let on_segment (verts : float array) ia ib ip =
+    let ax, ay = (get_x verts ia, get_y verts ia) in
+    let bx, by = (get_x verts ib, get_y verts ib) in
+    let px, py = (get_x verts ip, get_y verts ip) in
+    abs_float (cross_product verts ia ib ip) < epsilon
+    && px >= fmin ax bx -. epsilon
+    && px <= fmax ax bx +. epsilon
+    && py >= fmin ay by -. epsilon
+    && py <= fmax ay by +. epsilon
+
   let is_visible (verts : float array) p1_idx p2_idx poly_start_node poly_list =
     let curr_node = ref poly_start_node in
     let result = ref true in
@@ -280,10 +292,14 @@ module Triangulator = struct
 
       let intersected =
         if a = p1_idx || a = p2_idx || b = p1_idx || b = p2_idx then false
-        else intersects verts p1_idx p2_idx a b
+        else
+          intersects verts p1_idx p2_idx a b
+          || on_segment verts p1_idx p2_idx a
+          || on_segment verts p1_idx p2_idx b
       in
 
       if intersected then (
+        if !verbose then Printf.printf "  Blocked by edge %d-%d\n%!" a b;
         result := false;
         loop := false)
       else if next_node = poly_start_node then loop := false
@@ -324,12 +340,24 @@ module Triangulator = struct
     let m_node = hole_start_node in
     let p_node = find_bridge_point verts m_node outer_node poly_list in
     let p_prime = PolygonList.duplicate_node poly_list p_node in
+    let m_prime = PolygonList.duplicate_node poly_list m_node in
+
     let m_prev = poly_list.prev.(m_node) in
     let p_next = poly_list.next.(p_node) in
+
+    (* P -> M *)
     poly_list.next.(p_node) <- m_node;
     poly_list.prev.(m_node) <- p_node;
-    poly_list.next.(m_prev) <- p_prime;
-    poly_list.prev.(p_prime) <- m_prev;
+
+    (* M_prev -> M' *)
+    poly_list.next.(m_prev) <- m_prime;
+    poly_list.prev.(m_prime) <- m_prev;
+
+    (* M' -> P' *)
+    poly_list.next.(m_prime) <- p_prime;
+    poly_list.prev.(p_prime) <- m_prime;
+
+    (* P' -> P_next *)
     poly_list.next.(p_prime) <- p_next;
     poly_list.prev.(p_next) <- p_prime;
     p_node
@@ -355,6 +383,7 @@ module Triangulator = struct
         incr reflex_count);
       curr := next.(i)
     done;
+    if !verbose then Printf.printf "Total reflex nodes: %d\n%!" !reflex_count;
 
     let spatial_idx =
       if total_active_nodes > 96 then
@@ -392,10 +421,17 @@ module Triangulator = struct
                   (rx = ax && ry = ay)
                   || (rx = bx && ry = by)
                   || (rx = cx && ry = cy)
-                then ()
+                then (
+                  if !verbose then
+                    Printf.printf "  Reflex node %d is a vertex of ear(?)\n%!"
+                      vi_r)
                 else if point_in_triangle verts vi_r vi_prev vi_curr vi_next
-                then raise Exit
+                then (
+                  if !verbose then
+                    Printf.printf "  Rejected: Reflex node %d inside\n%!" vi_r;
+                  raise Exit)
             done;
+            if !verbose then Printf.printf "  Accepted Ear!\n%!";
             true
           with Exit -> false
         else
@@ -470,6 +506,9 @@ module Triangulator = struct
 
     while !count > 2 && !iterations < max_iter do
       incr iterations;
+      if !verbose then
+        Printf.printf "Loop iter %d count %d curr %d\n%!" !iterations !count
+          !curr;
       let i = !curr in
       if active.(i) && is_ear i then begin
         if !out_idx + 2 >= Array.length out_buffer then
