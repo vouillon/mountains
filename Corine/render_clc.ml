@@ -177,7 +177,11 @@ let load_clc file =
 
   for i = 1 to count do
     let start_pos = pos_in ic in
-    let code = input_byte ic in
+    (* Read Code: Changed to u16 *)
+    let c0 = input_byte ic in
+    let c1 = input_byte ic in
+    let code = c0 lor (c1 lsl 8) in
+
     (* Read u32 counts *)
     let b0 = input_byte ic in
     let b1 = input_byte ic in
