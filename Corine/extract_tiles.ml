@@ -26,7 +26,8 @@ module Encoder = struct
     low_x : Buffer.t;
     high_y : Buffer.t;
     low_y : Buffer.t;
-    indices : Buffer.t;
+    high_indices : Buffer.t;
+    low_indices : Buffer.t;
   }
 
   let create () =
@@ -36,7 +37,8 @@ module Encoder = struct
       low_x = Buffer.create 1024;
       high_y = Buffer.create 1024;
       low_y = Buffer.create 1024;
-      indices = Buffer.create 1024;
+      high_indices = Buffer.create 1024;
+      low_indices = Buffer.create 1024;
     }
 
   let write_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xFF))
@@ -92,12 +94,23 @@ module Encoder = struct
     done
 
   let encode_indices t indices count =
-    (* Ensure we only write 'count' indices *)
-    (* Delta compression for indices? Usually not worth it for triangle lists unless strip.
-       We leave indices raw u16 for now, or delta?
-       Let's stick to raw u16 for simplicity, Gzip will handle patterns. *)
+    let prev_idx = ref 0 in
     for i = 0 to count - 1 do
-      write_u16 t.indices indices.(i)
+      let idx = indices.(i) in
+
+      (* Delta Encoding (Modular u16) *)
+      let di = (idx - !prev_idx) land 0xFFFF in
+      prev_idx := idx;
+
+      (* Interpret as signed 16-bit for ZigZag *)
+      let sdi = if di >= 0x8000 then di - 0x10000 else di in
+
+      (* ZigZag Encoding *)
+      let zi = zigzag_encode sdi in
+
+      (* Split Bytes *)
+      write_u8 t.low_indices (zi land 0xFF);
+      write_u8 t.high_indices ((zi lsr 8) land 0xFF)
     done
 
   (* Using 'Zlib.compress' if available? *)
@@ -443,7 +456,8 @@ let process_tile db_path output_dir tile_name =
   Encoder.write_block out_ch encoder.low_x;
   Encoder.write_block out_ch encoder.high_y;
   Encoder.write_block out_ch encoder.low_y;
-  Encoder.write_block out_ch encoder.indices;
+  Encoder.write_block out_ch encoder.high_indices;
+  Encoder.write_block out_ch encoder.low_indices;
 
   Printf.printf "Streams Written.\n%!";
 

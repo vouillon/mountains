@@ -207,15 +207,15 @@ let load_clc file =
   let low_x = read_stream () in
   let high_y = read_stream () in
   let low_y = read_stream () in
-  let indices_str = read_stream () in
+  let high_indices = read_stream () in
+  let low_indices = read_stream () in
   close_in ic;
   Printf.printf "Streams Read. Parsing Metadata...\n%!";
 
   (* Decode Vertices *)
   let prev_x = ref 0 in
   let prev_y = ref 0 in
-  let total_verts_acc = ref 0 in
-  let total_tris_acc = ref 0 in
+  let prev_idx = ref 0 in
 
   let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
 
@@ -225,8 +225,6 @@ let load_clc file =
   let v_pos = ref 0 in
   let i_pos = ref 0 in
 
-  (* We need to know when to stop. We have 'count' features (placeholder was 0, but we backpatched it). *)
-  (* The loop below runs 'count' times *)
   let read_u16_meta () =
     let b0 = Char.code meta_str.[!meta_pos] in
     let b1 = Char.code meta_str.[!meta_pos + 1] in
@@ -246,12 +244,6 @@ let load_clc file =
         Hashtbl.add unknown_codes code true);
 
     (* Decode Vertices for this feature *)
-    (* Note: prev_x/y reset per feature or global?
-       Standard delta is usually per-feature for random access, 
-       but my Encoder implementation did:
-         let prev_x = ref 0 in ... for i=0 to num_verts ...
-       So it resets per feature. Correct.
-    *)
     prev_x := 0;
     prev_y := 0;
 
@@ -280,12 +272,17 @@ let load_clc file =
     total_verts := !total_verts + v_count;
 
     (* Decode Indices *)
+    prev_idx := 0;
     for k = 0 to (t_count * 3) - 1 do
       let idx = !i_pos + k in
-      let b0 = Char.code indices_str.[idx * 2] in
-      let b1 = Char.code indices_str.[(idx * 2) + 1] in
-      let val_ = b0 lor (b1 lsl 8) in
-      all_idx := (base_v + val_) :: !all_idx
+      let hi = Char.code high_indices.[idx] in
+      let li = Char.code low_indices.[idx] in
+      let zi = li lor (hi lsl 8) in
+      let sdi = zigzag_decode zi in
+      let idx_val = (!prev_idx + sdi) land 0xFFFF in
+      prev_idx := idx_val;
+
+      all_idx := (base_v + idx_val) :: !all_idx
     done;
     i_pos := !i_pos + (t_count * 3)
   done;
