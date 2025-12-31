@@ -363,9 +363,7 @@ let process_tile db_path output_dir tile_name =
                             Polygon_clipping.Clipper.clip_polygon flat_verts
                               proper_poly clipper_region
                           with
-                          | None ->
-                              Printf.printf
-                                "  Dropped feature (clipped out)\n%!"
+                          | None -> ()
                           | Some (clipped_verts, clipped_poly) ->
                               (* 4. Triangulate *)
                               let tris =

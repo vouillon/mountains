@@ -528,29 +528,31 @@ module Triangulator = struct
       else curr := next.(i)
     done;
 
-    (if !count > 2 then
-       let i = ref !curr in
-       let stop = !curr in
-       let loop = ref true in
-       while !loop do
-         let n = next.(!i) in
-         let p = prev.(!i) in
-         (* FIXED: Stop if 2 nodes remaining *)
-         if n = !i || n = p then loop := false
-         else (
-           if !out_idx + 2 >= Array.length out_buffer then
-             Printf.printf
-               "ERROR: out_buffer overflow (2)! out_idx=%d len=%d\n%!" !out_idx
-               (Array.length out_buffer);
-           out_buffer.(!out_idx) <- vert_idx.(p);
-           out_buffer.(!out_idx + 1) <- vert_idx.(!i);
-           out_buffer.(!out_idx + 2) <- vert_idx.(n);
-           out_idx := !out_idx + 3;
-           next.(p) <- n;
-           prev.(n) <- p;
-           i := n;
-           if !i = stop then loop := false)
-       done);
+    if !count > 2 then (
+      Format.eprintf "Failure: %d remaining vertices after %d iterations@."
+        !count max_iter;
+      let i = ref !curr in
+      let stop = !curr in
+      let loop = ref true in
+      while !loop do
+        let n = next.(!i) in
+        let p = prev.(!i) in
+        (* FIXED: Stop if 2 nodes remaining *)
+        if n = !i || n = p then loop := false
+        else (
+          if !out_idx + 2 >= Array.length out_buffer then
+            Printf.printf
+              "ERROR: out_buffer overflow (2)! out_idx=%d len=%d\n%!" !out_idx
+              (Array.length out_buffer);
+          out_buffer.(!out_idx) <- vert_idx.(p);
+          out_buffer.(!out_idx + 1) <- vert_idx.(!i);
+          out_buffer.(!out_idx + 2) <- vert_idx.(n);
+          out_idx := !out_idx + 3;
+          next.(p) <- n;
+          prev.(n) <- p;
+          i := n;
+          if !i = stop then loop := false)
+      done);
 
     !out_idx
 
