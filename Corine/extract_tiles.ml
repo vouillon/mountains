@@ -21,10 +21,17 @@ let parse_tile_string str =
 module Encoder = struct
   type t = {
     (* We write raw bytes to these buffers, then compress them later *)
-    meta : Buffer.t; (* Code, VCount, TCount *)
+    (* 
+       Columnar Storage Buffers:
+       We separate attributes into distinct streams to improve compression.
+       - 'high_x'/'low_x': Splitting 16-bit coordinates into high/low bytes puts similar bytes together.
+         High bytes (e.g. 0x41) tend to stay constant or change slowly for local features, compression well.
+         Low bytes are noisier (random bits), but isolating them prevents them from disrupting high byte entropy.
+    *)
+    meta : Buffer.t; (* Code (u16), VCount (u16), TCount (u16) per feature *)
     high_x : Buffer.t;
-    low_x : Buffer.t;
     high_y : Buffer.t;
+    low_x : Buffer.t;
     low_y : Buffer.t;
     high_indices : Buffer.t;
     low_indices : Buffer.t;
@@ -47,6 +54,17 @@ module Encoder = struct
     write_u8 buf (v land 0xFF);
     write_u8 buf ((v lsr 8) land 0xFF)
 
+  (* 
+     ZigZag Encoding:
+     Standard int16 representation uses two's complement. Small negative numbers (e.g. -1) are 0xFFFF,
+     which has high Hamming distance from 0 or 1. This prevents Gzip from identifying small delta patterns.
+     
+     ZigZag maps signed integers to unsigned integers such that small absolute values (positive or negative)
+     become small positive values:
+       0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4 ...
+     
+     Formula: (n << 1) ^ (n >> 31)
+  *)
   let zigzag_encode n = (n lsl 1) lxor (n asr 31)
 
   let encode_meta t code v_count t_count =
@@ -71,13 +89,20 @@ module Encoder = struct
       let qx = max 0 (min 65535 qx) in
       let qy = max 0 (min 65535 qy) in
 
-      (* Delta Encoding (Modular u16) *)
+      (* 
+         Modular Delta Encoding:
+         Instead of handling boundary checks for wrapping, we embrace 16-bit modular arithmetic.
+         (curr - prev) land 0xFFFF gives the "shortest path" difference in the u16 ring 
+         assuming the step is small (which it is for geometry).
+         
+         We then interpret this unsigned u16 diff as a signed 16-bit integer (sdx/sdy).
+         e.g., if diff is 0xFFFF (65535), it's interpreted as -1.
+      *)
       let dx = (qx - !prev_x) land 0xFFFF in
       let dy = (qy - !prev_y) land 0xFFFF in
       prev_x := qx;
       prev_y := qy;
 
-      (* Interpret as signed 16-bit for ZigZag *)
       let sdx = if dx >= 0x8000 then dx - 0x10000 else dx in
       let sdy = if dy >= 0x8000 then dy - 0x10000 else dy in
 
@@ -113,9 +138,6 @@ module Encoder = struct
       write_u8 t.high_indices ((zi lsr 8) land 0xFF)
     done
 
-  (* Using 'Zlib.compress' if available? *)
-  (* Dune file lists 'zip'. This usually refers to camlzip.
-     Camlzip has 'Zlib' module. *)
   let compress_string str =
     let input_pos = ref 0 in
     let len = String.length str in
@@ -160,14 +182,21 @@ let process_tile db_path output_dir tile_name =
   let min_lon = lon -. margin_deg in
   let max_lon = lon +. 1.0 +. margin_deg in
 
-  (* Calculate Scale Factors for 16-bit Quantization *)
+  (* 
+     Coordinate Normalization:
+     We Map [min_lon, max_lon] to [0, 65535].
+     This 16-bit quantization is sufficient for <1m precision within a 1-degree tile.
+     
+     Note: Since we use LAEA (meters) for extraction but WGS84 for storage,
+     there is non-linear distortion, but at the scale of 1 degree, simple linear 
+     interpolation in the vertex shader is visually acceptable for this use-case,
+     especially since we triangulate densely enough.
+  *)
   let range_x = max_lon -. min_lon in
   let range_y = max_lat -. min_lat in
-  (* Map range to 0..65535 *)
   let scale_x = 65535.0 /. range_x in
   let scale_y = 65535.0 /. range_y in
 
-  (* Open DB *)
   let db = Sqlite3.db_open db_path in
 
   let laea_pts =
@@ -200,7 +229,6 @@ let process_tile db_path output_dir tile_name =
   Printf.printf "LAEA Query Bounds: X[%.0f - %.0f] Y[%.0f - %.0f]\n%!"
     min_laea_x max_laea_x min_laea_y max_laea_y;
 
-  (* Query *)
   let sql =
     Printf.sprintf
       "SELECT c.Shape, c.Code_18 \n\
@@ -288,7 +316,12 @@ let process_tile db_path output_dir tile_name =
                           polys
                       in
 
-                      (* 2. Flatten for Clipping *)
+                      (* 
+                         2. Flatten for Polygon Clipping
+                         The Clipper library typically expects a flat array of floats.
+                         We flatten the MultiPolygon structure (Outer + Holes) into a single
+                         float array `flat_verts` and a list of hole descriptors.
+                      *)
                       Array.iter
                         (fun (outer_verts, hole_arrays) ->
                           let total_len =

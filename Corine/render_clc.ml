@@ -168,7 +168,13 @@ let load_clc file =
     "Header: count=%d, verts=%d, indices=%d, origin=(%.2f, %.2f)\n%!" count
     total_verts_header total_indices_header min_lon min_lat;
 
-  (* Pre-allocate Bigarrays *)
+  (* 
+     Pre-allocate Bigarrays:
+     The format header gives us exact total vertex and index counts.
+     We allocate the final GL buffers (Bigarrays) immediately.
+     This allows "Direct Decoding" where we write decompressed values straight into these arrays,
+     avoiding the massive GC pressure of creating millions of intermediate OCaml tuples/lists.
+  *)
   let n_verts = total_verts_header in
   let n_indices = total_indices_header in
   let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
@@ -220,6 +226,13 @@ let load_clc file =
   let global_v_offset = ref 0 in
   let global_i_offset = ref 0 in
 
+  (* 
+     ZigZag Decoding:
+     Maps positive integers back to signed integers.
+     Evens -> Positive, Odds -> Negative.
+     decode(n) = (n >> 1) ^ -(n & 1)
+     e.g. 0->0, 1->-1, 2->1, 3->-2
+  *)
   let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
 
   let meta_pos = ref 0 in
@@ -240,7 +253,6 @@ let load_clc file =
 
     let code_idx = get_code_index code in
 
-    (* Check code *)
     if not (Hashtbl.mem code_map code) then
       if not (Hashtbl.mem unknown_codes code) then (
         Printf.printf "Warning: Unknown CLC Code %d \n" code;
@@ -254,15 +266,14 @@ let load_clc file =
     for k = 0 to v_count - 1 do
       let idx = !v_pos + k in
 
-      (* X *)
       let hx = Char.code high_x.[idx] in
       let lx = Char.code low_x.[idx] in
       let zx = lx lor (hx lsl 8) in
       let sdx = zigzag_decode zx in
+      (* Modular reconstruction: (prev + diff) mod 65536 *)
       let qx = (!prev_x + sdx) land 0xFFFF in
       prev_x := qx;
 
-      (* Y *)
       let hy = Char.code high_y.[idx] in
       let ly = Char.code low_y.[idx] in
       let zy = ly lor (hy lsl 8) in
@@ -401,7 +412,6 @@ let () =
           let u_view_offset = Gl.get_uniform_location prog "u_view_offset" in
           let u_palette = Gl.get_uniform_location prog "u_palette" in
 
-          (* Texture *)
           let palette_data = create_palette_texture () in
           let texs = Array1.create int32 c_layout 1 in
           Gl.gen_textures 1 texs;
@@ -413,7 +423,6 @@ let () =
             (`Data palette_data);
           Gl.uniform1i u_palette 0;
 
-          (* Buffers *)
           let vaos = Array1.create int32 c_layout 1 in
           Gl.gen_vertex_arrays 1 vaos;
           Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
