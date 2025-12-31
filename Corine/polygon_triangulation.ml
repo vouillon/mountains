@@ -24,12 +24,33 @@ module Geometry = struct
     ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax))
   [@@inline always]
 
+  let cross_product_2d ax ay bx by = (ax *. by) -. (ay *. bx) [@@inline always]
+
   let point_in_triangle (verts : float array) ip ia ib ic =
     let cp1 = cross_product verts ia ib ip in
     let cp2 = cross_product verts ib ic ip in
     let cp3 = cross_product verts ic ia ip in
     (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
     || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
+  [@@inline always]
+
+  let dist_sq_point_segment x y ax ay bx by =
+    let dx = bx -. ax in
+    let dy = by -. ay in
+    if dx = 0.0 && dy = 0.0 then
+      let pdx = x -. ax in
+      let pdy = y -. ay in
+      (pdx *. pdx) +. (pdy *. pdy)
+    else
+      let t =
+        (((x -. ax) *. dx) +. ((y -. ay) *. dy)) /. ((dx *. dx) +. (dy *. dy))
+      in
+      let t_clamped = fmax 0.0 (fmin 1.0 t) in
+      let cx = ax +. (t_clamped *. dx) in
+      let cy = ay +. (t_clamped *. dy) in
+      let pdx = x -. cx in
+      let pdy = y -. cy in
+      (pdx *. pdx) +. (pdy *. pdy)
   [@@inline always]
 
   let dist_sq (verts : float array) ia ib =
@@ -280,6 +301,33 @@ module Triangulator = struct
     && py >= fmin ay by -. epsilon
     && py <= fmax ay by +. epsilon
 
+  (* Check if segment a->b is strictly internal to the polygon at vertex a.
+     a_prev and a_next are neighbors of a. *)
+  let locally_inside (verts : float array) a a_prev a_next b =
+    let ax, ay = (get_x verts a, get_y verts a) in
+    let px, py = (get_x verts a_prev, get_y verts a_prev) in
+    let nx, ny = (get_x verts a_next, get_y verts a_next) in
+    let bx, by = (get_x verts b, get_y verts b) in
+
+    let cp1 =
+      Geometry.cross_product_2d (ax -. px) (ay -. py) (nx -. ax) (ny -. ay)
+    in
+    let cp2 =
+      Geometry.cross_product_2d (ax -. px) (ay -. py) (bx -. ax) (by -. ay)
+    in
+    let cp3 =
+      Geometry.cross_product_2d (nx -. ax) (ny -. ay) (bx -. ax) (by -. ay)
+    in
+
+    if cp1 < 0.0 then
+      (* Reflex vertex (angle > 180) *)
+      (* Inside if to the right of prev->curr OR to the left of curr->next *)
+      cp2 > 0.0 || cp3 > 0.0
+    else
+      (* Convex vertex *)
+      (* Inside if to the right of prev->curr AND to the left of curr->next *)
+      cp2 > 0.0 && cp3 > 0.0
+
   let is_visible (verts : float array) p1_idx p2_idx poly_start_node poly_list =
     let curr_node = ref poly_start_node in
     let result = ref true in
@@ -296,6 +344,11 @@ module Triangulator = struct
           intersects verts p1_idx p2_idx a b
           || on_segment verts p1_idx p2_idx a
           || on_segment verts p1_idx p2_idx b
+          (* Extra robustness: check if vertex 'a' is extremely close to segment p1-p2 *)
+          || dist_sq_point_segment (get_x verts a) (get_y verts a)
+               (get_x verts p1_idx) (get_y verts p1_idx) (get_x verts p2_idx)
+               (get_y verts p2_idx)
+             < epsilon
       in
 
       if intersected then (
@@ -307,33 +360,164 @@ module Triangulator = struct
     done;
     !result
 
+  let cross_product_coords ax ay bx by = (ax *. by) -. (ay *. bx)
+
+  let point_in_triangle_coords ax ay bx by cx cy px py =
+    let cp1 =
+      cross_product_coords (bx -. ax) (by -. ay) (px -. ax) (py -. ay)
+    in
+    let cp2 =
+      cross_product_coords (cx -. bx) (cy -. by) (px -. bx) (py -. by)
+    in
+    let cp3 =
+      cross_product_coords (ax -. cx) (ay -. cy) (px -. cx) (py -. cy)
+    in
+    (cp1 >= 0.0 && cp2 >= 0.0 && cp3 >= 0.0)
+    || (cp1 <= 0.0 && cp2 <= 0.0 && cp3 <= 0.0)
+
   let find_bridge_point (verts : float array) hole_max_x_node outer_node
       poly_list =
     let h_idx = poly_list.PolygonList.vert_idx.(hole_max_x_node) in
     let hx = get_x verts h_idx in
+    let hy = get_y verts h_idx in
 
-    let best_candidate = ref (-1) in
-    let min_dist = ref infinity in
+    (* 1. Find the edge intersected by ray M -> +infinity *)
+    (* We want the intersection with smallest X > hx *)
+    let min_dist_x = ref infinity in
+    let best_P = ref (-1) in
 
-    let curr_node = ref outer_node in
+    let curr = ref outer_node in
     let loop = ref true in
 
     while !loop do
-      let v_idx = poly_list.PolygonList.vert_idx.(!curr_node) in
-      let vx = get_x verts v_idx in
+      let n1 = !curr in
+      let n2 = poly_list.next.(n1) in
 
-      (if vx >= hx then
-         let d = dist_sq verts h_idx v_idx in
-         if d < !min_dist then
-           if is_visible verts h_idx v_idx outer_node poly_list then (
-             min_dist := d;
-             best_candidate := !curr_node));
+      let v1 = poly_list.vert_idx.(n1) in
+      let v2 = poly_list.vert_idx.(n2) in
 
-      let next = poly_list.next.(!curr_node) in
-      if next = outer_node then loop := false else curr_node := next
+      let x1 = get_x verts v1 in
+      let y1 = get_y verts v1 in
+      let x2 = get_x verts v2 in
+      let y2 = get_y verts v2 in
+
+      (* Check intersection with ray y = hy, x > hx *)
+      (* Edge must cross the y-line *)
+      (if (y1 <= hy && y2 > hy) || (y2 <= hy && y1 > hy) then
+         let t = (hy -. y1) /. (y2 -. y1) in
+         let ix = x1 +. (t *. (x2 -. x1)) in
+
+         if ix >= hx then
+           if ix < !min_dist_x then (
+             min_dist_x := ix;
+             (* Default candidate P is the endpoint with larger X *)
+             best_P := if x1 > x2 then n1 else n2));
+
+      if n2 = outer_node then loop := false else curr := n2
     done;
 
-    if !best_candidate = -1 then outer_node else !best_candidate
+    if !best_P = -1 then outer_node (* Should not happen *)
+    else
+      (* 2. Refine P: Check for reflex vertices inside triangle (M, I, P) *)
+      (* If a vertex R is inside, it becomes the new P *)
+      let m_x, m_y = (hx, hy) in
+      let i_x, i_y = (!min_dist_x, hy) in
+      (* Current P coords *)
+      let p_idx = poly_list.vert_idx.(!best_P) in
+      let p_x = ref (get_x verts p_idx) in
+      let p_y = ref (get_y verts p_idx) in
+
+      curr := outer_node;
+      loop := true;
+
+      while !loop do
+        let n = !curr in
+        (if n <> !best_P && n <> hole_max_x_node then
+           let v_idx = poly_list.vert_idx.(n) in
+           let rx = get_x verts v_idx in
+           let ry = get_y verts v_idx in
+
+           (* Check if R is inside Triangle(M, I, P) *)
+           if point_in_triangle_coords m_x m_y i_x i_y !p_x !p_y rx ry then (
+             (* Found a blocker R inside the visibility cone. Update P to R. *)
+             (* This shrinks the triangle (M, I, P) ensuring next R must be inside new triangle *)
+             best_P := n;
+             p_x := rx;
+             p_y := ry));
+        let next = poly_list.next.(n) in
+        if next = outer_node then loop := false else curr := next
+      done;
+
+      (* Validate the result with strict visibility check AND cone check *)
+      let p_node = !best_P in
+      let p_idx = poly_list.vert_idx.(p_node) in
+      let m_next_node = poly_list.next.(hole_max_x_node) in
+      let m_prev_node = poly_list.prev.(hole_max_x_node) in
+      let p_next_node = poly_list.next.(p_node) in
+      let p_prev_node = poly_list.prev.(p_node) in
+
+      let m_idx = poly_list.vert_idx.(hole_max_x_node) in
+      let m_next = poly_list.vert_idx.(m_next_node) in
+      let m_prev = poly_list.vert_idx.(m_prev_node) in
+      let p_next = poly_list.vert_idx.(p_next_node) in
+      let p_prev = poly_list.vert_idx.(p_prev_node) in
+
+      let valid_cone =
+        locally_inside verts m_idx m_prev m_next p_idx
+        && locally_inside verts p_idx p_prev p_next m_idx
+      in
+
+      if valid_cone && is_visible verts h_idx p_idx outer_node poly_list then
+        !best_P
+      else begin
+        (* Fallback to generic robust search O(N^2) if optimization fails *)
+        if !verbose then
+          Printf.printf
+            "  Optimized bridge failed (cone=%b), using fallback...\n%!"
+            valid_cone;
+        let best_candidate = ref (-1) in
+        let min_dist = ref infinity in
+        let closest_any = ref (-1) in
+        let min_dist_any = ref infinity in
+        let curr_node = ref outer_node in
+        let loop = ref true in
+        while !loop do
+          let v_idx = poly_list.vert_idx.(!curr_node) in
+          let vx = get_x verts v_idx in
+          if vx >= hx then (
+            let d = dist_sq verts h_idx v_idx in
+            (* Track absolute closest for desperate fallback *)
+            if d < !min_dist_any then (
+              min_dist_any := d;
+              closest_any := !curr_node);
+
+            if d < !min_dist then
+              (* Check cone validity for candidate *)
+              let c_next_node = poly_list.next.(!curr_node) in
+              let c_prev_node = poly_list.prev.(!curr_node) in
+              let c_next = poly_list.vert_idx.(c_next_node) in
+              let c_prev = poly_list.vert_idx.(c_prev_node) in
+
+              if
+                locally_inside verts m_idx m_prev m_next v_idx
+                && locally_inside verts v_idx c_prev c_next m_idx
+              then
+                if is_visible verts h_idx v_idx outer_node poly_list then (
+                  min_dist := d;
+                  best_candidate := !curr_node));
+          let next = poly_list.next.(!curr_node) in
+          if next = outer_node then loop := false else curr_node := next
+        done;
+        if !best_candidate <> -1 then !best_candidate
+        else if !closest_any <> -1 then (
+          if !verbose then
+            Printf.printf "  Using DESPERATE bridge (might overlap)!\n%!";
+          !closest_any)
+        else (
+          if !verbose then
+            Printf.printf "  Fallback FAILED to find any bridge candidate!\n%!";
+          outer_node)
+      end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
       poly_list =
@@ -514,6 +698,20 @@ module Triangulator = struct
         let i = !curr in
         let p = prev.(i) in
         let n = next.(i) in
+        let vi_p = vert_idx.(p) in
+        let vi_i = vert_idx.(i) in
+        let vi_n = vert_idx.(n) in
+        let cp = cross_product verts vi_p vi_i vi_n in
+
+        (* If convex or collinear, EMIT the triangle to fill the gap! *)
+        if cp >= -.epsilon then begin
+          if !out_idx + 2 < Array.length out_buffer then (
+            out_buffer.(!out_idx) <- vi_p;
+            out_buffer.(!out_idx + 1) <- vi_i;
+            out_buffer.(!out_idx + 2) <- vi_n;
+            out_idx := !out_idx + 3)
+        end;
+
         active.(i) <- false;
         next.(p) <- n;
         prev.(n) <- p;

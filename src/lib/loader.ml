@@ -29,8 +29,8 @@ module Make (R : Tiff.READER) = struct
     let min_lon' = truncate (lon *. 3600.) - (size / 2) in
     let max_lat' = min_lat + size - 1 in
     let max_lon' = min_lon + size - 1 in
-    min_lat <= min_lat' // 3600
-    && max_lat' // 3600 <= max_lat
+    min_lat <= (min_lat' - 1) // 3600
+    && (max_lat' - 1) // 3600 <= max_lat
     && min_lon <= min_lon' // 3600
     && max_lon' // 3600 <= max_lon
 
@@ -39,9 +39,11 @@ module Make (R : Tiff.READER) = struct
     let min_lon = truncate (lon *. 3600.) - (size / 2) in
     let max_lat = min_lat + size - 1 in
     let max_lon = min_lon + size - 1 in
-    Format.eprintf "PREFETCH RANGE: %d %d %d %d@." (min_lat // 3600)
-      (max_lat // 3600) (min_lon // 3600) (max_lon // 3600);
-    parallel_iter (min_lat // 3600) (max_lat // 3600) @@ fun lat ->
+    Format.eprintf "PREFETCH RANGE: %d %d %d %d@."
+      ((min_lat - 1) // 3600)
+      ((max_lat - 1) // 3600)
+      (min_lon // 3600) (max_lon // 3600);
+    parallel_iter ((min_lat - 1) // 3600) ((max_lat - 1) // 3600) @@ fun lat ->
     parallel_iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
     R.prefetch ~lat ~lon
 
@@ -53,11 +55,13 @@ module Make (R : Tiff.READER) = struct
     let max_lon = min_lon + size - 1 in
     let heights = Bigarray.(Array2.create Float32 C_layout) size size in
 
-    Format.eprintf "RANGE: %d %d %d %d@." (min_lat // 3600) (max_lat // 3600)
+    Format.eprintf "RANGE: %d %d %d %d@."
+      ((min_lat - 1) // 3600)
+      ((max_lat - 1) // 3600)
       (min_lon // 3600) (max_lon // 3600);
 
     let* () =
-      iter_rev (min_lat // 3600) (max_lat // 3600) @@ fun lat ->
+      iter_rev ((min_lat - 1) // 3600) ((max_lat - 1) // 3600) @@ fun lat ->
       Format.eprintf "LAT: %d@." lat;
       iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
       R.select ~lat ~lon @@ fun ch ->
@@ -73,7 +77,7 @@ module Make (R : Tiff.READER) = struct
       iter min_tile_y max_tile_y @@ fun tile_y ->
       iter min_tile_x max_tile_x @@ fun tile_x ->
       let delta_x = (3600 * lon) + (1024 * tile_x) in
-      let delta_y = (3600 * (lat + 1)) - (1024 * (tile_y + 1)) in
+      let delta_y = (3600 * (lat + 1)) - (1024 * (tile_y + 1)) + 1 in
       let min_x = min_lon - delta_x in
       let max_x = max_lon - delta_x in
       let min_y = min_lat - delta_y in
