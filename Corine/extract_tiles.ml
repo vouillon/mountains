@@ -223,32 +223,8 @@ let process_tile db_path output_dir tile_name =
 
   let encoder = Encoder.create () in
   let entry_count = ref 0 in
-
-  let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
-  let out_ch = open_out_bin output_file_path in
-
-  (* Write Header Placeholder (Magic + Count + Bounds) *)
-  output_string out_ch "CLC2";
-  output_binary_int out_ch 0;
-
-  (* Count placeholder *)
-
-  (* Write float params (bounds + scale) for reconstruction *)
-  let write_float64 f =
-    let bits = Int64.bits_of_float f in
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 0) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 8) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 16) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 24) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 32) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 40) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 48) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 56) land 0xFF)
-  in
-  write_float64 min_lon;
-  write_float64 min_lat;
-  write_float64 scale_x;
-  write_float64 scale_y;
+  let total_vertices = ref 0 in
+  let total_indices = ref 0 in
 
   let rec process_rows () =
     match Sqlite3.step stmt with
@@ -415,6 +391,9 @@ let process_tile db_path output_dir tile_name =
                                 let tri_count_val = i_count / 3 in
                                 let valid_i_count = tri_count_val * 3 in
 
+                                total_vertices := !total_vertices + v_count;
+                                total_indices := !total_indices + valid_i_count;
+
                                 (* Write Meta *)
                                 Encoder.encode_meta encoder code v_count
                                   tri_count_val;
@@ -449,6 +428,32 @@ let process_tile db_path output_dir tile_name =
 
   process_rows ();
 
+  let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
+  let out_ch = open_out_bin output_file_path in
+
+  (* Write Header (Magic + Counts + Bounds) *)
+  output_string out_ch "CLC3";
+  output_binary_int out_ch !entry_count;
+  output_binary_int out_ch !total_vertices;
+  output_binary_int out_ch !total_indices;
+
+  (* Write float params (bounds + scale) for reconstruction *)
+  let write_float64 f =
+    let bits = Int64.bits_of_float f in
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 0) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 8) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 16) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 24) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 32) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 40) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 48) land 0xFF);
+    output_byte out_ch (Int64.to_int (Int64.shift_right bits 56) land 0xFF)
+  in
+  write_float64 min_lon;
+  write_float64 min_lat;
+  write_float64 scale_x;
+  write_float64 scale_y;
+
   (* Write Global Streams *)
   Printf.printf "Compressing and Writing Global Streams...\n%!";
   Encoder.write_block out_ch encoder.meta;
@@ -461,12 +466,10 @@ let process_tile db_path output_dir tile_name =
 
   Printf.printf "Streams Written.\n%!";
 
-  (* Backpatch count *)
-  seek_out out_ch 4;
-  output_binary_int out_ch !entry_count;
   close_out out_ch;
   ignore (Sqlite3.db_close db);
-  Printf.printf "Done. Extracted %d features.\n%!" !entry_count
+  Printf.printf "Done. Extracted %d features (%d verts, %d indices).\n%!"
+    !entry_count !total_vertices !total_indices
 
 let () =
   if Array.length Sys.argv < 4 then
