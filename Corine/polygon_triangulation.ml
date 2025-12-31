@@ -510,20 +510,48 @@ module Triangulator = struct
         Printf.printf "Loop iter %d count %d curr %d\n%!" !iterations !count
           !curr;
       let i = !curr in
-      if active.(i) && is_ear i then begin
-        if !out_idx + 2 >= Array.length out_buffer then
-          Printf.printf "ERROR: out_buffer overflow (1)! out_idx=%d len=%d\n%!"
-            !out_idx (Array.length out_buffer);
-        out_buffer.(!out_idx) <- vert_idx.(prev.(i));
-        out_buffer.(!out_idx + 1) <- vert_idx.(i);
-        out_buffer.(!out_idx + 2) <- vert_idx.(next.(i));
-        out_idx := !out_idx + 3;
+      if active.(i) then begin
+        let p = prev.(i) in
+        let n = next.(i) in
+        let vi_p = vert_idx.(p) in
+        let vi_i = vert_idx.(i) in
+        let vi_n = vert_idx.(n) in
+        let cp = cross_product verts vi_p vi_i vi_n in
 
-        active.(i) <- false;
-        next.(prev.(i)) <- next.(i);
-        prev.(next.(i)) <- prev.(i);
-        decr count;
-        curr := prev.(i)
+        if cp > epsilon then begin
+          (* Convex vertex - check if it's a valid ear *)
+          if is_ear i then begin
+            if !out_idx + 2 >= Array.length out_buffer then
+              Printf.printf "ERROR: out_buffer overflow! out_idx=%d len=%d\n%!"
+                !out_idx (Array.length out_buffer);
+            out_buffer.(!out_idx) <- vi_p;
+            out_buffer.(!out_idx + 1) <- vi_i;
+            out_buffer.(!out_idx + 2) <- vi_n;
+            out_idx := !out_idx + 3;
+
+            active.(i) <- false;
+            next.(p) <- n;
+            prev.(n) <- p;
+            decr count;
+            curr := p
+          end
+          else curr := n
+        end
+        else if abs_float cp < 1e-14 then begin
+          (* 
+             Truly collinear vertex (extremely small cross product).
+             We use a much stricter threshold than epsilon to preserve thin
+             triangles while still removing degenerate collinear points.
+          *)
+          active.(i) <- false;
+          next.(p) <- n;
+          prev.(n) <- p;
+          decr count;
+          curr := p
+        end
+        else
+          (* Reflex vertex - skip *)
+          curr := n
       end
       else curr := next.(i)
     done;
@@ -531,6 +559,19 @@ module Triangulator = struct
     if !count > 2 then (
       Format.eprintf "Failure: %d remaining vertices after %d iterations@."
         !count max_iter;
+      (* Diagnostic: Print the remaining polygon *)
+      Format.eprintf "Remaining polygon vertices:@.";
+      let start = !curr in
+      let n = ref start in
+      let first = ref true in
+      while !first || !n <> start do
+        first := false;
+        let vi = vert_idx.(!n) in
+        Format.eprintf "  [%d] node=%d vert=%d (%.10f, %.10f)@."
+          (if !n = start then 0 else 1)
+          !n vi (get_x verts vi) (get_y verts vi);
+        n := next.(!n)
+      done;
       let i = ref !curr in
       let stop = !curr in
       let loop = ref true in
@@ -630,8 +671,38 @@ module Triangulator = struct
 
       let active_count = PolygonList.count_nodes poly_list !curr_outer_node in
 
-      triangulate_dll verts !curr_outer_node poly_list active_count out_buffer
-        start_offset
+      (* 
+         Skip degenerate (zero-area) polygons.
+         After clipping and hole merging, we may end up with collinear points
+         that form a line segment rather than a polygon. Ear-clipping cannot
+         triangulate these.
+      *)
+      if active_count < 3 then start_offset
+      else
+        let area =
+          (* Compute signed area by walking the linked list *)
+          let sum = ref 0.0 in
+          let start = !curr_outer_node in
+          let curr = ref start in
+          let first = ref true in
+          while !first || !curr <> start do
+            first := false;
+            let n = poly_list.next.(!curr) in
+            let vi = poly_list.vert_idx.(!curr) in
+            let vn = poly_list.vert_idx.(n) in
+            let x1 = Geometry.get_x verts vi in
+            let y1 = Geometry.get_y verts vi in
+            let x2 = Geometry.get_x verts vn in
+            let y2 = Geometry.get_y verts vn in
+            sum := !sum +. ((x1 *. y2) -. (x2 *. y1));
+            curr := n
+          done;
+          abs_float (!sum *. 0.5)
+        in
+        if area < Geometry.epsilon then start_offset
+        else
+          triangulate_dll verts !curr_outer_node poly_list active_count
+            out_buffer start_offset
 
   (* Use Geometry_types.validate_polygon *)
 
