@@ -502,58 +502,78 @@ module Triangulator = struct
     let count = ref total_active_nodes in
     curr := start_node;
     let iterations = ref 0 in
-    let max_iter = 2 * total_active_nodes * total_active_nodes in
+    (* Linear max_iter with stuck detection - much faster than O(N²) *)
+    let max_iter = 10 * total_active_nodes in
+    let since_last_progress = ref 0 in
 
     while !count > 2 && !iterations < max_iter do
       incr iterations;
-      if !verbose then
-        Printf.printf "Loop iter %d count %d curr %d\n%!" !iterations !count
-          !curr;
-      let i = !curr in
-      if active.(i) then begin
+      incr since_last_progress;
+      (* If we've gone around 3 times without progress, forcibly remove a vertex *)
+      if !since_last_progress > !count * 3 && !count > 2 then begin
+        let i = !curr in
         let p = prev.(i) in
         let n = next.(i) in
-        let vi_p = vert_idx.(p) in
-        let vi_i = vert_idx.(i) in
-        let vi_n = vert_idx.(n) in
-        let cp = cross_product verts vi_p vi_i vi_n in
+        active.(i) <- false;
+        next.(p) <- n;
+        prev.(n) <- p;
+        decr count;
+        since_last_progress := 0;
+        curr := p (* Advance to previous vertex *)
+      end
+      else begin
+        if !verbose then
+          Printf.printf "Loop iter %d count %d curr %d\n%!" !iterations !count
+            !curr;
+        let i = !curr in
+        if active.(i) then begin
+          let p = prev.(i) in
+          let n = next.(i) in
+          let vi_p = vert_idx.(p) in
+          let vi_i = vert_idx.(i) in
+          let vi_n = vert_idx.(n) in
+          let cp = cross_product verts vi_p vi_i vi_n in
 
-        if cp > epsilon then begin
-          (* Convex vertex - check if it's a valid ear *)
-          if is_ear i then begin
-            if !out_idx + 2 >= Array.length out_buffer then
-              Printf.printf "ERROR: out_buffer overflow! out_idx=%d len=%d\n%!"
-                !out_idx (Array.length out_buffer);
-            out_buffer.(!out_idx) <- vi_p;
-            out_buffer.(!out_idx + 1) <- vi_i;
-            out_buffer.(!out_idx + 2) <- vi_n;
-            out_idx := !out_idx + 3;
+          if cp > epsilon then begin
+            (* Convex vertex - check if it's a valid ear *)
+            if is_ear i then begin
+              if !out_idx + 2 >= Array.length out_buffer then
+                Printf.printf
+                  "ERROR: out_buffer overflow! out_idx=%d len=%d\n%!" !out_idx
+                  (Array.length out_buffer);
+              out_buffer.(!out_idx) <- vi_p;
+              out_buffer.(!out_idx + 1) <- vi_i;
+              out_buffer.(!out_idx + 2) <- vi_n;
+              out_idx := !out_idx + 3;
 
+              active.(i) <- false;
+              next.(p) <- n;
+              prev.(n) <- p;
+              decr count;
+              since_last_progress := 0;
+              curr := p
+            end
+            else curr := n
+          end
+          else if abs_float cp < 1e-14 then begin
+            (* 
+               Truly collinear vertex (extremely small cross product).
+               We use a much stricter threshold than epsilon to preserve thin
+               triangles while still removing degenerate collinear points.
+            *)
             active.(i) <- false;
             next.(p) <- n;
             prev.(n) <- p;
             decr count;
+            since_last_progress := 0;
             curr := p
           end
-          else curr := n
+          else
+            (* Reflex vertex - skip *)
+            curr := n
         end
-        else if abs_float cp < 1e-14 then begin
-          (* 
-             Truly collinear vertex (extremely small cross product).
-             We use a much stricter threshold than epsilon to preserve thin
-             triangles while still removing degenerate collinear points.
-          *)
-          active.(i) <- false;
-          next.(p) <- n;
-          prev.(n) <- p;
-          decr count;
-          curr := p
-        end
-        else
-          (* Reflex vertex - skip *)
-          curr := n
+        else curr := next.(i)
       end
-      else curr := next.(i)
     done;
 
     if !count > 2 then (
