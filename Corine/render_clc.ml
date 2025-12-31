@@ -153,25 +153,27 @@ let load_clc file =
   let ic = open_in_bin file in
 
   let magic = really_input_string ic 4 in
-  if magic <> "CLC2" then failwith "Invalid magic";
+  if magic <> "CLC3" then failwith "Invalid magic";
 
   let count = input_binary_int ic in
+  let total_verts_header = input_binary_int ic in
+  let total_indices_header = input_binary_int ic in
+
   let min_lon = read_f64_as_float ic in
   let min_lat = read_f64_as_float ic in
   let scale_x = read_f64_as_float ic in
   let scale_y = read_f64_as_float ic in
 
-  Printf.printf "Header: count=%d, origin=(%.2f, %.2f) scale=(%.2f, %.2f)\n%!"
-    count min_lon min_lat scale_x scale_y;
+  Printf.printf
+    "Header: count=%d, verts=%d, indices=%d, origin=(%.2f, %.2f)\n%!" count
+    total_verts_header total_indices_header min_lon min_lat;
 
-  (* Buffers to accumulate geometry *)
-  let all_pos = ref [] in
-  (* (u16 * u16) list *)
-  let all_col = ref [] in
-  (* u8 list *)
-  let all_idx = ref [] in
-  (* int list *)
-  let total_verts = ref 0 in
+  (* Pre-allocate Bigarrays *)
+  let n_verts = total_verts_header in
+  let n_indices = total_indices_header in
+  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
+  let arr_col = Array1.create int8_unsigned c_layout n_verts in
+  let arr_ebo = Array1.create int32 c_layout n_indices in
 
   let unknown_codes = Hashtbl.create 5 in
 
@@ -210,17 +212,16 @@ let load_clc file =
   let high_indices = read_stream () in
   let low_indices = read_stream () in
   close_in ic;
-  Printf.printf "Streams Read. Parsing Metadata...\n%!";
+  Printf.printf "Streams Read. Decoding directly to Bigarrays...\n%!";
 
-  (* Decode Vertices *)
   let prev_x = ref 0 in
   let prev_y = ref 0 in
   let prev_idx = ref 0 in
+  let global_v_offset = ref 0 in
+  let global_i_offset = ref 0 in
 
   let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
 
-  (* We need to iterate over metadata to know feature boundaries if we want to assign codes.
-     Actually, we can just iterate the meta stream. *)
   let meta_pos = ref 0 in
   let v_pos = ref 0 in
   let i_pos = ref 0 in
@@ -237,20 +238,23 @@ let load_clc file =
     let v_count = read_u16_meta () in
     let t_count = read_u16_meta () in
 
+    let code_idx = get_code_index code in
+
     (* Check code *)
     if not (Hashtbl.mem code_map code) then
       if not (Hashtbl.mem unknown_codes code) then (
         Printf.printf "Warning: Unknown CLC Code %d \n" code;
         Hashtbl.add unknown_codes code true);
 
-    (* Decode Vertices for this feature *)
+    (* Decode Vertices *)
     prev_x := 0;
     prev_y := 0;
-
-    let base_v = !total_verts in
+    let base_v = !global_v_offset in
 
     for k = 0 to v_count - 1 do
       let idx = !v_pos + k in
+
+      (* X *)
       let hx = Char.code high_x.[idx] in
       let lx = Char.code low_x.[idx] in
       let zx = lx lor (hx lsl 8) in
@@ -258,6 +262,7 @@ let load_clc file =
       let qx = (!prev_x + sdx) land 0xFFFF in
       prev_x := qx;
 
+      (* Y *)
       let hy = Char.code high_y.[idx] in
       let ly = Char.code low_y.[idx] in
       let zy = ly lor (hy lsl 8) in
@@ -265,15 +270,21 @@ let load_clc file =
       let qy = (!prev_y + sdy) land 0xFFFF in
       prev_y := qy;
 
-      all_pos := (qx, qy) :: !all_pos;
-      all_col := code :: !all_col
+      (* Write direct to Bigarray *)
+      let out_idx = base_v + k in
+      Array1.set arr_pos (out_idx * 2) qx;
+      Array1.set arr_pos ((out_idx * 2) + 1) qy;
+      Array1.set arr_col out_idx code_idx
     done;
+
     v_pos := !v_pos + v_count;
-    total_verts := !total_verts + v_count;
+    global_v_offset := !global_v_offset + v_count;
 
     (* Decode Indices *)
     prev_idx := 0;
-    for k = 0 to (t_count * 3) - 1 do
+    let num_indices = t_count * 3 in
+
+    for k = 0 to num_indices - 1 do
       let idx = !i_pos + k in
       let hi = Char.code high_indices.[idx] in
       let li = Char.code low_indices.[idx] in
@@ -282,53 +293,15 @@ let load_clc file =
       let idx_val = (!prev_idx + sdi) land 0xFFFF in
       prev_idx := idx_val;
 
-      all_idx := (base_v + idx_val) :: !all_idx
+      let final_idx = base_v + idx_val in
+      Array1.set arr_ebo (!global_i_offset + k) (Int32.of_int final_idx)
     done;
-    i_pos := !i_pos + (t_count * 3)
+    i_pos := !i_pos + num_indices;
+    global_i_offset := !global_i_offset + num_indices
   done;
 
-  Printf.printf "Decoded: %d verts, %d indices\n%!" !total_verts
-    (List.length !all_idx);
-
-  (* Convert to Bigarrays *)
-  let n_verts = !total_verts in
-  let n_indices = List.length !all_idx in
-
-  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
-  let arr_col = Array1.create int8_unsigned c_layout n_verts in
-  let arr_ebo = Array1.create int32 c_layout n_indices in
-
-  (* Lists are reversed relative to processing order. Arrays should match. *)
-  (* Filling from back restores order *)
-  let rec fill_pos idx lst =
-    match lst with
-    | [] -> ()
-    | (x, y) :: tl ->
-        Array1.set arr_pos (idx - 1) y;
-        (* Y at odd *)
-        Array1.set arr_pos (idx - 2) x;
-        (* X at even *)
-        fill_pos (idx - 2) tl
-  in
-  fill_pos (n_verts * 2) !all_pos;
-
-  let rec fill_col idx lst =
-    match lst with
-    | [] -> ()
-    | c :: tl ->
-        Array1.set arr_col (idx - 1) (get_code_index c);
-        fill_col (idx - 1) tl
-  in
-  fill_col n_verts !all_col;
-
-  let rec fill_idx idx lst =
-    match lst with
-    | [] -> ()
-    | i :: tl ->
-        Array1.set arr_ebo (idx - 1) (Int32.of_int i);
-        fill_idx (idx - 1) tl
-  in
-  fill_idx n_indices !all_idx;
+  Printf.printf "Decoded: %d verts, %d indices\n%!" !global_v_offset
+    !global_i_offset;
 
   (n_indices, arr_pos, arr_col, arr_ebo, min_lon, min_lat, scale_x, scale_y)
 
