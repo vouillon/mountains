@@ -254,6 +254,49 @@ let process_tile db_path output_dir tile_name =
   let total_vertices = ref 0 in
   let total_indices = ref 0 in
 
+  (* 
+     Recursive helper: clip a polygon to a region, and if the result is too large,
+     split the region horizontally and recurse. Returns list of (clipped_verts, clipped_poly) pairs.
+  *)
+  let max_clipped_verts = 5000 in
+
+  let rec clip_with_split flat_verts proper_poly region depth =
+    match
+      Polygon_clipping.Clipper.clip_polygon flat_verts proper_poly region
+    with
+    | None -> []
+    | Some (clipped_verts, clipped_poly) ->
+        let vert_count = Array.length clipped_verts / 2 in
+        (* Return if small enough OR if we've hit max recursion depth *)
+        if vert_count <= max_clipped_verts || depth > 5 then
+          [ (clipped_verts, clipped_poly) ]
+        else begin
+          (* Split along the largest dimension *)
+          let width = region.Geometry_types.max_x -. region.min_x in
+          let height = region.max_y -. region.min_y in
+          let region_a, region_b =
+            if width > height then begin
+              (* Split vertically (along X) *)
+              let mid_x = (region.min_x +. region.max_x) /. 2.0 in
+              ({ region with max_x = mid_x }, { region with min_x = mid_x })
+            end
+            else begin
+              (* Split horizontally (along Y) *)
+              let mid_y = (region.min_y +. region.max_y) /. 2.0 in
+              ({ region with max_y = mid_y }, { region with min_y = mid_y })
+            end
+          in
+          (* Recurse on both halves, using the CLIPPED result as input *)
+          let results_a =
+            clip_with_split clipped_verts clipped_poly region_a (depth + 1)
+          in
+          let results_b =
+            clip_with_split clipped_verts clipped_poly region_b (depth + 1)
+          in
+          results_a @ results_b
+        end
+  in
+
   let rec process_rows () =
     match Sqlite3.step stmt with
     | Sqlite3.Rc.ROW ->
@@ -358,13 +401,14 @@ let process_tile db_path output_dir tile_name =
                             }
                           in
 
-                          (* 3. Clip *)
-                          match
-                            Polygon_clipping.Clipper.clip_polygon flat_verts
-                              proper_poly clipper_region
-                          with
-                          | None -> ()
-                          | Some (clipped_verts, clipped_poly) ->
+                          (* 3. Clip with recursive splitting for large polygons *)
+                          let clipped_pieces =
+                            clip_with_split flat_verts proper_poly
+                              clipper_region 0
+                          in
+
+                          List.iter
+                            (fun (clipped_verts, clipped_poly) ->
                               (* 4. Triangulate *)
                               let tris =
                                 try
@@ -445,6 +489,7 @@ let process_tile db_path output_dir tile_name =
                                     valid_i_count
                                 in
                                 ()))
+                            clipped_pieces)
                         float_polys
                 | None -> ()
               end
