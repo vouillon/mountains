@@ -490,11 +490,23 @@ let () =
 
             Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
+            (* 
+               Geographic correction: 1° longitude is shorter than 1° latitude
+               by a factor of cos(latitude). We apply this to make the map
+               appear with correct proportions.
+            *)
+            let center_lat = t_min_y +. (range_y /. 2.0) in
+            let lat_correction = cos (center_lat *. Float.pi /. 180.0) in
+
+            (* Apply correction to view scale, not to range (range is for data reconstruction) *)
             let aspect = float w_width /. float w_height in
+            let corrected_range_x = range_x *. lat_correction in
             let sx, sy =
-              if range_x > range_y *. aspect then
-                (!zoom /. range_x, !zoom /. range_x *. aspect)
-              else (!zoom /. range_y /. aspect, !zoom /. range_y)
+              if corrected_range_x > range_y *. aspect then
+                ( !zoom /. corrected_range_x,
+                  !zoom /. corrected_range_x *. aspect )
+              else
+                (!zoom /. range_y /. aspect *. lat_correction, !zoom /. range_y)
             in
 
             Gl.uniform2f u_range range_x range_y;
