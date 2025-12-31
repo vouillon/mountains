@@ -296,41 +296,6 @@ let process_tile db_path output_dir tile_name =
           [] result_polys
   in
 
-  (* 
-     Recursive helper: clip a polygon to a region, and if the result is too large,
-     split the region horizontally and recurse. Returns list of (clipped_verts, clipped_poly) pairs.
-  *)
-  let max_clipped_verts = 20000 in
-
-  let rec clip_with_split flat_verts proper_poly region depth =
-    match
-      Polygon_clipping.Clipper.clip_polygon flat_verts proper_poly region
-    with
-    | None -> []
-    | Some (clipped_verts, clipped_poly) ->
-        let vert_count = Array.length clipped_verts / 2 in
-        (* Return if small enough OR if we've hit max recursion depth *)
-        if vert_count <= max_clipped_verts || depth > 3 then
-          [ (clipped_verts, clipped_poly) ]
-        else
-          (* Split region either Horizontally or Vertically ensuring square-ish aspect *)
-          let width = region.max_x -. region.min_x in
-          let height = region.max_y -. region.min_y in
-
-          let r1, r2 =
-            if width > height then
-              let mid_x = (region.min_x +. region.max_x) /. 2.0 in
-              ({ region with max_x = mid_x }, { region with min_x = mid_x })
-            else
-              let mid_y = (region.min_y +. region.max_y) /. 2.0 in
-              ({ region with max_y = mid_y }, { region with min_y = mid_y })
-          in
-
-          let res1 = clip_with_split flat_verts proper_poly r1 (depth + 1) in
-          let res2 = clip_with_split flat_verts proper_poly r2 (depth + 1) in
-          res1 @ res2
-  in
-
   let rec collect_features acc =
     match Sqlite3.step stmt with
     | Sqlite3.Rc.ROW ->
