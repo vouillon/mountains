@@ -2253,7 +2253,7 @@ let wait_for_service_worker =
 
 let get_preset_position () =
   if false then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
-  else if true then (44.6075287, 6.8210935, 0.)
+  else if true then (44.6078064, 6.8210935, 0.)
   else if false then
     (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
   else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)

@@ -253,12 +253,54 @@ let process_tile db_path output_dir tile_name =
   let entry_count = ref 0 in
   let total_vertices = ref 0 in
   let total_indices = ref 0 in
+  (* 
+     Recursive helper: clipped multipolygon handling.
+  *)
+  let max_clipped_verts = 20000 in
+
+  let rec clip_with_split_fixed flat_verts proper_poly region depth =
+    let clipped_verts, result_polys =
+      Polygon_clipping.Clipper.clip_multipolygon flat_verts [| proper_poly |]
+        region
+    in
+    if Array.length result_polys = 0 then []
+    else
+      let vert_count = Array.length clipped_verts / 2 in
+      (* Return if small enough OR if we've hit max recursion depth *)
+      if vert_count <= max_clipped_verts || depth > 3 then
+        Array.to_list (Array.map (fun p -> (clipped_verts, p)) result_polys)
+      else
+        (* Split region either Horizontally or Vertically *)
+        let width = region.max_x -. region.min_x in
+        let height = region.max_y -. region.min_y in
+
+        let r1, r2 =
+          if width > height then
+            let mid_x = (region.min_x +. region.max_x) /. 2.0 in
+            ({ region with max_x = mid_x }, { region with min_x = mid_x })
+          else
+            let mid_y = (region.min_y +. region.max_y) /. 2.0 in
+            ({ region with max_y = mid_y }, { region with min_y = mid_y })
+        in
+
+        (* Recurse on EACH resulting polygon *)
+        Array.fold_left
+          (fun acc poly ->
+            let res1 =
+              clip_with_split_fixed clipped_verts poly r1 (depth + 1)
+            in
+            let res2 =
+              clip_with_split_fixed clipped_verts poly r2 (depth + 1)
+            in
+            acc @ res1 @ res2)
+          [] result_polys
+  in
 
   (* 
      Recursive helper: clip a polygon to a region, and if the result is too large,
      split the region horizontally and recurse. Returns list of (clipped_verts, clipped_poly) pairs.
   *)
-  let max_clipped_verts = 5000 in
+  let max_clipped_verts = 20000 in
 
   let rec clip_with_split flat_verts proper_poly region depth =
     match
@@ -268,38 +310,31 @@ let process_tile db_path output_dir tile_name =
     | Some (clipped_verts, clipped_poly) ->
         let vert_count = Array.length clipped_verts / 2 in
         (* Return if small enough OR if we've hit max recursion depth *)
-        if vert_count <= max_clipped_verts || depth > 5 then
+        if vert_count <= max_clipped_verts || depth > 3 then
           [ (clipped_verts, clipped_poly) ]
-        else begin
-          (* Split along the largest dimension *)
-          let width = region.Geometry_types.max_x -. region.min_x in
+        else
+          (* Split region either Horizontally or Vertically ensuring square-ish aspect *)
+          let width = region.max_x -. region.min_x in
           let height = region.max_y -. region.min_y in
-          let region_a, region_b =
-            if width > height then begin
-              (* Split vertically (along X) *)
+
+          let r1, r2 =
+            if width > height then
               let mid_x = (region.min_x +. region.max_x) /. 2.0 in
               ({ region with max_x = mid_x }, { region with min_x = mid_x })
-            end
-            else begin
-              (* Split horizontally (along Y) *)
+            else
               let mid_y = (region.min_y +. region.max_y) /. 2.0 in
               ({ region with max_y = mid_y }, { region with min_y = mid_y })
-            end
           in
-          (* Recurse on both halves, using the CLIPPED result as input *)
-          let results_a =
-            clip_with_split clipped_verts clipped_poly region_a (depth + 1)
-          in
-          let results_b =
-            clip_with_split clipped_verts clipped_poly region_b (depth + 1)
-          in
-          results_a @ results_b
-        end
+
+          let res1 = clip_with_split flat_verts proper_poly r1 (depth + 1) in
+          let res2 = clip_with_split flat_verts proper_poly r2 (depth + 1) in
+          res1 @ res2
   in
 
-  let rec process_rows () =
+  let rec collect_features acc =
     match Sqlite3.step stmt with
     | Sqlite3.Rc.ROW ->
+        let batch_acc = ref [] in
         let shape_blob = Sqlite3.column stmt 0 in
         let code_str = Sqlite3.Data.to_string_exn (Sqlite3.column stmt 1) in
         let code = try int_of_string code_str with _ -> 0 in
@@ -403,7 +438,7 @@ let process_tile db_path output_dir tile_name =
 
                           (* 3. Clip with recursive splitting for large polygons *)
                           let clipped_pieces =
-                            clip_with_split flat_verts proper_poly
+                            clip_with_split_fixed flat_verts proper_poly
                               clipper_region 0
                           in
 
@@ -469,25 +504,39 @@ let process_tile db_path output_dir tile_name =
                                 total_vertices := !total_vertices + v_count;
                                 total_indices := !total_indices + valid_i_count;
 
-                                (* Write Meta *)
-                                Encoder.encode_meta encoder code v_count
-                                  tri_count_val;
+                                (* Compute Area for Sorting *)
+                                let min_x = ref infinity in
+                                let max_x = ref neg_infinity in
+                                let min_y = ref infinity in
+                                let max_y = ref neg_infinity in
+                                for k = 0 to v_count - 1 do
+                                  let x = final_verts.(k * 2) in
+                                  let y = final_verts.((k * 2) + 1) in
+                                  if x < !min_x then min_x := x;
+                                  if x > !max_x then max_x := x;
+                                  if y < !min_y then min_y := y;
+                                  if y > !max_y then max_y := y
+                                done;
+                                let area =
+                                  (!max_x -. !min_x) *. (!max_y -. !min_y)
+                                in
+
+                                batch_acc :=
+                                  ( area,
+                                    code,
+                                    v_count,
+                                    tri_count_val,
+                                    valid_i_count,
+                                    final_verts,
+                                    final_indices )
+                                  :: !batch_acc;
 
                                 if !entry_count <= 10 then
                                   Printf.printf
                                     "Processed Feature %d: Code %d, Tris %d, \
-                                     Verts %d\n\
+                                     Verts %d, Area %f\n\
                                      %!"
-                                    !entry_count code tri_count_val v_count;
-
-                                let _ =
-                                  Encoder.encode_vertices encoder final_verts
-                                    v_count (min_lon, min_lat) (scale_x, scale_y)
-                                in
-                                let _ =
-                                  Encoder.encode_indices encoder final_indices
-                                    valid_i_count
-                                in
+                                    !entry_count code tri_count_val v_count area;
                                 ()))
                             clipped_pieces)
                         float_polys
@@ -497,12 +546,38 @@ let process_tile db_path output_dir tile_name =
             end
         | _ -> ()
         end;
-        process_rows ()
-    | Sqlite3.Rc.DONE -> ()
+        collect_features (!batch_acc @ acc)
+    | Sqlite3.Rc.DONE -> acc
     | _ -> failwith "DB Error"
   in
 
-  process_rows ();
+  let all_features = collect_features [] in
+
+  (* Sorting by Area Ascending (Smallest First) *)
+  let sorted_features =
+    List.sort
+      (fun (a1, _, _, _, _, _, _) (a2, _, _, _, _, _, _) -> compare a1 a2)
+      all_features
+  in
+
+  (* Encode Sorted Features *)
+  List.iter
+    (fun ( _area,
+           code,
+           v_count,
+           tri_count,
+           valid_i_count,
+           final_verts,
+           final_indices ) ->
+      Encoder.encode_meta encoder code v_count tri_count;
+
+      let _ =
+        Encoder.encode_vertices encoder final_verts v_count (min_lon, min_lat)
+          (scale_x, scale_y)
+      in
+      let _ = Encoder.encode_indices encoder final_indices valid_i_count in
+      ())
+    sorted_features;
 
   let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
   let out_ch = open_out_bin output_file_path in
