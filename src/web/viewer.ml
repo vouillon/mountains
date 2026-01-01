@@ -2440,6 +2440,29 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
 
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
+  (* Try to load real CLC tile for current position *)
+  let clc_path = Clc_loader.tile_path lat lon in
+  Brr.Console.(log [ str ("Loading CLC tile: " ^ clc_path) ]);
+  Lwt.async (fun () ->
+      Lwt.catch
+        (fun () ->
+          let open Lwt.Syntax in
+          let* header = Clc_loader.load_clc_tile clc_path in
+          Brr.Console.(
+            log
+              [
+                str "CLC header loaded:";
+                str (string_of_int header.count);
+                str "polygons, origin=";
+                str (string_of_float header.min_lon);
+                str (string_of_float header.min_lat);
+              ]);
+          Lwt.return ())
+        (fun exn ->
+          Brr.Console.(
+            log [ str ("CLC load failed: " ^ Printexc.to_string exn) ]);
+          Lwt.return ()));
+  (* For now, still use dummy texture until rasterization is complete *)
   let cover_map_texture, cover_map_size = make_dummy_cover_map ctx in
   (* Set to true to enable CLC material system, false for original rendering *)
   let use_clc = true in
