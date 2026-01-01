@@ -92,12 +92,11 @@ let read_stream data offset =
   let open Lwt.Syntax in
   let comp_len = read_i32_le data offset in
   let compressed = String.sub data (offset + 4) comp_len in
-  (* Estimate uncompressed size - will be resized by inflate *)
-  let est_size = max (comp_len * 10) 65536 in
-  let buf = Bytes.create est_size in
-  let tarray = Tarray.of_jstr (Jstr.of_string compressed) in
-  let* () = Reader.inflate tarray buf in
-  Lwt.return (Bytes.to_string buf, offset + 4 + comp_len)
+  (* Convert string to uint8 array for pako *)
+  let tarray = Reader.uint8_of_string compressed in
+  (* Decompress and return string directly *)
+  let* decompressed = Reader.inflate_to_string tarray in
+  Lwt.return (decompressed, offset + 4 + comp_len)
 
 (* Decode vertices and triangles from CLC streams *)
 let decode_clc_data header meta_str high_x low_x high_y low_y high_indices
@@ -173,20 +172,6 @@ let decode_clc_data header meta_str high_x low_x high_y low_y high_indices
   done;
   { header; positions = arr_pos; colors = arr_col; indices = arr_ebo }
 
-(* Load and parse CLC tile from file path *)
-let load_clc_tile path =
-  let open Lwt.Syntax in
-  let* data = Reader.read_file path in
-  let header = parse_header data in
-  Console.(
-    log
-      [
-        Jstr.v ("Loaded CLC: " ^ path ^ " with ");
-        Jstr.v (string_of_int header.count);
-        Jstr.v " polygons";
-      ]);
-  Lwt.return header
-
 (* Edge function for triangle rasterization *)
 let edge_function x1 y1 x2 y2 px py =
   ((px - x1) * (y2 - y1)) - ((py - y1) * (x2 - x1))
@@ -249,11 +234,65 @@ let rasterize_clc_tile tile size =
   done;
   data
 
-(* Placeholder for non-decoded tiles *)
-let rasterize_to_texture _ctx _header size =
-  let data = Array1.create int8_unsigned c_layout (size * size) in
-  let grass_idx = Clc_palette.get_index 321 in
-  for i = 0 to (size * size) - 1 do
-    data.{i} <- grass_idx
-  done;
-  data
+(* Full CLC tile loading: decompress all streams and decode geometry *)
+let load_full_clc_tile path =
+  let open Lwt.Syntax in
+  let* data = Reader.read_file path in
+  let header = parse_header data in
+  Console.(log [ Jstr.v ("Decoding CLC: " ^ path) ]);
+
+  (* Read all 7 compressed streams starting at offset 48 (after header) *)
+  let offset = 48 in
+  let* meta_str, offset = read_stream data offset in
+  let* high_x, offset = read_stream data offset in
+  let* low_x, offset = read_stream data offset in
+  let* high_y, offset = read_stream data offset in
+  let* low_y, offset = read_stream data offset in
+  let* high_indices, offset = read_stream data offset in
+  let* low_indices, _ = read_stream data offset in
+
+  Console.(log [ Jstr.v "Streams decompressed, decoding geometry..." ]);
+
+  (* Decode the geometry *)
+  let tile =
+    decode_clc_data header meta_str high_x low_x high_y low_y high_indices
+      low_indices
+  in
+  Console.(
+    log
+      [
+        Jstr.v
+          ("Decoded "
+          ^ string_of_int (Array1.dim tile.indices / 3)
+          ^ " triangles");
+      ]);
+  Lwt.return tile
+
+(* Load CLC tile and rasterize to texture data *)
+let load_and_rasterize_clc path size =
+  let open Lwt.Syntax in
+  let* tile = load_full_clc_tile path in
+  Console.(
+    log
+      [
+        Jstr.v
+          ("Rasterizing to " ^ string_of_int size ^ "x" ^ string_of_int size
+         ^ " texture...");
+      ]);
+  let data = rasterize_clc_tile tile size in
+  Console.(log [ Jstr.v "CLC rasterization complete" ]);
+  Lwt.return (tile.header, data)
+
+(* Load and parse CLC tile header only (for quick checks) *)
+let load_clc_tile path =
+  let open Lwt.Syntax in
+  let* data = Reader.read_file path in
+  let header = parse_header data in
+  Console.(
+    log
+      [
+        Jstr.v ("Loaded CLC: " ^ path ^ " with ");
+        Jstr.v (string_of_int header.count);
+        Jstr.v " polygons";
+      ]);
+  Lwt.return header

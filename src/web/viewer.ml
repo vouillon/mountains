@@ -279,7 +279,7 @@ let terrain_program =
           // Steep slopes force rock regardless of CLC classification
           float rockForce = smoothstep(0.15, 0.5, slope);
           
-          if (rockForce > 0.01) {
+          if (false && rockForce > 0.01) {
             // Rock color (grey-brown, linear space)
             vec3 rockAlbedo = vec3(0.09, 0.08, 0.065);  // ~(76, 72, 65) in sRGB
             
@@ -2440,31 +2440,36 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
 
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
-  (* Try to load real CLC tile for current position *)
+  (* Create dummy cover map that will be replaced when CLC loads *)
+  let cover_map_texture, _dummy_size = make_dummy_cover_map ctx in
+  let cover_map_size = 1024 in
+  (* Target rasterization size *)
+
+  (* Load and rasterize CLC tile asynchronously, upload when ready *)
   let clc_path = Clc_loader.tile_path lat lon in
   Brr.Console.(log [ Jstr.v ("Loading CLC tile: " ^ clc_path) ]);
   Lwt.async (fun () ->
       Lwt.catch
         (fun () ->
           let open Lwt.Syntax in
-          let* header = Clc_loader.load_clc_tile clc_path in
-          Brr.Console.(
-            log
-              [
-                Jstr.v "CLC header loaded:";
-                Jstr.v (string_of_int header.count);
-                Jstr.v "polygons, origin=";
-                Jstr.v (string_of_float header.min_lon);
-                Jstr.v (string_of_float header.min_lat);
-              ]);
+          let* _header, rasterized_data =
+            Clc_loader.load_and_rasterize_clc clc_path cover_map_size
+          in
+          (* Upload rasterized data to texture *)
+          Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
+          Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui cover_map_size
+            cover_map_size 0 Gl.red_integer Gl.unsigned_byte
+            (Brr.Tarray.of_bigarray
+               (Bigarray.genarray_of_array1 rasterized_data))
+            0;
+          Gl.bind_texture ctx Gl.texture_2d None;
+          Brr.Console.(log [ Jstr.v "CLC texture uploaded!" ]);
           Lwt.return ())
         (fun exn ->
           Brr.Console.(
             log [ Jstr.v ("CLC load failed: " ^ Printexc.to_string exn) ]);
           Lwt.return ()));
-  (* For now, still use dummy texture until rasterization is complete *)
-  let cover_map_texture, cover_map_size = make_dummy_cover_map ctx in
-  (* Set to true to enable CLC material system, false for original rendering *)
+  (* Set to true to enable CLC material system *)
   let use_clc = true in
 
   event_loop ctx (fun ~orientation ctx ->

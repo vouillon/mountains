@@ -45,6 +45,25 @@ let inflate s b =
   String.blit s' 0 b 0 (String.length s');
   Lwt.return ()
 
+(* Inflate compressed data, returning decompressed string directly *)
+let inflate_to_string s =
+  let* s' =
+    to_lwt
+      (Fut.of_promise
+         ~ok:(Obj.magic : Jv.t -> Brr.Tarray.uint8)
+         (inflate_impl s))
+  in
+  Lwt.return Brr.Tarray.(to_string s')
+
+(* Create uint8 typed array from string bytes *)
+let uint8_of_string s =
+  let len = String.length s in
+  let ba = Bigarray.(Array1.create int8_unsigned c_layout len) in
+  for i = 0 to len - 1 do
+    Bigarray.Array1.set ba i (Char.code s.[i])
+  done;
+  Brr.Tarray.of_bigarray1 ba
+
 let read_file f =
   let open Brr_io.Fetch in
   let* resp = to_lwt @@ url (Jstr.v f) in
