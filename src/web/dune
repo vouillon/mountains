@@ -20,11 +20,10 @@
   (dir data))
  (alias all)
  (deps
-  (glob_files ../../data/*))
+  (glob_files_rec ../../data/**))
  (action
   (progn
-   (run mkdir %{target})
-   (run cp %{deps} %{target}))))
+   (run cp -r ../../data %{target}))))
 
 (rule
  (target service_worker.bc.js)
