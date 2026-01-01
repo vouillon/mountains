@@ -206,7 +206,86 @@ let rasterize_triangle data size x0 y0 x1 y1 x2 y2 color_idx =
     done
   done
 
-(* Rasterize CLC tile to a texture of given size using CPU *)
+(* Rasterize CLC tile to a texture, mapping geographic bounds.
+   - tile: the loaded CLC tile with header containing min_lon, min_lat, scale_x, scale_y
+   - tex_size: output texture size (e.g., 1024)
+   - target_min_lon/lat, target_max_lon/lat: DEM coverage bounds in degrees
+   The header's scale_x/scale_y are the quantization divisors: 
+   geographic_coord = min + (quantized / scale) *)
+let rasterize_clc_tile_to_bounds tile tex_size ~target_min_lon ~target_min_lat
+    ~target_max_lon ~target_max_lat =
+  let data = Array1.create int8_unsigned c_layout (tex_size * tex_size) in
+  Array1.fill data 0;
+
+  let header = tile.header in
+  let positions = tile.positions in
+  let colors = tile.colors in
+  let indices = tile.indices in
+  let n_triangles = Array1.dim indices / 3 in
+
+  (* Target bounds in texture *)
+  let target_width = target_max_lon -. target_min_lon in
+  let target_height = target_max_lat -. target_min_lat in
+  let tex_scale_x = float tex_size /. target_width in
+  let tex_scale_y = float tex_size /. target_height in
+
+  for t = 0 to n_triangles - 1 do
+    let i0 = Int32.to_int (Array1.get indices (t * 3)) in
+    let i1 = Int32.to_int (Array1.get indices ((t * 3) + 1)) in
+    let i2 = Int32.to_int (Array1.get indices ((t * 3) + 2)) in
+
+    (* Get quantized coords (0-65535 range) *)
+    let qx0 = Array1.get positions (i0 * 2) in
+    let qy0 = Array1.get positions ((i0 * 2) + 1) in
+    let qx1 = Array1.get positions (i1 * 2) in
+    let qy1 = Array1.get positions ((i1 * 2) + 1) in
+    let qx2 = Array1.get positions (i2 * 2) in
+    let qy2 = Array1.get positions ((i2 * 2) + 1) in
+
+    (* Convert to geographic coords using header bounds *)
+    let geo_x0 = header.min_lon +. (float qx0 /. header.scale_x) in
+    let geo_y0 = header.min_lat +. (float qy0 /. header.scale_y) in
+    let geo_x1 = header.min_lon +. (float qx1 /. header.scale_x) in
+    let geo_y1 = header.min_lat +. (float qy1 /. header.scale_y) in
+    let geo_x2 = header.min_lon +. (float qx2 /. header.scale_x) in
+    let geo_y2 = header.min_lat +. (float qy2 /. header.scale_y) in
+
+    (* Convert to texture coords *)
+    let tx0 = int_of_float ((geo_x0 -. target_min_lon) *. tex_scale_x) in
+    let ty0 = int_of_float ((geo_y0 -. target_min_lat) *. tex_scale_y) in
+    let tx1 = int_of_float ((geo_x1 -. target_min_lon) *. tex_scale_x) in
+    let ty1 = int_of_float ((geo_y1 -. target_min_lat) *. tex_scale_y) in
+    let tx2 = int_of_float ((geo_x2 -. target_min_lon) *. tex_scale_x) in
+    let ty2 = int_of_float ((geo_y2 -. target_min_lat) *. tex_scale_y) in
+
+    let color_idx = Array1.get colors i0 in
+
+    (* Bounding box with clipping *)
+    let min_x = max 0 (min tx0 (min tx1 tx2)) in
+    let max_x = min (tex_size - 1) (max tx0 (max tx1 tx2)) in
+    let min_y = max 0 (min ty0 (min ty1 ty2)) in
+    let max_y = min (tex_size - 1) (max ty0 (max ty1 ty2)) in
+
+    (* Rasterize *)
+    for py = min_y to max_y do
+      for px = min_x to max_x do
+        let w0 = edge_function tx1 ty1 tx2 ty2 px py in
+        let w1 = edge_function tx2 ty2 tx0 ty0 px py in
+        let w2 = edge_function tx0 ty0 tx1 ty1 px py in
+        if (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)
+        then Array1.set data ((py * tex_size) + px) color_idx
+      done
+    done
+  done;
+
+  Console.(
+    log
+      [
+        Jstr.v (Printf.sprintf "Rasterized %d triangles to bounds" n_triangles);
+      ]);
+  data
+
+(* Legacy function for backward compatibility - assumes 1:1 quantized to texture mapping *)
 let rasterize_clc_tile tile size =
   let data = Array1.create int8_unsigned c_layout (size * size) in
   (* Fill with default (fallback color) - use 0 which maps to magenta for visibility *)
@@ -284,6 +363,14 @@ let load_full_clc_tile path =
   let* data = Reader.read_file path in
   let header = parse_header data in
   Console.(log [ Jstr.v ("Decoding CLC: " ^ path) ]);
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf
+             "  Header: min_lon=%.4f min_lat=%.4f scale_x=%.6f scale_y=%.6f"
+             header.min_lon header.min_lat header.scale_x header.scale_y);
+      ]);
 
   (* Read all 7 compressed streams starting at offset 48 (after header) *)
   let offset = 48 in
@@ -341,102 +428,80 @@ let load_clc_tile path =
       ]);
   Lwt.return header
 
-(* Load and rasterize multiple CLC tiles to cover DEM area.
-   - lat, lon: center position in degrees
-   - size: DEM size in arcseconds
+(* Load and rasterize CLC tiles to cover DEM geographic area.
+   - lat, lon: camera position in degrees
+   - size: DEM size in arcseconds (pixels)
    - tex_size: output texture resolution (e.g., 1024)
-   Returns (min_lat_deg, min_lon_deg, total_width_deg, data) *)
+   Returns (min_lat_deg, min_lon_deg, width_deg, height_deg, data) *)
 let load_and_rasterize_multi ~lat ~lon ~size ~tex_size =
   let open Lwt.Syntax in
-  (* Calculate arcsecond range covered by DEM (matching loader.ml logic) *)
-  let center_lat = truncate (lat *. 3600.) in
-  let center_lon = truncate (lon *. 3600.) in
-  let min_lat_as = center_lat - (size / 2) in
-  let min_lon_as = center_lon - (size / 2) in
-  let max_lat_as = min_lat_as + size - 1 in
-  let max_lon_as = min_lon_as + size - 1 in
-
-  (* Convert to tile indices (1° tiles). Use same // operator as loader.ml *)
-  let ( // ) x y =
-    let q = x / y in
-    let r = x mod y in
-    if r >= 0 then q else q - 1
-  in
-  let min_tile_lat = (min_lat_as - 1) // 3600 in
-  let max_tile_lat = (max_lat_as - 1) // 3600 in
-  let min_tile_lon = min_lon_as // 3600 in
-  let max_tile_lon = max_lon_as // 3600 in
-
-  let n_tiles_lat = max_tile_lat - min_tile_lat + 1 in
-  let n_tiles_lon = max_tile_lon - min_tile_lon + 1 in
+  (* Calculate DEM geographic bounds in degrees *)
+  let size_deg = float size /. 3600. in
+  (* Convert arcseconds to degrees *)
+  let dem_min_lat = lat -. (size_deg /. 2.) in
+  let dem_max_lat = lat +. (size_deg /. 2.) in
+  let dem_min_lon = lon -. (size_deg /. 2.) in
+  let dem_max_lon = lon +. (size_deg /. 2.) in
 
   Console.(
     log
       [
         Jstr.v
-          (Printf.sprintf "CLC tile range: lat %d-%d, lon %d-%d (%dx%d tiles)"
-             min_tile_lat max_tile_lat min_tile_lon max_tile_lon n_tiles_lat
-             n_tiles_lon);
+          (Printf.sprintf
+             "CLC: DEM bounds lat=%.4f-%.4f lon=%.4f-%.4f (%.3f deg)"
+             dem_min_lat dem_max_lat dem_min_lon dem_max_lon size_deg);
       ]);
 
-  (* Create output texture covering all tiles *)
-  let total_width_deg = float n_tiles_lon in
-  let total_height_deg = float n_tiles_lat in
+  (* Determine which CLC tiles might contribute (with margin for overlap) *)
+  let min_tile_lat = int_of_float (floor dem_min_lat) - 1 in
+  let max_tile_lat = int_of_float (ceil dem_max_lat) in
+  let min_tile_lon = int_of_float (floor dem_min_lon) - 1 in
+  let max_tile_lon = int_of_float (ceil dem_max_lon) in
+
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf "CLC: Tile range lat=%d-%d lon=%d-%d" min_tile_lat
+             max_tile_lat min_tile_lon max_tile_lon);
+      ]);
+
+  (* Create output texture *)
   let data = Array1.create int8_unsigned c_layout (tex_size * tex_size) in
   Array1.fill data 0;
 
-  (* Default to fallback *)
-
-  (* Pixels per degree in output texture *)
-  let px_per_deg_x = float tex_size /. total_width_deg in
-  let px_per_deg_y = float tex_size /. total_height_deg in
-
-  (* Load and rasterize each tile *)
+  (* Load and rasterize each tile directly to DEM bounds *)
   let rec load_tiles tile_lat tile_lon =
     if tile_lat > max_tile_lat then Lwt.return ()
     else if tile_lon > max_tile_lon then load_tiles (tile_lat + 1) min_tile_lon
     else begin
       let path = tile_path (float tile_lat +. 0.5) (float tile_lon +. 0.5) in
-      Console.(log [ Jstr.v ("Loading CLC tile: " ^ path) ]);
       Lwt.catch
         (fun () ->
           let* tile = load_full_clc_tile path in
-          (* Calculate offset in output texture *)
-          let offset_x =
-            int_of_float (float (tile_lon - min_tile_lon) *. px_per_deg_x)
+          (* Rasterize this tile using proper geographic transform *)
+          let tile_data =
+            rasterize_clc_tile_to_bounds tile tex_size
+              ~target_min_lon:dem_min_lon ~target_min_lat:dem_min_lat
+              ~target_max_lon:dem_max_lon ~target_max_lat:dem_max_lat
           in
-          let offset_y =
-            int_of_float (float (tile_lat - min_tile_lat) *. px_per_deg_y)
-          in
-          let sub_size_x = int_of_float px_per_deg_x in
-          let sub_size_y = int_of_float px_per_deg_y in
-
-          (* Rasterize this tile into a temporary buffer *)
-          let tile_data = rasterize_clc_tile tile (max sub_size_x sub_size_y) in
-
-          (* Copy to correct position in output texture *)
-          for py = 0 to sub_size_y - 1 do
-            for px = 0 to sub_size_x - 1 do
-              let src_idx = (py * sub_size_x) + px in
-              let dst_x = offset_x + px in
-              let dst_y = offset_y + py in
-              if
-                dst_x >= 0 && dst_x < tex_size && dst_y >= 0 && dst_y < tex_size
-              then
-                let dst_idx = (dst_y * tex_size) + dst_x in
-                Array1.set data dst_idx (Array1.get tile_data src_idx)
-            done
+          (* Merge: overwrite 0s (empty) with tile data *)
+          for i = 0 to (tex_size * tex_size) - 1 do
+            let v = Array1.get tile_data i in
+            if v <> 0 then Array1.set data i v
           done;
           Lwt.return ())
         (fun _exn ->
-          Console.(log [ Jstr.v "  (tile not found, skipping)" ]);
+          (* Tile not found - skip silently *)
           Lwt.return ())
       >>= fun () -> load_tiles tile_lat (tile_lon + 1)
     end
   in
   let* () = load_tiles min_tile_lat min_tile_lon in
 
-  Console.(log [ Jstr.v "Multi-tile CLC rasterization complete" ]);
+  Console.(log [ Jstr.v "CLC: Multi-tile rasterization complete" ]);
 
-  (* Return geographic bounds and data *)
-  Lwt.return (float min_tile_lat, float min_tile_lon, total_width_deg, data)
+  (* Return DEM geographic bounds and data *)
+  let width_deg = dem_max_lon -. dem_min_lon in
+  let height_deg = dem_max_lat -. dem_min_lat in
+  Lwt.return (dem_min_lat, dem_min_lon, width_deg, height_deg, data)
