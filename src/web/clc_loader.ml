@@ -3,6 +3,8 @@
 open Bigarray
 open Brr
 
+let ( >>= ) = Lwt.bind
+
 (* CLC tile header info *)
 type clc_header = {
   count : int;
@@ -207,13 +209,15 @@ let rasterize_triangle data size x0 y0 x1 y1 x2 y2 color_idx =
 (* Rasterize CLC tile to a texture of given size using CPU *)
 let rasterize_clc_tile tile size =
   let data = Array1.create int8_unsigned c_layout (size * size) in
-  (* Fill with default (fallback color) *)
+  (* Fill with default (fallback color) - use 0 which maps to magenta for visibility *)
   Array1.fill data 0;
 
   let positions = tile.positions in
   let colors = tile.colors in
   let indices = tile.indices in
   let n_triangles = Array1.dim indices / 3 in
+  let pixels_written = ref 0 in
+  let color_counts = Array.make 50 0 in
 
   for t = 0 to n_triangles - 1 do
     let i0 = Int32.to_int (Array1.get indices (t * 3)) in
@@ -229,9 +233,49 @@ let rasterize_clc_tile tile size =
 
     (* Use color from first vertex *)
     let color_idx = Array1.get colors i0 in
+    if color_idx < 50 then
+      color_counts.(color_idx) <- color_counts.(color_idx) + 1;
 
-    rasterize_triangle data size x0 y0 x1 y1 x2 y2 color_idx
+    (* Rasterize with pixel counting *)
+    let tx0 = x0 * size / 65536 in
+    let ty0 = y0 * size / 65536 in
+    let tx1 = x1 * size / 65536 in
+    let ty1 = y1 * size / 65536 in
+    let tx2 = x2 * size / 65536 in
+    let ty2 = y2 * size / 65536 in
+    let min_x = max 0 (min tx0 (min tx1 tx2)) in
+    let max_x = min (size - 1) (max tx0 (max tx1 tx2)) in
+    let min_y = max 0 (min ty0 (min ty1 ty2)) in
+    let max_y = min (size - 1) (max ty0 (max ty1 ty2)) in
+    for py = min_y to max_y do
+      for px = min_x to max_x do
+        let w0 = edge_function tx1 ty1 tx2 ty2 px py in
+        let w1 = edge_function tx2 ty2 tx0 ty0 px py in
+        let w2 = edge_function tx0 ty0 tx1 ty1 px py in
+        if (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)
+        then begin
+          Array1.set data ((py * size) + px) color_idx;
+          incr pixels_written
+        end
+      done
+    done
   done;
+
+  (* Log statistics *)
+  Console.(
+    log
+      [
+        Jstr.v
+          ("Triangles: " ^ string_of_int n_triangles ^ ", Pixels written: "
+          ^ string_of_int !pixels_written);
+      ]);
+  (* Log first few color counts *)
+  let color_info = Buffer.create 100 in
+  for i = 0 to 10 do
+    if color_counts.(i) > 0 then
+      Buffer.add_string color_info (Printf.sprintf " c%d=%d" i color_counts.(i))
+  done;
+  Console.(log [ Jstr.v ("Color distribution:" ^ Buffer.contents color_info) ]);
   data
 
 (* Full CLC tile loading: decompress all streams and decode geometry *)
@@ -296,3 +340,103 @@ let load_clc_tile path =
         Jstr.v " polygons";
       ]);
   Lwt.return header
+
+(* Load and rasterize multiple CLC tiles to cover DEM area.
+   - lat, lon: center position in degrees
+   - size: DEM size in arcseconds
+   - tex_size: output texture resolution (e.g., 1024)
+   Returns (min_lat_deg, min_lon_deg, total_width_deg, data) *)
+let load_and_rasterize_multi ~lat ~lon ~size ~tex_size =
+  let open Lwt.Syntax in
+  (* Calculate arcsecond range covered by DEM (matching loader.ml logic) *)
+  let center_lat = truncate (lat *. 3600.) in
+  let center_lon = truncate (lon *. 3600.) in
+  let min_lat_as = center_lat - (size / 2) in
+  let min_lon_as = center_lon - (size / 2) in
+  let max_lat_as = min_lat_as + size - 1 in
+  let max_lon_as = min_lon_as + size - 1 in
+
+  (* Convert to tile indices (1° tiles). Use same // operator as loader.ml *)
+  let ( // ) x y =
+    let q = x / y in
+    let r = x mod y in
+    if r >= 0 then q else q - 1
+  in
+  let min_tile_lat = (min_lat_as - 1) // 3600 in
+  let max_tile_lat = (max_lat_as - 1) // 3600 in
+  let min_tile_lon = min_lon_as // 3600 in
+  let max_tile_lon = max_lon_as // 3600 in
+
+  let n_tiles_lat = max_tile_lat - min_tile_lat + 1 in
+  let n_tiles_lon = max_tile_lon - min_tile_lon + 1 in
+
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf "CLC tile range: lat %d-%d, lon %d-%d (%dx%d tiles)"
+             min_tile_lat max_tile_lat min_tile_lon max_tile_lon n_tiles_lat
+             n_tiles_lon);
+      ]);
+
+  (* Create output texture covering all tiles *)
+  let total_width_deg = float n_tiles_lon in
+  let total_height_deg = float n_tiles_lat in
+  let data = Array1.create int8_unsigned c_layout (tex_size * tex_size) in
+  Array1.fill data 0;
+
+  (* Default to fallback *)
+
+  (* Pixels per degree in output texture *)
+  let px_per_deg_x = float tex_size /. total_width_deg in
+  let px_per_deg_y = float tex_size /. total_height_deg in
+
+  (* Load and rasterize each tile *)
+  let rec load_tiles tile_lat tile_lon =
+    if tile_lat > max_tile_lat then Lwt.return ()
+    else if tile_lon > max_tile_lon then load_tiles (tile_lat + 1) min_tile_lon
+    else begin
+      let path = tile_path (float tile_lat +. 0.5) (float tile_lon +. 0.5) in
+      Console.(log [ Jstr.v ("Loading CLC tile: " ^ path) ]);
+      Lwt.catch
+        (fun () ->
+          let* tile = load_full_clc_tile path in
+          (* Calculate offset in output texture *)
+          let offset_x =
+            int_of_float (float (tile_lon - min_tile_lon) *. px_per_deg_x)
+          in
+          let offset_y =
+            int_of_float (float (tile_lat - min_tile_lat) *. px_per_deg_y)
+          in
+          let sub_size_x = int_of_float px_per_deg_x in
+          let sub_size_y = int_of_float px_per_deg_y in
+
+          (* Rasterize this tile into a temporary buffer *)
+          let tile_data = rasterize_clc_tile tile (max sub_size_x sub_size_y) in
+
+          (* Copy to correct position in output texture *)
+          for py = 0 to sub_size_y - 1 do
+            for px = 0 to sub_size_x - 1 do
+              let src_idx = (py * sub_size_x) + px in
+              let dst_x = offset_x + px in
+              let dst_y = offset_y + py in
+              if
+                dst_x >= 0 && dst_x < tex_size && dst_y >= 0 && dst_y < tex_size
+              then
+                let dst_idx = (dst_y * tex_size) + dst_x in
+                Array1.set data dst_idx (Array1.get tile_data src_idx)
+            done
+          done;
+          Lwt.return ())
+        (fun _exn ->
+          Console.(log [ Jstr.v "  (tile not found, skipping)" ]);
+          Lwt.return ())
+      >>= fun () -> load_tiles tile_lat (tile_lon + 1)
+    end
+  in
+  let* () = load_tiles min_tile_lat min_tile_lon in
+
+  Console.(log [ Jstr.v "Multi-tile CLC rasterization complete" ]);
+
+  (* Return geographic bounds and data *)
+  Lwt.return (float min_tile_lat, float min_tile_lon, total_width_deg, data)
