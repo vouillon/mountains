@@ -178,7 +178,7 @@ let terrain_program =
         uniform mediump usampler2D u_coverMap;   // CLC ID texture (R8UI)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
         uniform highp vec2 u_coverMapOffset;     // World position of CLC texture origin
-        uniform highp float u_coverMapScale;     // Meters per CLC texel
+        uniform highp vec2 u_coverMapScale;      // Size of CLC coverage in meters (X, Y)
         uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
         
         uniform mat4 shadow_matrices[3];
@@ -1942,9 +1942,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (* CLC origin in world coords (meters from camera) *)
   let clc_origin_x = (float min_tile_lon -. lon) *. 3600. *. deltax in
   let clc_origin_y = (float min_tile_lat -. lat) *. 3600. *. deltay in
-  let clc_size = float (max n_tiles_lon n_tiles_lat) *. 3600. *. deltax in
+  let clc_size_x = float n_tiles_lon *. 3600. *. deltax in
+  let clc_size_y = float n_tiles_lat *. 3600. *. deltay in
   Gl.uniform2f ctx cover_offset_loc clc_origin_x clc_origin_y;
-  Gl.uniform1f ctx cover_scale_loc clc_size;
+  Gl.uniform2f ctx cover_scale_loc clc_size_x clc_size_y;
   Gl.uniform1i ctx use_clc_loc (if use_clc then 1 else 0);
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
