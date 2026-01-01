@@ -414,6 +414,16 @@ let terrain_program =
           if (u_useCLC) {
             // === NEW: CLC-Based Material ===
             Surface surface = sampleCLCBilinear(v_world_pos.xy);
+            
+            // DEBUG: Visualize raw CLC ID as color
+            vec2 texCoord = (v_world_pos.xy - u_coverMapOffset) / u_coverMapScale;
+            vec2 texSize = vec2(textureSize(u_coverMap, 0));
+            ivec2 texelCoord = ivec2(texCoord * texSize);
+            texelCoord = clamp(texelCoord, ivec2(0), ivec2(texSize) - 1);
+            float rawId = float(texelFetch(u_coverMap, texelCoord, 0).r);
+            color = vec4(rawId / 50.0, fract(rawId / 10.0), fract(rawId / 3.0), 1.0);
+            return;
+            
             applySlopeModification(surface, slope);
             
             // Sample detail texture
@@ -1638,7 +1648,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
     ~index_count ~noise_texture ~ao_texture ~rock_texture ~rock_normal_map
     ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture
-    ~cover_map_size ~use_clc canvas ctx =
+    ~cover_map_size:_ ~use_clc canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1880,13 +1890,61 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   in
   Gl.uniform1i ctx cover_map_loc 7;
   Gl.uniform1i ctx palette_loc 8;
-  (* Cover map offset: world origin of the CLC texture *)
-  (* For now, use 0,0 since we don't have real CLC data *)
-  Gl.uniform2f ctx cover_offset_loc 0.0 0.0;
-  (* Cover map scale: meters per CLC texel (2m for high-res L0) *)
-  let cover_scale = deltax *. float w /. float cover_map_size in
-  Gl.uniform1f ctx cover_scale_loc cover_scale;
-  (* Enable/disable CLC system *)
+
+  (* CLC texture covers 1° tile. World coords are relative to camera.
+     To map world pos to CLC texture:
+     - texCoord = (worldPos - offset) / totalTileSize * textureSize
+     - offset should be set so that worldPos=0 (camera) maps to camera's position in tile
+     - The camera is at (center_offset_x, center_offset_y) in the tile
+     - So we want: texCoord = (worldPos + 0) / tileSize + cameraFrac
+     
+     Actually simpler: shader does texCoord = (worldPos - offset) / scale
+     - We want worldPos in range [0, tileSize] to map to texture coords [0, 1]
+     - offset should be the world position of tile origin (corner) 
+     - offset = -center_offset (so worldPos=0 -> texCoord = center_offset/tileSize)
+     No wait, let me reconsider:
+     
+     World pos is relative to camera (0,0 = camera).
+     CLC texture covers tile from (0,0) to (tileWidth, tileHeight) in meters.
+     Camera is at (center_offset_x, center_offset_y) in the tile.
+     
+     So worldPos=0 (camera) corresponds to CLC texCoord = (center_offset_x/tileWidth, center_offset_y/tileHeight)
+     
+     For shader: texCoord = (worldPos - offset) / scale * texSize
+     We want: texCoord = (worldPos + center_offset) / tileSize * texSize
+     So: offset = -center_offset, scale = tileSize / texSize => tileSize  (since texCoord is in [0,1] then multiplied by texSize)
+     
+     Actually shader does: texCoord = (worldPos - offset) / scale, then texelPos = texCoord * texSize
+     So for worldPos=0: texCoord = -offset / scale
+     We want this to equal center_offset / tileSize
+     So: -offset / scale = center_offset / tileSize
+     => offset = -center_offset, scale = tileSize
+     
+     But scale in shader is "meters per texel", so scale = tileSize / texSize *)
+  (* Calculate CLC texture coverage matching load_and_rasterize_multi *)
+  let ( // ) x y' =
+    let q = x / y' in
+    let r = x mod y' in
+    if r >= 0 then q else q - 1
+  in
+  let center_lat_as = truncate (lat *. 3600.) in
+  let center_lon_as = truncate (lon *. 3600.) in
+  let min_lat_as = center_lat_as - (w / 2) in
+  let min_lon_as = center_lon_as - (w / 2) in
+  let max_lat_as = min_lat_as + w - 1 in
+  let max_lon_as = min_lon_as + w - 1 in
+  let min_tile_lat = (min_lat_as - 1) // 3600 in
+  let max_tile_lat = (max_lat_as - 1) // 3600 in
+  let min_tile_lon = min_lon_as // 3600 in
+  let max_tile_lon = max_lon_as // 3600 in
+  let n_tiles_lon = max_tile_lon - min_tile_lon + 1 in
+  let n_tiles_lat = max_tile_lat - min_tile_lat + 1 in
+  (* CLC origin in world coords (meters from camera) *)
+  let clc_origin_x = (float min_tile_lon -. lon) *. 3600. *. deltax in
+  let clc_origin_y = (float min_tile_lat -. lat) *. 3600. *. deltay in
+  let clc_size = float (max n_tiles_lon n_tiles_lat) *. 3600. *. deltax in
+  Gl.uniform2f ctx cover_offset_loc clc_origin_x clc_origin_y;
+  Gl.uniform1f ctx cover_scale_loc clc_size;
   Gl.uniform1i ctx use_clc_loc (if use_clc then 1 else 0);
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
@@ -2443,18 +2501,26 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   (* Create dummy cover map that will be replaced when CLC loads *)
   let cover_map_texture, _dummy_size = make_dummy_cover_map ctx in
   let cover_map_size = 1024 in
-  (* Target rasterization size *)
 
-  (* Load and rasterize CLC tile asynchronously, upload when ready *)
-  let clc_path = Clc_loader.tile_path lat lon in
-  Brr.Console.(log [ Jstr.v ("Loading CLC tile: " ^ clc_path) ]);
+  (* Store CLC geographic bounds for shader coordinate mapping *)
+  let clc_min_lat = ref (float (truncate lat)) in
+  let clc_min_lon = ref (float (truncate lon)) in
+  let clc_width_deg = ref 1.0 in
+
+  (* Load and rasterize multiple CLC tiles asynchronously to cover DEM area *)
+  Brr.Console.(log [ Jstr.v "Loading multi-tile CLC coverage..." ]);
   Lwt.async (fun () ->
       Lwt.catch
         (fun () ->
           let open Lwt.Syntax in
-          let* _header, rasterized_data =
-            Clc_loader.load_and_rasterize_clc clc_path cover_map_size
+          let* min_lat_deg, min_lon_deg, total_width_deg, rasterized_data =
+            Clc_loader.load_and_rasterize_multi ~lat ~lon ~size:w
+              ~tex_size:cover_map_size
           in
+          (* Store bounds for shader use *)
+          clc_min_lat := min_lat_deg;
+          clc_min_lon := min_lon_deg;
+          clc_width_deg := total_width_deg;
           (* Upload rasterized data to texture *)
           Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui cover_map_size
@@ -2463,7 +2529,14 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
                (Bigarray.genarray_of_array1 rasterized_data))
             0;
           Gl.bind_texture ctx Gl.texture_2d None;
-          Brr.Console.(log [ Jstr.v "CLC texture uploaded!" ]);
+          Brr.Console.(
+            log
+              [
+                Jstr.v
+                  (Printf.sprintf
+                     "CLC texture uploaded! Bounds: lat %g, lon %g, width %g°"
+                     min_lat_deg min_lon_deg total_width_deg);
+              ]);
           Lwt.return ())
         (fun exn ->
           Brr.Console.(
