@@ -170,9 +170,16 @@ let terrain_program =
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
-        uniform mediump sampler2D rock_texture;  // Rock texture for triplanar mapping
-        uniform mediump sampler2D rock_normal_map;  // Rock normal map for triplanar
+        uniform mediump sampler2D rock_texture;  // Detail texture (triplanar)
+        uniform mediump sampler2D rock_normal_map;  // Normal map (triplanar)
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
+        
+        // CLC Material System Uniforms
+        uniform mediump usampler2D u_coverMap;   // CLC ID texture (R8UI)
+        uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
+        uniform highp vec2 u_coverMapOffset;     // World position of CLC texture origin
+        uniform highp float u_coverMapScale;     // Meters per CLC texel
+        uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
         
         uniform mat4 shadow_matrices[3];
         uniform float shadow_splits[3];
@@ -185,14 +192,181 @@ let terrain_program =
 
         out lowp vec4 color;
 
+        // ========== CLC Material System ==========
+        
+        struct Surface {
+          vec3 albedo;
+          float roughness;
+          vec4 detailWeights;  // RGBA = Rock, Grass, Forest, Ice
+          float waterFactor;
+        };
+        
+        // Lookup surface properties from palette by material ID
+        Surface getSurfaceFromID(float id) {
+          Surface s;
+          // 2 pixels per material in 128-wide texture
+          float u = (id * 2.0 + 0.5) / 128.0;
+          vec4 pixelA = texture(u_paletteTex, vec2(u, 0.5));
+          vec4 pixelB = texture(u_paletteTex, vec2(u + 1.0/128.0, 0.5));
+          
+          // sRGB to linear approximation (palette stored as sRGB)
+          s.albedo = pixelA.rgb * pixelA.rgb;  // Simplified gamma decode
+          s.roughness = pixelA.a;
+          s.detailWeights = vec4(pixelB.rgb, 0.0);  // RGB weights, ice computed below
+          s.waterFactor = pixelB.a;
+          
+          // ICE LOGIC: If RGB weights are ~0 and not water, force ice (alpha channel)
+          float weightSum = dot(pixelB.rgb, vec3(1.0));
+          if (weightSum < 0.05 && s.waterFactor < 0.5) {
+            s.detailWeights.a = 1.0;  // Force ice/snow weight
+          }
+          
+          return s;
+        }
+        
+        // Manual bilinear filtering of CLC IDs (blend Surface properties)
+        Surface sampleCLCBilinear(vec2 worldPos) {
+          // Convert world position to CLC texture coords
+          vec2 texCoord = (worldPos - u_coverMapOffset) / u_coverMapScale;
+          vec2 texSize = vec2(textureSize(u_coverMap, 0));
+          vec2 texelPos = texCoord * texSize - 0.5;
+          
+          ivec2 p00 = ivec2(floor(texelPos));
+          vec2 frac = fract(texelPos);
+          
+          // Clamp to valid range
+          ivec2 maxCoord = ivec2(texSize) - 1;
+          p00 = clamp(p00, ivec2(0), maxCoord);
+          ivec2 p10 = clamp(p00 + ivec2(1,0), ivec2(0), maxCoord);
+          ivec2 p01 = clamp(p00 + ivec2(0,1), ivec2(0), maxCoord);
+          ivec2 p11 = clamp(p00 + ivec2(1,1), ivec2(0), maxCoord);
+          
+          // Sample 4 neighbors as integer IDs
+          float id00 = float(texelFetch(u_coverMap, p00, 0).r);
+          float id10 = float(texelFetch(u_coverMap, p10, 0).r);
+          float id01 = float(texelFetch(u_coverMap, p01, 0).r);
+          float id11 = float(texelFetch(u_coverMap, p11, 0).r);
+          
+          // Get surfaces for each neighbor
+          Surface s00 = getSurfaceFromID(id00);
+          Surface s10 = getSurfaceFromID(id10);
+          Surface s01 = getSurfaceFromID(id01);
+          Surface s11 = getSurfaceFromID(id11);
+          
+          // Bilinear blend of surface properties
+          Surface result;
+          vec3 a0 = mix(s00.albedo, s10.albedo, frac.x);
+          vec3 a1 = mix(s01.albedo, s11.albedo, frac.x);
+          result.albedo = mix(a0, a1, frac.y);
+          
+          float r0 = mix(s00.roughness, s10.roughness, frac.x);
+          float r1 = mix(s01.roughness, s11.roughness, frac.x);
+          result.roughness = mix(r0, r1, frac.y);
+          
+          vec4 w0 = mix(s00.detailWeights, s10.detailWeights, frac.x);
+          vec4 w1 = mix(s01.detailWeights, s11.detailWeights, frac.x);
+          result.detailWeights = mix(w0, w1, frac.y);
+          
+          float wf0 = mix(s00.waterFactor, s10.waterFactor, frac.x);
+          float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
+          result.waterFactor = mix(wf0, wf1, frac.y);
+          
+          return result;
+        }
+        
+        // Modify CLC surface based on slope (steep = rock)
+        void applySlopeModification(inout Surface s, float slope) {
+          // Steep slopes force rock regardless of CLC classification
+          float rockForce = smoothstep(0.15, 0.5, slope);
+          
+          if (rockForce > 0.01) {
+            // Rock color (grey-brown, linear space)
+            vec3 rockAlbedo = vec3(0.09, 0.08, 0.065);  // ~(76, 72, 65) in sRGB
+            
+            // Blend albedo towards rock based on slope
+            s.albedo = mix(s.albedo, rockAlbedo, rockForce);
+            
+            // Also increase roughness for rock
+            s.roughness = mix(s.roughness, 0.7, rockForce);
+            
+            // Transfer weight from other channels to rock
+            float transferFromIce = rockForce * s.detailWeights.a;
+            float transferFromGrass = rockForce * s.detailWeights.g * 0.8;
+            float transferFromForest = rockForce * s.detailWeights.b * 0.5;
+            
+            s.detailWeights.r += transferFromIce + transferFromGrass + transferFromForest;
+            s.detailWeights.a -= transferFromIce;
+            s.detailWeights.g -= transferFromGrass;
+            s.detailWeights.b -= transferFromForest;
+            
+            // Normalize weights
+            float total = dot(s.detailWeights, vec4(1.0));
+            if (total > 0.01) {
+              s.detailWeights /= total;
+            }
+          }
+        }
+        
+        // Sample packed detail texture with triplanar mapping
+        vec4 sampleDetailTriplanar(vec3 worldPos, vec3 normal) {
+          float scale = 0.01;  // ~100m per texture repeat
+          vec2 uv_xz = worldPos.xz * scale;
+          vec2 uv_xy = worldPos.xy * scale;
+          vec2 uv_yz = worldPos.yz * scale;
+          
+          vec3 blend = abs(normal);
+          blend /= (blend.x + blend.y + blend.z + 0.0001);
+          
+          // Use rock_texture as detail map (R channel for all detail types for now)
+          // Future: use packed RGBA texture with separate detail per channel
+          vec3 d_xz = texture(rock_texture, uv_xz).rgb;
+          vec3 d_xy = texture(rock_texture, uv_xy).rgb;
+          vec3 d_yz = texture(rock_texture, uv_yz).rgb;
+          
+          vec3 blended = d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
+          float detail = dot(blended, vec3(0.33));  // Luminance
+          
+          return vec4(detail, detail, detail, detail);  // Same detail for all channels
+        }
+        
+        // Procedural water with organic shoreline
+        float getWaterMask(vec2 worldPos, float waterFactor) {
+          // High-frequency noise for organic shoreline edge
+          float noise_val = texture(noise, worldPos * 0.002).r;
+          float jitter = (noise_val - 0.5) * 0.25;  // +/- 12.5% variation
+          
+          // Sharp threshold with smooth transition
+          float threshold = 0.5 + jitter;
+          return smoothstep(threshold - 0.15, threshold + 0.15, waterFactor);
+        }
+        
+        vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
+          if (waterMask < 0.01) return baseColor;
+          
+          // Deep water color (linear space)
+          vec3 waterColor = vec3(0.01, 0.04, 0.12);
+          
+          // Shoreline foam zone
+          float shoreZone = smoothstep(0.2, 0.6, waterMask) * (1.0 - smoothstep(0.6, 1.0, waterMask));
+          vec3 foamColor = vec3(0.35, 0.40, 0.45);
+          
+          // Simple ripple pattern
+          float ripples = sin(worldPos.x * 0.3) * sin(worldPos.y * 0.3) * 0.5 + 0.5;
+          
+          vec3 result = mix(baseColor, waterColor, waterMask);
+          result = mix(result, foamColor, shoreZone * ripples * 0.4);
+          
+          return result;
+        }
+
+        // ========== Shadow Functions ==========
+        
         float sample_shadow(int layer, vec2 coords, float compare) {
-             // Hardware shadow comparison with bilinear filtering
              return texture(shadow_map, vec4(coords, float(layer), compare));
         }
 
         float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
             float result = 0.0;
-            // 3x3 PCF with hardware bilinear filtering (36 effective samples)
             for(int x = -1; x <= 1; ++x) {
                 for(int y = -1; y <= 1; ++y) {
                     result += texture(shadow_map, vec4(coords + vec2(x,y) * texel_size, float(layer), compare));
@@ -201,231 +375,161 @@ let terrain_program =
             return result / 9.0;
         }
 
+        // ========== Main ==========
+        
         void main() {
+          // Decode normal from relief texture
           mediump vec2 encodedN = texture(relief, reliefCoord).ba;
           highp vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
           vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
-//          vec3 lightDir = normalize(vec3(-4, 2., 1.0));
-
-          lowp float l = max(0.0, dot(normal, lightDir));
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
 
-          // Cascade Selection
+          // === Shadow Calculation (unchanged) ===
           int cascade = 2;
           if (v_dist < shadow_splits[0]) cascade = 0;
           else if (v_dist < shadow_splits[1]) cascade = 1;
 
-          // Normal offset bias: offset position along normal before shadow lookup
-          // Larger offset for steeper slopes and larger cascades
-//          float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-//          float normal_offset_scale = (cascade == 0) ? 5.0 : ((cascade == 1) ? 15.0 : 50.0);
-//          vec3 offset_pos = v_world_pos + normal * sinTheta * normal_offset_scale;
-          float slopeScale = 1. - cosTheta;
-          float texelSize = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
-          float normalOffset = texelSize * slopeScale;
+          float slopeScale = 1.0 - cosTheta;
+          float texelSz = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
+          float normalOffset = texelSz * slopeScale;
           vec3 offset_pos = v_world_pos + normal * normalOffset;
-//offset_pos = v_world_pos;
 
-          // Project to Shadow Space with offset position
           vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
           vec3 proj_coords = s_pos.xyz / s_pos.w;
           proj_coords = proj_coords * 0.5 + 0.5;
 
           float current_depth = proj_coords.z;
-          
-          // Slope-Scaled Bias (reduced since normal offset handles steep slopes)
-          float cascade_scale = (cascade == 0) ? 0.1 : ((cascade == 1) ? 0.15 : 0.15);
-          float base_bias = max(0.005 * (1.0 - cosTheta), 0.001);
-          float bias = base_bias * cascade_scale;
-bias = 0.0015;
-/*
-  cascade_scale = (cascade == 0) ? 0.15 : ((cascade == 1) ? 0.25 : 0.20);
-  base_bias = max(0.01 * (1.0 - cosTheta), 0.002);
-bias = base_bias * cascade_scale;
-*/
-          
-          // PCF Shadow (texel size = 1/2048)
+          float bias = 0.0015;
           float shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
-          
-          // Force lit beyond depth far plane (XY handled by 1-pixel border)
           if (proj_coords.z > 1.0) shadow_val = 1.0;
 
-          // DEBUG MODE: 0=normal, 1=cascade colors, 2=proj_coords debug, 3=ring colors, 4=texcoords
-          #define DEBUG_SHADOWS 0
-          
-          #if DEBUG_SHADOWS == 2
-          // Show proj_coords: R=x, G=y, B=in_bounds
-          float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
-                             proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
-          color = vec4(proj_coords.x, proj_coords.y, in_bounds, 1.0);
-          #elif DEBUG_SHADOWS == 4
-          // Show texture coordinates: use fractional part scaled for fine detail
-          // R = fract(texcoord.x * 100), G = fract(texcoord.y * 100), B = ring marker
-          vec2 tc = reliefCoord * 100.0;  // Scale to show fine detail
-          float ring_marker = (mod(v_ring, 10.0) < 0.5) ? 0.5 : 0.0;  // Mark every 10th ring
-          color = vec4(fract(tc.x), fract(tc.y), ring_marker, 1.0);
-          #elif DEBUG_SHADOWS == 3
-          // Ring visualization: cycle through colors for each ring
-          // Ring 0=red, 1=yellow, 2=green, 3=cyan, 4=blue, 5=magenta, etc.
-          float hue = mod(v_ring, 6.0) / 6.0;
-          vec3 ring_color;
-          if (hue < 1.0/6.0) ring_color = vec3(1.0, hue * 6.0, 0.0);           // R->Y
-          else if (hue < 2.0/6.0) ring_color = vec3(1.0 - (hue - 1.0/6.0) * 6.0, 1.0, 0.0); // Y->G
-          else if (hue < 3.0/6.0) ring_color = vec3(0.0, 1.0, (hue - 2.0/6.0) * 6.0);       // G->C
-          else if (hue < 4.0/6.0) ring_color = vec3(0.0, 1.0 - (hue - 3.0/6.0) * 6.0, 1.0); // C->B
-          else if (hue < 5.0/6.0) ring_color = vec3((hue - 4.0/6.0) * 6.0, 0.0, 1.0);       // B->M
-          else ring_color = vec3(1.0, 0.0, 1.0 - (hue - 5.0/6.0) * 6.0);                     // M->R
-          // Make ring 0 extra bright/distinct
-          if (v_ring < 0.5) ring_color = vec3(1.0, 0.0, 0.0);
-          color = vec4(ring_color * l, 1.0);
-          #elif DEBUG_SHADOWS == 1
-          // Cascade colors: Red=near, Green=mid, Blue=far, Magenta=beyond
-          vec3 cascade_color;
-          if (v_dist < shadow_splits[0]) cascade_color = vec3(1.0, 0.3, 0.3);      // Red
-          else if (v_dist < shadow_splits[1]) cascade_color = vec3(0.3, 1.0, 0.3); // Green
-          else if (v_dist < shadow_splits[2]) cascade_color = vec3(0.3, 0.3, 1.0); // Blue
-          else {
-            float in_bounds = (proj_coords.x >= 0.0 && proj_coords.x <= 1.0 && 
-                               proj_coords.y >= 0.0 && proj_coords.y <= 1.0) ? 1.0 : 0.0;
-            cascade_color = vec3(1.0, 0.3, 1.0 - in_bounds);                                 // Magenta (beyond)
-          }
-          // Show shadow intensity within cascade color
-          color = vec4(cascade_color * (0.7 * shadow_val + 0.3) * (0.8 + 0.2 * l), 1.0);
-          #else
-          // Biome Colors (Vibrant & Darker to counteract Gamma)
-          lowp vec3 c_water = vec3(0.05, 0.25, 0.45);
-          lowp vec3 c_grass = vec3(0.1, 0.4, 0.15); // Deep Vibrant Green
-          lowp vec3 c_rock  = vec3(0.3, 0.28, 0.25); // Darker Rock
-          lowp vec3 c_snow  = vec3(0.95, 0.95, 0.98); // White
-
-          // Slope Factor (0 = flat, 1 = vertical)
+          // === Material System ===
           float slope = 1.0 - normal.z;
-
-          // Mixing Logic
           vec3 terrain_color;
-          vec3 final_normal = normal;  // Start with terrain normal
-
-          if (v_h < 0.0) {
-             terrain_color = c_water;
+          vec3 final_normal = normal;
+          
+          if (u_useCLC) {
+            // === NEW: CLC-Based Material ===
+            Surface surface = sampleCLCBilinear(v_world_pos.xy);
+            applySlopeModification(surface, slope);
+            
+            // Sample detail texture
+            vec4 detailSample = sampleDetailTriplanar(v_world_pos, normal);
+            float detailMod = dot(surface.detailWeights, detailSample);
+            
+            // Apply detail modulation to albedo
+            terrain_color = surface.albedo * (0.7 + 0.6 * detailMod);
+            
+            // Water handling
+            float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
+            terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
+            
+            // Normal perturbation based on detail weights
+            float tex_scale = 0.01;
+            vec2 uv_xz = v_world_pos.xz * tex_scale;
+            vec2 uv_xy = v_world_pos.xy * tex_scale;
+            vec2 uv_yz = v_world_pos.yz * tex_scale;
+            
+            vec3 blend = abs(normal);
+            blend /= (blend.x + blend.y + blend.z + 0.0001);
+            
+            vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
+            vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
+            vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
+            vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
+            
+            // Weight normal perturbation by rock weight
+            float perturbStrength = surface.detailWeights.r * 3.0 + 
+                                   surface.detailWeights.g * 0.5 + 
+                                   surface.detailWeights.b * 1.0;
+            vec3 perturbed = normal;
+            perturbed.xy += rock_detail.xy * perturbStrength;
+            final_normal = normalize(perturbed);
+            
           } else {
-             // Triplanar mapping for rock texture
-             // Use world position for texture coordinates (scale for desired tiling)
-             float tex_scale = 0.01;  // ~100m per texture repeat (visible from distance)
-             vec2 uv_xz = v_world_pos.xz * tex_scale;  // Top-down projection
-             vec2 uv_xy = v_world_pos.xy * tex_scale;  // Front projection  
-             vec2 uv_yz = v_world_pos.yz * tex_scale;  // Side projection
-             
-             // Blend weights from absolute normal components
-             vec3 blend = abs(normal);
-             // Normalize so weights sum to 1
-             blend = blend / (blend.x + blend.y + blend.z + 0.0001);
-             
-             // Slope-based rock mixing factor (needed before normal blending)
-             float rock_mixin = smoothstep(0.15, 0.5, slope);
-             
-             // Sample rock texture from each projection (triplanar mapping)
-             vec3 tex_xz = texture(rock_texture, uv_xz).rgb;  // Top view (flat areas)
-             vec3 tex_xy = texture(rock_texture, uv_xy).rgb;  // Front view (north/south cliffs)
-             vec3 tex_yz = texture(rock_texture, uv_yz).rgb;  // Side view (east/west cliffs)
-             
-             // Triplanar blend for color
-             vec3 rock_tex = tex_xz * blend.z + tex_xy * blend.y + tex_yz * blend.x;
-             
-             // Sample rock normal map from each projection
-             vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;  // Decode from [0,1] to [-1,1]
-             vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
-             vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
-             
-             // Triplanar blend for normal perturbation
-             vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
-             
-             // Rock luminance (needed for micro-occlusion)
-             float rock_lum = dot(rock_tex, vec3(0.3, 0.3, 0.3));
-             
-             // Grass normal sampling (larger scale, subtler bumps)
-             float grass_tex_scale = 0.005;  // Larger features for grass
-             vec2 grass_uv = v_world_pos.xy * grass_tex_scale;
-             vec3 grass_normal_sample = texture(rock_normal_map, grass_uv).rgb * 2.0 - 1.0;
-             
-             // Blend grass and rock detail based on slope
-             float grass_strength = (1.0 - rock_mixin) * 0.8;  // Subtle on grass
-             float rock_strength = rock_mixin * 3.0;           // Strong on rocks
-             
-             // Combined normal perturbation
-             vec3 perturbed = normal;
-             perturbed.xy += grass_normal_sample.xy * grass_strength;
-             perturbed.xy += rock_detail.xy * rock_strength;
-             final_normal = normalize(perturbed);
-             
-             // Geometric occlusion: surfaces pointing down (into crevices) are darker
-             // rock_detail.z < 1.0 means normal tilts away from straight up
-             float geometric_ao = 0.5 + 0.5 * rock_detail.z;  // Map z from [-1,1] to [0,1]
-             geometric_ao = geometric_ao * geometric_ao;  // Square for more contrast
-             
-             // Micro-occlusion from texture: darker areas = crevices
-             // Invert so low luminance (dark crevices) = low occlusion
-             float micro_ao = 0.5 + 0.5 * rock_lum;  // rock_lum is already 0-1 range
-             
-             // Combined occlusion for rocks (geometric + micro)
-             float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
-             
-             // Grass colors for variation
-             vec3 c_grass_lush = vec3(0.08, 0.42, 0.12);   // Deep green (low altitude)
-             vec3 c_grass_mid = vec3(0.15, 0.38, 0.10);    // Medium green
-             vec3 c_grass_dry = vec3(0.30, 0.35, 0.12);    // Yellow-brown (high altitude/dry)
-             
-             // Height-based grass color (smooth transition)
-             float height_factor = smoothstep(800.0, 2000.0, v_h);  // 800m=lush, 2000m=dry
-             vec3 c_grass_height = mix(c_grass_lush, c_grass_dry, height_factor);
-             
-             // Patchy color mixing using large-scale noise
-             vec3 patch_noise = texture(noise, reliefCoord * 5.0).rgb;  // Large patches
-             float patch_factor = patch_noise.r;  // Use one channel for variation
-             vec3 c_grass_patchy = mix(c_grass_height, c_grass_mid, patch_factor * 0.5);
-             
-             // Fine noise for micro-variation
-             vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
-             vec3 grass_color = c_grass_patchy * (0.85 + 0.3 * grass_noise);
-             
-             // Rock color: base color with high-contrast texture modulation
-             vec3 rock_color = c_rock * (-1. + 5.0 * rock_lum);  // Strong contrast
-             rock_color *= rock_ao;  // Apply micro/geometric occlusion
-             
-             // Slope: Grass -> Rock (triplanar kicks in on steep areas)
-             terrain_color = mix(grass_color, rock_color, rock_mixin);
+            // === FALLBACK: Original slope-based biome logic ===
+            vec3 c_water = vec3(0.05, 0.25, 0.45);
+            vec3 c_grass = vec3(0.1, 0.4, 0.15);
+            vec3 c_rock  = vec3(0.3, 0.28, 0.25);
+
+            if (v_h < 0.0) {
+               terrain_color = c_water;
+            } else {
+               float tex_scale = 0.01;
+               vec2 uv_xz = v_world_pos.xz * tex_scale;
+               vec2 uv_xy = v_world_pos.xy * tex_scale;
+               vec2 uv_yz = v_world_pos.yz * tex_scale;
+               
+               vec3 blend = abs(normal);
+               blend = blend / (blend.x + blend.y + blend.z + 0.0001);
+               
+               float rock_mixin = smoothstep(0.15, 0.5, slope);
+               
+               vec3 tex_xz = texture(rock_texture, uv_xz).rgb;
+               vec3 tex_xy = texture(rock_texture, uv_xy).rgb;
+               vec3 tex_yz = texture(rock_texture, uv_yz).rgb;
+               vec3 rock_tex = tex_xz * blend.z + tex_xy * blend.y + tex_yz * blend.x;
+               
+               vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
+               vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
+               vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
+               vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
+               
+               float rock_lum = dot(rock_tex, vec3(0.33));
+               
+               vec3 grass_normal_sample = texture(rock_normal_map, v_world_pos.xy * 0.005).rgb * 2.0 - 1.0;
+               vec3 perturbed = normal;
+               perturbed.xy += grass_normal_sample.xy * (1.0 - rock_mixin) * 0.8;
+               perturbed.xy += rock_detail.xy * rock_mixin * 3.0;
+               final_normal = normalize(perturbed);
+               
+               float geometric_ao = 0.5 + 0.5 * rock_detail.z;
+               geometric_ao = geometric_ao * geometric_ao;
+               float micro_ao = 0.5 + 0.5 * rock_lum;
+               float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
+               
+               float height_factor = smoothstep(800.0, 2000.0, v_h);
+               vec3 c_grass_lush = vec3(0.08, 0.42, 0.12);
+               vec3 c_grass_dry = vec3(0.30, 0.35, 0.12);
+               vec3 c_grass_height = mix(c_grass_lush, c_grass_dry, height_factor);
+               
+               vec3 patch_noise = texture(noise, reliefCoord * 5.0).rgb;
+               vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
+               vec3 grass_color = c_grass_height * (0.85 + 0.3 * grass_noise);
+               
+               vec3 rock_color = c_rock * (-1.0 + 5.0 * rock_lum) * rock_ao;
+               
+               terrain_color = mix(grass_color, rock_color, rock_mixin);
+            }
           }
           
-          // Calculate lighting with final blended normal
+          // === Lighting (unchanged) ===
           float final_l = max(0.0, dot(final_normal, lightDir));
           
-          // Hemisphere ambient lighting: sky from above, ground bounce from below
-          vec3 sky_color = vec3(0.4, 0.5, 0.7);      // Blue-ish sky ambient
-          vec3 ground_color = vec3(0.15, 0.12, 0.08); // Warm brown ground bounce
-          float sky_factor = final_normal.z * 0.5 + 0.5;  // Map [-1,1] to [0,1]
+          vec3 sky_color = vec3(0.4, 0.5, 0.7);
+          vec3 ground_color = vec3(0.15, 0.12, 0.08);
+          float sky_factor = final_normal.z * 0.5 + 0.5;
           vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.35;
           
-          // Direct light (warm sunlight)
           vec3 sun_color = vec3(1.0, 0.95, 0.85);
           vec3 direct = sun_color * final_l * shadow_val * 0.75;
-          
-          // Combined lighting
           vec3 lighting = ambient + direct;
 
-          // AO Modulation
-          lowp float occlusion = texture(ao, reliefCoord).r;
+          // === AO (unchanged) ===
+          float occlusion = texture(ao, reliefCoord).r;
           terrain_color = terrain_color * occlusion;
 
-          // Match fog to clear color (0.37, 0.56, 0.85)
-          lowp vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
-          float fog_coeff = exp(v_dist * -2e-5); // Slightly clearer fog
+          // === Fog (unchanged) ===
+          vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
+          float fog_coeff = exp(v_dist * -2e-5);
 
-          lowp vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
-          color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.);
+          vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           
-          #endif
+          // Gamma correction
+          color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
         }
       |};
     attributes = [];
@@ -1103,6 +1207,44 @@ let make_rock_texture ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, normal_tid)
 
+(* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
+let make_palette_texture ctx =
+  let data = Clc_palette.generate_palette () in
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 128 1 0 Gl.rgba Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+    0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tid
+
+(* Create dummy CLC cover map for testing (uniform grass ID) *)
+let make_dummy_cover_map ctx =
+  let size = 64 in
+  let data = Bigarray.(Array1.create int8_unsigned c_layout (size * size)) in
+  (* Fill with natural grassland ID (index 26 = code 321) *)
+  let grass_idx = Clc_palette.get_index 321 in
+  for i = 0 to (size * size) - 1 do
+    data.{i} <- grass_idx
+  done;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  (* Use R8UI for integer texture *)
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui size size 0 Gl.red_integer
+    Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+    0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  (tid, size)
+
 [@@@warning "-32"]
 
 let create_shadow_map ctx width height layers =
@@ -1461,7 +1603,8 @@ let shadow_rendered = ref false
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
     ~index_count ~noise_texture ~ao_texture ~rock_texture ~rock_normal_map
-    ~shadow_pid ~shadow_fbo ~shadow_map canvas ctx =
+    ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture
+    ~cover_map_size ~use_clc canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1685,6 +1828,33 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx rock_tex_loc 5;
   Gl.uniform1i ctx rock_normal_loc 6;
 
+  (* CLC Uniforms *)
+  let cover_map_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMap")
+  in
+  let palette_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_paletteTex")
+  in
+  let cover_offset_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMapOffset")
+  in
+  let cover_scale_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMapScale")
+  in
+  let use_clc_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_useCLC")
+  in
+  Gl.uniform1i ctx cover_map_loc 7;
+  Gl.uniform1i ctx palette_loc 8;
+  (* Cover map offset: world origin of the CLC texture *)
+  (* For now, use 0,0 since we don't have real CLC data *)
+  Gl.uniform2f ctx cover_offset_loc 0.0 0.0;
+  (* Cover map scale: meters per CLC texel (2m for high-res L0) *)
+  let cover_scale = deltax *. float w /. float cover_map_size in
+  Gl.uniform1f ctx cover_scale_loc cover_scale;
+  (* Enable/disable CLC system *)
+  Gl.uniform1i ctx use_clc_loc (if use_clc then 1 else 0);
+
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.active_texture ctx Gl.texture0;
   (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
@@ -1700,6 +1870,11 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_texture ctx Gl.texture_2d (Some rock_normal_map);
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
+  (* CLC Textures *)
+  Gl.active_texture ctx Gl.texture7;
+  Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
+  Gl.active_texture ctx Gl.texture8;
+  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
 
   (* Gl.bind_texture ctx Gl.texture_2d (Some shadow_debug_color); *)
 
@@ -2229,11 +2404,18 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
   let shadow_pid = create_program ctx shadow_program in
 
+  (* CLC Textures *)
+  let palette_texture = make_palette_texture ctx in
+  let cover_map_texture, cover_map_size = make_dummy_cover_map ctx in
+  (* Set to true to enable CLC material system, false for original rendering *)
+  let use_clc = true in
+
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
         ~points ~index_count ~noise_texture ~ao_texture ~rock_texture
-        ~rock_normal_map ~shadow_pid ~shadow_fbo ~shadow_map canvas ctx)
+        ~rock_normal_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+        ~cover_map_texture ~cover_map_size ~use_clc canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
