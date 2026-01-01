@@ -441,13 +441,47 @@ let terrain_program =
             vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
             vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
             
-            // Weight normal perturbation by rock weight
+            // Weight normal perturbation by rock weight AND roughness
+            // Smooth surfaces (low roughness) should have less normal detail
             float perturbStrength = surface.detailWeights.r * 3.0 + 
                                    surface.detailWeights.g * 0.5 + 
                                    surface.detailWeights.b * 1.0;
+            perturbStrength *= surface.roughness;  // Scale by roughness
+            
             vec3 perturbed = normal;
             perturbed.xy += rock_detail.xy * perturbStrength;
             final_normal = normalize(perturbed);
+            
+            // Store roughness and reflection properties for lighting
+            float material_roughness = surface.roughness;
+            float reflectivity = (1.0 - material_roughness) * 0.6;  // Smooth = reflective
+            
+            // Ice and water get extra reflection
+            float iceAmount = surface.detailWeights.a;
+            if (iceAmount > 0.1 || waterMask > 0.1) {
+              reflectivity = max(reflectivity, 0.4);
+            }
+            
+            // === Specular & Environment Reflection ===
+            vec3 viewDir = normalize(-v_world_pos);  // Approximate view direction
+            vec3 halfVec = normalize(lightDir + viewDir);
+            
+            // GGX-inspired specular (simplified)
+            float NdotH = max(0.0, dot(final_normal, halfVec));
+            float roughSq = material_roughness * material_roughness;
+            float denom = NdotH * NdotH * (roughSq - 1.0) + 1.0;
+            float D = roughSq / (3.14159 * denom * denom + 0.0001);
+            float specular = D * max(0.0, dot(final_normal, lightDir));
+            
+            // Environment reflection (sky color for glossy surfaces)
+            vec3 reflectDir = reflect(-viewDir, final_normal);
+            float skyReflect = max(0.0, reflectDir.z);  // Simple sky gradient
+            vec3 envColor = mix(vec3(0.6, 0.7, 0.9), vec3(0.2, 0.4, 0.8), skyReflect);
+            
+            // Apply specular and reflection to terrain color
+            vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
+            terrain_color += specColor * 0.3;
+            terrain_color = mix(terrain_color, envColor, reflectivity * 0.3);
             
           } else {
             // === FALLBACK: Original slope-based biome logic ===
