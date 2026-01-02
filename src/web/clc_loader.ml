@@ -565,3 +565,63 @@ let load_and_rasterize_multi ~lat ~lon ~size ~tex_size =
   let width_deg = dem_max_lon -. dem_min_lon in
   let height_deg = dem_max_lat -. dem_min_lat in
   Lwt.return (dem_min_lat, dem_min_lon, width_deg, height_deg, data)
+
+(* Load CLC tiles for GPU rasterization (no CPU rasterization).
+   Returns: (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles list)
+   Each tile in the list has: (tile_data, tile_range_lon, tile_range_lat) *)
+let load_tiles_for_gpu ~lat ~lon ~size =
+  let open Lwt.Syntax in
+  (* Calculate DEM geographic bounds in degrees *)
+  let size_deg = float size /. 3600. in
+  let dem_min_lat = lat -. (size_deg /. 2.) in
+  let dem_max_lat = lat +. (size_deg /. 2.) in
+  let dem_min_lon = lon -. (size_deg /. 2.) in
+  let dem_max_lon = lon +. (size_deg /. 2.) in
+  let dem_range_lon = dem_max_lon -. dem_min_lon in
+  let dem_range_lat = dem_max_lat -. dem_min_lat in
+
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf "CLC GPU: DEM bounds lat=%.4f-%.4f lon=%.4f-%.4f"
+             dem_min_lat dem_max_lat dem_min_lon dem_max_lon);
+      ]);
+
+  (* Determine which CLC tiles might contribute *)
+  let min_tile_lat = int_of_float (floor dem_min_lat) - 1 in
+  let max_tile_lat = int_of_float (ceil dem_max_lat) in
+  let min_tile_lon = int_of_float (floor dem_min_lon) - 1 in
+  let max_tile_lon = int_of_float (ceil dem_max_lon) in
+
+  (* Accumulate loaded tiles *)
+  let tiles = ref [] in
+
+  let rec load_tiles tile_lat tile_lon =
+    if tile_lat > max_tile_lat then Lwt.return ()
+    else if tile_lon > max_tile_lon then load_tiles (tile_lat + 1) min_tile_lon
+    else begin
+      let path = tile_path (float tile_lat +. 0.5) (float tile_lon +. 0.5) in
+      Lwt.catch
+        (fun () ->
+          let* tile = load_full_clc_tile path in
+          (* Calculate tile range in degrees (for shader uniforms) *)
+          let tile_range_lon = 65535. /. tile.header.scale_x in
+          let tile_range_lat = 65535. /. tile.header.scale_y in
+          tiles := (tile, tile_range_lon, tile_range_lat) :: !tiles;
+          Lwt.return ())
+        (fun _exn -> Lwt.return ())
+      >>= fun () -> load_tiles tile_lat (tile_lon + 1)
+    end
+  in
+  let* () = load_tiles min_tile_lat min_tile_lon in
+
+  Console.(
+    log
+      [
+        Jstr.v (Printf.sprintf "CLC GPU: Loaded %d tiles" (List.length !tiles));
+      ]);
+
+  (* Reverse to get correct draw order (smaller features first) *)
+  Lwt.return
+    (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, List.rev !tiles)

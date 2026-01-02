@@ -893,6 +893,40 @@ let shadow_program =
     attributes = [];
   }
 
+(* CLC Rasterization Shader - renders CLC tile triangles to R8UI FBO *)
+let clc_raster_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        precision highp float;
+        layout(location = 0) in vec2 in_norm_pos;  // u16 normalized to 0..1
+        layout(location = 1) in uint in_color_idx;  // u8 palette index (unsigned)
+        uniform vec2 u_tile_range;   // tile extent in degrees (65535/scale_x, 65535/scale_y)
+        uniform vec2 u_tile_min;     // tile origin (min_lon, min_lat)
+        uniform vec2 u_tex_min;      // DEM min (lon, lat) in degrees
+        uniform vec2 u_tex_range;    // DEM extent (lon_range, lat_range) in degrees
+        flat out uint v_idx;
+        void main() {
+          // Map normalized u16 (0..1) to geographic coords
+          vec2 geo_pos = in_norm_pos * u_tile_range + u_tile_min;
+          // Map geographic coords to NDC [-1, 1] for the output texture
+          vec2 ndc = ((geo_pos - u_tex_min) / u_tex_range) * 2.0 - 1.0;
+          gl_Position = vec4(ndc, 0.0, 1.0);
+          v_idx = in_color_idx;
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision mediump float;
+        flat in uint v_idx;
+        out uvec4 out_color;
+        void main() {
+          out_color = uvec4(v_idx, 0u, 0u, 1u);
+        }
+      |};
+    attributes = [ "in_norm_pos"; "in_color_idx" ];
+  }
+
 (* OpenGL setup *)
 
 module Gl = Brr_canvas.Gl
@@ -2475,11 +2509,53 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
   let shadow_pid = create_program ctx shadow_program in
 
+  (* CLC GPU Rasterization setup *)
+  let clc_raster_pid = create_program ctx clc_raster_program in
+  let cover_map_size = 1024 in
+
+  (* Create FBO for CLC rasterization *)
+  let clc_fbo = Gl.create_framebuffer ctx in
+
+  (* Create R8UI texture for CLC output *)
+  let cover_map_texture = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  (* Initialize with zeros *)
+  let init_data =
+    Bigarray.(
+      Array1.create int8_unsigned c_layout (cover_map_size * cover_map_size))
+  in
+  Bigarray.Array1.fill init_data 0;
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui cover_map_size cover_map_size 0
+    Gl.red_integer Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
+    0;
+
+  (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
+  let clc_depth_rb = Gl.create_renderbuffer ctx in
+  Gl.bind_renderbuffer ctx Gl.renderbuffer (Some clc_depth_rb);
+  Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
+    cover_map_size cover_map_size;
+
+  (* Attach to FBO *)
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    cover_map_texture 0;
+  Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
+    Gl.renderbuffer clc_depth_rb;
+
+  (* Check FBO completeness *)
+  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
+  (if status <> Gl.framebuffer_complete then
+     Brr.Console.(log [ Jstr.v "WARNING: CLC FBO incomplete!" ]));
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.bind_texture ctx Gl.texture_2d None;
+
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
-  (* Create dummy cover map that will be replaced when CLC loads *)
-  let cover_map_texture, _dummy_size = make_dummy_cover_map ctx in
-  let cover_map_size = 1024 in
 
   (* Store CLC geographic bounds for shader coordinate mapping *)
   let clc_min_lat = ref (lat -. (float w /. 3600. /. 2.)) in
@@ -2487,43 +2563,124 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let clc_width_deg = ref (float w /. 3600.) in
   let clc_height_deg = ref (float w /. 3600.) in
 
-  (* Load and rasterize multiple CLC tiles asynchronously to cover DEM area *)
-  Brr.Console.(log [ Jstr.v "Loading multi-tile CLC coverage..." ]);
+  (* Load CLC tiles and GPU rasterize to FBO *)
+  Brr.Console.(log [ Jstr.v "Loading CLC tiles for GPU rasterization..." ]);
   Lwt.async (fun () ->
       Lwt.catch
         (fun () ->
           let open Lwt.Syntax in
-          let* min_lat_deg, min_lon_deg, width_deg, height_deg, rasterized_data
-              =
-            Clc_loader.load_and_rasterize_multi ~lat ~lon ~size:w
-              ~tex_size:cover_map_size
+          let* dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles =
+            Clc_loader.load_tiles_for_gpu ~lat ~lon ~size:w
           in
           (* Store bounds for shader use *)
-          clc_min_lat := min_lat_deg;
-          clc_min_lon := min_lon_deg;
-          clc_width_deg := width_deg;
-          clc_height_deg := height_deg;
-          (* Upload rasterized data to texture *)
-          Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
-          Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui cover_map_size
-            cover_map_size 0 Gl.red_integer Gl.unsigned_byte
-            (Brr.Tarray.of_bigarray
-               (Bigarray.genarray_of_array1 rasterized_data))
-            0;
-          Gl.bind_texture ctx Gl.texture_2d None;
+          clc_min_lat := dem_min_lat;
+          clc_min_lon := dem_min_lon;
+          clc_width_deg := dem_range_lon;
+          clc_height_deg := dem_range_lat;
+
+          (* GPU Rasterization: render tiles to FBO *)
+          Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+          Gl.viewport ctx 0 0 cover_map_size cover_map_size;
+
+          (* Clear depth only - R8UI texture can't use glClear for color
+             (would need glClearBufferuiv which Brr doesn't have).
+             Texture was initialized to 0 when created. *)
+          Gl.clear_depth ctx 1.0;
+          Gl.clear ctx Gl.depth_buffer_bit;
+
+          (* Enable depth test: first-drawn wins (smaller features drawn first) *)
+          Gl.enable ctx Gl.depth_test;
+          Gl.depth_func ctx Gl.less;
+
+          Gl.use_program ctx clc_raster_pid;
+
+          (* Get uniform locations *)
+          let u_tile_range =
+            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_range")
+          in
+          let u_tile_min =
+            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_min")
+          in
+          let u_tex_min =
+            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_min")
+          in
+          let u_tex_range =
+            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_range")
+          in
+
+          (* Set DEM bounds uniforms (same for all tiles) *)
+          Gl.uniform2f ctx u_tex_min dem_min_lon dem_min_lat;
+          Gl.uniform2f ctx u_tex_range dem_range_lon dem_range_lat;
+
+          (* Create reusable VAO *)
+          let vao = Gl.create_vertex_array ctx in
+          Gl.bind_vertex_array ctx (Some vao);
+
+          (* For each tile, create VBOs, set uniforms, and draw *)
+          List.iter
+            (fun (tile, tile_range_lon, tile_range_lat) ->
+              let header = tile.Clc_loader.header in
+
+              (* Set tile-specific uniforms *)
+              Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
+              Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
+                header.Clc_loader.min_lat;
+
+              (* Create and upload position VBO *)
+              let vbo_pos = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
+                Gl.static_draw;
+              Gl.enable_vertex_attrib_array ctx 0;
+              (* normalized=true converts u16 0-65535 to 0.0-1.0 *)
+              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+              (* Create and upload color VBO *)
+              let vbo_col = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
+                Gl.static_draw;
+              Gl.enable_vertex_attrib_array ctx 1;
+              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+              (* Create and upload index buffer *)
+              let ebo = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
+              Gl.buffer_data ctx Gl.element_array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
+                Gl.static_draw;
+
+              (* Draw all triangles *)
+              let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+              Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
+
+              (* Clean up VBOs *)
+              Gl.delete_buffer ctx vbo_pos;
+              Gl.delete_buffer ctx vbo_col;
+              Gl.delete_buffer ctx ebo)
+            tiles;
+
+          (* Cleanup *)
+          Gl.delete_vertex_array ctx vao;
+          Gl.disable ctx Gl.depth_test;
+          Gl.bind_framebuffer ctx Gl.framebuffer None;
+
           Brr.Console.(
             log
               [
                 Jstr.v
                   (Printf.sprintf
-                     "CLC texture uploaded! Bounds: lat=%.4f lon=%.4f \
-                      size=%.3f×%.3f°"
-                     min_lat_deg min_lon_deg width_deg height_deg);
+                     "CLC GPU rasterization complete! %d tiles, bounds: \
+                      lon=%.4f lat=%.4f size=%.3f×%.3f°"
+                     (List.length tiles) dem_min_lon dem_min_lat dem_range_lon
+                     dem_range_lat);
               ]);
           Lwt.return ())
         (fun exn ->
           Brr.Console.(
-            log [ Jstr.v ("CLC load failed: " ^ Printexc.to_string exn) ]);
+            log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
           Lwt.return ()));
   (* Set to true to enable CLC material system *)
   let use_clc = true in
