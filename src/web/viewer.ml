@@ -175,10 +175,12 @@ let terrain_program =
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
         
         // CLC Material System Uniforms
-        uniform mediump usampler2D u_coverMap;   // CLC ID texture (R8UI)
+        // CLC Material System Uniforms
+        uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
-        uniform highp vec2 u_coverMapOffset;     // World position of CLC texture origin
-        uniform highp vec2 u_coverMapScale;      // Size of CLC coverage in meters (X, Y)
+        uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
+        uniform highp float u_baseExtent;        // Extent of level 0 in meters
+        uniform int u_numLevels;                 // Number of clipmap levels
         uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
         
         uniform mat4 shadow_matrices[3];
@@ -227,9 +229,21 @@ let terrain_program =
         
         // Manual bilinear filtering of CLC IDs (blend Surface properties)
         Surface sampleCLCBilinear(vec2 worldPos) {
-          // Convert world position to CLC texture coords
-          vec2 texCoord = (worldPos - u_coverMapOffset) / u_coverMapScale;
-          vec2 texSize = vec2(textureSize(u_coverMap, 0));
+          // Calculate distance from center (camera) for LOD selection
+          vec2 relPos = worldPos - u_cameraOffset;
+          float dist = max(abs(relPos.x), abs(relPos.y));
+          
+          // Select clipmap level based on distance
+          // Level L covers extent = u_baseExtent * 2^L
+          // We want the finest level that covers this point
+          float desiredLevel = max(0.0, 1.0 + log2(dist / u_baseExtent));
+          int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
+          
+          // Calculate texture coordinates for this level
+          float levelExtent = u_baseExtent * pow(2.0, float(level));
+          vec2 texCoord = (relPos / levelExtent) + 0.5;
+          
+          vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
           vec2 texelPos = texCoord * texSize - 0.5;
           
           ivec2 p00 = ivec2(floor(texelPos));
@@ -242,11 +256,12 @@ let terrain_program =
           ivec2 p01 = clamp(p00 + ivec2(0,1), ivec2(0), maxCoord);
           ivec2 p11 = clamp(p00 + ivec2(1,1), ivec2(0), maxCoord);
           
-          // Sample 4 neighbors as integer IDs
-          float id00 = float(texelFetch(u_coverMap, p00, 0).r);
-          float id10 = float(texelFetch(u_coverMap, p10, 0).r);
-          float id01 = float(texelFetch(u_coverMap, p01, 0).r);
-          float id11 = float(texelFetch(u_coverMap, p11, 0).r);
+          // Sample 4 neighbors from selected array layer
+          // usampler2DArray fetch returns uvec4, we take .r component
+          float id00 = float(texelFetch(u_coverMap, ivec3(p00, level), 0).r);
+          float id10 = float(texelFetch(u_coverMap, ivec3(p10, level), 0).r);
+          float id01 = float(texelFetch(u_coverMap, ivec3(p01, level), 0).r);
+          float id11 = float(texelFetch(u_coverMap, ivec3(p11, level), 0).r);
           
           // Get surfaces for each neighbor
           Surface s00 = getSurfaceFromID(id00);
@@ -272,6 +287,16 @@ let terrain_program =
           float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
           result.waterFactor = mix(wf0, wf1, frac.y);
           
+          // Visualization debug: tint based on level
+          if (false) {
+             vec3 tint = vec3(1.0);
+             if (level == 0) tint = vec3(1.2, 0.8, 0.8); // Red
+             else if (level == 1) tint = vec3(0.8, 1.2, 0.8); // Green
+             else if (level == 2) tint = vec3(0.8, 0.8, 1.2); // Blue
+             else if (level > 2) tint = vec3(1.2, 1.2, 0.8); // Yellow
+             result.albedo *= tint;
+          }
+
           return result;
         }
         
@@ -1925,11 +1950,14 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let palette_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_paletteTex")
   in
-  let cover_offset_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMapOffset")
+  let camera_offset_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_cameraOffset")
   in
-  let cover_scale_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMapScale")
+  let base_extent_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_baseExtent")
+  in
+  let num_levels_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_numLevels")
   in
   let use_clc_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_useCLC")
@@ -1937,48 +1965,13 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx cover_map_loc 7;
   Gl.uniform1i ctx palette_loc 8;
 
-  (* CLC texture covers 1° tile. World coords are relative to camera.
-     To map world pos to CLC texture:
-     - texCoord = (worldPos - offset) / totalTileSize * textureSize
-     - offset should be set so that worldPos=0 (camera) maps to camera's position in tile
-     - The camera is at (center_offset_x, center_offset_y) in the tile
-     - So we want: texCoord = (worldPos + 0) / tileSize + cameraFrac
-     
-     Actually simpler: shader does texCoord = (worldPos - offset) / scale
-     - We want worldPos in range [0, tileSize] to map to texture coords [0, 1]
-     - offset should be the world position of tile origin (corner) 
-     - offset = -center_offset (so worldPos=0 -> texCoord = center_offset/tileSize)
-     No wait, let me reconsider:
-     
-     World pos is relative to camera (0,0 = camera).
-     CLC texture covers tile from (0,0) to (tileWidth, tileHeight) in meters.
-     Camera is at (center_offset_x, center_offset_y) in the tile.
-     
-     So worldPos=0 (camera) corresponds to CLC texCoord = (center_offset_x/tileWidth, center_offset_y/tileHeight)
-     
-     For shader: texCoord = (worldPos - offset) / scale * texSize
-     We want: texCoord = (worldPos + center_offset) / tileSize * texSize
-     So: offset = -center_offset, scale = tileSize / texSize => tileSize  (since texCoord is in [0,1] then multiplied by texSize)
-     
-     Actually shader does: texCoord = (worldPos - offset) / scale, then texelPos = texCoord * texSize
-     So for worldPos=0: texCoord = -offset / scale
-     We want this to equal center_offset / tileSize
-     So: -offset / scale = center_offset / tileSize
-     => offset = -center_offset, scale = tileSize
-          But scale in shader is "meters per texel", so scale = tileSize / texSize *)
-  (* CLC texture covers exactly the DEM area, centered on camera.
-     World coordinates have camera at center_offset (not 0,0).
-     CLC texture origin is at (center_offset - halfWidth, center_offset - halfHeight). *)
-  let dem_size_x = float w *. deltax in
-  (* DEM width in meters *)
-  let dem_size_y = float w *. deltay in
-  (* DEM height in meters *)
-  let clc_origin_x = center_offset_x -. (dem_size_x /. 2.) in
-  (* Left edge in world coords *)
-  let clc_origin_y = center_offset_y -. (dem_size_y /. 2.) in
-  (* Bottom edge in world coords *)
-  Gl.uniform2f ctx cover_offset_loc clc_origin_x clc_origin_y;
-  Gl.uniform2f ctx cover_scale_loc dem_size_x dem_size_y;
+  (* Set clipmap parameters *)
+  Gl.uniform2f ctx camera_offset_loc center_offset_x center_offset_y;
+  (* Clipmap centered on initial view which is (0,0) rel *)
+  Gl.uniform1f ctx base_extent_loc 2048.0;
+  (* Level 0 extent *)
+  Gl.uniform1i ctx num_levels_loc 7;
+
   Gl.uniform1i ctx use_clc_loc (if use_clc then 1 else 0);
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
@@ -1998,7 +1991,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
   (* CLC Textures *)
   Gl.active_texture ctx Gl.texture7;
-  Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
   Gl.active_texture ctx Gl.texture8;
   Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
 
@@ -2537,21 +2530,23 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   (* Create FBO for CLC rasterization *)
   let clc_fbo = Gl.create_framebuffer ctx in
 
-  (* Create R8UI texture for CLC output *)
+  (* Create R8UI texture array for CLC output (7 levels) *)
+  let clc_levels = 7 in
   let cover_map_texture = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some cover_map_texture);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
   (* Initialize with zeros *)
   let init_data =
     Bigarray.(
-      Array1.create int8_unsigned c_layout (cover_map_size * cover_map_size))
+      Array1.create int8_unsigned c_layout
+        (cover_map_size * cover_map_size * clc_levels))
   in
   Bigarray.Array1.fill init_data 0;
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui cover_map_size cover_map_size 0
-    Gl.red_integer Gl.unsigned_byte
+  Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
+    clc_levels 0 Gl.red_integer Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
     0;
 
@@ -2561,10 +2556,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
     cover_map_size cover_map_size;
 
-  (* Attach to FBO *)
+  (* Attach to FBO (attach layer 0 initially) *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
-    cover_map_texture 0;
+  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+    cover_map_texture 0 0;
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
     Gl.renderbuffer clc_depth_rb;
 
@@ -2579,10 +2574,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let palette_texture = make_palette_texture ctx in
 
   (* Store CLC geographic bounds for shader coordinate mapping *)
-  let clc_min_lat = ref (lat -. (float w /. 3600. /. 2.)) in
-  let clc_min_lon = ref (lon -. (float w /. 3600. /. 2.)) in
-  let clc_width_deg = ref (float w /. 3600.) in
-  let clc_height_deg = ref (float w /. 3600.) in
 
   (* Load CLC tiles and GPU rasterize to FBO *)
   Brr.Console.(log [ Jstr.v "Loading CLC tiles for GPU rasterization..." ]);
@@ -2590,32 +2581,24 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
       Lwt.catch
         (fun () ->
           let open Lwt.Syntax in
-          let* dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles =
-            Clc_loader.load_tiles_for_gpu ~lat ~lon ~size:w
+          (* Load tiles covering the largest extent (Level 6) *)
+          let max_extent = 2048.0 *. (2.0 ** 6.0) in
+          (* 131km *)
+          let* _, _, _, _, tiles =
+            Clc_loader.load_tiles_for_gpu ~lat ~lon
+              ~size:(int_of_float (max_extent /. 30.0))
           in
-          (* Store bounds for shader use *)
-          clc_min_lat := dem_min_lat;
-          clc_min_lon := dem_min_lon;
-          clc_width_deg := dem_range_lon;
-          clc_height_deg := dem_range_lat;
 
-          (* GPU Rasterization: render tiles to FBO *)
+          (* Prepare FBO *)
           Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
           Gl.viewport ctx 0 0 cover_map_size cover_map_size;
-
-          (* Clear depth only - R8UI texture can't use glClear for color
-             (would need glClearBufferuiv which Brr doesn't have).
-             Texture was initialized to 0 when created. *)
-          Gl.clear_depth ctx 1.0;
-          Gl.clear ctx Gl.depth_buffer_bit;
-
-          (* Enable depth test: first-drawn wins (smaller features drawn first) *)
-          Gl.enable ctx Gl.depth_test;
-          Gl.depth_func ctx Gl.less;
-
           Gl.use_program ctx clc_raster_pid;
 
-          (* Get uniform locations *)
+          (* Reusable VAO *)
+          let vao = Gl.create_vertex_array ctx in
+          Gl.bind_vertex_array ctx (Some vao);
+
+          (* Get uniforms *)
           let u_tile_range =
             Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_range")
           in
@@ -2629,59 +2612,76 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
             Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_range")
           in
 
-          (* Set DEM bounds uniforms (same for all tiles) *)
-          Gl.uniform2f ctx u_tex_min dem_min_lon dem_min_lat;
-          Gl.uniform2f ctx u_tex_range dem_range_lon dem_range_lat;
+          (* Conversion factors *)
+          let meters_per_deg_lat = 111132.0 in
+          let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
 
-          (* Create reusable VAO *)
-          let vao = Gl.create_vertex_array ctx in
-          Gl.bind_vertex_array ctx (Some vao);
+          (* Render each level *)
+          for level = 0 to 6 do
+            let extent_meters = 2048.0 *. (2.0 ** float level) in
 
-          (* For each tile, create VBOs, set uniforms, and draw *)
-          List.iter
-            (fun (tile, tile_range_lon, tile_range_lat) ->
-              let header = tile.Clc_loader.header in
+            (* Calculate viewport in degrees centered on (lat, lon) *)
+            let extent_lat = extent_meters /. meters_per_deg_lat in
+            let extent_lon = extent_meters /. meters_per_deg_lon in
+            let min_lat = lat -. (extent_lat /. 2.) in
+            let min_lon = lon -. (extent_lon /. 2.) in
 
-              (* Set tile-specific uniforms *)
-              Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
-              Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
-                header.Clc_loader.min_lat;
+            (* Attach specific layer *)
+            Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+              cover_map_texture 0 level;
 
-              (* Create and upload position VBO *)
-              let vbo_pos = Gl.create_buffer ctx in
-              Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
-              Gl.buffer_data ctx Gl.array_buffer
-                (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
-                Gl.static_draw;
-              Gl.enable_vertex_attrib_array ctx 0;
-              (* normalized=true converts u16 0-65535 to 0.0-1.0 *)
-              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+            (* Clear depth *)
+            Gl.clear_depth ctx 1.0;
+            Gl.clear ctx Gl.depth_buffer_bit;
 
-              (* Create and upload color VBO *)
-              let vbo_col = Gl.create_buffer ctx in
-              Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
-              Gl.buffer_data ctx Gl.array_buffer
-                (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
-                Gl.static_draw;
-              Gl.enable_vertex_attrib_array ctx 1;
-              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+            (* Set viewport uniforms *)
+            Gl.uniform2f ctx u_tex_min min_lon min_lat;
+            Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
 
-              (* Create and upload index buffer *)
-              let ebo = Gl.create_buffer ctx in
-              Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
-              Gl.buffer_data ctx Gl.element_array_buffer
-                (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
-                Gl.static_draw;
+            (* Enable depth test per level *)
+            Gl.enable ctx Gl.depth_test;
+            Gl.depth_func ctx Gl.less;
 
-              (* Draw all triangles *)
-              let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
-              Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
+            (* Render tiles *)
+            List.iter
+              (fun (tile, tile_range_lon, tile_range_lat) ->
+                let header = tile.Clc_loader.header in
+                (* Optimization: could skip tiles outside view here *)
 
-              (* Clean up VBOs *)
-              Gl.delete_buffer ctx vbo_pos;
-              Gl.delete_buffer ctx vbo_col;
-              Gl.delete_buffer ctx ebo)
-            tiles;
+                Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
+                Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
+                  header.Clc_loader.min_lat;
+
+                let vbo_pos = Gl.create_buffer ctx in
+                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
+                Gl.buffer_data ctx Gl.array_buffer
+                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
+                  Gl.static_draw;
+                Gl.enable_vertex_attrib_array ctx 0;
+                Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+                let vbo_col = Gl.create_buffer ctx in
+                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
+                Gl.buffer_data ctx Gl.array_buffer
+                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
+                  Gl.static_draw;
+                Gl.enable_vertex_attrib_array ctx 1;
+                Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+                let ebo = Gl.create_buffer ctx in
+                Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
+                Gl.buffer_data ctx Gl.element_array_buffer
+                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
+                  Gl.static_draw;
+
+                let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+                Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
+
+                Gl.delete_buffer ctx vbo_pos;
+                Gl.delete_buffer ctx vbo_col;
+                Gl.delete_buffer ctx ebo)
+              tiles
+          done;
 
           (* Cleanup *)
           Gl.delete_vertex_array ctx vao;
@@ -2689,15 +2689,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           Gl.bind_framebuffer ctx Gl.framebuffer None;
 
           Brr.Console.(
-            log
-              [
-                Jstr.v
-                  (Printf.sprintf
-                     "CLC GPU rasterization complete! %d tiles, bounds: \
-                      lon=%.4f lat=%.4f size=%.3f×%.3f°"
-                     (List.length tiles) dem_min_lon dem_min_lat dem_range_lon
-                     dem_range_lat);
-              ]);
+            log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ]);
           Lwt.return ())
         (fun exn ->
           Brr.Console.(
