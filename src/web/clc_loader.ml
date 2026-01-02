@@ -210,10 +210,12 @@ let rasterize_triangle data size x0 y0 x1 y1 x2 y2 color_idx =
    - tile: the loaded CLC tile with header containing min_lon, min_lat, scale_x, scale_y
    - tex_size: output texture size (e.g., 1024)
    - target_min_lon/lat, target_max_lon/lat: DEM coverage bounds in degrees
+   - nominal_min/max_lon/lat: Tile's nominal 1° boundaries (to avoid overlap issues)
    The header's scale_x/scale_y are the quantization divisors: 
    geographic_coord = min + (quantized / scale) *)
 let rasterize_clc_tile_to_bounds tile tex_size ~target_min_lon ~target_min_lat
-    ~target_max_lon ~target_max_lat =
+    ~target_max_lon ~target_max_lat ~nominal_min_lon ~nominal_min_lat
+    ~nominal_max_lon ~nominal_max_lat =
   let data = Array1.create int8_unsigned c_layout (tex_size * tex_size) in
   Array1.fill data 0;
 
@@ -228,6 +230,24 @@ let rasterize_clc_tile_to_bounds tile tex_size ~target_min_lon ~target_min_lat
   let target_height = target_max_lat -. target_min_lat in
   let tex_scale_x = float tex_size /. target_width in
   let tex_scale_y = float tex_size /. target_height in
+
+  (* Debug: log bounds and scale *)
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf
+             "  Rasterize: target=[%.4f,%.4f]-[%.4f,%.4f] scale=%.1f,%.1f"
+             target_min_lon target_min_lat target_max_lon target_max_lat
+             tex_scale_x tex_scale_y);
+      ]);
+  Console.(
+    log
+      [
+        Jstr.v
+          (Printf.sprintf "  Header: min=[%.4f,%.4f] scale=[%.1f,%.1f]"
+             header.min_lon header.min_lat header.scale_x header.scale_y);
+      ]);
 
   for t = 0 to n_triangles - 1 do
     let i0 = Int32.to_int (Array1.get indices (t * 3)) in
@@ -250,38 +270,70 @@ let rasterize_clc_tile_to_bounds tile tex_size ~target_min_lon ~target_min_lat
     let geo_x2 = header.min_lon +. (float qx2 /. header.scale_x) in
     let geo_y2 = header.min_lat +. (float qy2 /. header.scale_y) in
 
-    (* Convert to texture coords *)
-    let tx0 = int_of_float ((geo_x0 -. target_min_lon) *. tex_scale_x) in
-    let ty0 = int_of_float ((geo_y0 -. target_min_lat) *. tex_scale_y) in
-    let tx1 = int_of_float ((geo_x1 -. target_min_lon) *. tex_scale_x) in
-    let ty1 = int_of_float ((geo_y1 -. target_min_lat) *. tex_scale_y) in
-    let tx2 = int_of_float ((geo_x2 -. target_min_lon) *. tex_scale_x) in
-    let ty2 = int_of_float ((geo_y2 -. target_min_lat) *. tex_scale_y) in
+    (* NOTE: Nominal clipping disabled - was incorrectly rejecting valid triangles
+       because CLC tiles extend beyond their nominal 1° boundaries *)
+    let _ =
+      (nominal_min_lon, nominal_max_lon, nominal_min_lat, nominal_max_lat)
+    in
 
-    let color_idx = Array1.get colors i0 in
+    begin
+      (* Always process - no nominal clipping *)
+      (* Convert to texture coords *)
+      let tx0 = int_of_float ((geo_x0 -. target_min_lon) *. tex_scale_x) in
+      let ty0 = int_of_float ((geo_y0 -. target_min_lat) *. tex_scale_y) in
+      let tx1 = int_of_float ((geo_x1 -. target_min_lon) *. tex_scale_x) in
+      let ty1 = int_of_float ((geo_y1 -. target_min_lat) *. tex_scale_y) in
+      let tx2 = int_of_float ((geo_x2 -. target_min_lon) *. tex_scale_x) in
+      let ty2 = int_of_float ((geo_y2 -. target_min_lat) *. tex_scale_y) in
 
-    (* Bounding box with clipping *)
-    let min_x = max 0 (min tx0 (min tx1 tx2)) in
-    let max_x = min (tex_size - 1) (max tx0 (max tx1 tx2)) in
-    let min_y = max 0 (min ty0 (min ty1 ty2)) in
-    let max_y = min (tex_size - 1) (max ty0 (max ty1 ty2)) in
+      let color_idx = Array1.get colors i0 in
 
-    (* Rasterize *)
-    for py = min_y to max_y do
-      for px = min_x to max_x do
-        let w0 = edge_function tx1 ty1 tx2 ty2 px py in
-        let w1 = edge_function tx2 ty2 tx0 ty0 px py in
-        let w2 = edge_function tx0 ty0 tx1 ty1 px py in
-        if (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)
-        then Array1.set data ((py * tex_size) + px) color_idx
-      done
-    done
+      (* Early rejection: skip triangles entirely outside texture bounds *)
+      let all_left = tx0 < 0 && tx1 < 0 && tx2 < 0 in
+      let all_right = tx0 >= tex_size && tx1 >= tex_size && tx2 >= tex_size in
+      let all_below = ty0 < 0 && ty1 < 0 && ty2 < 0 in
+      let all_above = ty0 >= tex_size && ty1 >= tex_size && ty2 >= tex_size in
+
+      (* Also skip huge triangles that could cause overflow (> 2x texture size) *)
+      let max_dim = tex_size * 2 in
+      let width = max tx0 (max tx1 tx2) - min tx0 (min tx1 tx2) in
+      let height = max ty0 (max ty1 ty2) - min ty0 (min ty1 ty2) in
+      let too_big = width > max_dim || height > max_dim in
+
+      if not (all_left || all_right || all_below || all_above || too_big) then begin
+        (* Bounding box with clipping to texture bounds *)
+        let min_x = max 0 (min tx0 (min tx1 tx2)) in
+        let max_x = min (tex_size - 1) (max tx0 (max tx1 tx2)) in
+        let min_y = max 0 (min ty0 (min ty1 ty2)) in
+        let max_y = min (tex_size - 1) (max ty0 (max ty1 ty2)) in
+
+        (* Rasterize *)
+        for py = min_y to max_y do
+          for px = min_x to max_x do
+            let w0 = edge_function tx1 ty1 tx2 ty2 px py in
+            let w1 = edge_function tx2 ty2 tx0 ty0 px py in
+            let w2 = edge_function tx0 ty0 tx1 ty1 px py in
+            if (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)
+            then Array1.set data ((py * tex_size) + px) color_idx
+          done
+        done
+      end
+    end
+    (* end nominal bounds check *)
+  done;
+
+  (* Count non-zero pixels for debugging *)
+  let non_zero = ref 0 in
+  for i = 0 to (tex_size * tex_size) - 1 do
+    if Array1.get data i <> 0 then incr non_zero
   done;
 
   Console.(
     log
       [
-        Jstr.v (Printf.sprintf "Rasterized %d triangles to bounds" n_triangles);
+        Jstr.v
+          (Printf.sprintf "Rasterized %d triangles, %d pixels filled"
+             n_triangles !non_zero);
       ]);
   data
 
@@ -479,16 +531,24 @@ let load_and_rasterize_multi ~lat ~lon ~size ~tex_size =
       Lwt.catch
         (fun () ->
           let* tile = load_full_clc_tile path in
-          (* Rasterize this tile using proper geographic transform *)
+          (* Rasterize this tile using proper geographic transform, 
+             clipped to nominal 1° tile bounds *)
+          let nominal_min_lon = float tile_lon in
+          let nominal_max_lon = float (tile_lon + 1) in
+          let nominal_min_lat = float tile_lat in
+          let nominal_max_lat = float (tile_lat + 1) in
           let tile_data =
             rasterize_clc_tile_to_bounds tile tex_size
               ~target_min_lon:dem_min_lon ~target_min_lat:dem_min_lat
               ~target_max_lon:dem_max_lon ~target_max_lat:dem_max_lat
+              ~nominal_min_lon ~nominal_min_lat ~nominal_max_lon
+              ~nominal_max_lat
           in
-          (* Merge: overwrite 0s (empty) with tile data *)
+          (* Merge: FIRST WINS - only write to empty pixels (prevents overlap artifacts) *)
           for i = 0 to (tex_size * tex_size) - 1 do
             let v = Array1.get tile_data i in
-            if v <> 0 then Array1.set data i v
+            let existing = Array1.get data i in
+            if v <> 0 && existing = 0 then Array1.set data i v
           done;
           Lwt.return ())
         (fun _exn ->

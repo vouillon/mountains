@@ -412,17 +412,8 @@ let terrain_program =
           vec3 final_normal = normal;
           
           if (u_useCLC) {
-            // === NEW: CLC-Based Material ===
+            // === CLC-Based Material ===
             Surface surface = sampleCLCBilinear(v_world_pos.xy);
-            
-            // DEBUG: Visualize raw CLC ID as color
-//            vec2 texCoord = (v_world_pos.xy - u_coverMapOffset) / u_coverMapScale;
-//            vec2 texSize = vec2(textureSize(u_coverMap, 0));
-//            ivec2 texelCoord = ivec2(texCoord * texSize);
-//            texelCoord = clamp(texelCoord, ivec2(0), ivec2(texSize) - 1);
-//            float rawId = float(texelFetch(u_coverMap, texelCoord, 0).r);
-//            color = vec4(rawId / 50.0, fract(rawId / 10.0), fract(rawId / 3.0), 1.0);
-//            return;
             
             applySlopeModification(surface, slope);
             
@@ -1921,15 +1912,15 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
      => offset = -center_offset, scale = tileSize
           But scale in shader is "meters per texel", so scale = tileSize / texSize *)
   (* CLC texture covers exactly the DEM area, centered on camera.
-     World coordinates are relative to camera at (0,0).
-     CLC texture origin is at (-halfWidth, -halfHeight) in world coords. *)
+     World coordinates have camera at center_offset (not 0,0).
+     CLC texture origin is at (center_offset - halfWidth, center_offset - halfHeight). *)
   let dem_size_x = float w *. deltax in
   (* DEM width in meters *)
   let dem_size_y = float w *. deltay in
   (* DEM height in meters *)
-  let clc_origin_x = -.dem_size_x /. 2. in
+  let clc_origin_x = center_offset_x -. (dem_size_x /. 2.) in
   (* Left edge in world coords *)
-  let clc_origin_y = -.dem_size_y /. 2. in
+  let clc_origin_y = center_offset_y -. (dem_size_y /. 2.) in
   (* Bottom edge in world coords *)
   Gl.uniform2f ctx cover_offset_loc clc_origin_x clc_origin_y;
   Gl.uniform2f ctx cover_scale_loc dem_size_x dem_size_y;
