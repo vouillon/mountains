@@ -1,4 +1,6 @@
 (library
  (name mountains)
  (wrapped false)
- (libraries yojson lwt unix))
+ (libraries yojson lwt unix)
+ (preprocess
+  (pps ppx_inline_test)))
