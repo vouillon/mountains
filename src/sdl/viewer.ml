@@ -164,6 +164,7 @@ let terrain_program =
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise; // Added Noise Sampler
         uniform mediump int w;
+        uniform vec3 u_lightDir; // Dynamic Sun Direction
         in highp vec2 reliefCoord;
         in highp float v_dist;
         in highp float v_h;
@@ -176,7 +177,7 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
           
-          lowp float l = max(0.0, dot(normal, normalize(vec3(-1, 1, 2))));
+          lowp float l = max(0.0, dot(normal, normalize(u_lightDir)));
           lowp float lighting = 0.1 + 0.9 * l; // Deeper shadows (Ambient 0.1)
           
           // Biome Colors (Vibrant & Darker to counteract Gamma)
@@ -854,6 +855,20 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture noise_texture
   (* Gl.uniform1i tile_loc 0; *)
   Gl.uniform1i relief_loc 1;
   Gl.uniform1i noise_loc 2;
+
+  let sx, sy, sz =
+    let now = Unix.gettimeofday () in
+    let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
+    if sz < 0.2 then
+      let tm = Unix.localtime now in
+      let tm = { tm with Unix.tm_hour = 10; tm_min = 0; tm_sec = 0 } in
+      let t, _ = Unix.mktime tm in
+      Sun.position ~lat ~lon ~time:t
+    else (sx, sy, sz)
+  in
+  let ld_loc = get_uniform_location terrain_pid "u_lightDir" in
+  Gl.uniform3f ld_loc sx sy sz;
+
   bind_vertex_array terrain_geo;
   Gl.active_texture Gl.texture0;
   (* Gl.bind_texture Gl.texture_2d tile_texture; *)

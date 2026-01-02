@@ -183,6 +183,7 @@ let terrain_program =
         
         uniform mat4 shadow_matrices[3];
         uniform float shadow_splits[3];
+        uniform vec3 u_lightDir;
 
         in highp vec2 reliefCoord;
         in highp float v_dist;
@@ -384,7 +385,7 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
-          vec3 lightDir = normalize(vec3(-1.0, 1.0, 2.0));
+          vec3 lightDir = normalize(u_lightDir);
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
 
           // === Shadow Calculation (unchanged) ===
@@ -1751,12 +1752,27 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
 
   let light_dir =
-    let m = Matrix.{ x = -1.; y = 1.; z = 2.; w = 0. } in
-    (*
-    let m = Matrix.{ x = -4.; y = -2.; z = 1.; w = 0. } in
-*)
-    let len = sqrt ((m.x *. m.x) +. (m.y *. m.y) +. (m.z *. m.z)) in
-    Matrix.{ x = m.x /. len; y = m.y /. len; z = m.z /. len; w = 0. }
+    let date_ctor = Jv.get Jv.global "Date" in
+    let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
+    let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
+    let sx, sy, sz =
+      if sz < 0.2 then
+        let date = Jv.new' date_ctor [||] in
+        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
+        let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
+        let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
+        Sun.position ~lat ~lon ~time:t
+      else (sx, sy, sz)
+    in
+    (sx, sy, sz)
+  in
+  let light_dir_shadows =
+    let sx, sy, sz = light_dir in
+    Matrix.{ x = sx; y = -.sy; z = sz; w = 0. }
+  in
+  let light_dir_shader =
+    let sx, sy, sz = light_dir in
+    Matrix.{ x = sx; y = sy; z = sz; w = 0. }
   in
   let view_proj = Matrix.(proj * transform) in
   let z_far = 50000. in
@@ -1776,7 +1792,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 
   let shadow_matrices =
     calculate_shadow_matrices ~near_plane:0.1 ~view_proj ~splits:splits_dist
-      ~light_dir ~world_center ~shadow_map_size:2048.
+      ~light_dir:light_dir_shadows ~world_center ~shadow_map_size:2048.
   in
 
   (* Render shadows once on first frame *)
@@ -1890,12 +1906,17 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let rock_normal_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "rock_normal_map")
   in
+  let light_dir_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_lightDir")
+  in
 
   Gl.uniform1i ctx relief_loc 1;
   Gl.uniform1i ctx noise_loc 2;
   Gl.uniform1i ctx ao_loc 3;
   Gl.uniform1i ctx rock_tex_loc 5;
   Gl.uniform1i ctx rock_normal_loc 6;
+  Gl.uniform3f ctx light_dir_loc light_dir_shader.x light_dir_shader.y
+    light_dir_shader.z;
 
   (* CLC Uniforms *)
   let cover_map_loc =
