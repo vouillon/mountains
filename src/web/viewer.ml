@@ -2652,6 +2652,42 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
                 Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
                   header.Clc_loader.min_lat;
 
+                (* Render water layer FIRST (wins depth test, appears on top) *)
+                let water_index_count =
+                  Bigarray.Array1.dim tile.Clc_loader.water_indices
+                in
+                if water_index_count > 0 then begin
+                  let w_vbo_pos = Gl.create_buffer ctx in
+                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_pos);
+                  Gl.buffer_data ctx Gl.array_buffer
+                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
+                    Gl.static_draw;
+                  Gl.enable_vertex_attrib_array ctx 0;
+                  Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+                  let w_vbo_col = Gl.create_buffer ctx in
+                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_col);
+                  Gl.buffer_data ctx Gl.array_buffer
+                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
+                    Gl.static_draw;
+                  Gl.enable_vertex_attrib_array ctx 1;
+                  Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+                  let w_ebo = Gl.create_buffer ctx in
+                  Gl.bind_buffer ctx Gl.element_array_buffer (Some w_ebo);
+                  Gl.buffer_data ctx Gl.element_array_buffer
+                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
+                    Gl.static_draw;
+
+                  Gl.draw_elements ctx Gl.triangles water_index_count
+                    Gl.unsigned_int 0;
+
+                  Gl.delete_buffer ctx w_vbo_pos;
+                  Gl.delete_buffer ctx w_vbo_col;
+                  Gl.delete_buffer ctx w_ebo
+                end;
+
+                (* Render CLC land cover (underneath water) *)
                 let vbo_pos = Gl.create_buffer ctx in
                 Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
                 Gl.buffer_data ctx Gl.array_buffer
