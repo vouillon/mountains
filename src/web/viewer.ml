@@ -1789,7 +1789,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         Sun.position ~lat ~lon ~time:t
       else (sx, sy, sz)
     in
-    (sx, sy, sz)
+    (sx, -.sy, sz)
   in
   let light_dir_shadows =
     let sx, sy, sz = light_dir in
