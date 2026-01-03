@@ -25,15 +25,21 @@ let q_from_lat sin_phi =
 
 let q_p = q_from_lat 1.0 (* q at pole *)
 
-(* Pre-calculated constants for inverse projection *)
+(* Pre-calculated constants for projection *)
 let sin_lat0 = sin lat0
+let cos_lat0 = cos lat0
 let q0 = q_from_lat sin_lat0
 let r_q = a *. sqrt (q_p /. 2.0) (* Authalic radius *)
-let d = a *. sqrt (1.0 /. (1.0 -. (e2 *. sin_lat0 *. sin_lat0)))
-(* Note: Different formulations exist for sphere vs ellipsoid LAEA. 
-   EPSG:3035 uses the ellipsoidal form. 
-   However, for high performance, many implementations approximate to sphere 
-   if the error is small, but we should try to be precise. *)
+
+(* beta0 = asin(q0/qP) - authalic latitude of center *)
+let sin_beta0 = q0 /. q_p
+let cos_beta0 = sqrt (1.0 -. (sin_beta0 *. sin_beta0))
+
+(* D = a * cos(lat0) / sqrt(1 - e2*sin^2(lat0)) / (Rq * cos(beta0)) *)
+let d =
+  a *. cos_lat0
+  /. sqrt (1.0 -. (e2 *. sin_lat0 *. sin_lat0))
+  /. (r_q *. cos_beta0)
 
 (* 
    Using the breakdown from PROJ:
@@ -45,45 +51,45 @@ let d = a *. sqrt (1.0 /. (1.0 -. (e2 *. sin_lat0 *. sin_lat0)))
 let laea_to_wgs84 x y =
   let x' = x -. fe in
   let y' = y -. fn in
-  let rho = sqrt ((x' *. x') +. (y' *. y')) in
+
+  (* EPSG:9820 requires D scaling: rho = sqrt((x'/D)^2 + (D*y')^2) *)
+  let x_scaled = x' /. d in
+  let y_scaled = d *. y' in
+  let rho = sqrt ((x_scaled *. x_scaled) +. (y_scaled *. y_scaled)) in
 
   if rho < 1.0e-9 then (lon0 *. rad_to_deg, lat0 *. rad_to_deg)
   else
-    (* Sphere approximation for R_q based approach usually works for Authalic, 
-       but let's see if we can implement the iterative solution for ellipsoid or 
-       the Authalic Sphere mapping which is standard for ETRS89-LAEA. 
-       
-       EPSG:3035 defines the operation method "Lambert Azimuthal Equal Area (Spherical)".
-       Wait, ETRS89-LAEA is often treated as spherical on the GRS80 authalic sphere.
-    *)
+    (* EPSG:9820 ellipsoidal LAEA inverse formulas *)
     let ce = 2.0 *. asin (rho /. (2.0 *. r_q)) in
     let sin_ce = sin ce in
     let cos_ce = cos ce in
 
-    let sin_beta =
-      (cos_ce *. sin (asin (q0 /. q_p)))
-      +. (y' *. sin_ce *. cos (asin (q0 /. q_p)) /. rho)
+    (* beta0 (sin_beta0, cos_beta0) pre-calculated at module level *)
+
+    (* Compute sin(beta') *)
+    let sin_beta' =
+      (cos_ce *. sin_beta0) +. (y_scaled *. sin_ce *. cos_beta0 /. rho)
     in
 
-    (* Recalculate Latitude from Authalic Latitude (beta) *)
-    (* Approximation for beta -> phi *)
-    let beta = asin sin_beta in
+    (* Recalculate Latitude from Authalic Latitude (beta') *)
+    let beta' = asin sin_beta' in
     let phi =
-      beta
+      beta'
       +. ((e2 /. 3.0)
          +. (31.0 *. e2 *. e2 /. 180.0)
          +. (517.0 *. e2 *. e2 *. e2 /. 5040.0))
-         *. sin (2.0 *. beta)
+         *. sin (2.0 *. beta')
       +. ((23.0 *. e2 *. e2 /. 360.0) +. (251.0 *. e2 *. e2 *. e2 /. 3780.0))
-         *. sin (4.0 *. beta)
-      +. (761.0 *. e2 *. e2 *. e2 /. 45360.0 *. sin (6.0 *. beta))
+         *. sin (4.0 *. beta')
+      +. (761.0 *. e2 *. e2 *. e2 /. 45360.0 *. sin (6.0 *. beta'))
     in
 
+    (* EPSG:9820: lon = lonO + atan2(x_scaled * sin_C, D*rho*cos_beta0*cos_C - D^2*y'*sin_beta0*sin_C) 
+       Simplify using our scaled values *)
     let lam =
       lon0
-      +. atan2 (x' *. sin_ce)
-           ((rho *. cos_ce *. cos (asin (q0 /. q_p)))
-           -. (y' *. sin (asin (q0 /. q_p)) *. sin_ce))
+      +. atan2 (x_scaled *. sin_ce)
+           ((rho *. cos_ce *. cos_beta0) -. (y_scaled *. sin_beta0 *. sin_ce))
     in
 
     (lam *. rad_to_deg, phi *. rad_to_deg)
@@ -99,9 +105,7 @@ let wgs84_to_laea lon lat =
   let sin_beta = q /. q_p in
   let cos_beta = sqrt (1.0 -. (sin_beta *. sin_beta)) in
 
-  let sin_beta0 = q0 /. q_p in
-  let cos_beta0 = sqrt (1.0 -. (sin_beta0 *. sin_beta0)) in
-
+  (* sin_beta0, cos_beta0 pre-calculated at module level *)
   let b =
     r_q
     *. sqrt
@@ -110,10 +114,10 @@ let wgs84_to_laea lon lat =
             +. (cos_beta0 *. cos_beta *. cos (lam -. lon0))))
   in
 
-  let x = fe +. (b *. cos_beta *. sin (lam -. lon0)) in
+  let x = fe +. (b *. d *. cos_beta *. sin (lam -. lon0)) in
   let y =
     fn
-    +. b
+    +. b /. d
        *. ((cos_beta0 *. sin_beta)
           -. (sin_beta0 *. cos_beta *. cos (lam -. lon0)))
   in
