@@ -111,6 +111,26 @@ let fragment_shader_src =
    out vec4 out_color;\n\
    void main() { out_color = texelFetch(u_palette, ivec2(v_idx, 0), 0); }\n"
 
+(* --- Marker Shaders --- *)
+let marker_vs_src =
+  "\n\
+   #version 300 es\n\
+   uniform vec2 u_pos;\n\
+   uniform vec2 u_view_scale;\n\
+   uniform vec2 u_view_offset;\n\
+   void main() {\n\
+  \    vec2 screen_pos = (u_pos - u_view_offset) * u_view_scale * 2.0;\n\
+  \    gl_Position = vec4(screen_pos, 0.0, 1.0);\n\
+  \    gl_PointSize = 15.0;\n\
+   }\n"
+
+let marker_fs_src =
+  "\n\
+   #version 300 es\n\
+   precision mediump float;\n\
+   out vec4 out_color;\n\
+   void main() { out_color = vec4(1.0, 0.0, 0.0, 1.0); }\n"
+
 (* --- 3. CLC Loading --- *)
 
 type tile_header = {
@@ -380,11 +400,27 @@ let () =
           in
           ignore (Sdl.gl_set_swap_interval 1);
 
-          (* Load Data *)
-          let file =
-            if Array.length Sys.argv > 1 then Sys.argv.(1)
-            else "data/clc/N45E006.clc"
+          (* Parse Args *)
+          let file_ref = ref "data/clc/N45E006.clc" in
+          let mark_pos = ref None in
+
+          let rec parse_args i =
+            if i >= Array.length Sys.argv then ()
+            else
+              match Sys.argv.(i) with
+              | "-mark" ->
+                  if i + 2 < Array.length Sys.argv then (
+                    let lat = float_of_string Sys.argv.(i + 1) in
+                    let lon = float_of_string Sys.argv.(i + 2) in
+                    mark_pos := Some (lon, lat);
+                    parse_args (i + 3))
+                  else failwith "Missing coordinates for -mark"
+              | arg ->
+                  if arg.[0] <> '-' then file_ref := arg;
+                  parse_args (i + 1)
           in
+          parse_args 1;
+          let file = !file_ref in
           let ( index_count,
                 data_pos,
                 data_col,
@@ -400,17 +436,29 @@ let () =
           let range_x = 65535.0 /. t_scale_x in
           let range_y = 65535.0 /. t_scale_y in
 
+          (* Compile Shaders *)
           let vs = compile_shader Gl.vertex_shader vertex_shader_src in
           let fs = compile_shader Gl.fragment_shader fragment_shader_src in
           let prog = create_program vs fs in
-          Gl.use_program prog;
+
+          let m_vs = compile_shader Gl.vertex_shader marker_vs_src in
+          let m_fs = compile_shader Gl.fragment_shader marker_fs_src in
+          let m_prog = create_program m_vs m_fs in
 
           (* Uniforms *)
+          Gl.use_program prog;
           let u_range = Gl.get_uniform_location prog "u_range" in
           let u_min = Gl.get_uniform_location prog "u_min" in
           let u_view_scale = Gl.get_uniform_location prog "u_view_scale" in
           let u_view_offset = Gl.get_uniform_location prog "u_view_offset" in
           let u_palette = Gl.get_uniform_location prog "u_palette" in
+
+          Gl.use_program m_prog;
+          let m_u_pos = Gl.get_uniform_location m_prog "u_pos" in
+          let m_u_view_scale = Gl.get_uniform_location m_prog "u_view_scale" in
+          let m_u_view_offset =
+            Gl.get_uniform_location m_prog "u_view_offset"
+          in
 
           let palette_data = create_palette_texture () in
           let texs = Array1.create int32 c_layout 1 in
@@ -509,6 +557,12 @@ let () =
                 (!zoom /. range_y /. aspect *. lat_correction, !zoom /. range_y)
             in
 
+            (* Draw Map *)
+            Gl.use_program prog;
+            Gl.active_texture Gl.texture0;
+            Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
+            Gl.uniform1i u_palette 0;
+
             Gl.uniform2f u_range range_x range_y;
             Gl.uniform2f u_min t_min_x t_min_y;
             Gl.uniform2f u_view_scale sx sy;
@@ -516,6 +570,19 @@ let () =
 
             Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
               (`Offset 0);
+
+            (* Draw Marker *)
+            (match !mark_pos with
+            | Some (mx, my) ->
+                Gl.disable Gl.depth_test;
+                Gl.use_program m_prog;
+                Gl.uniform2f m_u_pos mx my;
+                Gl.uniform2f m_u_view_scale sx sy;
+                Gl.uniform2f m_u_view_offset !cx !cy;
+                (* Draw single point *)
+                Gl.draw_arrays Gl.points 0 1;
+                Gl.enable Gl.depth_test
+            | None -> ());
 
             Sdl.gl_swap_window window;
             loop ()
