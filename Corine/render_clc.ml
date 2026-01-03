@@ -201,10 +201,13 @@ let load_clc file =
   let total_verts_header = input_binary_int ic in
   let total_indices_header = input_binary_int ic in
 
-  (* CLC4 has additional water counts *)
+  (* CLC4 has additional water counts - use sequential lets for defined order *)
   let water_count, water_verts_header, water_indices_header =
     if is_clc4 then
-      (input_binary_int ic, input_binary_int ic, input_binary_int ic)
+      let c = input_binary_int ic in
+      let v = input_binary_int ic in
+      let i = input_binary_int ic in
+      (c, v, i)
     else (0, 0, 0)
   in
 
@@ -275,7 +278,7 @@ let load_clc file =
   let high_indices = read_stream () in
   let low_indices = read_stream () in
 
-  (* Read water streams if CLC4 *)
+  (* Read water streams if CLC4 - use sequential lets for defined order *)
   let ( water_meta_str,
         water_high_x,
         water_mid_x,
@@ -286,15 +289,16 @@ let load_clc file =
         water_high_indices,
         water_low_indices ) =
     if is_clc4 && water_count > 0 then
-      ( read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream (),
-        read_stream () )
+      let s1 = read_stream () in
+      let s2 = read_stream () in
+      let s3 = read_stream () in
+      let s4 = read_stream () in
+      let s5 = read_stream () in
+      let s6 = read_stream () in
+      let s7 = read_stream () in
+      let s8 = read_stream () in
+      let s9 = read_stream () in
+      (s1, s2, s3, s4, s5, s6, s7, s8, s9)
     else ("", "", "", "", "", "", "", "", "")
   in
 
@@ -389,11 +393,26 @@ let load_clc file =
   let water_global_i_offset = ref 0 in
 
   if is_clc4 && water_count > 0 then begin
+    Printf.printf "Decoding water: count=%d, expected verts=%d, indices=%d\n%!"
+      water_count water_verts_header water_indices_header;
+    Printf.printf
+      "  Stream sizes: meta=%d, hx=%d, mx=%d, lx=%d, hy=%d, my=%d, ly=%d, \
+       hi=%d, li=%d\n\
+       %!"
+      (String.length water_meta_str)
+      (String.length water_high_x)
+      (String.length water_mid_x)
+      (String.length water_low_x)
+      (String.length water_high_y)
+      (String.length water_mid_y)
+      (String.length water_low_y)
+      (String.length water_high_indices)
+      (String.length water_low_indices);
     let water_meta_pos = ref 0 in
     let water_v_pos = ref 0 in
     let water_i_pos = ref 0 in
 
-    for _feat_i = 1 to water_count do
+    for feat_i = 1 to water_count do
       let code = read_u16_meta water_meta_str water_meta_pos in
       let v_count = read_u16_meta water_meta_str water_meta_pos in
       let t_count = read_u16_meta water_meta_str water_meta_pos in
@@ -403,6 +422,15 @@ let load_clc file =
       prev_x := 0;
       prev_y := 0;
       let base_v = !water_global_v_offset in
+
+      (* Bounds check before vertex decode *)
+      if !water_v_pos + v_count > String.length water_high_x then
+        failwith
+          (Printf.sprintf
+             "Water vertex overflow at feature %d: v_pos=%d, v_count=%d, \
+              stream_len=%d"
+             feat_i !water_v_pos v_count
+             (String.length water_high_x));
 
       (* 3-byte coordinate decoding - scale to 16-bit range for GL compatibility *)
       for k = 0 to v_count - 1 do
@@ -724,33 +752,27 @@ let () =
                 (!zoom /. range_y /. aspect *. lat_correction, !zoom /. range_y)
             in
 
-            (* Draw CLC Map *)
-            Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
+            (* Setup shader uniforms once *)
             Gl.use_program prog;
             Gl.active_texture Gl.texture0;
             Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
             Gl.uniform1i u_palette 0;
-
             Gl.uniform2f u_range range_x range_y;
             Gl.uniform2f u_min t_min_x t_min_y;
             Gl.uniform2f u_view_scale sx sy;
             Gl.uniform2f u_view_offset !cx !cy;
 
-            Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
-              (`Offset 0);
-
-            (* Draw Water Layer on top - use same shader as CLC since coords are scaled to 16-bit *)
+            (* Draw Water Layer FIRST (topmost - uses depth buffer for overdraw avoidance) *)
             if water_index_count > 0 then begin
               Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 1));
-              (* Reuse CLC shader - water coords already scaled to 65535 range *)
-              Gl.uniform2f u_range range_x range_y;
-              Gl.uniform2f u_min t_min_x t_min_y;
-              Gl.uniform2f u_view_scale sx sy;
-              Gl.uniform2f u_view_offset !cx !cy;
-
               Gl.draw_elements Gl.triangles water_index_count Gl.unsigned_int
                 (`Offset 0)
             end;
+
+            (* Draw CLC Map (underneath water) *)
+            Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
+            Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
+              (`Offset 0);
 
             (* Draw Marker *)
             (match !mark_pos with

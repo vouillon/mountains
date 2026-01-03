@@ -52,7 +52,7 @@ let fetch_overpass_data_once query =
   let clean_query = String.concat " " (String.split_on_char '\n' query) in
   let cmd =
     Printf.sprintf
-      "curl -s --connect-timeout 30 --max-time 120 -X POST -d 'data=%s' '%s'"
+      "curl -f -s --connect-timeout 30 --max-time 120 -X POST -d 'data=%s' '%s'"
       clean_query url
   in
 
@@ -63,26 +63,30 @@ let fetch_overpass_data_once query =
        Buffer.add_channel buf ic 1
      done
    with End_of_file -> ());
-  let _ = Unix.close_process_in ic in
-  Buffer.contents buf
+  match Unix.close_process_in ic with
+  | Unix.WEXITED 0 -> Some (Buffer.contents buf)
+  | Unix.WEXITED code ->
+      Printf.eprintf "curl failed with exit code %d\n%!" code;
+      None
+  | Unix.WSIGNALED _ | Unix.WSTOPPED _ ->
+      Printf.eprintf "curl was killed by signal\n%!";
+      None
 
 let fetch_overpass_data ?(max_retries = 5) query =
   let rec retry attempt =
     Printf.printf "Overpass API request (attempt %d/%d)...\n%!" attempt
       max_retries;
-    let response = fetch_overpass_data_once query in
-    (* Check if response looks like valid JSON *)
-    if String.length response >= 1 && String.sub response 0 1 = "{" then
-      response
-    else if attempt < max_retries then begin
-      (* Longer delays to handle rate limiting: 10s, 30s, 60s *)
-      let delay = 2.0 *. (3.0 ** float (attempt - 1)) in
-      Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
-        delay;
-      Unix.sleepf delay;
-      retry (attempt + 1)
-    end
-    else response (* Return last response, let caller handle error *)
+    match fetch_overpass_data_once query with
+    | Some response
+      when String.length response >= 1 && String.sub response 0 1 = "{" ->
+        Some response
+    | (Some _ | None) when attempt < max_retries ->
+        let delay = 2.0 *. (3.0 ** float (attempt - 1)) in
+        Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
+          delay;
+        Unix.sleepf delay;
+        retry (attempt + 1)
+    | resp -> resp (* Return last response or None *)
   in
   retry 1
 
@@ -195,21 +199,13 @@ let fetch_water_polygons ~min_lat ~min_lon ~max_lat ~max_lon =
     min_lon max_lat max_lon;
 
   let query = build_overpass_query ~min_lat ~min_lon ~max_lat ~max_lon in
-  let response = fetch_overpass_data query in
-
-  (* Fail on errors rather than silently returning empty data *)
-  if String.length response < 10 then
-    failwith "Overpass API returned empty response"
-  else if String.sub response 0 1 <> "{" then
-    failwith
-      (Printf.sprintf "Overpass API returned non-JSON response: %s"
-         (String.sub response 0 (min 2000 (String.length response))))
-  else begin
-    let features = parse_overpass_elements response in
-    Printf.printf "Fetched %d water features from OSM\n%!"
-      (List.length features);
-    features
-  end
+  match fetch_overpass_data query with
+  | None -> failwith "Overpass API request failed after all retries"
+  | Some response ->
+      let features = parse_overpass_elements response in
+      Printf.printf "Fetched %d water features from OSM\n%!"
+        (List.length features);
+      features
 
 (* Convert to flat vertex array format used by polygon_clipping/triangulation *)
 let feature_to_flat_arrays (feature : water_feature) =
