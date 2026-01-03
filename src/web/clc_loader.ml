@@ -588,11 +588,12 @@ let load_tiles_for_gpu ~lat ~lon ~size =
              dem_min_lat dem_max_lat dem_min_lon dem_max_lon);
       ]);
 
-  (* Determine which CLC tiles might contribute *)
-  let min_tile_lat = int_of_float (floor dem_min_lat) - 1 in
-  let max_tile_lat = int_of_float (ceil dem_max_lat) in
-  let min_tile_lon = int_of_float (floor dem_min_lon) - 1 in
-  let max_tile_lon = int_of_float (ceil dem_max_lon) in
+  (* Determine which CLC tiles contribute *)
+  (* Tiles are named by lower-left corner: N45 covers [45,46), so use floor for all *)
+  let min_tile_lat = int_of_float (floor dem_min_lat) in
+  let max_tile_lat = int_of_float (floor dem_max_lat) in
+  let min_tile_lon = int_of_float (floor dem_min_lon) in
+  let max_tile_lon = int_of_float (floor dem_max_lon) in
 
   (* Accumulate loaded tiles *)
   let tiles = ref [] in
