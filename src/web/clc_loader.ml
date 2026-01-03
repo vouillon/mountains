@@ -10,10 +10,16 @@ type clc_header = {
   count : int;
   total_verts : int;
   total_indices : int;
+  water_count : int; (* CLC4 only *)
+  water_verts : int; (* CLC4 only *)
+  water_indices : int; (* CLC4 only *)
   min_lon : float;
   min_lat : float;
   scale_x : float;
   scale_y : float;
+  water_scale_x : float; (* CLC4 only *)
+  water_scale_y : float; (* CLC4 only *)
+  is_clc4 : bool;
 }
 
 (* Parsed CLC tile data ready for rasterization *)
@@ -22,6 +28,10 @@ type clc_tile = {
   positions : (int, int16_unsigned_elt, c_layout) Array1.t; (* x,y pairs U16 *)
   colors : (int, int8_unsigned_elt, c_layout) Array1.t; (* palette indices *)
   indices : (int32, int32_elt, c_layout) Array1.t;
+  (* Water layer (CLC4 only) - stored as U16 like CLC after scaling *)
+  water_positions : (int, int16_unsigned_elt, c_layout) Array1.t;
+  water_colors : (int, int8_unsigned_elt, c_layout) Array1.t;
+  water_indices : (int32, int32_elt, c_layout) Array1.t;
 }
 
 (* Read big-endian 32-bit int from string at offset (OCaml's input_binary_int format) *)
@@ -65,18 +75,50 @@ let read_f64_le s offset =
 (* ZigZag decode - for delta-encoded coordinates *)
 let zigzag_decode n = (n lsr 1) lxor -(n land 1)
 
-(* Parse CLC file header (48 bytes: 4 magic + 12 ints + 32 floats) *)
+(* Parse CLC file header - supports both CLC3 and CLC4 formats *)
 let parse_header s =
   let magic = String.sub s 0 4 in
-  if magic <> "CLC3" then failwith ("Invalid CLC magic: " ^ magic);
+  let is_clc4 = magic = "CLC4" in
+  if magic <> "CLC3" && magic <> "CLC4" then
+    failwith ("Invalid CLC magic: " ^ magic);
+
   let count = read_i32_be s 4 in
   let total_verts = read_i32_be s 8 in
   let total_indices = read_i32_be s 12 in
-  let min_lon = read_f64_le s 16 in
-  let min_lat = read_f64_le s 24 in
-  let scale_x = read_f64_le s 32 in
-  let scale_y = read_f64_le s 40 in
-  { count; total_verts; total_indices; min_lon; min_lat; scale_x; scale_y }
+
+  (* CLC4 has additional water counts after CLC counts *)
+  let water_count, water_verts, water_indices, float_offset =
+    if is_clc4 then (read_i32_be s 16, read_i32_be s 20, read_i32_be s 24, 28)
+    else (0, 0, 0, 16)
+  in
+
+  let min_lon = read_f64_le s float_offset in
+  let min_lat = read_f64_le s (float_offset + 8) in
+  let scale_x = read_f64_le s (float_offset + 16) in
+  let scale_y = read_f64_le s (float_offset + 24) in
+
+  (* CLC4 has water scales *)
+  let water_scale_x, water_scale_y =
+    if is_clc4 then
+      (read_f64_le s (float_offset + 32), read_f64_le s (float_offset + 40))
+    else (0.0, 0.0)
+  in
+
+  {
+    count;
+    total_verts;
+    total_indices;
+    water_count;
+    water_verts;
+    water_indices;
+    min_lon;
+    min_lat;
+    scale_x;
+    scale_y;
+    water_scale_x;
+    water_scale_y;
+    is_clc4;
+  }
 
 (* Get CLC tile name from lat/lon *)
 let tile_name lat lon =
@@ -100,8 +142,8 @@ let read_stream data offset =
   let* decompressed = Reader.inflate_to_string tarray in
   Lwt.return (decompressed, offset + 4 + comp_len)
 
-(* Decode vertices and triangles from CLC streams *)
-let decode_clc_data header meta_str high_x low_x high_y low_y high_indices
+(* Decode CLC vertices and triangles from streams *)
+let decode_clc_streams header meta_str high_x low_x high_y low_y high_indices
     low_indices =
   let n_verts = header.total_verts in
   let n_indices = header.total_indices in
@@ -115,17 +157,17 @@ let decode_clc_data header meta_str high_x low_x high_y low_y high_indices
   let global_v_offset = ref 0 in
   let global_i_offset = ref 0 in
 
-  let read_u16_meta () =
-    let b0 = Char.code meta_str.[!meta_pos] in
-    let b1 = Char.code meta_str.[!meta_pos + 1] in
-    meta_pos := !meta_pos + 2;
+  let read_u16 str pos =
+    let b0 = Char.code str.[!pos] in
+    let b1 = Char.code str.[!pos + 1] in
+    pos := !pos + 2;
     b0 lor (b1 lsl 8)
   in
 
   for _ = 1 to header.count do
-    let code = read_u16_meta () in
-    let v_count = read_u16_meta () in
-    let t_count = read_u16_meta () in
+    let code = read_u16 meta_str meta_pos in
+    let v_count = read_u16 meta_str meta_pos in
+    let t_count = read_u16 meta_str meta_pos in
     let code_idx = Clc_palette.get_index code in
     let base_v = !global_v_offset in
 
@@ -172,7 +214,90 @@ let decode_clc_data header meta_str high_x low_x high_y low_y high_indices
     i_pos := !i_pos + num_indices;
     global_i_offset := !global_i_offset + num_indices
   done;
-  { header; positions = arr_pos; colors = arr_col; indices = arr_ebo }
+  (arr_pos, arr_col, arr_ebo)
+
+(* Decode water vertices and triangles from CLC4 streams (3-byte coords) *)
+let decode_water_streams header meta_str high_x mid_x low_x high_y mid_y low_y
+    high_indices low_indices =
+  let n_verts = header.water_verts in
+  let n_indices = header.water_indices in
+  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
+  let arr_col = Array1.create int8_unsigned c_layout n_verts in
+  let arr_ebo = Array1.create int32 c_layout n_indices in
+
+  if n_verts = 0 then (arr_pos, arr_col, arr_ebo)
+  else begin
+    let meta_pos = ref 0 in
+    let v_pos = ref 0 in
+    let i_pos = ref 0 in
+    let global_v_offset = ref 0 in
+    let global_i_offset = ref 0 in
+
+    let read_u16 str pos =
+      let b0 = Char.code str.[!pos] in
+      let b1 = Char.code str.[!pos + 1] in
+      pos := !pos + 2;
+      b0 lor (b1 lsl 8)
+    in
+
+    for _ = 1 to header.water_count do
+      let code = read_u16 meta_str meta_pos in
+      let v_count = read_u16 meta_str meta_pos in
+      let t_count = read_u16 meta_str meta_pos in
+      let code_idx = Clc_palette.get_index code in
+      let base_v = !global_v_offset in
+
+      (* Decode 3-byte coordinates and scale to 16-bit *)
+      let prev_x = ref 0 in
+      let prev_y = ref 0 in
+      for k = 0 to v_count - 1 do
+        let idx = !v_pos + k in
+        let hx = Char.code high_x.[idx] in
+        let mx = Char.code mid_x.[idx] in
+        let lx = Char.code low_x.[idx] in
+        let zx = lx lor (mx lsl 8) lor (hx lsl 16) in
+        let sdx = zigzag_decode zx in
+        let qx = (!prev_x + sdx) land 0xFFFFFF in
+        prev_x := qx;
+
+        let hy = Char.code high_y.[idx] in
+        let my = Char.code mid_y.[idx] in
+        let ly = Char.code low_y.[idx] in
+        let zy = ly lor (my lsl 8) lor (hy lsl 16) in
+        let sdy = zigzag_decode zy in
+        let qy = (!prev_y + sdy) land 0xFFFFFF in
+        prev_y := qy;
+
+        (* Scale from water range (0-220000) to u16 range (0-65535) *)
+        let scaled_x = qx * 65535 / 220000 in
+        let scaled_y = qy * 65535 / 220000 in
+
+        let out_idx = base_v + k in
+        Array1.set arr_pos (out_idx * 2) scaled_x;
+        Array1.set arr_pos ((out_idx * 2) + 1) scaled_y;
+        Array1.set arr_col out_idx code_idx
+      done;
+      v_pos := !v_pos + v_count;
+      global_v_offset := !global_v_offset + v_count;
+
+      (* Decode indices (same as CLC - 16-bit) *)
+      let prev_idx = ref 0 in
+      let num_indices = t_count * 3 in
+      for k = 0 to num_indices - 1 do
+        let idx = !i_pos + k in
+        let hi = Char.code high_indices.[idx] in
+        let li = Char.code low_indices.[idx] in
+        let zi = li lor (hi lsl 8) in
+        let sdi = zigzag_decode zi in
+        let qi = (!prev_idx + sdi) land 0xFFFF in
+        prev_idx := qi;
+        Array1.set arr_ebo (!global_i_offset + k) (Int32.of_int (base_v + qi))
+      done;
+      i_pos := !i_pos + num_indices;
+      global_i_offset := !global_i_offset + num_indices
+    done;
+    (arr_pos, arr_col, arr_ebo)
+  end
 
 (* Edge function for triangle rasterization *)
 let edge_function x1 y1 x2 y2 px py =
@@ -420,34 +545,87 @@ let load_full_clc_tile path =
       [
         Jstr.v
           (Printf.sprintf
-             "  Header: min_lon=%.4f min_lat=%.4f scale_x=%.6f scale_y=%.6f"
-             header.min_lon header.min_lat header.scale_x header.scale_y);
+             "  Header: min_lon=%.4f min_lat=%.4f scale_x=%.6f scale_y=%.6f%s"
+             header.min_lon header.min_lat header.scale_x header.scale_y
+             (if header.is_clc4 then " (CLC4)" else ""));
       ]);
+  (if header.is_clc4 && header.water_count > 0 then
+     Console.(
+       log
+         [
+           Jstr.v
+             (Printf.sprintf "  Water: %d features, %d verts" header.water_count
+                header.water_verts);
+         ]));
 
-  (* Read all 7 compressed streams starting at offset 48 (after header) *)
-  let offset = 48 in
+  (* Header size varies by format *)
+  let offset = if header.is_clc4 then 76 else 48 in
+
+  (* Read CLC streams (7 for CLC3, same for CLC4) *)
   let* meta_str, offset = read_stream data offset in
   let* high_x, offset = read_stream data offset in
   let* low_x, offset = read_stream data offset in
   let* high_y, offset = read_stream data offset in
   let* low_y, offset = read_stream data offset in
   let* high_indices, offset = read_stream data offset in
-  let* low_indices, _ = read_stream data offset in
+  let* low_indices, offset = read_stream data offset in
 
-  Console.(log [ Jstr.v "Streams decompressed, decoding geometry..." ]);
+  Console.(log [ Jstr.v "CLC streams decompressed, decoding..." ]);
 
-  (* Decode the geometry *)
-  let tile =
-    decode_clc_data header meta_str high_x low_x high_y low_y high_indices
+  (* Decode CLC geometry *)
+  let clc_pos, clc_col, clc_ebo =
+    decode_clc_streams header meta_str high_x low_x high_y low_y high_indices
       low_indices
   in
+
+  (* Read and decode water streams if CLC4 *)
+  let* water_pos, water_col, water_ebo =
+    if header.is_clc4 && header.water_count > 0 then begin
+      Console.(log [ Jstr.v "Reading water streams..." ]);
+      let* w_meta, offset = read_stream data offset in
+      let* w_high_x, offset = read_stream data offset in
+      let* w_mid_x, offset = read_stream data offset in
+      let* w_low_x, offset = read_stream data offset in
+      let* w_high_y, offset = read_stream data offset in
+      let* w_mid_y, offset = read_stream data offset in
+      let* w_low_y, offset = read_stream data offset in
+      let* w_high_idx, offset = read_stream data offset in
+      let* w_low_idx, _ = read_stream data offset in
+      Console.(log [ Jstr.v "Water streams decompressed, decoding..." ]);
+      let wp, wc, we =
+        decode_water_streams header w_meta w_high_x w_mid_x w_low_x w_high_y
+          w_mid_y w_low_y w_high_idx w_low_idx
+      in
+      Lwt.return (wp, wc, we)
+    end
+    else begin
+      (* Empty water arrays *)
+      Lwt.return
+        ( Array1.create int16_unsigned c_layout 0,
+          Array1.create int8_unsigned c_layout 0,
+          Array1.create int32 c_layout 0 )
+    end
+  in
+
+  let tile =
+    {
+      header;
+      positions = clc_pos;
+      colors = clc_col;
+      indices = clc_ebo;
+      water_positions = water_pos;
+      water_colors = water_col;
+      water_indices = water_ebo;
+    }
+  in
+
   Console.(
     log
       [
         Jstr.v
-          ("Decoded "
-          ^ string_of_int (Array1.dim tile.indices / 3)
-          ^ " triangles");
+          (Printf.sprintf "Decoded %d CLC + %d water triangles"
+             (Array1.dim tile.indices / 3)
+             (Array1.dim tile.water_indices / 3));
       ]);
   Lwt.return tile
 

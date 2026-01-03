@@ -167,6 +167,105 @@ module Encoder = struct
     output_string out_ch compressed
 end
 
+(* Water encoder with 3-byte coordinates for ~30-50cm precision *)
+module Water_encoder = struct
+  type t = {
+    meta : Buffer.t; (* Code (u16), VCount (u16), TCount (u16) per feature *)
+    high_x : Buffer.t;
+    mid_x : Buffer.t;
+    low_x : Buffer.t;
+    high_y : Buffer.t;
+    mid_y : Buffer.t;
+    low_y : Buffer.t;
+    high_indices : Buffer.t;
+    low_indices : Buffer.t;
+  }
+
+  let create () =
+    {
+      meta = Buffer.create 1024;
+      high_x = Buffer.create 1024;
+      mid_x = Buffer.create 1024;
+      low_x = Buffer.create 1024;
+      high_y = Buffer.create 1024;
+      mid_y = Buffer.create 1024;
+      low_y = Buffer.create 1024;
+      high_indices = Buffer.create 1024;
+      low_indices = Buffer.create 1024;
+    }
+
+  let write_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xFF))
+
+  let write_u16 buf v =
+    write_u8 buf (v land 0xFF);
+    write_u8 buf ((v lsr 8) land 0xFF)
+
+  (* ZigZag encoding for 24-bit values *)
+  let zigzag_encode n = (n lsl 1) lxor (n asr 31)
+
+  let encode_meta t code v_count t_count =
+    write_u16 t.meta code;
+    write_u16 t.meta v_count;
+    write_u16 t.meta t_count
+
+  (* 3-byte coordinate encoding for water layer *)
+  let encode_vertices t (verts : float array) num_verts (min_x, min_y)
+      (scale_x, scale_y) =
+    let prev_x = ref 0 in
+    let prev_y = ref 0 in
+
+    for i = 0 to num_verts - 1 do
+      let x = verts.(i * 2) in
+      let y = verts.((i * 2) + 1) in
+
+      (* Quantize to 24-bit range but use limited scale for ~40cm precision *)
+      let qx = int_of_float ((x -. min_x) *. scale_x) in
+      let qy = int_of_float ((y -. min_y) *. scale_y) in
+
+      (* Clamp to 24-bit range (0 to 16777215) *)
+      let qx = max 0 (min 0xFFFFFF qx) in
+      let qy = max 0 (min 0xFFFFFF qy) in
+
+      (* Modular Delta Encoding for 24-bit values *)
+      let dx = (qx - !prev_x) land 0xFFFFFF in
+      let dy = (qy - !prev_y) land 0xFFFFFF in
+      prev_x := qx;
+      prev_y := qy;
+
+      (* Convert to signed for zigzag *)
+      let sdx = if dx >= 0x800000 then dx - 0x1000000 else dx in
+      let sdy = if dy >= 0x800000 then dy - 0x1000000 else dy in
+
+      (* ZigZag Encoding *)
+      let zx = zigzag_encode sdx in
+      let zy = zigzag_encode sdy in
+
+      (* Split into 3 bytes *)
+      write_u8 t.low_x (zx land 0xFF);
+      write_u8 t.mid_x ((zx lsr 8) land 0xFF);
+      write_u8 t.high_x ((zx lsr 16) land 0xFF);
+
+      write_u8 t.low_y (zy land 0xFF);
+      write_u8 t.mid_y ((zy lsr 8) land 0xFF);
+      write_u8 t.high_y ((zy lsr 16) land 0xFF)
+    done
+
+  (* Index encoding unchanged from CLC (16-bit sufficient) *)
+  let encode_indices t indices count =
+    let prev_idx = ref 0 in
+    for i = 0 to count - 1 do
+      let idx = indices.(i) in
+      let di = (idx - !prev_idx) land 0xFFFF in
+      prev_idx := idx;
+      let sdi = if di >= 0x8000 then di - 0x10000 else di in
+      let zi = zigzag_encode sdi in
+      write_u8 t.low_indices (zi land 0xFF);
+      write_u8 t.high_indices ((zi lsr 8) land 0xFF)
+    done
+
+  let write_block out_ch buf = Encoder.write_block out_ch buf
+end
+
 (* --- Main Pipeline --- *)
 
 let process_tile db_path output_dir tile_name =
@@ -544,16 +643,150 @@ let process_tile db_path output_dir tile_name =
       ())
     sorted_features;
 
+  (* === WATER LAYER PROCESSING === *)
+  Printf.printf "Fetching water polygons from OSM...\n%!";
+
+  (* Water scale: ~220000 values for 1.1° gives ~40cm precision *)
+  let water_scale_x = 220000.0 /. range_x in
+  let water_scale_y = 220000.0 /. range_y in
+
+  let water_encoder = Water_encoder.create () in
+  let water_entry_count = ref 0 in
+  let water_total_vertices = ref 0 in
+  let water_total_indices = ref 0 in
+
+  let water_features =
+    Osm_fetch.fetch_water_polygons ~min_lat ~min_lon ~max_lat ~max_lon
+  in
+
+  (* Process each water feature *)
+  List.iter
+    (fun (feature : Osm_fetch.water_feature) ->
+      let flat_arrays = Osm_fetch.feature_to_flat_arrays feature in
+      List.iter
+        (fun (clc_code, outer_flat, holes_flat) ->
+          (* Build geometry like CLC processing *)
+          let total_len =
+            Array.length outer_flat
+            + Array.fold_left (fun acc h -> acc + Array.length h) 0 holes_flat
+          in
+          if total_len < 6 then () (* Skip degenerate polygons *)
+          else begin
+            let flat_verts = Array.make total_len 0.0 in
+            Array.blit outer_flat 0 flat_verts 0 (Array.length outer_flat);
+            let offset = ref (Array.length outer_flat) in
+
+            let proper_holes =
+              Array.map
+                (fun raw_h ->
+                  Array.blit raw_h 0 flat_verts !offset (Array.length raw_h);
+                  let start = !offset / 2 in
+                  let len = Array.length raw_h / 2 in
+                  offset := !offset + (len * 2);
+                  { Geometry_types.start; len })
+                holes_flat
+            in
+
+            let proper_poly =
+              {
+                Geometry_types.outer =
+                  {
+                    Geometry_types.start = 0;
+                    len = Array.length outer_flat / 2;
+                  };
+                holes = proper_holes;
+              }
+            in
+
+            (* Clip to tile region *)
+            let clipped_pieces =
+              clip_with_split_fixed flat_verts proper_poly clipper_region 0
+            in
+
+            List.iter
+              (fun (clipped_verts, clipped_poly) ->
+                (* Triangulate *)
+                let tris =
+                  try
+                    Polygon_triangulation.Triangulator.triangulate_multi
+                      clipped_verts [| clipped_poly |]
+                  with Invalid_argument msg ->
+                    Printf.printf "Water triangulation failed: %s\n%!" msg;
+                    [||]
+                in
+
+                if Array.length tris > 0 then begin
+                  (* Reorder vertices for draw order optimization *)
+                  let n_old = Array.length clipped_verts / 2 in
+                  let map = Array.make n_old (-1) in
+                  let new_verts_dyn = ref [] in
+                  let next_idx = ref 0 in
+                  let new_indices_rev = ref [] in
+
+                  for i = 0 to Array.length tris - 1 do
+                    let old_idx = tris.(i) in
+                    if old_idx >= 0 && old_idx < Array.length map then begin
+                      if map.(old_idx) = -1 then begin
+                        map.(old_idx) <- !next_idx;
+                        let vx = clipped_verts.(old_idx * 2) in
+                        let vy = clipped_verts.((old_idx * 2) + 1) in
+                        new_verts_dyn := vy :: vx :: !new_verts_dyn;
+                        incr next_idx
+                      end;
+                      new_indices_rev := map.(old_idx) :: !new_indices_rev
+                    end
+                  done;
+
+                  let final_indices =
+                    Array.of_list (List.rev !new_indices_rev)
+                  in
+                  let final_verts = Array.of_list (List.rev !new_verts_dyn) in
+
+                  let v_count = !next_idx in
+                  let i_count = Array.length final_indices in
+                  let tri_count_val = i_count / 3 in
+                  let valid_i_count = tri_count_val * 3 in
+
+                  if v_count > 0 && tri_count_val > 0 then begin
+                    incr water_entry_count;
+                    water_total_vertices := !water_total_vertices + v_count;
+                    water_total_indices := !water_total_indices + valid_i_count;
+
+                    Water_encoder.encode_meta water_encoder clc_code v_count
+                      tri_count_val;
+                    Water_encoder.encode_vertices water_encoder final_verts
+                      v_count (min_lon, min_lat)
+                      (water_scale_x, water_scale_y);
+                    Water_encoder.encode_indices water_encoder final_indices
+                      valid_i_count
+                  end
+                end)
+              clipped_pieces
+          end)
+        flat_arrays)
+    water_features;
+
+  Printf.printf "Processed %d water features (%d verts, %d indices)\n%!"
+    !water_entry_count !water_total_vertices !water_total_indices;
+
+  (* === FILE OUTPUT (CLC4 Format) === *)
   let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
   let out_ch = open_out_bin output_file_path in
 
-  (* Write Header (Magic + Counts + Bounds) *)
-  output_string out_ch "CLC3";
+  (* Write Header (Magic + Counts + Bounds + Scales) *)
+  output_string out_ch "CLC4";
+
+  (* CLC counts *)
   output_binary_int out_ch !entry_count;
   output_binary_int out_ch !total_vertices;
   output_binary_int out_ch !total_indices;
 
-  (* Write float params (bounds + scale) for reconstruction *)
+  (* Water counts *)
+  output_binary_int out_ch !water_entry_count;
+  output_binary_int out_ch !water_total_vertices;
+  output_binary_int out_ch !water_total_indices;
+
+  (* Write float params (bounds + scales) for reconstruction *)
   let write_float64 f =
     let bits = Int64.bits_of_float f in
     output_byte out_ch (Int64.to_int (Int64.shift_right bits 0) land 0xFF);
@@ -569,9 +802,10 @@ let process_tile db_path output_dir tile_name =
   write_float64 min_lat;
   write_float64 scale_x;
   write_float64 scale_y;
+  write_float64 water_scale_x;
+  write_float64 water_scale_y;
 
-  (* Write Global Streams *)
-  Printf.printf "Compressing and Writing Global Streams...\n%!";
+  (* Write CLC Streams *)
   Encoder.write_block out_ch encoder.meta;
   Encoder.write_block out_ch encoder.high_x;
   Encoder.write_block out_ch encoder.low_x;
@@ -580,12 +814,27 @@ let process_tile db_path output_dir tile_name =
   Encoder.write_block out_ch encoder.high_indices;
   Encoder.write_block out_ch encoder.low_indices;
 
+  (* Write Water Streams (3-byte coords) *)
+  Water_encoder.write_block out_ch water_encoder.meta;
+  Water_encoder.write_block out_ch water_encoder.high_x;
+  Water_encoder.write_block out_ch water_encoder.mid_x;
+  Water_encoder.write_block out_ch water_encoder.low_x;
+  Water_encoder.write_block out_ch water_encoder.high_y;
+  Water_encoder.write_block out_ch water_encoder.mid_y;
+  Water_encoder.write_block out_ch water_encoder.low_y;
+  Water_encoder.write_block out_ch water_encoder.high_indices;
+  Water_encoder.write_block out_ch water_encoder.low_indices;
+
   Printf.printf "Streams Written.\n%!";
 
   close_out out_ch;
   ignore (Sqlite3.db_close db);
-  Printf.printf "Done. Extracted %d features (%d verts, %d indices).\n%!"
-    !entry_count !total_vertices !total_indices
+  Printf.printf
+    "Done. Extracted %d CLC features (%d verts, %d indices) + %d water \
+     features (%d verts, %d indices).\n\
+     %!"
+    !entry_count !total_vertices !total_indices !water_entry_count
+    !water_total_vertices !water_total_indices
 
 let () =
   if Array.length Sys.argv < 4 then

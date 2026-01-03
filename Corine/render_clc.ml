@@ -131,6 +131,27 @@ let marker_fs_src =
    out vec4 out_color;\n\
    void main() { out_color = vec4(1.0, 0.0, 0.0, 1.0); }\n"
 
+(* --- Water Shaders (32-bit integer positions) --- *)
+let water_vs_src =
+  "\n\
+   #version 300 es\n\
+   layout(location = 0) in ivec2 in_pos; // 24-bit quantized as int32\n\
+   layout(location = 1) in int in_color_idx;\n\
+   uniform vec2 u_water_range; // range in degrees\n\
+   uniform float u_water_scale; // quantization scale\n\
+   uniform vec2 u_min;   // tile origin in deg\n\
+   uniform vec2 u_view_scale;\n\
+   uniform vec2 u_view_offset;\n\
+   flat out int v_idx;\n\
+   void main() {\n\
+   \\    // Convert quantized int to normalized, then to world coords\n\
+   \\    vec2 norm_pos = vec2(in_pos) / u_water_scale;\n\
+   \\    vec2 world_pos = norm_pos * u_water_range + u_min;\n\
+   \\    vec2 screen_pos = (world_pos - u_view_offset) * u_view_scale * 2.0;\n\
+   \\    gl_Position = vec4(screen_pos, 0.1, 1.0); // slightly above CLC\n\
+   \\    v_idx = in_color_idx;\n\
+   }\n"
+
 (* --- 3. CLC Loading --- *)
 
 type tile_header = {
@@ -173,33 +194,50 @@ let load_clc file =
   let ic = open_in_bin file in
 
   let magic = really_input_string ic 4 in
-  if magic <> "CLC3" then failwith "Invalid magic";
+  let is_clc4 = magic = "CLC4" in
+  if magic <> "CLC3" && magic <> "CLC4" then failwith ("Invalid magic: " ^ magic);
 
   let count = input_binary_int ic in
   let total_verts_header = input_binary_int ic in
   let total_indices_header = input_binary_int ic in
+
+  (* CLC4 has additional water counts *)
+  let water_count, water_verts_header, water_indices_header =
+    if is_clc4 then
+      (input_binary_int ic, input_binary_int ic, input_binary_int ic)
+    else (0, 0, 0)
+  in
 
   let min_lon = read_f64_as_float ic in
   let min_lat = read_f64_as_float ic in
   let scale_x = read_f64_as_float ic in
   let scale_y = read_f64_as_float ic in
 
+  (* CLC4 has additional water scales *)
+  let water_scale_x, water_scale_y =
+    if is_clc4 then (read_f64_as_float ic, read_f64_as_float ic) else (0.0, 0.0)
+  in
+
   Printf.printf
     "Header: count=%d, verts=%d, indices=%d, origin=(%.2f, %.2f)\n%!" count
     total_verts_header total_indices_header min_lon min_lat;
+  if is_clc4 then
+    Printf.printf "Water: count=%d, verts=%d, indices=%d\n%!" water_count
+      water_verts_header water_indices_header;
 
-  (* 
-     Pre-allocate Bigarrays:
-     The format header gives us exact total vertex and index counts.
-     We allocate the final GL buffers (Bigarrays) immediately.
-     This allows "Direct Decoding" where we write decompressed values straight into these arrays,
-     avoiding the massive GC pressure of creating millions of intermediate OCaml tuples/lists.
-  *)
+  (* Pre-allocate Bigarrays for CLC *)
   let n_verts = total_verts_header in
   let n_indices = total_indices_header in
   let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
   let arr_col = Array1.create int8_unsigned c_layout n_verts in
   let arr_ebo = Array1.create int32 c_layout n_indices in
+
+  (* Pre-allocate for water - use int16_unsigned like CLC, rescale during decode *)
+  let water_arr_pos =
+    Array1.create int16_unsigned c_layout (water_verts_header * 2)
+  in
+  let water_arr_col = Array1.create int8_unsigned c_layout water_verts_header in
+  let water_arr_ebo = Array1.create int32 c_layout water_indices_header in
 
   let unknown_codes = Hashtbl.create 5 in
 
@@ -229,7 +267,6 @@ let load_clc file =
     uncompress_string compressed
   in
 
-  Printf.printf "Reading Global Streams...\n%!";
   let meta_str = read_stream () in
   let high_x = read_stream () in
   let low_x = read_stream () in
@@ -237,8 +274,31 @@ let load_clc file =
   let low_y = read_stream () in
   let high_indices = read_stream () in
   let low_indices = read_stream () in
+
+  (* Read water streams if CLC4 *)
+  let ( water_meta_str,
+        water_high_x,
+        water_mid_x,
+        water_low_x,
+        water_high_y,
+        water_mid_y,
+        water_low_y,
+        water_high_indices,
+        water_low_indices ) =
+    if is_clc4 && water_count > 0 then
+      ( read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream (),
+        read_stream () )
+    else ("", "", "", "", "", "", "", "", "")
+  in
+
   close_in ic;
-  Printf.printf "Streams Read. Decoding directly to Bigarrays...\n%!";
 
   let prev_x = ref 0 in
   let prev_y = ref 0 in
@@ -246,30 +306,24 @@ let load_clc file =
   let global_v_offset = ref 0 in
   let global_i_offset = ref 0 in
 
-  (* 
-     ZigZag Decoding:
-     Maps positive integers back to signed integers.
-     Evens -> Positive, Odds -> Negative.
-     decode(n) = (n >> 1) ^ -(n & 1)
-     e.g. 0->0, 1->-1, 2->1, 3->-2
-  *)
   let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
 
   let meta_pos = ref 0 in
   let v_pos = ref 0 in
   let i_pos = ref 0 in
 
-  let read_u16_meta () =
-    let b0 = Char.code meta_str.[!meta_pos] in
-    let b1 = Char.code meta_str.[!meta_pos + 1] in
-    meta_pos := !meta_pos + 2;
+  let read_u16_meta str pos =
+    let b0 = Char.code str.[!pos] in
+    let b1 = Char.code str.[!pos + 1] in
+    pos := !pos + 2;
     b0 lor (b1 lsl 8)
   in
 
-  for i = 1 to count do
-    let code = read_u16_meta () in
-    let v_count = read_u16_meta () in
-    let t_count = read_u16_meta () in
+  (* Decode CLC features *)
+  for _ = 1 to count do
+    let code = read_u16_meta meta_str meta_pos in
+    let v_count = read_u16_meta meta_str meta_pos in
+    let t_count = read_u16_meta meta_str meta_pos in
 
     let code_idx = get_code_index code in
 
@@ -278,7 +332,6 @@ let load_clc file =
         Printf.printf "Warning: Unknown CLC Code %d \n" code;
         Hashtbl.add unknown_codes code true);
 
-    (* Decode Vertices *)
     prev_x := 0;
     prev_y := 0;
     let base_v = !global_v_offset in
@@ -290,7 +343,6 @@ let load_clc file =
       let lx = Char.code low_x.[idx] in
       let zx = lx lor (hx lsl 8) in
       let sdx = zigzag_decode zx in
-      (* Modular reconstruction: (prev + diff) mod 65536 *)
       let qx = (!prev_x + sdx) land 0xFFFF in
       prev_x := qx;
 
@@ -301,7 +353,6 @@ let load_clc file =
       let qy = (!prev_y + sdy) land 0xFFFF in
       prev_y := qy;
 
-      (* Write direct to Bigarray *)
       let out_idx = base_v + k in
       Array1.set arr_pos (out_idx * 2) qx;
       Array1.set arr_pos ((out_idx * 2) + 1) qy;
@@ -311,7 +362,6 @@ let load_clc file =
     v_pos := !v_pos + v_count;
     global_v_offset := !global_v_offset + v_count;
 
-    (* Decode Indices *)
     prev_idx := 0;
     let num_indices = t_count * 3 in
 
@@ -331,10 +381,100 @@ let load_clc file =
     global_i_offset := !global_i_offset + num_indices
   done;
 
-  Printf.printf "Decoded: %d verts, %d indices\n%!" !global_v_offset
+  Printf.printf "Decoded CLC: %d verts, %d indices\n%!" !global_v_offset
     !global_i_offset;
 
-  (n_indices, arr_pos, arr_col, arr_ebo, min_lon, min_lat, scale_x, scale_y)
+  (* Decode water features if CLC4 *)
+  let water_global_v_offset = ref 0 in
+  let water_global_i_offset = ref 0 in
+
+  if is_clc4 && water_count > 0 then begin
+    let water_meta_pos = ref 0 in
+    let water_v_pos = ref 0 in
+    let water_i_pos = ref 0 in
+
+    for _feat_i = 1 to water_count do
+      let code = read_u16_meta water_meta_str water_meta_pos in
+      let v_count = read_u16_meta water_meta_str water_meta_pos in
+      let t_count = read_u16_meta water_meta_str water_meta_pos in
+
+      let code_idx = get_code_index code in
+
+      prev_x := 0;
+      prev_y := 0;
+      let base_v = !water_global_v_offset in
+
+      (* 3-byte coordinate decoding - scale to 16-bit range for GL compatibility *)
+      for k = 0 to v_count - 1 do
+        let idx = !water_v_pos + k in
+
+        let hx = Char.code water_high_x.[idx] in
+        let mx = Char.code water_mid_x.[idx] in
+        let lx = Char.code water_low_x.[idx] in
+        let zx = lx lor (mx lsl 8) lor (hx lsl 16) in
+        let sdx = zigzag_decode zx in
+        (* 24-bit modular: mask with 0xFFFFFF *)
+        let qx = (!prev_x + sdx) land 0xFFFFFF in
+        prev_x := qx;
+
+        let hy = Char.code water_high_y.[idx] in
+        let my = Char.code water_mid_y.[idx] in
+        let ly = Char.code water_low_y.[idx] in
+        let zy = ly lor (my lsl 8) lor (hy lsl 16) in
+        let sdy = zigzag_decode zy in
+        let qy = (!prev_y + sdy) land 0xFFFFFF in
+        prev_y := qy;
+
+        (* Scale from water range (0-220000) to u16 range (0-65535) *)
+        let scaled_x = qx * 65535 / 220000 in
+        let scaled_y = qy * 65535 / 220000 in
+
+        let out_idx = base_v + k in
+        Array1.set water_arr_pos (out_idx * 2) scaled_x;
+        Array1.set water_arr_pos ((out_idx * 2) + 1) scaled_y;
+        Array1.set water_arr_col out_idx code_idx
+      done;
+
+      water_v_pos := !water_v_pos + v_count;
+      water_global_v_offset := !water_global_v_offset + v_count;
+
+      prev_idx := 0;
+      let num_indices = t_count * 3 in
+
+      for k = 0 to num_indices - 1 do
+        let idx = !water_i_pos + k in
+        let hi = Char.code water_high_indices.[idx] in
+        let li = Char.code water_low_indices.[idx] in
+        let zi = li lor (hi lsl 8) in
+        let sdi = zigzag_decode zi in
+        let idx_val = (!prev_idx + sdi) land 0xFFFF in
+        prev_idx := idx_val;
+
+        let final_idx = base_v + idx_val in
+        Array1.set water_arr_ebo
+          (!water_global_i_offset + k)
+          (Int32.of_int final_idx)
+      done;
+      water_i_pos := !water_i_pos + num_indices;
+      water_global_i_offset := !water_global_i_offset + num_indices
+    done
+  end;
+
+  (* Return CLC data, water data, and metadata *)
+  ( n_indices,
+    arr_pos,
+    arr_col,
+    arr_ebo,
+    min_lon,
+    min_lat,
+    scale_x,
+    scale_y,
+    water_indices_header,
+    water_arr_pos,
+    water_arr_col,
+    water_arr_ebo,
+    water_scale_x,
+    water_scale_y )
 
 (* --- 4. GL Helper --- *)
 let get_iv get_fn obj param =
@@ -428,7 +568,13 @@ let () =
                 t_min_x,
                 t_min_y,
                 t_scale_x,
-                t_scale_y ) =
+                t_scale_y,
+                water_index_count,
+                water_data_pos,
+                water_data_col,
+                water_data_ebo,
+                water_scale_x,
+                water_scale_y ) =
             load_clc file
           in
 
@@ -445,7 +591,7 @@ let () =
           let m_fs = compile_shader Gl.fragment_shader marker_fs_src in
           let m_prog = create_program m_vs m_fs in
 
-          (* Uniforms *)
+          (* CLC Uniforms - also used for water since coords are scaled to same range *)
           Gl.use_program prog;
           let u_range = Gl.get_uniform_location prog "u_range" in
           let u_min = Gl.get_uniform_location prog "u_min" in
@@ -471,15 +617,21 @@ let () =
             (`Data palette_data);
           Gl.uniform1i u_palette 0;
 
-          let vaos = Array1.create int32 c_layout 1 in
-          Gl.gen_vertex_arrays 1 vaos;
+          (* CLC VAO/VBOs *)
+          let vaos = Array1.create int32 c_layout 2 in
+          Gl.gen_vertex_arrays 2 vaos;
+
+          (* CLC VAO *)
           Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
 
-          let vbos = Array1.create int32 c_layout 3 in
-          Gl.gen_buffers 3 vbos;
+          let vbos = Array1.create int32 c_layout 6 in
+          Gl.gen_buffers 6 vbos;
           let vbo_pos = Int32.to_int (Array1.get vbos 0) in
           let vbo_col = Int32.to_int (Array1.get vbos 1) in
           let vbo_ebo = Int32.to_int (Array1.get vbos 2) in
+          let w_vbo_pos = Int32.to_int (Array1.get vbos 3) in
+          let w_vbo_col = Int32.to_int (Array1.get vbos 4) in
+          let w_vbo_ebo = Int32.to_int (Array1.get vbos 5) in
 
           Gl.bind_buffer Gl.array_buffer vbo_pos;
           Gl.buffer_data Gl.array_buffer
@@ -499,6 +651,28 @@ let () =
           Gl.buffer_data Gl.element_array_buffer
             (Gl.bigarray_byte_size data_ebo)
             (Some data_ebo) Gl.static_draw;
+
+          (* Water VAO *)
+          Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 1));
+
+          Gl.bind_buffer Gl.array_buffer w_vbo_pos;
+          Gl.buffer_data Gl.array_buffer
+            (Gl.bigarray_byte_size water_data_pos)
+            (Some water_data_pos) Gl.static_draw;
+          Gl.enable_vertex_attrib_array 0;
+          (* Use unsigned_short like CLC - water coords are scaled to 16-bit *)
+          Gl.vertex_attrib_pointer 0 2 Gl.unsigned_short true 0 (`Offset 0);
+          Gl.bind_buffer Gl.array_buffer w_vbo_col;
+          Gl.buffer_data Gl.array_buffer
+            (Gl.bigarray_byte_size water_data_col)
+            (Some water_data_col) Gl.static_draw;
+          Gl.enable_vertex_attrib_array 1;
+          Gl.vertex_attrib_ipointer 1 1 Gl.unsigned_byte 0 (`Offset 0);
+
+          Gl.bind_buffer Gl.element_array_buffer w_vbo_ebo;
+          Gl.buffer_data Gl.element_array_buffer
+            (Gl.bigarray_byte_size water_data_ebo)
+            (Some water_data_ebo) Gl.static_draw;
 
           (* Interaction State *)
           let zoom = ref 1.0 in
@@ -528,7 +702,6 @@ let () =
                     if !drag then (
                       let dx = float Sdl.Event.(get e mouse_motion_xrel) in
                       let dy = float Sdl.Event.(get e mouse_motion_yrel) in
-                      (* Adjust pan speed based on zoom *)
                       cx := !cx -. (dx /. float w_width *. range_x /. !zoom);
                       cy := !cy +. (dy /. float w_height *. range_y /. !zoom))
                 | _ -> ());
@@ -538,15 +711,9 @@ let () =
 
             Gl.clear (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-            (* 
-               Geographic correction: 1° longitude is shorter than 1° latitude
-               by a factor of cos(latitude). We apply this to make the map
-               appear with correct proportions.
-            *)
             let center_lat = t_min_y +. (range_y /. 2.0) in
             let lat_correction = cos (center_lat *. Float.pi /. 180.0) in
 
-            (* Apply correction to view scale, not to range (range is for data reconstruction) *)
             let aspect = float w_width /. float w_height in
             let corrected_range_x = range_x *. lat_correction in
             let sx, sy =
@@ -557,7 +724,8 @@ let () =
                 (!zoom /. range_y /. aspect *. lat_correction, !zoom /. range_y)
             in
 
-            (* Draw Map *)
+            (* Draw CLC Map *)
+            Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
             Gl.use_program prog;
             Gl.active_texture Gl.texture0;
             Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
@@ -571,6 +739,19 @@ let () =
             Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
               (`Offset 0);
 
+            (* Draw Water Layer on top - use same shader as CLC since coords are scaled to 16-bit *)
+            if water_index_count > 0 then begin
+              Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 1));
+              (* Reuse CLC shader - water coords already scaled to 65535 range *)
+              Gl.uniform2f u_range range_x range_y;
+              Gl.uniform2f u_min t_min_x t_min_y;
+              Gl.uniform2f u_view_scale sx sy;
+              Gl.uniform2f u_view_offset !cx !cy;
+
+              Gl.draw_elements Gl.triangles water_index_count Gl.unsigned_int
+                (`Offset 0)
+            end;
+
             (* Draw Marker *)
             (match !mark_pos with
             | Some (mx, my) ->
@@ -579,7 +760,6 @@ let () =
                 Gl.uniform2f m_u_pos mx my;
                 Gl.uniform2f m_u_view_scale sx sy;
                 Gl.uniform2f m_u_view_offset !cx !cy;
-                (* Draw single point *)
                 Gl.draw_arrays Gl.points 0 1;
                 Gl.enable Gl.depth_test
             | None -> ());
