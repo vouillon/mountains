@@ -364,7 +364,7 @@ let terrain_program ~use_clc =
         // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
         vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
-          highp float scale = 0.004;  // ~500m per texture repeat (matches validated debug scale)
+          highp float scale = 0.003;  // ~500m per texture repeat (matches validated debug scale)
           highp vec2 uv_xz = worldPos.xz * scale;
           highp vec2 uv_xy = worldPos.xy * scale;
           highp vec2 uv_yz = worldPos.yz * scale;
@@ -1288,7 +1288,7 @@ let make_noise_texture ctx =
   done;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb size size 0 Gl.rgb Gl.unsigned_byte
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb8 size size 0 Gl.rgb Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
   Gl.generate_mipmap ctx Gl.texture_2d;
@@ -1441,7 +1441,7 @@ let make_detail_map ctx =
   done;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 size size 0 Gl.rgba
     Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
@@ -1491,21 +1491,13 @@ let make_detail_map ctx =
                data.{idx} <- lum
              done
            done;
-
-           (* Update the texture - create fresh typed array to ensure data is copied *)
-           let arr_len = size * size * 4 in
-           let fresh_arr = Brr.Tarray.create Brr.Tarray.Uint8 arr_len in
-           let fresh_ba = Brr.Tarray.to_bigarray1 fresh_arr in
-           for i = 0 to arr_len - 1 do
-             fresh_ba.{i} <- data.{i}
-           done;
-
            Gl.active_texture ctx Gl.texture5;
-           Gl.bind_texture ctx Gl.texture_2d (Some tid);
-           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
-             Gl.unsigned_byte fresh_arr 0;
+           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 size size 0 Gl.rgba
+             Gl.unsigned_byte
+             (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+             0;
            Gl.generate_mipmap ctx Gl.texture_2d;
-           Gl.bind_texture ctx Gl.texture_2d None;
+           Gl.active_texture ctx Gl.texture0;
            set (Ok ()))
          (Brr.El.as_target img));
     ignore
@@ -1519,7 +1511,7 @@ let make_detail_map ctx =
     Brr.El.set_at (Jstr.v "src") (Some (Jstr.v filename)) img;
     fut
   in
-  (* Start async loads *)
+  (* Start async loads if enabled *)
   ignore (load_channel_texture "assets/rock.png" 0);
   ignore (load_channel_texture "assets/grass.png" 1);
   ignore (load_channel_texture "assets/forest.png" 2);
@@ -1609,8 +1601,7 @@ let create_shadow_fbo ctx shadow_map =
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
-let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
-    ~world_center ~shadow_map_size:_ =
+let calculate_shadow_matrices ~light_dir ~world_center =
   let matrices = Array.make 3 (Array.make 16 0.) in
 
   (* Simple Cascades based on Splits *)
@@ -1774,9 +1765,8 @@ let draw_text ctx transform_loc transform (tid, w, h) =
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
 (* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
 
-let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
-    ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w
-    ~snapped_alpha:_ ctx =
+let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
+    ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
@@ -1934,18 +1924,17 @@ let bind_terrain_textures ctx ~relief_texture ~noise_texture ~ao_texture
   Gl.active_texture ctx Gl.texture7;
   Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
   Gl.active_texture ctx Gl.texture8;
-  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture)
+  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
+  Gl.active_texture ctx Gl.texture0
 
 (* Track whether shadows have been rendered - only render once per session *)
 let shadow_rendered = ref false
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
-    ~(shadow_uniforms : Render_state.shadow_uniforms) ~shadow_matrices ~w ~h:_
-    ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
-    ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
-    ~palette_texture ~cover_map_texture ~cover_map_size:_ canvas ctx =
-  ignore shadow_uniforms;
+    ~shadow_matrices ~w ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
+    ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo
+    ~shadow_map ~palette_texture ~cover_map_texture canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
@@ -1965,7 +1954,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       * rotate_y (-.orientation.gamma *. pi /. 180.)
       * rotate_z (orientation.screen *. pi /. 180.))
   in
-  (* Radial grid params computed at init and uploaded via render state *)
   let screen_inclination =
     orientation.screen
     +. 180. /. pi
@@ -2013,21 +2001,12 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   in
 
   (* SHADOW PASS *)
-  let grid_k = pi /. float n_sectors in
-  let current_azimuth = compute_azimuth transform in
-  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
-
-  (* light_dir, splits_dist, shadow_matrices are now computed at init *)
-  (* splits_ratios is only used for draw_shadows which runs once at first frame *)
-  let z_far = 50000. in
-  let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
 
   (* Render shadows once on first frame *)
   if not !shadow_rendered then begin
     shadow_rendered := true;
     draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
-      ~splits:splits_ratios ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat
-      ~lon ~w ~snapped_alpha ctx;
+      ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx;
     (* Rebind terrain textures after draw_shadows disturbed them *)
     bind_terrain_textures ctx ~relief_texture ~noise_texture ~ao_texture
       ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
@@ -2038,11 +2017,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
-
   Gl.enable ctx Gl.cull_face';
-
-  (* Radial grid static uniforms already uploaded at init *)
-  (* Only dynamic uniforms need to be set per frame *)
 
   (* Determine snapped alpha - changes with camera orientation *)
   let grid_k = pi /. float n_sectors in
@@ -2056,12 +2031,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false
     (Brr.Tarray.of_bigarray1 (Matrix.array transform));
 
-  (* Uniforms and textures are session-static, bound at init and after draw_shadows *)
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
-  (* shadow_matrices and shadow_splits already uploaded at init *)
-
-  (* Bind AO *)
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -2615,10 +2586,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   in
   let shadow_matrices =
     (* view_proj is ignored in calculate_shadow_matrices *)
-    calculate_shadow_matrices ~near_plane:0.1
-      ~view_proj:(Matrix.translate 0. 0. 0.)
-      ~splits:splits_dist ~light_dir:light_dir_shadows ~world_center
-      ~shadow_map_size:2048.
+    calculate_shadow_matrices ~light_dir:light_dir_shadows ~world_center
   in
 
   (* Upload all session-static uniforms *)
@@ -2839,11 +2807,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           Lwt.return ()));
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
-        text_pid text_geo ~terrain_uniforms ~shadow_uniforms ~shadow_matrices ~w
-        ~h ~x ~y ~lat ~lon ~orientation ~height ~tile ~points ~index_count
-        ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo
-        ~shadow_map ~palette_texture ~cover_map_texture ~cover_map_size canvas
-        ctx)
+        text_pid text_geo ~terrain_uniforms ~shadow_matrices ~w ~x ~y ~lat ~lon
+        ~orientation ~height ~tile ~points ~index_count ~noise_texture
+        ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
+        ~palette_texture ~cover_map_texture canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
