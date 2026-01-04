@@ -21,15 +21,63 @@ let remove_message () =
       message := None
   | None -> ()
 
-let display_message msg =
+let display_element el =
   remove_message ();
-  let msg = Brr.El.(v (Jstr.v "div") [ txt (Jstr.v msg) ]) in
-  Brr.El.append_children (Brr.Document.body Brr.G.document) [ msg ];
-  message := Some msg
+  let container =
+    Brr.El.(v (Jstr.v "div") ~at:[ Brr.At.class' (Jstr.v "message") ] [ el ])
+  in
+  Brr.El.append_children (Brr.Document.body Brr.G.document) [ container ];
+  message := Some container
+
+let display_message msg = display_element Brr.El.(txt (Jstr.v msg))
 
 let display_temporary_message msg =
   display_message msg;
   ignore (Brr.G.set_timeout ~ms:10000 remove_message)
+
+(* Sky colors *)
+let fog_linear = (0.17, 0.38, 0.79)
+let zenith_linear = (0.02, 0.12, 0.55)
+
+let loading_message () =
+  let open Brr.El in
+  let small_style = Brr.At.style (Jstr.v "font-size: 11px; color: #666;") in
+  v (Jstr.v "div")
+    [
+      v (Jstr.v "div")
+        ~at:[ Brr.At.style (Jstr.v "font-size: 20px; margin-bottom: 12px;") ]
+        [ txt (Jstr.v "Loading...") ];
+      v (Jstr.v "div") ~at:[ small_style ]
+        [
+          v (Jstr.v "div")
+            ~at:
+              [ Brr.At.style (Jstr.v "font-weight: bold; margin-bottom: 4px;") ]
+            [ txt (Jstr.v "Map Data & Terrain Sources:") ];
+          v (Jstr.v "div")
+            [
+              txt
+                (Jstr.v
+                   "Elevation: Produced using Copernicus WorldDEM-30 © DLR \
+                    e.V. 2010-2014 and © Airbus Defence and Space GmbH \
+                    2014-2018 provided under COPERNICUS by the European Union \
+                    and ESA; all rights reserved.");
+            ];
+          v (Jstr.v "div")
+            [
+              txt
+                (Jstr.v
+                   "Land Use: © European Union, Copernicus Land Monitoring \
+                    Service 2025, European Environment Agency (EEA)");
+            ];
+          v (Jstr.v "div")
+            [
+              txt
+                (Jstr.v
+                   "Water Bodies: © OpenStreetMap contributors (Open Database \
+                    License)");
+            ];
+        ];
+    ]
 
 module Loader = Loader.Make (Reader)
 
@@ -68,10 +116,8 @@ let compute_azimuth m =
   azimuth -. (pi /. 2.)
 
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
-let terrain_program ~use_clc =
-  let use_clc_define =
-    if use_clc then "#define USE_CLC 1" else "#define USE_CLC 0"
-  in
+let terrain_program =
+  let use_clc_define = "#define USE_CLC 1" in
   {
     vertex_shader =
       {|#version 300 es
@@ -174,7 +220,6 @@ let terrain_program ~use_clc =
         precision highp sampler2DArray;
 
         uniform mediump sampler2D relief;
-        uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
         uniform mediump sampler2D u_detailMap;  // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
@@ -237,12 +282,11 @@ let terrain_program ~use_clc =
         Surface sampleCLCBilinear(highp vec2 worldPos) {
           // Calculate distance from center (camera) for LOD selection
           highp vec2 relPos = worldPos - u_cameraOffset;
-          highp float dist = max(abs(relPos.x), abs(relPos.y));
           
           // Select clipmap level based on distance
           // Level L covers extent = u_baseExtent * 2^L
           // We want the finest level that covers this point
-          highp float desiredLevel = max(0.0, 1.0 + log2(dist / u_baseExtent));
+          highp float desiredLevel = max(0.0, 1.0 + log2(v_dist / u_baseExtent));
           int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
           
           // Calculate texture coordinates for this level
@@ -320,7 +364,7 @@ let terrain_program ~use_clc =
         // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
         vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
-          highp float scale = 0.004;  // ~500m per texture repeat (matches validated debug scale)
+          highp float scale = 0.002;  // ~500m per texture repeat (matches validated debug scale)
           highp vec2 uv_xz = worldPos.xz * scale;
           highp vec2 uv_xy = worldPos.xy * scale;
           highp vec2 uv_yz = worldPos.yz * scale;
@@ -385,18 +429,20 @@ let terrain_program ~use_clc =
         
         // Procedural water with organic shoreline
         float getWaterMask(highp vec2 worldPos, float waterFactor) {
-          // High-frequency noise for organic shoreline edge
-          float noise_val = texture(noise, worldPos * 0.002).r;
-          float jitter = (noise_val - 0.5) * 0.25;  // +/- 12.5%% variation
-          
-          // Sharp threshold with smooth transition
-          float threshold = 0.5 + jitter;
-          return smoothstep(threshold - 0.15, threshold + 0.15, waterFactor);
+          if (waterFactor >= 0.01 && waterFactor < 0.99) {
+              float noise_val = texture(u_detailMap, worldPos.xy * 0.2).r;
+              float jitter = (noise_val - 0.5) * 0.5;
+
+              // Sharp threshold with smooth transition
+              float threshold = 0.5 + jitter;
+              return smoothstep(threshold - 0.15, threshold + 0.15, waterFactor);
+          }
+          return waterFactor;
         }
         
         vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
           if (waterMask < 0.01) return baseColor;
-          
+
           // Deep water color (linear space)
           vec3 waterColor = vec3(0.01, 0.04, 0.12);
           
@@ -428,10 +474,16 @@ let terrain_program ~use_clc =
 
         // ========== Main ==========
         
+        uniform vec3 u_fogColor;
+        uniform vec3 u_zenithColor;
+
         void main() {
+          // Define fog color early for use in water reflection
+          vec3 fog_color = u_fogColor;
+
           // Decode normal from relief texture
           mediump vec2 encodedN = texture(relief, reliefCoord).ba;
-          highp vec3 normal;
+          vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
@@ -584,13 +636,31 @@ let terrain_program ~use_clc =
             
             // Environment reflection (sky color for glossy surfaces)
             vec3 reflectDir = reflect(-viewDir, final_normal);
-            float skyReflect = max(0.0, reflectDir.z);  // Simple sky gradient
-            vec3 envColor = mix(vec3(0.6, 0.7, 0.9), vec3(0.2, 0.4, 0.8), skyReflect);
+            float skyReflect = max(0.0, reflectDir.z); 
+            // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
+            // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
+            // We use the exact same mixing factor for consistency
+            float sky_mix = smoothstep(0.0, 0.35, skyReflect);
+            vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
             
+
             // Apply specular and reflection to terrain color
             vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
             terrain_color += specColor * 0.3;
-            terrain_color = mix(terrain_color, envColor, reflectivity * 0.3);
+            
+            // Fresnel for water
+            if (waterMask > 0.01) {
+               float n_dot_v = max(0.0, dot(final_normal, viewDir));
+               // Schlick's approximation
+               float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
+               reflectivity = mix(reflectivity, fresnel, waterMask);
+               // Removed explicit fog mixing here; let distance fog handle it
+               // envColor = mix(envColor, fog_color, waterMask); 
+            }
+            
+            // Apply reflection (remove damping for water)
+            float reflectDamp = (waterMask > 0.01) ? 1.0 : 0.3;
+            terrain_color = mix(terrain_color, envColor, reflectivity * reflectDamp);
             
 #else
             // === FALLBACK: Original slope-based biome logic ===
@@ -643,27 +713,48 @@ let terrain_program ~use_clc =
             }
 #endif
           
-          // === Lighting (unchanged) ===
+          // === Lighting ===
           float final_l = max(0.0, dot(final_normal, lightDir));
           
-          vec3 sky_color = vec3(0.4, 0.5, 0.7);
-          vec3 ground_color = vec3(0.15, 0.12, 0.08);
+          // Matched to Sky Shader: Horizon -> Zenith
+          vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2; 
+          vec3 ground_color = vec3(0.1, 0.08, 0.05); // Slightly darker ground bounce
           float sky_factor = final_normal.z * 0.5 + 0.5;
-          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.35;
+          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5; // Tuned intensity
           
-          vec3 sun_color = vec3(1.0, 0.95, 0.85);
-          vec3 direct = sun_color * final_l * shadow_val * 0.75;
+          vec3 sun_color = vec3(1.0, 0.95, 0.9);
+          vec3 direct = sun_color * final_l * shadow_val * 0.5; // Reduced direct intensity slightly to balance
           vec3 lighting = ambient + direct;
 
           // === AO (unchanged) ===
           float occlusion = texture(ao, reliefCoord).r;
           terrain_color = terrain_color * occlusion;
 
+
           // === Fog ===
-          const vec3 fog_color = vec3(0.1138, 0.2746, 0.6944);  // Pre-computed pow((0.37,0.56,0.85), 2.2)
           float fog_coeff = exp(v_dist * -2e-5);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
+          
+          // DEBUG: Visualize normal-map mip level
+          // Blue(0) -> Cyan(1) -> Green(2) -> Yellow(3) -> Orange(4) -> Red(5) -> Magenta(6) -> White(7+)
+          vec2 dxCoord = dFdx(reliefCoord);
+          vec2 dyCoord = dFdy(reliefCoord);
+          ivec2 texSize = textureSize(relief, 0);
+          float maxDeriv = max(length(dxCoord * vec2(texSize)), length(dyCoord * vec2(texSize)));
+          int mipLevel = int(log2(max(1.0, maxDeriv)));
+          vec3 mipColors[8] = vec3[8](
+              vec3(0.0, 0.0, 1.0),  // 0: Blue
+              vec3(0.0, 1.0, 1.0),  // 1: Cyan
+              vec3(0.0, 1.0, 0.0),  // 2: Green
+              vec3(1.0, 1.0, 0.0),  // 3: Yellow
+              vec3(1.0, 0.5, 0.0),  // 4: Orange
+              vec3(1.0, 0.0, 0.0),  // 5: Red
+              vec3(1.0, 0.0, 1.0),  // 6: Magenta
+              vec3(1.0, 1.0, 1.0)   // 7+: White
+          );
+          // Uncomment below to enable mipmap visualization:
+          // final_color = mipColors[min(mipLevel, 7)];
           
           // Gamma correction
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
@@ -1030,6 +1121,74 @@ let clc_raster_program =
     attributes = [ "in_norm_pos"; "in_color_idx" ];
   }
 
+let sky_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out mediump vec2 v_uv;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          v_uv = vec2(x, y);
+          // Draw at Far Plane (Z=1.0)
+          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision mediump float;
+        uniform mat4 inv_view;
+        uniform vec3 u_lightDir;
+        uniform vec3 u_fogColor;
+        uniform vec3 u_zenithColor;
+        uniform vec2 sky_params; // x_scale, y_scale
+        in vec2 v_uv;
+        out vec4 color;
+
+        void main() {
+          // Reconstruct View Ray in View Space
+          // Clip space: (x, y, -1.0) for forward direction (RH)
+          // View Ray = (clip.x / x_scale, clip.y / y_scale, -1.0)
+          
+          float x = (v_uv.x * 2.0 - 1.0) / sky_params.x;
+          float y = (v_uv.y * 2.0 - 1.0) / sky_params.y;
+          vec3 view_ray = normalize(vec3(x, y, -1.0));
+          
+          // Transform to World Space (Rotation only)
+          highp vec3 view_dir = mat3(inv_view) * view_ray;
+          view_dir = normalize(view_dir);
+
+          float cos_theta = view_dir.z;
+          highp float cos_gamma = dot(view_dir, u_lightDir);
+
+          // Deep blue zenith, lighter horizon (Linear Space)
+          // New Lighter Blue/White Horizon (Matches fog)
+          vec3 horizon = u_fogColor;
+
+          float horizon_factor = smoothstep(0.0, 0.35, cos_theta);
+          vec3 sky_base = mix(horizon, u_zenithColor, horizon_factor);
+
+          float mie = pow(max(0.0, cos_gamma), 400.0) * 0.8;
+          float halo = pow(max(0.0, cos_gamma), 20.0) * 0.2;
+          
+          vec3 sun_color = vec3(1.0, 0.9, 0.7);
+          vec3 sky = sky_base + sun_color * (mie + halo);
+
+          if (cos_gamma > 0.9995) {
+             sky = vec3(1.0, 0.95, 0.8) * 20.0;
+          }
+
+          // Dither to prevent banding
+          float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+          sky += (noise - 0.5) / 255.0;
+
+          // Gamma Correction (Linear -> sRGB)
+          color = vec4(pow(sky, vec3(1.0 / 2.2)), 1.0);
+        }
+      |};
+    attributes = [];
+  }
+
 (* OpenGL setup *)
 
 module Gl = Brr_canvas.Gl
@@ -1117,74 +1276,6 @@ let instantiate ~size =
           obj [| ("env", obj [| ("memory", memory) |]) |];
         |])
 
-let _precompute tile_height tile_width tile =
-  let normals =
-    Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 2
-  in
-  let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
-  in
-  let deltax = deltay *. cos (44. *. pi /. 180.) in
-  if true then (
-    to_lwt
-    @@
-    let tile_size = tile_height * tile_width * 4 in
-    let heights_size = (tile_height - 2) * (tile_width - 2) * 4 in
-    let normals_size = (tile_height - 2) * (tile_width - 2) * 2 in
-    let size = tile_size + heights_size + normals_size in
-    let open Fut.Result_syntax in
-    let+ memory, funcs = instantiate ~size in
-    let t = Unix.gettimeofday () in
-    Brr.Tarray.set_tarray
-      Brr.Tarray.(of_buffer Float32 memory)
-      ~dst:0
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile));
-    let t' = Unix.gettimeofday () in
-    ignore
-      (Jv.call funcs "precompute"
-         [|
-           Jv.of_int tile_width;
-           Jv.of_int tile_height;
-           Jv.of_float deltax;
-           Jv.of_float deltay;
-           Jv.of_int 0;
-           Jv.of_int tile_size;
-           Jv.of_int (tile_size + heights_size);
-         |]);
-    Format.eprintf "precompute (kernel) %f@." (Unix.gettimeofday () -. t');
-    Brr.Tarray.set_tarray
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 heights))
-      ~dst:0
-      Brr.Tarray.(
-        of_buffer ~byte_offset:tile_size ~length:(heights_size / 4) Float32
-          memory);
-    Brr.Tarray.set_tarray
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array3 normals))
-      ~dst:0
-      Brr.Tarray.(
-        of_buffer ~byte_offset:(tile_size + heights_size) ~length:normals_size
-          Int8 memory);
-    Format.eprintf "precompute %f@." (Unix.gettimeofday () -. t);
-    (linearize2 heights, linearize3 normals))
-  else
-    let t = Unix.gettimeofday () in
-    for y = 1 to tile_height - 2 do
-      for x = 1 to tile_width - 2 do
-        let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
-        let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
-        let nz = 2. *. deltax *. deltay in
-        let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-        normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
-        normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
-        normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
-        heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
-      done
-    done;
-    Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
-    Lwt.return (linearize2 heights, linearize3 normals)
-(* TODO: Update fallback if keeping it, but plan is to delete *)
-
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
   let block_size = 32 in
@@ -1234,252 +1325,136 @@ let make_tile_texture ctx tile =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-let make_noise_texture ctx =
-  let size = 256 in
-  let data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 3))
-  in
-  for i = 0 to (size * size * 3) - 1 do
-    data.{i} <- Random.int 256
-  done;
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb size size 0 Gl.rgb Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
-    0;
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  tid
+(* Anisotropic filtering support *)
+let aniso_ext = ref None
+let max_anisotropy = ref 1.0
 
-(* Create packed RGBA detail map with distinct patterns per channel:
-   R = Rock/Ground (cracks, rough edges)
-   G = Grass/Vegetation (soft, organic patterns)
-   B = Forest floor (granular, debris-like)
-   A = Ice/Snow (smooth, subtle variation) *)
+let init_anisotropic_filtering ctx =
+  let ext = Gl.get_extension ctx (Jstr.v "EXT_texture_filter_anisotropic") in
+  if Jv.is_some ext then begin
+    aniso_ext := Some ext;
+    (* MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF *)
+    let max_val = Jv.to_float (Gl.get_parameter ctx 0x84FF) in
+    max_anisotropy := max_val;
+    Format.eprintf "Anisotropic filtering enabled: max %.0fx@." max_val
+  end
+  else Format.eprintf "Anisotropic filtering not supported@."
+
+let apply_anisotropic_filtering ctx =
+  if !max_anisotropy > 1.0 then
+    (* TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE *)
+    Gl.tex_parameterf ctx Gl.texture_2d 0x84FE !max_anisotropy
+
+(* Detect supported compressed texture format *)
+type compressed_format = BC7 | ASTC | ETC2
+
+let detect_compressed_format ctx =
+  let has_ext name = Jv.is_some (Gl.get_extension ctx (Jstr.v name)) in
+  (* BC7 first for best quality on desktop *)
+  if has_ext "EXT_texture_compression_bptc" then Some BC7
+  else if has_ext "WEBGL_compressed_texture_astc" then Some ASTC
+  else if has_ext "WEBGL_compressed_texture_etc" then Some ETC2
+  else None
+
+(* GL internal format for compressed texture *)
+let compressed_internal_format = function
+  | BC7 -> 0x8E8C (* COMPRESSED_RGBA_BPTC_UNORM_EXT *)
+  | ASTC -> 0x93B0 (* COMPRESSED_RGBA_ASTC_4x4_KHR *)
+  | ETC2 -> 0x9278 (* COMPRESSED_RGBA8_ETC2_EAC *)
+
+(* KTX2 file for each format *)
+let compressed_texture_file = function
+  | BC7 -> "assets/details_bc7.ktx2"
+  | ASTC -> "assets/details_astc.ktx2"
+  | ETC2 -> "assets/details_etc2.ktx2"
+
+(* Load compressed KTX2 texture asynchronously *)
+let load_compressed_detail_map ctx tid =
+  match detect_compressed_format ctx with
+  | None -> Format.eprintf "No compressed texture format supported@."
+  | Some fmt ->
+      let file = compressed_texture_file fmt in
+      let internal_fmt = compressed_internal_format fmt in
+      let fetch =
+        let open Fut.Result_syntax in
+        let* response = Brr_io.Fetch.url (Jstr.v file) in
+        let* buffer =
+          Brr_io.Fetch.Body.array_buffer
+            (Brr_io.Fetch.Response.as_body response)
+        in
+        Fut.return (Ok buffer)
+      in
+      Fut.await fetch (function
+        | Error e ->
+            Format.eprintf "Failed to load %s: %s@." file
+              (Jv.Error.message e |> Jstr.to_string)
+        | Ok buffer ->
+            (* Parse KTX2 header using DataView *)
+            let view =
+              Jv.new'
+                (Jv.get Jv.global "DataView")
+                [| Brr.Tarray.Buffer.to_jv buffer |]
+            in
+            let get_u32 off =
+              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+            in
+            (* Header fields at known offsets:
+               12: vkFormat, 16: typeSize, 20: pixelWidth, 24: pixelHeight,
+               28: pixelDepth, 32: layerCount, 36: faceCount, 40: levelCount *)
+            let pixel_width = get_u32 20 in
+            let pixel_height = get_u32 24 in
+            let level_count = get_u32 40 in
+            (* Level index starts at offset 80, each entry is 24 bytes (3 x uint64) *)
+            let get_u64_low off =
+              (* Just read low 32 bits - file offsets won't exceed 4GB *)
+              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+            in
+            (* Upload each mip level - Level Index is in GL order: [0]=largest, [n-1]=smallest *)
+            Gl.active_texture ctx Gl.texture5;
+            Gl.bind_texture ctx Gl.texture_2d (Some tid);
+            let data = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buffer in
+            for level = 0 to level_count - 1 do
+              let idx = 80 + (level * 24) in
+              let offset = get_u64_low idx in
+              let length = get_u64_low (idx + 8) in
+              let level_data =
+                Brr.Tarray.sub data ~start:offset ~stop:(offset + length)
+              in
+              let w = max 1 (pixel_width lsr level) in
+              let h = max 1 (pixel_height lsr level) in
+              Gl.compressed_tex_image2d ctx Gl.texture_2d level internal_fmt w h
+                0 level_data
+            done;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+              Gl.linear_mipmap_linear;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
+            apply_anisotropic_filtering ctx;
+            Gl.active_texture ctx Gl.texture0;
+            Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
+              file pixel_width pixel_height level_count)
+
+(* Create 1x1 placeholder detail map texture (grey midtone in all channels) *)
 let make_detail_map ctx =
-  let size = 1024 in
-  let data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 4))
-  in
-  (* Better hash function with less correlation *)
-  let hash x y seed =
-    let n = x + (y * 57) + (seed * 131) in
-    let n = (n lsl 13) lxor n in
-    let n = (n * ((n * n * 15731) + 789221)) + 1376312589 in
-    (* Extra mixing step to reduce correlation *)
-    let n = n lxor (n lsr 16) * 0x45d9f3b in
-    let n = n lxor (n lsr 16) in
-    n land 0x7fffffff
-  in
-  let noise x y seed = float (hash x y seed land 255) /. 255.0 in
-
-  (* Smoothstep function for Hermite interpolation *)
-  let smoothstep t = t *. t *. (3.0 -. (2.0 *. t)) in
-
-  (* Smooth noise with Hermite interpolation - eliminates grid artifacts *)
-  let smooth_noise_tiled fx fy period seed =
-    let x = int_of_float (if fx >= 0.0 then fx else fx -. 1.0) in
-    let y = int_of_float (if fy >= 0.0 then fy else fy -. 1.0) in
-    let x0 = ((x mod period) + period) mod period in
-    let y0 = ((y mod period) + period) mod period in
-    let x1 = (x0 + 1) mod period in
-    let y1 = (y0 + 1) mod period in
-    let frac_x = fx -. float x in
-    let frac_y = fy -. float y in
-    (* Use smoothstep instead of linear interpolation *)
-    let sx = smoothstep frac_x in
-    let sy = smoothstep frac_y in
-    let v00 = noise x0 y0 seed in
-    let v10 = noise x1 y0 seed in
-    let v01 = noise x0 y1 seed in
-    let v11 = noise x1 y1 seed in
-    let i0 = v00 +. (sx *. (v10 -. v00)) in
-    let i1 = v01 +. (sx *. (v11 -. v01)) in
-    i0 +. (sy *. (i1 -. i0))
-  in
-
-  (* Domain warping: offset coordinates by noise to break up grid alignment *)
-  let warp_coords x y seed_offset =
-    let wx = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 (500 + seed_offset) in
-    let wy =
-      smooth_noise_tiled
-        ((x *. 4.0) +. 5.3)
-        ((y *. 4.0) +. 1.7)
-        4 (600 + seed_offset)
-    in
-    (x +. ((wx -. 0.5) *. 0.15), y +. ((wy -. 0.5) *. 0.15))
-  in
-
-  (* Rock pattern: Multi-octave fractal noise with domain warping and rotation *)
-  let rock_pattern x y =
-    (* Apply domain warping to break grid alignment *)
-    let x, y = warp_coords x y 0 in
-    (* Rotate coordinates at each octave to break up directional patterns *)
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
-    let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
-    let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
-    let rot_x4 = (-.x *. 0.707) +. (y *. 0.707) in
-    let rot_y4 = (-.y *. 0.707) -. (x *. 0.707) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 16.0) (rot_y1 *. 16.0) 16 0 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 32.0) (rot_y2 *. 32.0) 32 1 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 64.0) (rot_y3 *. 64.0) 64 2 in
-    let v4 = smooth_noise_tiled (rot_x4 *. 128.0) (rot_y4 *. 128.0) 128 3 in
-    let v = (v1 *. 0.4) +. (v2 *. 0.3) +. (v3 *. 0.2) +. (v4 *. 0.1) in
-    (* Apply contrast curve for sharper cracks *)
-    let v = ((v -. 0.5) *. 1.5) +. 0.5 in
-    max 0.0 (min 1.0 v)
-  in
-
-  (* Grass pattern: Softer, more organic with domain warping and rotation *)
-  let grass_pattern x y =
-    let x, y = warp_coords x y 100 in
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
-    let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
-    let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 8.0) (rot_y1 *. 8.0) 8 100 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 16.0) (rot_y2 *. 16.0) 16 101 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 32.0) (rot_y3 *. 32.0) 32 102 in
-    (* Softer blend, less high-frequency detail *)
-    (v1 *. 0.5) +. (v2 *. 0.35) +. (v3 *. 0.15)
-  in
-
-  (* Forest floor: Granular, debris-like pattern with domain warping *)
-  let forest_pattern x y =
-    let x, y = warp_coords x y 200 in
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.707) +. (y *. 0.707) in
-    let rot_y2 = (y *. 0.707) -. (x *. 0.707) in
-    let rot_x3 = (-.x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (-.y *. 0.866) -. (x *. 0.5) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 24.0) (rot_y1 *. 24.0) 24 200 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 48.0) (rot_y2 *. 48.0) 48 201 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 96.0) (rot_y3 *. 96.0) 96 202 in
-    (* Medium frequency mix for granular appearance *)
-    (v1 *. 0.3) +. (v2 *. 0.4) +. (v3 *. 0.3)
-  in
-
-  (* Ice pattern: Very smooth, subtle variation *)
-  let ice_pattern x y =
-    let v1 = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 300 in
-    let v2 = smooth_noise_tiled (x *. 8.0) (y *. 8.0) 8 301 in
-    (* Very low frequency, subtle variation *)
-    let v = (v1 *. 0.7) +. (v2 *. 0.3) in
-    (* Compress range for subtle effect *)
-    0.4 +. (v *. 0.2)
-  in
-  for py = 0 to size - 1 do
-    for px = 0 to size - 1 do
-      let fx = float px /. float size in
-      let fy = float py /. float size in
-      (* Placeholder for R - will be replaced by rock.png asynchronously *)
-      let r = rock_pattern fx fy in
-      let g = grass_pattern fx fy in
-      let b = forest_pattern fx fy in
-      let a = ice_pattern fx fy in
-      let idx = ((py * size) + px) * 4 in
-      data.{idx} <- min 255 (int_of_float (r *. 255.0));
-      data.{idx + 1} <- min 255 (int_of_float (g *. 255.0));
-      data.{idx + 2} <- min 255 (int_of_float (b *. 255.0));
-      data.{idx + 3} <- min 255 (int_of_float (a *. 255.0))
-    done
-  done;
+  let data = Bigarray.(Array1.create int8_unsigned c_layout 4) in
+  data.{0} <- 128;
+  data.{1} <- 128;
+  data.{2} <- 128;
+  data.{3} <- 128;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
-    Gl.unsigned_byte
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 1 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
     Gl.linear_mipmap_linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
   Gl.bind_texture ctx Gl.texture_2d None;
-
-  (* Async: Load texture into specific channel *)
-  let load_channel_texture filename channel_idx =
-    let img = Brr.El.img () in
-    let fut, set = Fut.create () in
-    ignore
-      (Brr.Ev.listen Brr.Ev.load
-         (fun _ ->
-           let canvas = Brr.El.canvas [] in
-           let img_w = Jv.Int.get (Brr.El.to_jv img) "naturalWidth" in
-           let img_h = Jv.Int.get (Brr.El.to_jv img) "naturalHeight" in
-           Brr_canvas.Canvas.set_w (Brr_canvas.Canvas.of_el canvas) img_w;
-           Brr_canvas.Canvas.set_h (Brr_canvas.Canvas.of_el canvas) img_h;
-           let c2d =
-             Brr_canvas.C2d.get_context (Brr_canvas.Canvas.of_el canvas)
-           in
-           Brr_canvas.C2d.draw_image c2d
-             (Brr_canvas.C2d.image_src_of_el img)
-             ~x:0.0 ~y:0.0;
-           let img_data =
-             Brr_canvas.C2d.get_image_data c2d ~x:0 ~y:0 ~w:img_w ~h:img_h
-           in
-           let pixels = Brr_canvas.C2d.Image_data.data img_data in
-           let pixels_ba = Brr.Tarray.to_bigarray1 pixels in
-
-           (* Update texture data at specific channel *)
-           for py = 0 to size - 1 do
-             for px = 0 to size - 1 do
-               let src_x = px * img_w / size in
-               let src_y = py * img_h / size in
-               let src_idx = ((src_y * img_w) + src_x) * 4 in
-               let r = pixels_ba.{src_idx} in
-               let g = pixels_ba.{src_idx + 1} in
-               let b = pixels_ba.{src_idx + 2} in
-               let lum = (r + g + b) / 3 in
-               let idx = (((py * size) + px) * 4) + channel_idx in
-               data.{idx} <- lum
-             done
-           done;
-
-           (* Update the texture - create fresh typed array to ensure data is copied *)
-           let arr_len = size * size * 4 in
-           let fresh_arr = Brr.Tarray.create Brr.Tarray.Uint8 arr_len in
-           let fresh_ba = Brr.Tarray.to_bigarray1 fresh_arr in
-           for i = 0 to arr_len - 1 do
-             fresh_ba.{i} <- data.{i}
-           done;
-
-           Gl.active_texture ctx Gl.texture5;
-           Gl.bind_texture ctx Gl.texture_2d (Some tid);
-           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
-             Gl.unsigned_byte fresh_arr 0;
-           Gl.generate_mipmap ctx Gl.texture_2d;
-           Gl.bind_texture ctx Gl.texture_2d None;
-           set (Ok ()))
-         (Brr.El.as_target img));
-    ignore
-      (Brr.Ev.listen Brr.Ev.error
-         (fun _ ->
-           set
-             (Error
-                (Jv.Error.v
-                   (Jstr.v (Printf.sprintf "Failed to load %s" filename)))))
-         (Brr.El.as_target img));
-    Brr.El.set_at (Jstr.v "src") (Some (Jstr.v filename)) img;
-    fut
-  in
-  (* Start async loads *)
-  ignore (load_channel_texture "assets/rock.png" 0);
-  ignore (load_channel_texture "assets/grass.png" 1);
-  ignore (load_channel_texture "assets/forest.png" 2);
-  ignore (load_channel_texture "assets/ice.png" 3);
+  (* Start async load of compressed texture *)
+  load_compressed_detail_map ctx tid;
   tid
 
 (* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
@@ -1565,8 +1540,7 @@ let create_shadow_fbo ctx shadow_map =
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
-let calculate_shadow_matrices ~near_plane:_ ~view_proj:_ ~splits:_ ~light_dir
-    ~world_center ~shadow_map_size:_ =
+let calculate_shadow_matrices ~light_dir ~world_center =
   let matrices = Array.make 3 (Array.make 16 0.) in
 
   (* Simple Cascades based on Splits *)
@@ -1721,18 +1695,18 @@ let prepare_text ctx text =
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
-let draw_text ctx transform_loc transform (tid, w, h) =
+let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
+    (tid, w, h) =
   let open Brr_canvas in
   let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.uniform_matrix4fv ctx transform_loc false
-    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0;
-  Gl.bind_texture ctx Gl.texture_2d None
+  Matrix.blit transform buffer;
+  Gl.uniform_matrix4fv ctx uniforms.transform false view;
+  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
+(* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
 
-let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
-    ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w
-    ~snapped_alpha:_ ctx =
+let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
+    ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
@@ -1872,14 +1846,37 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~splits:_
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+(** Bind all terrain textures to their units. Call at init and after
+    draw_shadows. *)
+let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
+    ~shadow_map ~cover_map_texture ~palette_texture =
+  let open Brr_canvas in
+  Gl.active_texture ctx Gl.texture1;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.active_texture ctx Gl.texture3;
+  Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
+  Gl.active_texture ctx Gl.texture5;
+  Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
+  Gl.active_texture ctx Gl.texture4;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
+  Gl.active_texture ctx Gl.texture7;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+  Gl.active_texture ctx Gl.texture8;
+  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
+  Gl.active_texture ctx Gl.texture0
+
 (* Track whether shadows have been rendered - only render once per session *)
 let shadow_rendered = ref false
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
-    text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo
-    ~shadow_map ~palette_texture ~cover_map_texture ~cover_map_size:_ canvas ctx
-    =
+    text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
+    ~(triangle_uniforms : Render_state.triangle_uniforms)
+    ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
+    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~shadow_matrices ~w ~x ~y
+    ~height ~lat ~lon ~orientation ~points ~tile ~index_count ~ao_texture
+    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+    ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
+  (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1897,13 +1894,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       * rotate_x (-.orientation.beta *. pi /. 180.)
       * rotate_y (-.orientation.gamma *. pi /. 180.)
       * rotate_z (orientation.screen *. pi /. 180.))
-  in
-  (* Radial Grid calculation *)
-  let w_stride = next_power_of_two (n_sectors + 1) 1 in
-  let w_mask_radial = w_stride - 1 in
-  let w_shift_radial =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n lsr 1) in
-    log2 w_stride
   in
   let screen_inclination =
     orientation.screen
@@ -1952,267 +1942,68 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   in
 
   (* SHADOW PASS *)
-  let grid_k = pi /. float n_sectors in
-  let current_azimuth = compute_azimuth transform in
-  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
-
-  let light_dir =
-    let date_ctor = Jv.get Jv.global "Date" in
-    let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
-    let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
-    let sx, sy, sz =
-      if sz < 0.2 then
-        let date = Jv.new' date_ctor [||] in
-        let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
-        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
-        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
-        let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
-        let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
-        Sun.position ~lat ~lon ~time:t
-      else (sx, sy, sz)
-    in
-    (sx, -.sy, sz)
-  in
-  let light_dir_shadows =
-    let sx, sy, sz = light_dir in
-    Matrix.{ x = sx; y = -.sy; z = sz; w = 0. }
-  in
-  let light_dir_shader =
-    let sx, sy, sz = light_dir in
-    Matrix.{ x = sx; y = sy; z = sz; w = 0. }
-  in
-  let view_proj = Matrix.(proj * transform) in
-  let z_far = 50000. in
-  let splits_ratios = [| 50. /. z_far; 400. /. z_far; 4000. /. z_far |] in
-  (* Splits must match shadow matrix radii: 2000, 8000, 25000 *)
-  let splits_dist = [| 2000.; 8000.; 25000. |] in
-
-  (* Calculate World Center for Shadows *)
-  (* Use z=0 since both shadow map terrain and lookup use absolute heights *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
-  let world_center =
-    Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
-  in
-
-  let shadow_matrices =
-    calculate_shadow_matrices ~near_plane:0.1 ~view_proj ~splits:splits_dist
-      ~light_dir:light_dir_shadows ~world_center ~shadow_map_size:2048.
-  in
 
   (* Render shadows once on first frame *)
   if not !shadow_rendered then begin
     shadow_rendered := true;
     draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
-      ~splits:splits_ratios ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat
-      ~lon ~w ~snapped_alpha ctx
+      ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx;
+    (* Rebind terrain textures after draw_shadows disturbed them *)
+    bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
+      ~shadow_map ~cover_map_texture ~palette_texture
   end;
 
-  Gl.clear_color ctx 0.37 0.56 0.85 1.;
+  (* Prepare Clear Color matching fog *)
+  let r, g, b = fog_linear in
+  Gl.clear_color ctx r g b 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
+  (* Sky Draw Moved to After Terrain *)
+  Gl.depth_mask ctx true;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
-
   Gl.enable ctx Gl.cull_face';
-  (* Radial Grid Uniforms *)
-  (* Radial Grid Uniforms *)
-  let width_shift_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_shift")
-  in
-  Gl.uniform1i ctx width_shift_loc w_shift_radial;
-
-  let sectors_div_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_sectors_div")
-  in
-  Gl.uniform1f ctx sectors_div_loc (1. /. (float n_sectors /. 2.));
-
-  (* Exponential Grid Parameters *)
+  (* Determine snapped alpha - changes with camera orientation *)
   let grid_k = pi /. float n_sectors in
-  let height_term = exp (grid_k *. float (n_rings - 1)) in
-  let grid_base = exp grid_k in
-  let grid_scale = 70000. /. (height_term -. 1.) in
-
-  let grid_k_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_k") in
-  let grid_base_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_base")
-  in
-  let grid_scale_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "grid_scale")
-  in
-
-  Gl.uniform1f ctx grid_k_loc grid_k;
-  Gl.uniform1f ctx grid_base_loc grid_base;
-  Gl.uniform1f ctx grid_scale_loc grid_scale;
-
-  let width_mask_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "w_mask")
-  in
-  Gl.uniform1i ctx width_mask_loc w_mask_radial;
-
-  (* Determine snapped alpha *)
-  let sector_angle = grid_k in
-  (* Reuse k *)
   let current_azimuth = compute_azimuth transform in
-  let snapped_alpha =
-    floor ((current_azimuth /. sector_angle) +. 0.5) *. sector_angle
-  in
-  let sa_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "snapped_alpha")
-  in
-  Gl.uniform1f ctx sa_loc snapped_alpha;
-
-  (* Center Offset in world meters relative to tile origin *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
-  let co_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "center_offset")
-  in
-  Gl.uniform2f ctx co_loc center_offset_x center_offset_y;
-
-  let w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "w") in
-  let inv_w_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_w") in
-  let max_lod_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "max_lod")
-  in
-  Gl.uniform1i ctx w_loc w;
-  Gl.uniform1f ctx inv_w_loc (1. /. float w);
-  let max_lod =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 w
-  in
-  Gl.uniform1i ctx max_lod_loc max_lod;
-  let inv_delta_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_delta")
-  in
-  let inv_avg_delta_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "inv_avg_delta")
-  in
-  Gl.uniform2f ctx inv_delta_loc (1. /. deltax) (1. /. deltay);
-  let avg_delta = (deltax +. deltay) *. 0.5 in
-  Gl.uniform1f ctx inv_avg_delta_loc (1. /. avg_delta);
-  let proj_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "proj") in
-  Gl.uniform_matrix4fv ctx proj_loc false
-    (Brr.Tarray.of_bigarray1 (Matrix.array proj));
-  let transform_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "transform")
-  in
-  Gl.uniform_matrix4fv ctx transform_loc false
-    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-  (*  let tile_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "tile") in*)
-  let relief_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "relief") in
-  let noise_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "noise") in
-  let ao_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "ao") in
-  let detail_map_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_detailMap")
-  in
-  let light_dir_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_lightDir")
-  in
-
-  Gl.uniform1i ctx relief_loc 1;
-  Gl.uniform1i ctx noise_loc 2;
-  Gl.uniform1i ctx ao_loc 3;
-  Gl.uniform1i ctx detail_map_loc 5;
-  Gl.uniform3f ctx light_dir_loc light_dir_shader.x light_dir_shader.y
-    light_dir_shader.z;
-
-  (* CLC Uniforms *)
-  let cover_map_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coverMap")
-  in
-  let palette_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_paletteTex")
-  in
-  let camera_offset_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_cameraOffset")
-  in
-  let base_extent_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_baseExtent")
-  in
-  let num_levels_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_numLevels")
-  in
-  Gl.uniform1i ctx cover_map_loc 7;
-  Gl.uniform1i ctx palette_loc 8;
-
-  (* Set clipmap parameters - only needed when use_clc is true, but harmless if not *)
-  Gl.uniform2f ctx camera_offset_loc center_offset_x center_offset_y;
-  (* Clipmap centered on initial view which is (0,0) rel *)
-  Gl.uniform1f ctx base_extent_loc 2048.0;
-  (* Level 0 extent *)
-  Gl.uniform1i ctx num_levels_loc 7;
-
+  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
+  Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
+  (* Matrices - change with camera orientation and aspect ratio *)
+  Matrix.blit proj proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  Matrix.blit transform transform_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
   Gl.bind_vertex_array ctx (Some terrain_geo);
-  Gl.active_texture ctx Gl.texture0;
-  (*  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);*)
-  Gl.active_texture ctx Gl.texture1;
-  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.active_texture ctx Gl.texture2;
-  Gl.bind_texture ctx Gl.texture_2d (Some noise_texture);
-  Gl.active_texture ctx Gl.texture3;
-  Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
-  Gl.active_texture ctx Gl.texture5;
-  Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
-  Gl.active_texture ctx Gl.texture4;
-  Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
-  (* CLC Textures *)
-  Gl.active_texture ctx Gl.texture7;
-  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-  Gl.active_texture ctx Gl.texture8;
-  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
-
-  (* Gl.bind_texture ctx Gl.texture_2d (Some shadow_debug_color); *)
-
-  (* Shadow Uniforms *)
-  let sm_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_matrices")
-  in
-  (* Flatten Matrices *)
-  let flat_matrices =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (16 * 3)
-  in
-  for i = 0 to 2 do
-    let m = Matrix.array shadow_matrices.(i) in
-    for j = 0 to 15 do
-      flat_matrices.{(i * 16) + j} <- m.{j}
-    done
-  done;
-
-  (* Upload Matrix Array *)
-  Gl.uniform_matrix4fv ctx sm_loc false (Brr.Tarray.of_bigarray1 flat_matrices);
-
-  let ss_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_splits")
-  in
-  let splits_ba =
-    Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout splits_dist
-  in
-  Gl.uniform1fv ctx ss_loc (Brr.Tarray.of_bigarray1 splits_ba);
-
-  let smap_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "shadow_map")
-  in
-  Gl.uniform1i ctx smap_loc 4;
-
-  (* Bind AO *)
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
-  Gl.active_texture ctx Gl.texture0;
+
+  (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
+  Gl.depth_mask ctx false;
+  Gl.enable ctx Gl.depth_test;
+  Gl.depth_func ctx Gl.lequal;
+  (* Draw if Z <= 1.0 (Far Plane) *)
+  Gl.disable ctx Gl.cull_face';
+  Gl.use_program ctx sky_pid;
+  Gl.bind_vertex_array ctx (Some text_geo);
+
+  (* Compute Inverse View *)
+  let inv_view = Matrix.inverse transform in
+  Matrix.blit inv_view inv_view_ba;
+  Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
+
+  Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
+
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  Gl.bind_vertex_array ctx None;
+  (* Restore default *)
+  Gl.depth_func ctx Gl.less;
+  Gl.depth_mask ctx true;
 
   Gl.use_program ctx triangle_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
-  let transform_loc =
-    Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
-  in
-  let color_loc = Gl.get_uniform_location ctx triangle_pid (Jstr.v "color") in
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
@@ -2227,10 +2018,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
           rotate_z (angle +. (screen_inclination *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
       in
-      Gl.uniform_matrix4fv ctx transform_loc false
-        (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-      if shown then Gl.uniform4f ctx color_loc 0. 0. 0. 1.
-      else Gl.uniform4f ctx color_loc 0. 0. 0. 0.4;
+      Matrix.blit transform transform_ba;
+      Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
+      if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
+      else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
   Gl.bind_vertex_array ctx None;
@@ -2240,9 +2031,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_vertex_array ctx (Some text_geo);
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
-  let transform_loc =
-    Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
-  in
   List.iter
     (fun (texture, x, y, shown) ->
       if shown then
@@ -2256,7 +2044,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
             * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
             * scale sx sy 1. * translate x y 0.)
         in
-        draw_text ctx transform_loc transform texture)
+        draw_text ctx text_uniforms transform transform_ba transform_ta texture)
     points;
   Gl.disable ctx Gl.blend;
 
@@ -2462,6 +2250,7 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
+  apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
   Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
@@ -2616,8 +2405,9 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+  (* Initialize anisotropic filtering extension *)
+  init_anisotropic_filtering ctx;
   (* CLC mode toggle - used at shader compile time *)
-  let use_clc = true in
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
@@ -2653,11 +2443,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
   (* Create two terrain program variants: CLC and fallback *)
-  let terrain_pid_clc = create_program ctx (terrain_program ~use_clc:true) in
-  let terrain_pid_fallback =
-    create_program ctx (terrain_program ~use_clc:false)
-  in
-  let terrain_pid = if use_clc then terrain_pid_clc else terrain_pid_fallback in
+  let terrain_pid = create_program ctx terrain_program in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
@@ -2692,14 +2478,78 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
-  let noise_texture = make_noise_texture ctx in
   let detail_map = make_detail_map ctx in
   let scale = deltay in
   (* Approx 30m per pixel *)
   let ao_texture = compute_ao ctx w h scale relief_texture in
   let shadow_map = create_shadow_map ctx 2048 2048 3 in
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
+
   let shadow_pid = create_program ctx shadow_program in
+  let sky_pid = create_program ctx sky_program in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
+
+  (* Initialize render state - cache uniform locations and pre-compute params *)
+  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
+  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
+
+  (* Upload static uniforms once at initialization *)
+  Gl.use_program ctx terrain_pid;
+  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
+  Render_state.upload_texture_units ctx terrain_uniforms;
+
+  Gl.use_program ctx shadow_pid;
+  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
+  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+
+  (* Compute session-static values for terrain uniforms *)
+  let light_dir_shader =
+    let date_ctor = Jv.get Jv.global "Date" in
+    let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
+    let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
+    let sx, sy, sz =
+      if sz < 0.2 then
+        let date = Jv.new' date_ctor [||] in
+        (*
+        let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
+*)
+        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
+        let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
+        let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
+        Sun.position ~lat ~lon ~time:t
+      else (sx, sy, sz)
+    in
+    Matrix.{ x = sx; y = -.sy; z = sz; w = 0. }
+  in
+  let light_dir_shadows =
+    Matrix.
+      {
+        x = light_dir_shader.x;
+        y = -.light_dir_shader.y;
+        z = light_dir_shader.z;
+        w = 0.;
+      }
+  in
+  let splits_dist = [| 2000.; 8000.; 25000. |] in
+  let deltay = 40_000. /. 360. /. 3600. *. 1000. in
+  let deltax = deltay *. cos (lat *. pi /. 180.) in
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
+  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let world_center =
+    Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
+  in
+  let shadow_matrices =
+    (* view_proj is ignored in calculate_shadow_matrices *)
+    calculate_shadow_matrices ~light_dir:light_dir_shadows ~world_center
+  in
+
+  (* Upload all session-static uniforms *)
+  Render_state.upload_session_static ctx terrain_pid sky_pid terrain_uniforms
+    sky_uniforms ~w ~lat ~x ~y ~lon ~light_dir:light_dir_shader ~shadow_matrices
+    ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
   let clc_raster_pid = create_program ctx clc_raster_program in
@@ -2716,13 +2566,13 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
-  (* Initialize with zeros *)
+  (* Initialize with grass (index 26 = Natural grasslands) *)
   let init_data =
     Bigarray.(
       Array1.create int8_unsigned c_layout
         (cover_map_size * cover_map_size * clc_levels))
   in
-  Bigarray.Array1.fill init_data 0;
+  Bigarray.Array1.fill init_data 26;
   Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
     clc_levels 0 Gl.red_integer Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
@@ -2751,6 +2601,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
 
+  (* Bind all terrain textures at init - after all textures are created *)
+  bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
+    ~cover_map_texture ~palette_texture;
+
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
   (* Load CLC tiles and GPU rasterize to FBO *)
@@ -2762,7 +2616,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           let max_extent = 2048.0 *. (2.0 ** 6.0) in
           (* 131km *)
           let* _, _, _, _, tiles =
-            Clc_loader.load_tiles_for_gpu ~lat ~lon
+            Clc_loader.load_tiles ~lat ~lon
               ~size:(int_of_float (max_extent /. 30.0))
           in
 
@@ -2907,13 +2761,31 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
         (fun exn ->
           Brr.Console.(
             log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
+
           Lwt.return ()));
+
+  let triangle_uniforms =
+    Render_state.init_triangle_uniforms ctx triangle_pid
+  in
+  let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
+  let transform_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
+  let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
+  let inv_view_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
+  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
+
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
-        text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid
-        ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture
-        ~cover_map_size canvas ctx)
+        text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
+        ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
+        ~shadow_matrices ~w ~x ~y ~lat ~lon ~orientation ~height ~tile ~points
+        ~index_count ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
+        ~palette_texture ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -3045,7 +2917,7 @@ let main () =
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
   let start = setup_events () in
-  display_message "Loading...";
+  display_element (loading_message ());
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
   if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in

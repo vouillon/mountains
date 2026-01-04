@@ -1,0 +1,40 @@
+(rule
+ (target details.png)
+ (deps rock.png grass.png forest.png ice.png)
+ (action
+  (run magick convert %{deps} -resize 1024x1024 -combine %{target})))
+
+(rule
+ (target details.ktx2)
+ (deps details.png)
+ (action
+  (run
+   toktx
+   --assign_oetf
+   linear
+   --encode
+   uastc
+   --genmipmap
+   %{target}
+   %{deps})))
+
+(rule
+ (mode promote)
+ (target details_bc7.ktx2)
+ (deps details.ktx2)
+ (action
+  (run ktx transcode --target bc7 %{deps} %{target})))
+
+(rule
+ (mode promote)
+ (target details_astc.ktx2)
+ (deps details.ktx2)
+ (action
+  (run ktx transcode --target astc %{deps} %{target})))
+
+(rule
+ (mode promote)
+ (target details_etc2.ktx2)
+ (deps details.ktx2)
+ (action
+  (run ktx transcode --target etc-rgba %{deps} %{target})))
