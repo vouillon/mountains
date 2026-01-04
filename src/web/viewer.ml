@@ -1756,12 +1756,13 @@ let prepare_text ctx text =
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
-let draw_text ctx transform_loc transform (tid, w, h) =
+let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
+    (tid, w, h) =
   let open Brr_canvas in
   let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.uniform_matrix4fv ctx transform_loc false
-    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+  Matrix.blit transform buffer;
+  Gl.uniform_matrix4fv ctx uniforms.transform false view;
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
 (* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
 
@@ -1932,9 +1933,12 @@ let shadow_rendered = ref false
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
-    ~shadow_matrices ~w ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo
-    ~shadow_map ~palette_texture ~cover_map_texture canvas ctx =
+    ~(triangle_uniforms : Render_state.triangle_uniforms)
+    ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
+    ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y ~height ~lat ~lon
+    ~orientation ~points ~tile ~index_count ~noise_texture ~ao_texture
+    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+    ~cover_map_texture canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
@@ -2026,10 +2030,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
 
   (* Matrices - change with camera orientation and aspect ratio *)
-  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false
-    (Brr.Tarray.of_bigarray1 (Matrix.array proj));
-  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false
-    (Brr.Tarray.of_bigarray1 (Matrix.array transform));
+  Matrix.blit proj proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  Matrix.blit transform transform_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
@@ -2042,10 +2046,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 
   Gl.use_program ctx triangle_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
-  let transform_loc =
-    Gl.get_uniform_location ctx triangle_pid (Jstr.v "transform")
-  in
-  let color_loc = Gl.get_uniform_location ctx triangle_pid (Jstr.v "color") in
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
@@ -2060,10 +2060,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
           rotate_z (angle +. (screen_inclination *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
       in
-      Gl.uniform_matrix4fv ctx transform_loc false
-        (Brr.Tarray.of_bigarray1 (Matrix.array transform));
-      if shown then Gl.uniform4f ctx color_loc 0. 0. 0. 1.
-      else Gl.uniform4f ctx color_loc 0. 0. 0. 0.4;
+      Matrix.blit transform transform_ba;
+      Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
+      if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
+      else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
   Gl.bind_vertex_array ctx None;
@@ -2073,9 +2073,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.bind_vertex_array ctx (Some text_geo);
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
-  let transform_loc =
-    Gl.get_uniform_location ctx text_pid (Jstr.v "transform")
-  in
   List.iter
     (fun (texture, x, y, shown) ->
       if shown then
@@ -2089,7 +2086,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
             * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
             * scale sx sy 1. * translate x y 0.)
         in
-        draw_text ctx transform_loc transform texture)
+        draw_text ctx text_uniforms transform transform_ba transform_ta texture)
     points;
   Gl.disable ctx Gl.blend;
 
@@ -2804,11 +2801,25 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
         (fun exn ->
           Brr.Console.(
             log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
+
           Lwt.return ()));
+
+  let triangle_uniforms =
+    Render_state.init_triangle_uniforms ctx triangle_pid
+  in
+  let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
+  let transform_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
+  let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
+  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
+
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
-        text_pid text_geo ~terrain_uniforms ~shadow_matrices ~w ~x ~y ~lat ~lon
-        ~orientation ~height ~tile ~points ~index_count ~noise_texture
+        text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
+        ~proj_ba ~transform_ba ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y
+        ~lat ~lon ~orientation ~height ~tile ~points ~index_count ~noise_texture
         ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
         ~palette_texture ~cover_map_texture canvas ctx)
 

@@ -247,3 +247,20 @@ let upload_session_static ctx (u : terrain_uniforms) ~w ~lat ~x ~y ~lon
     Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout shadow_splits
   in
   Gl.uniform1fv ctx u.shadow_splits (Brr.Tarray.of_bigarray1 splits_ba)
+
+type triangle_uniforms = {
+  transform : Gl.uniform_location;
+  color : Gl.uniform_location;
+}
+
+(** Initialize triangle uniform locations. Call once after program creation. *)
+let init_triangle_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { transform = u "transform"; color = u "color" }
+
+type text_uniforms = { transform : Gl.uniform_location }
+
+(** Initialize text uniform locations. Call once after program creation. *)
+let init_text_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { transform = u "transform" }
