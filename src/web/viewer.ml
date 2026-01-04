@@ -333,9 +333,11 @@ let terrain_program ~use_clc =
           vec4 d_xy = texture(u_detailMap, uv_xy);
           vec4 d_yz = texture(u_detailMap, uv_yz);
           
-          // Blend based on surface orientation
-//          return d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
-return d_xy;
+          // Blend based on surface orientation (Corrected for Z-up)
+          // Top/Bottom (blend.z) -> XY projection
+          // Side-Y (blend.y)     -> XZ projection
+          // Side-X (blend.x)     -> YZ projection
+          return d_xy * blend.z + d_xz * blend.y + d_yz * blend.x;
         }
         
         // Procedural normal perturbation based on detail noise
