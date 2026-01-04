@@ -296,36 +296,23 @@ let terrain_program ~use_clc =
           return result;
         }
         
-        // Modify CLC surface based on slope (steep = rock)
+        // Modify detail weights based on slope (steep = more rock)
         void applySlopeModification(inout Surface s, float slope) {
-          // Steep slopes force rock regardless of CLC classification
+          // Steep slopes increase rock weight, decrease others
           float rockForce = smoothstep(0.15, 0.5, slope);
-
-          if (rockForce > 0.01) {
-            // Rock color (grey-brown, linear space)
-            vec3 rockAlbedo = vec3(0.09, 0.08, 0.065);  // ~(76, 72, 65) in sRGB
-            
-            // Blend albedo towards rock based on slope
-            s.albedo = mix(s.albedo, rockAlbedo, rockForce);
-            
-            // Also increase roughness for rock
-            s.roughness = mix(s.roughness, 0.7, rockForce);
-            
-            // Transfer weight from other channels to rock
-            float transferFromIce = rockForce * s.detailWeights.a;
-            float transferFromGrass = rockForce * s.detailWeights.g * 0.8;
-            float transferFromForest = rockForce * s.detailWeights.b * 0.5;
-            
-            s.detailWeights.r += transferFromIce + transferFromGrass + transferFromForest;
-            s.detailWeights.a -= transferFromIce;
-            s.detailWeights.g -= transferFromGrass;
-            s.detailWeights.b -= transferFromForest;
-            
-            // Normalize weights
-            float total = dot(s.detailWeights, vec4(1.0));
-            if (total > 0.01) {
-              s.detailWeights /= total;
-            }
+          
+          // Scale down non-rock weights
+          s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
+          s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
+          s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
+          
+          // Increase rock weight
+          s.detailWeights.r += rockForce;
+          
+          // Normalize weights
+          float total = dot(s.detailWeights, vec4(1.0));
+          if (total > 0.01) {
+            s.detailWeights /= total;
           }
         }
         
