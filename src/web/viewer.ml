@@ -90,11 +90,11 @@ let terrain_program =
         uniform highp float inv_avg_delta;
         uniform highp int max_lod;
         uniform mediump sampler2D relief;
-        out highp float v_dist;
-        out highp float v_h;
+        out mediump float v_dist;
+        out mediump float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
-        out highp float v_ring;  // For debug visualization
+        out lowp float v_ring;  // Debug only, integer-derived
 
         void main()
         {
@@ -164,7 +164,7 @@ let terrain_program =
       |};
     fragment_shader =
       {|#version 300 es
-        precision highp float;
+        precision mediump float;  // Default mediump for mobile performance
         precision highp sampler2DArray;
 
         uniform mediump sampler2D relief;
@@ -175,23 +175,22 @@ let terrain_program =
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
         
         // CLC Material System Uniforms
-        // CLC Material System Uniforms
         uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
         uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
-        uniform highp float u_baseExtent;        // Extent of level 0 in meters
+        uniform mediump float u_baseExtent;      // Extent of level 0 in meters
         uniform int u_numLevels;                 // Number of clipmap levels
         uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
         
-        uniform mat4 shadow_matrices[3];
-        uniform float shadow_splits[3];
-        uniform vec3 u_lightDir;
+        uniform highp mat4 shadow_matrices[3];   // Must be highp for projection
+        uniform mediump float shadow_splits[3];
+        uniform vec3 u_lightDir;                 // Pre-normalized on CPU
 
-        in highp vec2 reliefCoord;
-        in highp float v_dist;
-        in highp float v_h;
-        in highp vec3 v_world_pos;
-        in highp float v_ring;  // For debug visualization
+        in highp vec2 reliefCoord;               // Highp for texture coords
+        in mediump float v_dist;
+        in mediump float v_h;
+        in highp vec3 v_world_pos;               // Highp for world coords
+        in lowp float v_ring;
 
         out lowp vec4 color;
 
@@ -207,10 +206,10 @@ let terrain_program =
         // Lookup surface properties from palette by material ID
         Surface getSurfaceFromID(float id) {
           Surface s;
-          // 2 pixels per material in 128-wide texture
-          float u = (id * 2.0 + 0.5) / 128.0;
-          vec4 pixelA = texture(u_paletteTex, vec2(u, 0.5));
-          vec4 pixelB = texture(u_paletteTex, vec2(u + 1.0/128.0, 0.5));
+          // Use texelFetch for direct integer addressing (no filtering overhead)
+          ivec2 coord = ivec2(int(id) * 2, 0);
+          vec4 pixelA = texelFetch(u_paletteTex, coord, 0);
+          vec4 pixelB = texelFetch(u_paletteTex, coord + ivec2(1, 0), 0);
           
           // sRGB to linear approximation (palette stored as sRGB)
           s.albedo = pixelA.rgb * pixelA.rgb;  // Simplified gamma decode
@@ -287,24 +286,15 @@ let terrain_program =
           float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
           result.waterFactor = mix(wf0, wf1, frac.y);
           
-          // Visualization debug: tint based on level
-          if (false) {
-             vec3 tint = vec3(1.0);
-             if (level == 0) tint = vec3(1.2, 0.8, 0.8); // Red
-             else if (level == 1) tint = vec3(0.8, 1.2, 0.8); // Green
-             else if (level == 2) tint = vec3(0.8, 0.8, 1.2); // Blue
-             else if (level > 2) tint = vec3(1.2, 1.2, 0.8); // Yellow
-             result.albedo *= tint;
-          }
-
           return result;
         }
         
         // Modify CLC surface based on slope (steep = rock)
+        // NOTE: Currently disabled (if false &&). Enable by removing 'false &&'.
         void applySlopeModification(inout Surface s, float slope) {
           // Steep slopes force rock regardless of CLC classification
           float rockForce = smoothstep(0.15, 0.5, slope);
-          
+
           if (false && rockForce > 0.01) {
             // Rock color (grey-brown, linear space)
             vec3 rockAlbedo = vec3(0.09, 0.08, 0.065);  // ~(76, 72, 65) in sRGB
@@ -333,8 +323,14 @@ let terrain_program =
           }
         }
         
-        // Sample packed detail texture with triplanar mapping
-        vec4 sampleDetailTriplanar(vec3 worldPos, vec3 normal) {
+        // Combined triplanar sampling for detail texture and normal map
+        // Single pass: 6 texture samples instead of 12
+        struct TriplanarResult {
+          float detail;
+          vec3 normalOffset;
+        };
+        
+        TriplanarResult sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
           float scale = 0.01;  // ~100m per texture repeat
           vec2 uv_xz = worldPos.xz * scale;
           vec2 uv_xy = worldPos.xy * scale;
@@ -343,16 +339,19 @@ let terrain_program =
           vec3 blend = abs(normal);
           blend /= (blend.x + blend.y + blend.z + 0.0001);
           
-          // Use rock_texture as detail map (R channel for all detail types for now)
-          // Future: use packed RGBA texture with separate detail per channel
+          // Fetch both textures for each plane (6 samples total)
           vec3 d_xz = texture(rock_texture, uv_xz).rgb;
+          vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
           vec3 d_xy = texture(rock_texture, uv_xy).rgb;
+          vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
           vec3 d_yz = texture(rock_texture, uv_yz).rgb;
+          vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
           
-          vec3 blended = d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
-          float detail = dot(blended, vec3(0.33));  // Luminance
-          
-          return vec4(detail, detail, detail, detail);  // Same detail for all channels
+          TriplanarResult r;
+          vec3 blendedDetail = d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
+          r.detail = dot(blendedDetail, vec3(0.33));
+          r.normalOffset = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
+          return r;
         }
         
         // Procedural water with organic shoreline
@@ -410,7 +409,7 @@ let terrain_program =
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
-          vec3 lightDir = normalize(u_lightDir);
+          vec3 lightDir = u_lightDir;  // Pre-normalized on CPU
           float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
 
           // === Shadow Calculation (unchanged) ===
@@ -443,9 +442,9 @@ let terrain_program =
             
             applySlopeModification(surface, slope);
             
-            // Sample detail texture
-            vec4 detailSample = sampleDetailTriplanar(v_world_pos, normal);
-            float detailMod = dot(surface.detailWeights, detailSample);
+            // Sample detail texture and normal map (merged triplanar pass)
+            TriplanarResult triplanar = sampleTriplanarCombined(v_world_pos, normal);
+            float detailMod = triplanar.detail * dot(surface.detailWeights, vec4(1.0));
             
             // Apply detail modulation to albedo
             terrain_color = surface.albedo * (0.7 + 0.6 * detailMod);
@@ -454,19 +453,8 @@ let terrain_program =
             float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
             terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
             
-            // Normal perturbation based on detail weights
-            float tex_scale = 0.01;
-            vec2 uv_xz = v_world_pos.xz * tex_scale;
-            vec2 uv_xy = v_world_pos.xy * tex_scale;
-            vec2 uv_yz = v_world_pos.yz * tex_scale;
-            
-            vec3 blend = abs(normal);
-            blend /= (blend.x + blend.y + blend.z + 0.0001);
-            
-            vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
-            vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
-            vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
-            vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
+            // Normal perturbation from triplanar result
+            vec3 rock_detail = triplanar.normalOffset;
             
             // Weight normal perturbation by rock weight AND roughness
             // Smooth surfaces (low roughness) should have less normal detail
@@ -588,8 +576,8 @@ let terrain_program =
           float occlusion = texture(ao, reliefCoord).r;
           terrain_color = terrain_color * occlusion;
 
-          // === Fog (unchanged) ===
-          vec3 fog_color = pow(vec3(0.37, 0.56, 0.85), vec3(2.2));
+          // === Fog ===
+          const vec3 fog_color = vec3(0.1138, 0.2746, 0.6944);  // Pre-computed pow((0.37,0.56,0.85), 2.2)
           float fog_coeff = exp(v_dist * -2e-5);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
