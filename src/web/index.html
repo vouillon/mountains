@@ -1,46 +1,51 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-<meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
-<meta name="theme-color" content="#5f8fd9">
-<link rel="manifest" href="manifest.json" />
-<link rel="icon" href="icon192.png" />
-<script>
-function loadScript(src) {
-  const script = document.createElement('script');
-  script.src = src;
-  script.type = 'text/javascript';
-  script.defer = true;
-  document.head.appendChild(script);
-}
-function isSafari() {
-  const ua = navigator.userAgent;
-  return /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
-}
-loadScript(WebAssembly.JSTag?'viewer.bc.wasm.js':'viewer.bc.js');
-</script>
-<style>
-html, body {
-  height:100%;
-  margin:0;
-  background: #464d2e;
-}
-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-  user-select:none;
-}
-div {
-  position: absolute;
-  top: 25%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  padding:10px;
-  border-radius:20px;
-  background: white;
-  font-size: 20px;
-}
-</style>
+  <meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#5f8fd9">
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon192.png" />
+  <script>
+    function loadScript(src) {
+      const script = document.createElement('script');
+      script.src = src;
+      script.type = 'text/javascript';
+      script.defer = true;
+      document.head.appendChild(script);
+    }
+    function isSafari() {
+      const ua = navigator.userAgent;
+      return /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
+    }
+    loadScript(WebAssembly.JSTag ? 'viewer.bc.wasm.js' : 'viewer.bc.js');
+  </script>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #464d2e;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      user-select: none;
+    }
+
+    .message {
+      position: absolute;
+      top: 25%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 20px;
+      border-radius: 12px;
+      background: white;
+      max-width: 420px;
+    }
+  </style>
+
 <body>
-<canvas id="canvas" width=640 height=480>
+  <canvas id="canvas" width=640 height=480>
