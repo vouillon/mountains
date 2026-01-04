@@ -317,12 +317,13 @@ let terrain_program ~use_clc =
         }
         
         // Triplanar sampling for packed RGBA detail map
+        // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
         vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
-          float scale = 0.01;  // ~100m per texture repeat
-          vec2 uv_xz = worldPos.xz * scale;
-          vec2 uv_xy = worldPos.xy * scale;
-          vec2 uv_yz = worldPos.yz * scale;
+          highp float scale = 0.004;  // ~500m per texture repeat (matches validated debug scale)
+          highp vec2 uv_xz = worldPos.xz * scale;
+          highp vec2 uv_xy = worldPos.xy * scale;
+          highp vec2 uv_yz = worldPos.yz * scale;
           
           vec3 blend = abs(normal);
           blend /= (blend.x + blend.y + blend.z + 0.0001);
@@ -333,35 +334,51 @@ let terrain_program ~use_clc =
           vec4 d_yz = texture(u_detailMap, uv_yz);
           
           // Blend based on surface orientation
-          return d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
+//          return d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
+return d_xy;
         }
         
         // Procedural normal perturbation based on detail noise
         // Uses screen-space derivatives for directional bump mapping
-        vec3 perturbNormal(vec3 geomNormal, float noise, float roughness, vec4 detailWeights) {
-          // Per-channel perturbation strength:
-          //   Rock (R): high (craggy detail)
-          //   Grass (G): low (smooth appearance)
-          //   Forest (B): medium (ground debris)
-          //   Ice (A): minimal (glossy surface)
-          float strength = detailWeights.r * 3.0 + 
-                           detailWeights.g * 0.5 + 
-                           detailWeights.b * 1.0 +
-                           detailWeights.a * 0.2;
-          
-          // Scale by roughness: smooth surfaces (water, ice) get less bump
-          strength *= roughness;
-          
-          // Use screen-space derivatives for directional perturbation
-          // This gives proper tangent-space bump mapping from the noise
-          float dx = dFdx(noise) * strength * 8.0;
-          float dy = dFdy(noise) * strength * 8.0;
-          
-          // Perturb normal in tangent space
-          vec3 perturbed = geomNormal;
-          perturbed.x -= dx;
-          perturbed.y -= dy;
-          return normalize(perturbed);
+        vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness, vec4 detailWeights) {
+            // 1. Define the "Bump Shape" for each material
+            // We subtract 0.5 to center the noise [-0.5 to +0.5]
+
+            // ROCK (Red): Strong, sharp cracks
+//            float rockBump = (texNoise.r - 0.5) * 1.5; 
+            float rockBump = (texNoise.r - 0.5) * 0.5; 
+
+            // GRASS (Green): Soft, rolling mounds (Multiplied by 0.4 to be gentle)
+            float grassBump = (texNoise.g - 0.5) * 0.4;
+
+            // FOREST (Blue): Medium canopy lumps
+            float forestBump = (texNoise.b - 0.5) * 0.6;
+
+            // ICE (Alpha): Sharp crystalline facets
+            float iceBump = (texNoise.a - 0.5) * 1.2;
+
+            // 2. Mix them based on the current material weights
+            float compositeBump = rockBump * detailWeights.r + 
+                                  grassBump * detailWeights.g + 
+                                  forestBump * detailWeights.b + 
+                                  iceBump * detailWeights.a;
+
+            // 3. Scale by Roughness
+            // Very smooth surfaces (mud/puddles) fill in cracks -> Less Bump.
+            // However, Ice (shiny) is an exception; it needs to stay sharp.
+            float intensity = 1.5 * roughness; 
+            
+            // Hack: If it's mostly Ice or Water, force high sharpness despite low roughness
+            if (detailWeights.a > 0.5) intensity = 1.0; 
+
+            // 4. Apply the Perturbation
+            // We modify the X and Y components of the normal (assuming Z is up).
+            // This tilts the normal vector based on the noise slope.
+            vec3 pNormal = geomNormal;
+            pNormal.xy += compositeBump * intensity;
+
+            // 5. Re-normalize to ensure lighting remains correct
+            return normalize(pNormal);
         }
         
         // Procedural water with organic shoreline
@@ -488,7 +505,8 @@ let terrain_program ~use_clc =
                 vec3 dirtColor = baseAlbedo * vec3(0.6, 0.55, 0.5); 
                 vec3 stoneColor = baseAlbedo * vec3(1.1, 1.1, 1.15);
                 
-                vec3 rockCol = mix(dirtColor, stoneColor, smoothstep(0.35, 0.65, rockNoise));
+                // Use raw texture value for more visible detail
+                vec3 rockCol = mix(dirtColor, stoneColor, rockNoise);
                 accumulatedColor += rockCol * finalWeights.r;
             }
 
@@ -499,7 +517,7 @@ let terrain_program ~use_clc =
                 // Micro: Roots (Low) = Dry/Brown, Tips (High) = Lush
                 vec3 rootColor = baseAlbedo * vec3(0.8, 0.7, 0.5); 
                 vec3 tipColor = baseAlbedo * vec3(1.15, 1.25, 1.0);
-                vec3 microCol = mix(rootColor, tipColor, smoothstep(0.3, 0.7, grassNoise));
+                vec3 microCol = mix(rootColor, tipColor, grassNoise);
                 
                 // Macro: Patches of dying grass (yellowish) vs healthy grass (blue-green)
                 vec3 dyingPatch = vec3(1.05, 1.0, 0.8);
@@ -517,7 +535,7 @@ let terrain_program ~use_clc =
                 vec3 deepShadow = baseAlbedo * vec3(0.2, 0.25, 0.3); // Very dark/cool
                 vec3 sunlitTop = baseAlbedo * vec3(1.2, 1.25, 1.0);
                 
-                vec3 forestCol = mix(deepShadow, sunlitTop, smoothstep(0.2, 0.8, forestNoise));
+                vec3 forestCol = mix(deepShadow, sunlitTop, forestNoise);
                 accumulatedColor += forestCol * finalWeights.b;
             }
             
@@ -533,14 +551,11 @@ let terrain_program ~use_clc =
             float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
             terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
             
-            // Calculate combined noise for normal perturbation
-            float noise = dot(texNoise, finalWeights);
-            
             // Procedural normal perturbation (replaces rock_normal_map)
-            final_normal = perturbNormal(normal, noise, surface.roughness, finalWeights);
+            final_normal = perturbNormal(normal, texNoise, surface.roughness, finalWeights);
 
             // Force water normal to be upward
-            if (waterMask > 0.0) {
+            if (waterMask > 0.01) {
                final_normal = mix(final_normal, vec3(0.0, 0.0, 1.0), waterMask); 
             }
             
@@ -1245,7 +1260,7 @@ let make_noise_texture ctx =
    B = Forest floor (granular, debris-like)
    A = Ice/Snow (smooth, subtle variation) *)
 let make_detail_map ctx =
-  let size = 256 in
+  let size = 1024 in
   let data =
     Bigarray.(Array1.create int8_unsigned c_layout (size * size * 4))
   in
@@ -1366,6 +1381,7 @@ let make_detail_map ctx =
     for px = 0 to size - 1 do
       let fx = float px /. float size in
       let fy = float py /. float size in
+      (* Placeholder for R - will be replaced by rock.png asynchronously *)
       let r = rock_pattern fx fy in
       let g = grass_pattern fx fy in
       let b = forest_pattern fx fy in
@@ -1390,6 +1406,78 @@ let make_detail_map ctx =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
   Gl.bind_texture ctx Gl.texture_2d None;
+
+  (* Async: Load texture into specific channel *)
+  let load_channel_texture filename channel_idx =
+    let img = Brr.El.img () in
+    let fut, set = Fut.create () in
+    ignore
+      (Brr.Ev.listen Brr.Ev.load
+         (fun _ ->
+           let canvas = Brr.El.canvas [] in
+           let img_w = Jv.Int.get (Brr.El.to_jv img) "naturalWidth" in
+           let img_h = Jv.Int.get (Brr.El.to_jv img) "naturalHeight" in
+           Brr_canvas.Canvas.set_w (Brr_canvas.Canvas.of_el canvas) img_w;
+           Brr_canvas.Canvas.set_h (Brr_canvas.Canvas.of_el canvas) img_h;
+           let c2d =
+             Brr_canvas.C2d.get_context (Brr_canvas.Canvas.of_el canvas)
+           in
+           Brr_canvas.C2d.draw_image c2d
+             (Brr_canvas.C2d.image_src_of_el img)
+             ~x:0.0 ~y:0.0;
+           let img_data =
+             Brr_canvas.C2d.get_image_data c2d ~x:0 ~y:0 ~w:img_w ~h:img_h
+           in
+           let pixels = Brr_canvas.C2d.Image_data.data img_data in
+           let pixels_ba = Brr.Tarray.to_bigarray1 pixels in
+
+           (* Update texture data at specific channel *)
+           for py = 0 to size - 1 do
+             for px = 0 to size - 1 do
+               let src_x = px * img_w / size in
+               let src_y = py * img_h / size in
+               let src_idx = ((src_y * img_w) + src_x) * 4 in
+               let r = pixels_ba.{src_idx} in
+               let g = pixels_ba.{src_idx + 1} in
+               let b = pixels_ba.{src_idx + 2} in
+               let lum = (r + g + b) / 3 in
+               let idx = (((py * size) + px) * 4) + channel_idx in
+               data.{idx} <- lum
+             done
+           done;
+
+           (* Update the texture - create fresh typed array to ensure data is copied *)
+           let arr_len = size * size * 4 in
+           let fresh_arr = Brr.Tarray.create Brr.Tarray.Uint8 arr_len in
+           let fresh_ba = Brr.Tarray.to_bigarray1 fresh_arr in
+           for i = 0 to arr_len - 1 do
+             fresh_ba.{i} <- data.{i}
+           done;
+
+           Gl.active_texture ctx Gl.texture5;
+           Gl.bind_texture ctx Gl.texture_2d (Some tid);
+           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
+             Gl.unsigned_byte fresh_arr 0;
+           Gl.generate_mipmap ctx Gl.texture_2d;
+           Gl.bind_texture ctx Gl.texture_2d None;
+           set (Ok ()))
+         (Brr.El.as_target img));
+    ignore
+      (Brr.Ev.listen Brr.Ev.error
+         (fun _ ->
+           set
+             (Error
+                (Jv.Error.v
+                   (Jstr.v (Printf.sprintf "Failed to load %s" filename)))))
+         (Brr.El.as_target img));
+    Brr.El.set_at (Jstr.v "src") (Some (Jstr.v filename)) img;
+    fut
+  in
+  (* Start async loads *)
+  ignore (load_channel_texture "assets/rock.png" 0);
+  ignore (load_channel_texture "assets/grass.png" 1);
+  ignore (load_channel_texture "assets/forest.png" 2);
+  ignore (load_channel_texture "assets/ice.png" 3);
   tid
 
 (* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
@@ -1873,6 +1961,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let sx, sy, sz =
       if sz < 0.2 then
         let date = Jv.new' date_ctor [||] in
+        let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
+        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
         let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
         let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
         let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
@@ -2662,7 +2752,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
   (* Load CLC tiles and GPU rasterize to FBO *)
-  Brr.Console.(log [ Jstr.v "Loading CLC tiles for GPU rasterization..." ]);
   Lwt.async (fun () ->
       Lwt.catch
         (fun () ->
@@ -3015,9 +3104,6 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
-  Format.eprintf "ZZZ %f %f@." lat lon;
-  Format.eprintf "ZZZ %f %f %f %f (%f %f) => %f@." h00 h10 h01 h11 off_x off_y
-    height;
 
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))

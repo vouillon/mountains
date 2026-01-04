@@ -26,6 +26,17 @@
    (run cp -r ../../data %{target}))))
 
 (rule
+ (target
+  (dir assets))
+ (alias all)
+ (deps
+  (glob_files_rec ../../assets/**))
+ (action
+  (progn
+   (run mkdir %{target})
+   (run cp %{deps} %{target}))))
+
+(rule
  (target service_worker.bc.js)
  (alias all)
  (deps service_worker/service_worker.bc.js)

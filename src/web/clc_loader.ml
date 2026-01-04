@@ -540,25 +540,6 @@ let load_full_clc_tile path =
   let open Lwt.Syntax in
   let* data = Reader.read_file path in
   let header = parse_header data in
-  Console.(log [ Jstr.v ("Decoding CLC: " ^ path) ]);
-  Console.(
-    log
-      [
-        Jstr.v
-          (Printf.sprintf
-             "  Header: min_lon=%.4f min_lat=%.4f scale_x=%.6f scale_y=%.6f%s"
-             header.min_lon header.min_lat header.scale_x header.scale_y
-             (if header.is_clc4 then " (CLC4)" else ""));
-      ]);
-  (if header.is_clc4 && header.water_count > 0 then
-     Console.(
-       log
-         [
-           Jstr.v
-             (Printf.sprintf "  Water: %d features, %d verts" header.water_count
-                header.water_verts);
-         ]));
-
   (* Header size varies by format *)
   let offset = if header.is_clc4 then 76 else 48 in
 
@@ -571,8 +552,6 @@ let load_full_clc_tile path =
   let* high_indices, offset = read_stream data offset in
   let* low_indices, offset = read_stream data offset in
 
-  Console.(log [ Jstr.v "CLC streams decompressed, decoding..." ]);
-
   (* Decode CLC geometry *)
   let clc_pos, clc_col, clc_ebo =
     decode_clc_streams header meta_str high_x low_x high_y low_y high_indices
@@ -582,7 +561,6 @@ let load_full_clc_tile path =
   (* Read and decode water streams if CLC4 *)
   let* water_pos, water_col, water_ebo =
     if header.is_clc4 && header.water_count > 0 then begin
-      Console.(log [ Jstr.v "Reading water streams..." ]);
       let* w_meta, offset = read_stream data offset in
       let* w_high_x, offset = read_stream data offset in
       let* w_mid_x, offset = read_stream data offset in
@@ -592,7 +570,6 @@ let load_full_clc_tile path =
       let* w_low_y, offset = read_stream data offset in
       let* w_high_idx, offset = read_stream data offset in
       let* w_low_idx, _ = read_stream data offset in
-      Console.(log [ Jstr.v "Water streams decompressed, decoding..." ]);
       let wp, wc, we =
         decode_water_streams header w_meta w_high_x w_mid_x w_low_x w_high_y
           w_mid_y w_low_y w_high_idx w_low_idx
@@ -608,7 +585,7 @@ let load_full_clc_tile path =
     end
   in
 
-  let tile =
+  Lwt.return
     {
       header;
       positions = clc_pos;
@@ -618,17 +595,6 @@ let load_full_clc_tile path =
       water_colors = water_col;
       water_indices = water_ebo;
     }
-  in
-
-  Console.(
-    log
-      [
-        Jstr.v
-          (Printf.sprintf "Decoded %d CLC + %d water triangles"
-             (Array1.dim tile.indices / 3)
-             (Array1.dim tile.water_indices / 3));
-      ]);
-  Lwt.return tile
 
 (* Load CLC tile and rasterize to texture data *)
 let load_and_rasterize_clc path size =
@@ -759,14 +725,6 @@ let load_tiles_for_gpu ~lat ~lon ~size =
   let dem_range_lon = dem_max_lon -. dem_min_lon in
   let dem_range_lat = dem_max_lat -. dem_min_lat in
 
-  Console.(
-    log
-      [
-        Jstr.v
-          (Printf.sprintf "CLC GPU: DEM bounds lat=%.4f-%.4f lon=%.4f-%.4f"
-             dem_min_lat dem_max_lat dem_min_lon dem_max_lon);
-      ]);
-
   (* Determine which CLC tiles contribute *)
   (* Tiles are named by lower-left corner: N45 covers [45,46), so use floor for all *)
   let min_tile_lat = int_of_float (floor dem_min_lat) in
@@ -795,12 +753,6 @@ let load_tiles_for_gpu ~lat ~lon ~size =
     end
   in
   let* () = load_tiles min_tile_lat min_tile_lon in
-
-  Console.(
-    log
-      [
-        Jstr.v (Printf.sprintf "CLC GPU: Loaded %d tiles" (List.length !tiles));
-      ]);
 
   (* Reverse to get correct draw order (smaller features first) *)
   Lwt.return
