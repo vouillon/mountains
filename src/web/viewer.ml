@@ -478,6 +478,11 @@ let terrain_program =
             vec3 perturbed = normal;
             perturbed.xy += rock_detail.xy * perturbStrength;
             final_normal = normalize(perturbed);
+
+            // Force water normal to be upward
+            if (waterMask > 0.0) {
+               final_normal = mix(final_normal, vec3(0.0, 0.0, 1.0), waterMask); 
+            }
             
             // Store roughness and reflection properties for lighting
             float material_roughness = surface.roughness;

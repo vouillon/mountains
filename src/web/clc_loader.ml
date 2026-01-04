@@ -268,9 +268,10 @@ let decode_water_streams header meta_str high_x mid_x low_x high_y mid_y low_y
         let qy = (!prev_y + sdy) land 0xFFFFFF in
         prev_y := qy;
 
-        (* Scale from water range (0-220000) to u16 range (0-65535) *)
-        let scaled_x = qx * 65535 / 220000 in
-        let scaled_y = qy * 65535 / 220000 in
+        (* Scale from water range (0-220000) to u16 range (0-65535) 
+           Use float to avoid overflow on 32-bit JS integers *)
+        let scaled_x = int_of_float (float_of_int qx *. 65535. /. 220000.) in
+        let scaled_y = int_of_float (float_of_int qy *. 65535. /. 220000.) in
 
         let out_idx = base_v + k in
         Array1.set arr_pos (out_idx * 2) scaled_x;
