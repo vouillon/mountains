@@ -16,7 +16,13 @@
 - Check for off-by-one errors
 - Use RGE Alti
   https://medium.com/@gui.attard/pre-processing-the-dem-of-france-rge-alti-5m-for-implementation-into-earth-engine-de9a0778e0d9
-- Zoom out a bit? Gesture for zooming
+- Zoom out a bit? Gesture for zooming. Pan
+- Improve loading (incremental / web worker)
 
 - Copyright notices:
-  "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved”
+
+Map Data & Terrain Sources:
+
+    Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
+    Land Use: © European Union, Copernicus Land Monitoring Service [Year], European Environment Agency (EEA)
+    Water Bodies: © OpenStreetMap contributors (Open Database License)
