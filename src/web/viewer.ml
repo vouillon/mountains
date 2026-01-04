@@ -178,7 +178,7 @@ let terrain_program =
         uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
         uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
-        uniform mediump float u_baseExtent;      // Extent of level 0 in meters
+        uniform highp float u_baseExtent;       // Extent of level 0 in meters (highp for coord math)
         uniform int u_numLevels;                 // Number of clipmap levels
         uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
         
@@ -227,23 +227,23 @@ let terrain_program =
         }
         
         // Manual bilinear filtering of CLC IDs (blend Surface properties)
-        Surface sampleCLCBilinear(vec2 worldPos) {
+        Surface sampleCLCBilinear(highp vec2 worldPos) {
           // Calculate distance from center (camera) for LOD selection
-          vec2 relPos = worldPos - u_cameraOffset;
-          float dist = max(abs(relPos.x), abs(relPos.y));
+          highp vec2 relPos = worldPos - u_cameraOffset;
+          highp float dist = max(abs(relPos.x), abs(relPos.y));
           
           // Select clipmap level based on distance
           // Level L covers extent = u_baseExtent * 2^L
           // We want the finest level that covers this point
-          float desiredLevel = max(0.0, 1.0 + log2(dist / u_baseExtent));
+          highp float desiredLevel = max(0.0, 1.0 + log2(dist / u_baseExtent));
           int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
           
           // Calculate texture coordinates for this level
-          float levelExtent = u_baseExtent * pow(2.0, float(level));
-          vec2 texCoord = (relPos / levelExtent) + 0.5;
+          highp float levelExtent = u_baseExtent * pow(2.0, float(level));
+          highp vec2 texCoord = (relPos / levelExtent) + 0.5;
           
           vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
-          vec2 texelPos = texCoord * texSize - 0.5;
+          highp vec2 texelPos = texCoord * texSize - 0.5;
           
           ivec2 p00 = ivec2(floor(texelPos));
           vec2 frac = fract(texelPos);
@@ -386,10 +386,6 @@ let terrain_program =
 
         // ========== Shadow Functions ==========
         
-        float sample_shadow(int layer, vec2 coords, float compare) {
-             return texture(shadow_map, vec4(coords, float(layer), compare));
-        }
-
         float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
             float result = 0.0;
             for(int x = -1; x <= 1; ++x) {
@@ -550,7 +546,6 @@ let terrain_program =
                vec3 c_grass_dry = vec3(0.30, 0.35, 0.12);
                vec3 c_grass_height = mix(c_grass_lush, c_grass_dry, height_factor);
                
-               vec3 patch_noise = texture(noise, reliefCoord * 5.0).rgb;
                vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
                vec3 grass_color = c_grass_height * (0.85 + 0.3 * grass_noise);
                
