@@ -450,21 +450,94 @@ let terrain_program ~use_clc =
             applySlopeModification(surface, slope);
             
             // Sample packed detail map via triplanar projection
-            vec4 triplanarSample = sampleTriplanarCombined(v_world_pos, normal);
+            vec4 texNoise = sampleTriplanarCombined(v_world_pos, normal);
             
-            // Calculate detail noise as weighted blend of all channels
-            // For "Sparsely Vegetated" (R=0.6, G=0.4), this blends rock cracks with grass softness
-            float noise = dot(triplanarSample, surface.detailWeights);
+            // -----------------------------------------------------------------------
+            // STEP A: HEIGHT-BASED BLENDING ("Clumping")
+            // -----------------------------------------------------------------------
+            // Solves "Ghosting" in sparse areas (e.g. 50%% Rock / 50%% Grass).
+            // Boosts the channel that matches the texture noise (High noise = Top layer).
             
-            // Apply detail modulation to albedo
-            terrain_color = surface.albedo * (0.7 + 0.6 * noise);
+            float heightSharpness = 4.0; 
+            vec4 heightWeights = surface.detailWeights * (texNoise + 0.2); 
+            heightWeights = pow(heightWeights, vec4(heightSharpness));
+            
+            // Re-normalize
+            float weightSum = dot(heightWeights, vec4(1.0));
+            vec4 finalWeights = (weightSum > 0.001) ? (heightWeights / weightSum) : surface.detailWeights;
+
+            // -----------------------------------------------------------------------
+            // STEP B: BIO-VARIATION (Color & Texture)
+            // -----------------------------------------------------------------------
+            
+            // Calculate Procedural Macro Noise (Cheap Math, No Texture Lookup)
+            // Creates large-scale patches (healthy vs dry, sediment vs clean)
+            vec2 macroPos = v_world_pos.xy * 0.005; 
+            float macroNoise = sin(macroPos.x) * cos(macroPos.y * 0.8) + 
+                               sin(macroPos.x * 0.5 + macroPos.y * 1.5) * 0.5;
+            float patchFactor = macroNoise * 0.3 + 0.5; // 0.0 to 1.0
+
+            vec3 accumulatedColor = vec3(0.0);
+            vec3 baseAlbedo = surface.albedo;
+
+            // --- ROCK (Red Channel) ---
+            if (finalWeights.r > 0.001) {
+                float rockNoise = texNoise.r;
+                
+                // Sedimentation: Cracks (Low) = Dark Dirt, Tips (High) = Bleached Stone
+                vec3 dirtColor = baseAlbedo * vec3(0.6, 0.55, 0.5); 
+                vec3 stoneColor = baseAlbedo * vec3(1.1, 1.1, 1.15);
+                
+                vec3 rockCol = mix(dirtColor, stoneColor, smoothstep(0.35, 0.65, rockNoise));
+                accumulatedColor += rockCol * finalWeights.r;
+            }
+
+            // --- GRASS (Green Channel) ---
+            if (finalWeights.g > 0.001) {
+                float grassNoise = texNoise.g;
+                
+                // Micro: Roots (Low) = Dry/Brown, Tips (High) = Lush
+                vec3 rootColor = baseAlbedo * vec3(0.8, 0.7, 0.5); 
+                vec3 tipColor = baseAlbedo * vec3(1.15, 1.25, 1.0);
+                vec3 microCol = mix(rootColor, tipColor, smoothstep(0.3, 0.7, grassNoise));
+                
+                // Macro: Patches of dying grass (yellowish) vs healthy grass (blue-green)
+                vec3 dyingPatch = vec3(1.05, 1.0, 0.8);
+                vec3 healthyPatch = vec3(0.95, 1.0, 1.05);
+                vec3 macroMod = mix(dyingPatch, healthyPatch, patchFactor);
+                
+                accumulatedColor += (microCol * macroMod) * finalWeights.g;
+            }
+
+            // --- FOREST (Blue Channel) ---
+            if (finalWeights.b > 0.001) {
+                float forestNoise = texNoise.b;
+                
+                // Volume: Deep Shadow (Low) vs Sunlit Canopy (High)
+                vec3 deepShadow = baseAlbedo * vec3(0.2, 0.25, 0.3); // Very dark/cool
+                vec3 sunlitTop = baseAlbedo * vec3(1.2, 1.25, 1.0);
+                
+                vec3 forestCol = mix(deepShadow, sunlitTop, smoothstep(0.2, 0.8, forestNoise));
+                accumulatedColor += forestCol * finalWeights.b;
+            }
+            
+            // --- ICE (Alpha Channel) ---
+            if (finalWeights.a > 0.001) {
+                vec3 iceCol = mix(baseAlbedo, vec3(0.95), texNoise.a * 0.8);
+                accumulatedColor += iceCol * finalWeights.a;
+            }
+            
+            terrain_color = accumulatedColor;
             
             // Water handling
             float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
             terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
             
+            // Calculate combined noise for normal perturbation
+            float noise = dot(texNoise, finalWeights);
+            
             // Procedural normal perturbation (replaces rock_normal_map)
-            final_normal = perturbNormal(normal, noise, surface.roughness, surface.detailWeights);
+            final_normal = perturbNormal(normal, noise, surface.roughness, finalWeights);
 
             // Force water normal to be upward
             if (waterMask > 0.0) {
