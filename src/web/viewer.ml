@@ -67,7 +67,11 @@ let compute_azimuth m =
   in
   azimuth -. (pi /. 2.)
 
-let terrain_program =
+(* Terrain shader with compile-time CLC toggle for optimal code generation *)
+let terrain_program ~use_clc =
+  let use_clc_define =
+    if use_clc then "#define USE_CLC 1" else "#define USE_CLC 0"
+  in
   {
     vertex_shader =
       {|#version 300 es
@@ -163,24 +167,26 @@ let terrain_program =
         }
       |};
     fragment_shader =
-      {|#version 300 es
+      Printf.sprintf
+        {|#version 300 es
+        %s
         precision mediump float;  // Default mediump for mobile performance
         precision highp sampler2DArray;
 
         uniform mediump sampler2D relief;
         uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
-        uniform mediump sampler2D rock_texture;  // Detail texture (triplanar)
-        uniform mediump sampler2D rock_normal_map;  // Normal map (triplanar)
+        uniform mediump sampler2D u_detailMap;  // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
         
-        // CLC Material System Uniforms
+        // CLC Material System Uniforms (only needed when USE_CLC is 1)
+#if USE_CLC
         uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
         uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
         uniform highp float u_baseExtent;       // Extent of level 0 in meters (highp for coord math)
         uniform int u_numLevels;                 // Number of clipmap levels
-        uniform bool u_useCLC;                   // Enable CLC system (for gradual rollout)
+#endif
         
         uniform highp mat4 shadow_matrices[3];   // Must be highp for projection
         uniform mediump float shadow_splits[3];
@@ -194,6 +200,7 @@ let terrain_program =
 
         out lowp vec4 color;
 
+#if USE_CLC
         // ========== CLC Material System ==========
         
         struct Surface {
@@ -290,12 +297,11 @@ let terrain_program =
         }
         
         // Modify CLC surface based on slope (steep = rock)
-        // NOTE: Currently disabled (if false &&). Enable by removing 'false &&'.
         void applySlopeModification(inout Surface s, float slope) {
           // Steep slopes force rock regardless of CLC classification
           float rockForce = smoothstep(0.15, 0.5, slope);
 
-          if (false && rockForce > 0.01) {
+          if (rockForce > 0.01) {
             // Rock color (grey-brown, linear space)
             vec3 rockAlbedo = vec3(0.09, 0.08, 0.065);  // ~(76, 72, 65) in sRGB
             
@@ -323,14 +329,9 @@ let terrain_program =
           }
         }
         
-        // Combined triplanar sampling for detail texture and normal map
-        // Single pass: 6 texture samples instead of 12
-        struct TriplanarResult {
-          float detail;
-          vec3 normalOffset;
-        };
-        
-        TriplanarResult sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
+        // Triplanar sampling for packed RGBA detail map
+        // Returns blended detail weights from all projection planes
+        vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
           float scale = 0.01;  // ~100m per texture repeat
           vec2 uv_xz = worldPos.xz * scale;
           vec2 uv_xy = worldPos.xy * scale;
@@ -339,26 +340,48 @@ let terrain_program =
           vec3 blend = abs(normal);
           blend /= (blend.x + blend.y + blend.z + 0.0001);
           
-          // Fetch both textures for each plane (6 samples total)
-          vec3 d_xz = texture(rock_texture, uv_xz).rgb;
-          vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
-          vec3 d_xy = texture(rock_texture, uv_xy).rgb;
-          vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
-          vec3 d_yz = texture(rock_texture, uv_yz).rgb;
-          vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
+          // Sample packed RGBA detail map from each projection plane
+          vec4 d_xz = texture(u_detailMap, uv_xz);
+          vec4 d_xy = texture(u_detailMap, uv_xy);
+          vec4 d_yz = texture(u_detailMap, uv_yz);
           
-          TriplanarResult r;
-          vec3 blendedDetail = d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
-          r.detail = dot(blendedDetail, vec3(0.33));
-          r.normalOffset = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
-          return r;
+          // Blend based on surface orientation
+          return d_xz * blend.z + d_xy * blend.y + d_yz * blend.x;
+        }
+        
+        // Procedural normal perturbation based on detail noise
+        // Uses screen-space derivatives for directional bump mapping
+        vec3 perturbNormal(vec3 geomNormal, float noise, float roughness, vec4 detailWeights) {
+          // Per-channel perturbation strength:
+          //   Rock (R): high (craggy detail)
+          //   Grass (G): low (smooth appearance)
+          //   Forest (B): medium (ground debris)
+          //   Ice (A): minimal (glossy surface)
+          float strength = detailWeights.r * 3.0 + 
+                           detailWeights.g * 0.5 + 
+                           detailWeights.b * 1.0 +
+                           detailWeights.a * 0.2;
+          
+          // Scale by roughness: smooth surfaces (water, ice) get less bump
+          strength *= roughness;
+          
+          // Use screen-space derivatives for directional perturbation
+          // This gives proper tangent-space bump mapping from the noise
+          float dx = dFdx(noise) * strength * 8.0;
+          float dy = dFdy(noise) * strength * 8.0;
+          
+          // Perturb normal in tangent space
+          vec3 perturbed = geomNormal;
+          perturbed.x -= dx;
+          perturbed.y -= dy;
+          return normalize(perturbed);
         }
         
         // Procedural water with organic shoreline
-        float getWaterMask(vec2 worldPos, float waterFactor) {
+        float getWaterMask(highp vec2 worldPos, float waterFactor) {
           // High-frequency noise for organic shoreline edge
           float noise_val = texture(noise, worldPos * 0.002).r;
-          float jitter = (noise_val - 0.5) * 0.25;  // +/- 12.5% variation
+          float jitter = (noise_val - 0.5) * 0.25;  // +/- 12.5%% variation
           
           // Sharp threshold with smooth transition
           float threshold = 0.5 + jitter;
@@ -383,6 +406,7 @@ let terrain_program =
           
           return result;
         }
+#endif
 
         // ========== Shadow Functions ==========
         
@@ -432,36 +456,28 @@ let terrain_program =
           vec3 terrain_color;
           vec3 final_normal = normal;
           
-          if (u_useCLC) {
+#if USE_CLC
             // === CLC-Based Material ===
             Surface surface = sampleCLCBilinear(v_world_pos.xy);
             
             applySlopeModification(surface, slope);
             
-            // Sample detail texture and normal map (merged triplanar pass)
-            TriplanarResult triplanar = sampleTriplanarCombined(v_world_pos, normal);
-            float detailMod = triplanar.detail * dot(surface.detailWeights, vec4(1.0));
+            // Sample packed detail map via triplanar projection
+            vec4 triplanarSample = sampleTriplanarCombined(v_world_pos, normal);
+            
+            // Calculate detail noise as weighted blend of all channels
+            // For "Sparsely Vegetated" (R=0.6, G=0.4), this blends rock cracks with grass softness
+            float noise = dot(triplanarSample, surface.detailWeights);
             
             // Apply detail modulation to albedo
-            terrain_color = surface.albedo * (0.7 + 0.6 * detailMod);
+            terrain_color = surface.albedo * (0.7 + 0.6 * noise);
             
             // Water handling
             float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
             terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
             
-            // Normal perturbation from triplanar result
-            vec3 rock_detail = triplanar.normalOffset;
-            
-            // Weight normal perturbation by rock weight AND roughness
-            // Smooth surfaces (low roughness) should have less normal detail
-            float perturbStrength = surface.detailWeights.r * 3.0 + 
-                                   surface.detailWeights.g * 0.5 + 
-                                   surface.detailWeights.b * 1.0;
-            perturbStrength *= surface.roughness;  // Scale by roughness
-            
-            vec3 perturbed = normal;
-            perturbed.xy += rock_detail.xy * perturbStrength;
-            final_normal = normalize(perturbed);
+            // Procedural normal perturbation (replaces rock_normal_map)
+            final_normal = perturbNormal(normal, noise, surface.roughness, surface.detailWeights);
 
             // Force water normal to be upward
             if (waterMask > 0.0) {
@@ -499,7 +515,7 @@ let terrain_program =
             terrain_color += specColor * 0.3;
             terrain_color = mix(terrain_color, envColor, reflectivity * 0.3);
             
-          } else {
+#else
             // === FALLBACK: Original slope-based biome logic ===
             vec3 c_water = vec3(0.05, 0.25, 0.45);
             vec3 c_grass = vec3(0.1, 0.4, 0.15);
@@ -518,26 +534,21 @@ let terrain_program =
                
                float rock_mixin = smoothstep(0.15, 0.5, slope);
                
-               vec3 tex_xz = texture(rock_texture, uv_xz).rgb;
-               vec3 tex_xy = texture(rock_texture, uv_xy).rgb;
-               vec3 tex_yz = texture(rock_texture, uv_yz).rgb;
-               vec3 rock_tex = tex_xz * blend.z + tex_xy * blend.y + tex_yz * blend.x;
+               vec4 tex_xz = texture(u_detailMap, uv_xz);
+               vec4 tex_xy = texture(u_detailMap, uv_xy);
+               vec4 tex_yz = texture(u_detailMap, uv_yz);
+               vec4 detail_tex = tex_xz * blend.z + tex_xy * blend.y + tex_yz * blend.x;
                
-               vec3 n_xz = texture(rock_normal_map, uv_xz).rgb * 2.0 - 1.0;
-               vec3 n_xy = texture(rock_normal_map, uv_xy).rgb * 2.0 - 1.0;
-               vec3 n_yz = texture(rock_normal_map, uv_yz).rgb * 2.0 - 1.0;
-               vec3 rock_detail = n_xz * blend.z + n_xy * blend.y + n_yz * blend.x;
+               // Use rock channel for rock texture, grass channel for fine detail
+               float rock_lum = detail_tex.r;
                
-               float rock_lum = dot(rock_tex, vec3(0.33));
-               
-               vec3 grass_normal_sample = texture(rock_normal_map, v_world_pos.xy * 0.005).rgb * 2.0 - 1.0;
+               // Procedural normal perturbation using noise
+               float noise_val = rock_lum * rock_mixin + detail_tex.g * (1.0 - rock_mixin);
                vec3 perturbed = normal;
-               perturbed.xy += grass_normal_sample.xy * (1.0 - rock_mixin) * 0.8;
-               perturbed.xy += rock_detail.xy * rock_mixin * 3.0;
+               perturbed.xy += (noise_val - 0.5) * (1.0 + rock_mixin * 2.0);
                final_normal = normalize(perturbed);
                
-               float geometric_ao = 0.5 + 0.5 * rock_detail.z;
-               geometric_ao = geometric_ao * geometric_ao;
+               float geometric_ao = 0.8 + 0.2 * rock_lum;
                float micro_ao = 0.5 + 0.5 * rock_lum;
                float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
                
@@ -553,7 +564,7 @@ let terrain_program =
                
                terrain_color = mix(grass_color, rock_color, rock_mixin);
             }
-          }
+#endif
           
           // === Lighting (unchanged) ===
           float final_l = max(0.0, dot(final_normal, lightDir));
@@ -580,7 +591,8 @@ let terrain_program =
           // Gamma correction
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
         }
-      |};
+      |}
+        use_clc_define;
     attributes = [];
   }
 
@@ -1167,72 +1179,148 @@ let make_noise_texture ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-(* Create procedural rock texture with coherent patterns *)
-let make_rock_texture ctx =
+(* Create packed RGBA detail map with distinct patterns per channel:
+   R = Rock/Ground (cracks, rough edges)
+   G = Grass/Vegetation (soft, organic patterns)
+   B = Forest floor (granular, debris-like)
+   A = Ice/Snow (smooth, subtle variation) *)
+let make_detail_map ctx =
   let size = 256 in
   let data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 3))
+    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 4))
   in
-  (* Simple value noise function *)
-  let hash x y =
-    let n = x + (y * 57) in
+  (* Better hash function with less correlation *)
+  let hash x y seed =
+    let n = x + (y * 57) + (seed * 131) in
     let n = (n lsl 13) lxor n in
-    ((n * ((n * n * 15731) + 789221)) + 1376312589) land 0x7fffffff
+    let n = (n * ((n * n * 15731) + 789221)) + 1376312589 in
+    (* Extra mixing step to reduce correlation *)
+    let n = n lxor (n lsr 16) * 0x45d9f3b in
+    let n = n lxor (n lsr 16) in
+    n land 0x7fffffff
   in
-  let noise x y = float (hash x y land 255) /. 255.0 in
-  (* Smooth noise with bilinear interpolation - tileable at given period *)
-  let smooth_noise_tiled fx fy period =
-    let x = int_of_float fx in
-    let y = int_of_float fy in
-    let x0 = x mod period in
-    let y0 = y mod period in
-    let x1 = (x + 1) mod period in
-    let y1 = (y + 1) mod period in
+  let noise x y seed = float (hash x y seed land 255) /. 255.0 in
+
+  (* Smoothstep function for Hermite interpolation *)
+  let smoothstep t = t *. t *. (3.0 -. (2.0 *. t)) in
+
+  (* Smooth noise with Hermite interpolation - eliminates grid artifacts *)
+  let smooth_noise_tiled fx fy period seed =
+    let x = int_of_float (if fx >= 0.0 then fx else fx -. 1.0) in
+    let y = int_of_float (if fy >= 0.0 then fy else fy -. 1.0) in
+    let x0 = ((x mod period) + period) mod period in
+    let y0 = ((y mod period) + period) mod period in
+    let x1 = (x0 + 1) mod period in
+    let y1 = (y0 + 1) mod period in
     let frac_x = fx -. float x in
     let frac_y = fy -. float y in
-    let v00 = noise x0 y0 in
-    let v10 = noise x1 y0 in
-    let v01 = noise x0 y1 in
-    let v11 = noise x1 y1 in
-    let i0 = v00 +. (frac_x *. (v10 -. v00)) in
-    let i1 = v01 +. (frac_x *. (v11 -. v01)) in
-    i0 +. (frac_y *. (i1 -. i0))
+    (* Use smoothstep instead of linear interpolation *)
+    let sx = smoothstep frac_x in
+    let sy = smoothstep frac_y in
+    let v00 = noise x0 y0 seed in
+    let v10 = noise x1 y0 seed in
+    let v01 = noise x0 y1 seed in
+    let v11 = noise x1 y1 seed in
+    let i0 = v00 +. (sx *. (v10 -. v00)) in
+    let i1 = v01 +. (sx *. (v11 -. v01)) in
+    i0 +. (sy *. (i1 -. i0))
   in
-  (* Multi-octave fractal noise - tileable with rotation to reduce banding *)
-  let fractal_noise x y =
+
+  (* Domain warping: offset coordinates by noise to break up grid alignment *)
+  let warp_coords x y seed_offset =
+    let wx = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 (500 + seed_offset) in
+    let wy =
+      smooth_noise_tiled
+        ((x *. 4.0) +. 5.3)
+        ((y *. 4.0) +. 1.7)
+        4 (600 + seed_offset)
+    in
+    (x +. ((wx -. 0.5) *. 0.15), y +. ((wy -. 0.5) *. 0.15))
+  in
+
+  (* Rock pattern: Multi-octave fractal noise with domain warping and rotation *)
+  let rock_pattern x y =
+    (* Apply domain warping to break grid alignment *)
+    let x, y = warp_coords x y 0 in
     (* Rotate coordinates at each octave to break up directional patterns *)
     let rot_x1 = x in
     let rot_y1 = y in
     let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
-    (* 30 degree rotation *)
     let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
     let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
-    (* 60 degree rotation *)
     let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 16.0) (rot_y1 *. 16.0) 16 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 32.0) (rot_y2 *. 32.0) 32 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 64.0) (rot_y3 *. 64.0) 64 in
-    let v4 = smooth_noise_tiled (rot_x1 *. 128.0) (rot_y1 *. 128.0) 128 in
-    (v1 *. 0.4) +. (v2 *. 0.3) +. (v3 *. 0.2) +. (v4 *. 0.1)
+    let rot_x4 = (-.x *. 0.707) +. (y *. 0.707) in
+    let rot_y4 = (-.y *. 0.707) -. (x *. 0.707) in
+    let v1 = smooth_noise_tiled (rot_x1 *. 16.0) (rot_y1 *. 16.0) 16 0 in
+    let v2 = smooth_noise_tiled (rot_x2 *. 32.0) (rot_y2 *. 32.0) 32 1 in
+    let v3 = smooth_noise_tiled (rot_x3 *. 64.0) (rot_y3 *. 64.0) 64 2 in
+    let v4 = smooth_noise_tiled (rot_x4 *. 128.0) (rot_y4 *. 128.0) 128 3 in
+    let v = (v1 *. 0.4) +. (v2 *. 0.3) +. (v3 *. 0.2) +. (v4 *. 0.1) in
+    (* Apply contrast curve for sharper cracks *)
+    let v = ((v -. 0.5) *. 1.5) +. 0.5 in
+    max 0.0 (min 1.0 v)
+  in
+
+  (* Grass pattern: Softer, more organic with domain warping and rotation *)
+  let grass_pattern x y =
+    let x, y = warp_coords x y 100 in
+    let rot_x1 = x in
+    let rot_y1 = y in
+    let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
+    let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
+    let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
+    let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
+    let v1 = smooth_noise_tiled (rot_x1 *. 8.0) (rot_y1 *. 8.0) 8 100 in
+    let v2 = smooth_noise_tiled (rot_x2 *. 16.0) (rot_y2 *. 16.0) 16 101 in
+    let v3 = smooth_noise_tiled (rot_x3 *. 32.0) (rot_y3 *. 32.0) 32 102 in
+    (* Softer blend, less high-frequency detail *)
+    (v1 *. 0.5) +. (v2 *. 0.35) +. (v3 *. 0.15)
+  in
+
+  (* Forest floor: Granular, debris-like pattern with domain warping *)
+  let forest_pattern x y =
+    let x, y = warp_coords x y 200 in
+    let rot_x1 = x in
+    let rot_y1 = y in
+    let rot_x2 = (x *. 0.707) +. (y *. 0.707) in
+    let rot_y2 = (y *. 0.707) -. (x *. 0.707) in
+    let rot_x3 = (-.x *. 0.5) +. (y *. 0.866) in
+    let rot_y3 = (-.y *. 0.866) -. (x *. 0.5) in
+    let v1 = smooth_noise_tiled (rot_x1 *. 24.0) (rot_y1 *. 24.0) 24 200 in
+    let v2 = smooth_noise_tiled (rot_x2 *. 48.0) (rot_y2 *. 48.0) 48 201 in
+    let v3 = smooth_noise_tiled (rot_x3 *. 96.0) (rot_y3 *. 96.0) 96 202 in
+    (* Medium frequency mix for granular appearance *)
+    (v1 *. 0.3) +. (v2 *. 0.4) +. (v3 *. 0.3)
+  in
+
+  (* Ice pattern: Very smooth, subtle variation *)
+  let ice_pattern x y =
+    let v1 = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 300 in
+    let v2 = smooth_noise_tiled (x *. 8.0) (y *. 8.0) 8 301 in
+    (* Very low frequency, subtle variation *)
+    let v = (v1 *. 0.7) +. (v2 *. 0.3) in
+    (* Compress range for subtle effect *)
+    0.4 +. (v *. 0.2)
   in
   for py = 0 to size - 1 do
     for px = 0 to size - 1 do
       let fx = float px /. float size in
       let fy = float py /. float size in
-      let v = fractal_noise fx fy in
-      (* Rock color: grey-brown tones *)
-      let base_r = 0.35 +. (v *. 0.3) in
-      let base_g = 0.32 +. (v *. 0.28) in
-      let base_b = 0.28 +. (v *. 0.25) in
-      let idx = ((py * size) + px) * 3 in
-      data.{idx} <- min 255 (int_of_float (base_r *. 255.0));
-      data.{idx + 1} <- min 255 (int_of_float (base_g *. 255.0));
-      data.{idx + 2} <- min 255 (int_of_float (base_b *. 255.0))
+      let r = rock_pattern fx fy in
+      let g = grass_pattern fx fy in
+      let b = forest_pattern fx fy in
+      let a = ice_pattern fx fy in
+      let idx = ((py * size) + px) * 4 in
+      data.{idx} <- min 255 (int_of_float (r *. 255.0));
+      data.{idx + 1} <- min 255 (int_of_float (g *. 255.0));
+      data.{idx + 2} <- min 255 (int_of_float (b *. 255.0));
+      data.{idx + 3} <- min 255 (int_of_float (a *. 255.0))
     done
   done;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb size size 0 Gl.rgb Gl.unsigned_byte
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba size size 0 Gl.rgba
+    Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
   Gl.generate_mipmap ctx Gl.texture_2d;
@@ -1242,53 +1330,7 @@ let make_rock_texture ctx =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
   Gl.bind_texture ctx Gl.texture_2d None;
-  (* Also generate a normal map from the height values *)
-  let normal_data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 3))
-  in
-  let strength = 5.0 in
-  (* Normal strength - higher = more bumpy *)
-  for py = 0 to size - 1 do
-    for px = 0 to size - 1 do
-      (* Get heights at neighboring pixels (with wrapping) *)
-      let get_height x y =
-        let wx = (x + size) mod size in
-        let wy = (y + size) mod size in
-        let idx = ((wy * size) + wx) * 3 in
-        float data.{idx} /. 255.0
-      in
-      let h_left = get_height (px - 1) py in
-      let h_right = get_height (px + 1) py in
-      let h_down = get_height px (py - 1) in
-      let h_up = get_height px (py + 1) in
-      (* Central differences for gradient *)
-      let dx = (h_right -. h_left) *. strength in
-      let dy = (h_up -. h_down) *. strength in
-      (* Tangent-space normal: (-dx, -dy, 1) normalized *)
-      let len = sqrt ((dx *. dx) +. (dy *. dy) +. 1.0) in
-      let nx = -.dx /. len in
-      let ny = -.dy /. len in
-      let nz = 1.0 /. len in
-      (* Encode to RGB: map [-1,1] to [0,255] *)
-      let idx = ((py * size) + px) * 3 in
-      normal_data.{idx} <- int_of_float (((nx *. 0.5) +. 0.5) *. 255.0);
-      normal_data.{idx + 1} <- int_of_float (((ny *. 0.5) +. 0.5) *. 255.0);
-      normal_data.{idx + 2} <- int_of_float (((nz *. 0.5) +. 0.5) *. 255.0)
-    done
-  done;
-  let normal_tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some normal_tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb size size 0 Gl.rgb Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 normal_data))
-    0;
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  (tid, normal_tid)
+  tid
 
 (* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
 let make_palette_texture ctx =
@@ -1685,9 +1727,9 @@ let shadow_rendered = ref false
 
 let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~w ~h:_ ~x ~y ~height ~lat ~lon ~orientation ~points ~tile
-    ~index_count ~noise_texture ~ao_texture ~rock_texture ~rock_normal_map
-    ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture
-    ~cover_map_size:_ ~use_clc canvas ctx =
+    ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo
+    ~shadow_map ~palette_texture ~cover_map_texture ~cover_map_size:_ canvas ctx
+    =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1913,11 +1955,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let relief_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "relief") in
   let noise_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "noise") in
   let ao_loc = Gl.get_uniform_location ctx terrain_pid (Jstr.v "ao") in
-  let rock_tex_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "rock_texture")
-  in
-  let rock_normal_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "rock_normal_map")
+  let detail_map_loc =
+    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_detailMap")
   in
   let light_dir_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_lightDir")
@@ -1926,8 +1965,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.uniform1i ctx relief_loc 1;
   Gl.uniform1i ctx noise_loc 2;
   Gl.uniform1i ctx ao_loc 3;
-  Gl.uniform1i ctx rock_tex_loc 5;
-  Gl.uniform1i ctx rock_normal_loc 6;
+  Gl.uniform1i ctx detail_map_loc 5;
   Gl.uniform3f ctx light_dir_loc light_dir_shader.x light_dir_shader.y
     light_dir_shader.z;
 
@@ -1947,20 +1985,15 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let num_levels_loc =
     Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_numLevels")
   in
-  let use_clc_loc =
-    Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_useCLC")
-  in
   Gl.uniform1i ctx cover_map_loc 7;
   Gl.uniform1i ctx palette_loc 8;
 
-  (* Set clipmap parameters *)
+  (* Set clipmap parameters - only needed when use_clc is true, but harmless if not *)
   Gl.uniform2f ctx camera_offset_loc center_offset_x center_offset_y;
   (* Clipmap centered on initial view which is (0,0) rel *)
   Gl.uniform1f ctx base_extent_loc 2048.0;
   (* Level 0 extent *)
   Gl.uniform1i ctx num_levels_loc 7;
-
-  Gl.uniform1i ctx use_clc_loc (if use_clc then 1 else 0);
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.active_texture ctx Gl.texture0;
@@ -1972,9 +2005,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.active_texture ctx Gl.texture3;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
   Gl.active_texture ctx Gl.texture5;
-  Gl.bind_texture ctx Gl.texture_2d (Some rock_texture);
-  Gl.active_texture ctx Gl.texture6;
-  Gl.bind_texture ctx Gl.texture_2d (Some rock_normal_map);
+  Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
   (* CLC Textures *)
@@ -2433,6 +2464,8 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+  (* CLC mode toggle - used at shader compile time *)
+  let use_clc = true in
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
@@ -2467,7 +2500,12 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     in
     create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
-  let terrain_pid = create_program ctx terrain_program in
+  (* Create two terrain program variants: CLC and fallback *)
+  let terrain_pid_clc = create_program ctx (terrain_program ~use_clc:true) in
+  let terrain_pid_fallback =
+    create_program ctx (terrain_program ~use_clc:false)
+  in
+  let terrain_pid = if use_clc then terrain_pid_clc else terrain_pid_fallback in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
@@ -2503,7 +2541,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   in
   let index_count = Bigarray.Array1.dim indices in
   let noise_texture = make_noise_texture ctx in
-  let rock_texture, rock_normal_map = make_rock_texture ctx in
+  let detail_map = make_detail_map ctx in
   let scale = deltay in
   (* Approx 30m per pixel *)
   let ao_texture = compute_ao ctx w h scale relief_texture in
@@ -2719,15 +2757,12 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           Brr.Console.(
             log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
           Lwt.return ()));
-  (* Set to true to enable CLC material system *)
-  let use_clc = true in
-
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~w ~h ~x ~y ~lat ~lon ~orientation ~height ~tile
-        ~points ~index_count ~noise_texture ~ao_texture ~rock_texture
-        ~rock_normal_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
-        ~cover_map_texture ~cover_map_size ~use_clc canvas ctx)
+        ~points ~index_count ~noise_texture ~ao_texture ~detail_map ~shadow_pid
+        ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture
+        ~cover_map_size canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in

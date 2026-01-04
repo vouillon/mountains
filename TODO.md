@@ -18,6 +18,7 @@
   https://medium.com/@gui.attard/pre-processing-the-dem-of-france-rge-alti-5m-for-implementation-into-earth-engine-de9a0778e0d9
 - Zoom out a bit? Gesture for zooming. Pan
 - Improve loading (incremental / web worker)
+- Optimize GL context set-up
 
 - Copyright notices:
 
