@@ -341,13 +341,16 @@ let materials =
       detail_forest = 0.0;
       water_factor = 0.0;
     };
-    (* 32: Sparsely vegetated areas *)
+    (* 32: Sparsely vegetated areas - patchy mix of rock and grass *)
     {
       code = 333;
-      albedo = (145, 140, 120);
+      albedo = (130, 135, 100);
+      (* Greener tint for visible grass *)
       roughness = 0.75;
-      detail_rock = 0.6;
-      detail_grass = 0.35;
+      detail_rock = 0.45;
+      (* Reduced rock for more balance *)
+      detail_grass = 0.50;
+      (* Increased grass for patchy appearance *)
       detail_forest = 0.05;
       water_factor = 0.0;
     };
