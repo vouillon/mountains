@@ -309,3 +309,8 @@ let array m =
     a.{i} <- m.(i)
   done;
   a
+
+let blit m a =
+  for i = 0 to Array.length m - 1 do
+    a.{i} <- m.(i)
+  done

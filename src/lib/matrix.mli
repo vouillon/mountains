@@ -25,3 +25,8 @@ val inverse : t -> t
 
 val array :
   t -> (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+val blit :
+  t ->
+  (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t ->
+  unit
