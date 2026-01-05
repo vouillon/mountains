@@ -110,6 +110,13 @@ let input_mode = ref Sensor
 let zoom = ref 1.0
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
+let rotation_matrix orientation =
+  let open Matrix in
+  rotate_z (-.orientation.alpha *. pi /. 180.)
+  * rotate_x (-.orientation.beta *. pi /. 180.)
+  * rotate_y (-.orientation.gamma *. pi /. 180.)
+  * rotate_z (orientation.screen *. pi /. 180.)
+
 let compute_azimuth m =
   let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
   let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
@@ -1954,12 +1961,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
-    Matrix.(
-      translate 0. 0. (-.height -. 2.)
-      * rotate_z (-.orientation.alpha *. pi /. 180.)
-      * rotate_x (-.orientation.beta *. pi /. 180.)
-      * rotate_y (-.orientation.gamma *. pi /. 180.)
-      * rotate_z (orientation.screen *. pi /. 180.))
+    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
   let screen_inclination =
     orientation.screen
@@ -2120,6 +2122,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 (* Event loop *)
 
 let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
+let force_redraw = ref true
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -2130,8 +2133,9 @@ let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
     let orientation = !current_orientation in
     let z = !zoom in
-    if orientation <> prev_orientation || z <> prev_zoom then
-      draw ~orientation ctx;
+    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
+      force_redraw := false;
+      draw ~orientation ctx);
     let* () = request_animation_frame () in
     loop orientation z
   in
@@ -2927,7 +2931,6 @@ let setup_events canvas =
   let state = ref `Init in
 
   (* Sensitivity for drag rotation (degrees per pixel) *)
-  let drag_sensitivity = 0.1 in
 
   (* Mouse state *)
   let mouse_dragging = ref false in
@@ -2985,8 +2988,6 @@ let setup_events canvas =
     let now = now_ms () in
     if now -. !last_tap_time < double_tap_threshold then begin
       (* Double tap - switch back to sensor mode *)
-      (* Undo the fullscreen toggle from the first tap *)
-      toggle_fullscreen ();
       if !input_mode = Manual then begin
         input_mode := Sensor;
         display_temporary_message "Sensor mode"
@@ -3081,7 +3082,13 @@ let setup_events canvas =
          mouse_dragging := true;
          if !input_mode = Sensor then begin
            input_mode := Manual;
-           display_temporary_message "Manual mode"
+           display_temporary_message "Manual mode";
+           let alpha =
+             compute_azimuth (rotation_matrix !current_orientation)
+             *. 180. /. pi
+           in
+           current_orientation :=
+             { !current_orientation with alpha; gamma = 0. }
          end;
          let x = Brr.Ev.Mouse.client_x mouse in
          let y = Brr.Ev.Mouse.client_y mouse in
@@ -3100,15 +3107,23 @@ let setup_events canvas =
            let y = Brr.Ev.Mouse.client_y mouse in
            let dx = x -. !mouse_last_x in
            let dy = y -. !mouse_last_y in
-           let speed = drag_sensitivity /. !zoom in
+           let h = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight") in
+           let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
+           let speed = 2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi in
+           let gamma = !current_orientation.screen *. Float.pi /. 180. in
+           let c = cos gamma in
+           let s = sin gamma in
+           let dx_eff = (dx *. c) -. (dy *. s) in
+           let dy_eff = (dx *. s) +. (dy *. c) in
            mouse_last_x := x;
            mouse_last_y := y;
            current_orientation :=
              {
                !current_orientation with
-               alpha = !current_orientation.alpha -. (dx *. speed);
+               alpha = !current_orientation.alpha -. (dx_eff *. speed);
                beta =
-                 max 60. (min 120. (!current_orientation.beta -. (dy *. speed)));
+                 max 60.
+                   (min 120. (!current_orientation.beta -. (dy_eff *. speed)));
              }
          end)
        (Brr.Window.as_target Brr.G.window));
@@ -3178,22 +3193,40 @@ let setup_events canvas =
              (* Switch to manual mode when user starts dragging *)
              if !input_mode = Sensor then begin
                input_mode := Manual;
-               display_temporary_message "Manual mode"
+               display_temporary_message "Manual mode";
+               let alpha =
+                 compute_azimuth (rotation_matrix !current_orientation)
+                 *. 180. /. pi
+               in
+               Format.eprintf "%f %f => %f@." !current_orientation.alpha
+                 !current_orientation.gamma alpha;
+               current_orientation :=
+                 { !current_orientation with alpha; gamma = 0. }
              end;
              Brr.Ev.prevent_default ev
            end;
            if !touch_dragging then begin
-             Brr.Ev.prevent_default ev;
-             let speed = drag_sensitivity /. !zoom in
+             let h =
+               Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
+             in
+             let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
+             let speed =
+               2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
+             in
+             let gamma = !current_orientation.screen *. Float.pi /. 180. in
+             let c = cos gamma in
+             let s = sin gamma in
+             let dx_eff = (dx *. c) -. (dy *. s) in
+             let dy_eff = (dx *. s) +. (dy *. c) in
              touch_last_x := x;
              touch_last_y := y;
              current_orientation :=
                {
                  !current_orientation with
-                 alpha = !current_orientation.alpha +. (dx *. speed);
+                 alpha = !current_orientation.alpha +. (dx_eff *. speed);
                  beta =
                    max 60.
-                     (min 120. (!current_orientation.beta +. (dy *. speed)));
+                     (min 120. (!current_orientation.beta +. (dy_eff *. speed)));
                }
            end
          end
@@ -3239,6 +3272,11 @@ let setup_events canvas =
            pinch_distance := 0.
          end)
        target);
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.resize
+       (fun _ -> force_redraw := true)
+       (Brr.Window.as_target Brr.G.window));
 
   fun () -> state := `Starting
 
