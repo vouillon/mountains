@@ -266,6 +266,68 @@ module Water_encoder = struct
   let write_block out_ch buf = Encoder.write_block out_ch buf
 end
 
+(* POI encoder for peaks and saddles *)
+module Poi_encoder = struct
+  type t = {
+    (* POI data uses simpler encoding since count is small *)
+    names : Buffer.t; (* Length-prefixed UTF-8 strings *)
+    coords : Buffer.t; (* 3-byte quantized lon/lat pairs (same as water) *)
+    elevations : Buffer.t; (* Signed 16-bit elevation in meters *)
+    types : Buffer.t; (* 1 byte: 0=peak, 1=saddle *)
+  }
+
+  let create () =
+    {
+      names = Buffer.create 1024;
+      coords = Buffer.create 256;
+      elevations = Buffer.create 128;
+      types = Buffer.create 64;
+    }
+
+  let write_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xFF))
+
+  let write_u16 buf v =
+    write_u8 buf (v land 0xFF);
+    write_u8 buf ((v lsr 8) land 0xFF)
+
+  let write_i16 buf v =
+    (* Signed 16-bit as unsigned *)
+    let uv = if v < 0 then v + 0x10000 else v in
+    write_u16 buf uv
+
+  let encode_poi t (poi : Poi_fetch.poi) (min_lon, min_lat) (scale_x, scale_y) =
+    (* Encode name as length-prefixed UTF-8 *)
+    let name_bytes = Bytes.of_string poi.name in
+    let name_len = Bytes.length name_bytes in
+    write_u8 t.names name_len;
+    Buffer.add_bytes t.names name_bytes;
+
+    (* Encode coordinates (3-byte quantized, same as water) *)
+    let qx = int_of_float ((poi.lon -. min_lon) *. scale_x) in
+    let qy = int_of_float ((poi.lat -. min_lat) *. scale_y) in
+    let qx = max 0 (min 0xFFFFFF qx) in
+    let qy = max 0 (min 0xFFFFFF qy) in
+    write_u8 t.coords (qx land 0xFF);
+    write_u8 t.coords ((qx lsr 8) land 0xFF);
+    write_u8 t.coords ((qx lsr 16) land 0xFF);
+    write_u8 t.coords (qy land 0xFF);
+    write_u8 t.coords ((qy lsr 8) land 0xFF);
+    write_u8 t.coords ((qy lsr 16) land 0xFF);
+
+    (* Encode elevation (signed 16-bit, 0 if unknown) *)
+    let elev = match poi.elevation with Some e -> e | None -> 0 in
+    let elev = max (-32768) (min 32767 elev) in
+    write_i16 t.elevations elev;
+
+    (* Encode type (0=peak, 1=saddle) *)
+    let type_byte =
+      match poi.poi_type with Poi_fetch.Peak -> 0 | Poi_fetch.Saddle -> 1
+    in
+    write_u8 t.types type_byte
+
+  let write_block out_ch buf = Encoder.write_block out_ch buf
+end
+
 (* --- Main Pipeline --- *)
 
 let process_tile db_path output_dir tile_name =
@@ -769,12 +831,32 @@ let process_tile db_path output_dir tile_name =
   Printf.printf "Processed %d water features (%d verts, %d indices)\n%!"
     !water_entry_count !water_total_vertices !water_total_indices;
 
-  (* === FILE OUTPUT (CLC4 Format) === *)
+  (* === POI LAYER PROCESSING === *)
+  Printf.printf "Fetching POIs from OSM...\n%!";
+
+  let poi_encoder = Poi_encoder.create () in
+  let poi_count = ref 0 in
+
+  (* Use same scale as water for ~40cm precision *)
+  let poi_scale_x = water_scale_x in
+  let poi_scale_y = water_scale_y in
+
+  let pois = Poi_fetch.fetch_pois ~min_lat ~min_lon ~max_lat ~max_lon in
+  List.iter
+    (fun poi ->
+      Poi_encoder.encode_poi poi_encoder poi (min_lon, min_lat)
+        (poi_scale_x, poi_scale_y);
+      incr poi_count)
+    pois;
+
+  Printf.printf "Processed %d POIs\n%!" !poi_count;
+
+  (* === FILE OUTPUT (CLC5 Format) === *)
   let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
   let out_ch = open_out_bin output_file_path in
 
   (* Write Header (Magic + Counts + Bounds + Scales) *)
-  output_string out_ch "CLC4";
+  output_string out_ch "CLC5";
 
   (* CLC counts *)
   output_binary_int out_ch !entry_count;
@@ -785,6 +867,9 @@ let process_tile db_path output_dir tile_name =
   output_binary_int out_ch !water_entry_count;
   output_binary_int out_ch !water_total_vertices;
   output_binary_int out_ch !water_total_indices;
+
+  (* POI count *)
+  output_binary_int out_ch !poi_count;
 
   (* Write float params (bounds + scales) for reconstruction *)
   let write_float64 f =
@@ -804,6 +889,8 @@ let process_tile db_path output_dir tile_name =
   write_float64 scale_y;
   write_float64 water_scale_x;
   write_float64 water_scale_y;
+  write_float64 poi_scale_x;
+  write_float64 poi_scale_y;
 
   (* Write CLC Streams *)
   Encoder.write_block out_ch encoder.meta;
@@ -825,16 +912,22 @@ let process_tile db_path output_dir tile_name =
   Water_encoder.write_block out_ch water_encoder.high_indices;
   Water_encoder.write_block out_ch water_encoder.low_indices;
 
+  (* Write POI Streams *)
+  Poi_encoder.write_block out_ch poi_encoder.names;
+  Poi_encoder.write_block out_ch poi_encoder.coords;
+  Poi_encoder.write_block out_ch poi_encoder.elevations;
+  Poi_encoder.write_block out_ch poi_encoder.types;
+
   Printf.printf "Streams Written.\n%!";
 
   close_out out_ch;
   ignore (Sqlite3.db_close db);
   Printf.printf
     "Done. Extracted %d CLC features (%d verts, %d indices) + %d water \
-     features (%d verts, %d indices).\n\
+     features (%d verts, %d indices) + %d POIs.\n\
      %!"
     !entry_count !total_vertices !total_indices !water_entry_count
-    !water_total_vertices !water_total_indices
+    !water_total_vertices !water_total_indices !poi_count
 
 let () =
   if Array.length Sys.argv < 4 then
