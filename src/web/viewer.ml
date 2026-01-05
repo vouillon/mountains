@@ -612,15 +612,15 @@ let terrain_program =
             if (waterMask > 0.01) {
                // 1. Low frequency waves (Swell) - Isotropic Interference Pattern
                // Using 3 waves at 120-degree offsets to eliminate directional banding
-               vec2 waveCoord = v_world_pos.xy * 0.05; 
+               highp vec2 waveCoord = v_world_pos.xy * 0.05; 
                
                // Wave 1: 0 degrees, Freq 1.0
                float w1 = sin(waveCoord.x);
                // Wave 2: 120 degrees, Freq 1.1 (Detuned)
-               float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1; 
+               highp float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1; 
                float w2 = sin(input2);
                // Wave 3: 240 degrees, Freq 1.2 (Detuned)
-               float input3 = (waveCoord.x * -0.5 - waveCoord.y * 0.866) * 1.2;
+               highp float input3 = (waveCoord.x * -0.5 - waveCoord.y * 0.866) * 1.2;
                float w3 = sin(input3);
                
                float waveHeight = w1 + w2 + w3;
@@ -646,17 +646,17 @@ let terrain_program =
                // No extra flatten mix needed, controlled by z-component above 
 
                // 2. High frequency ripples - Texture based (Rotated & Layered)
-               // 2. High frequency ripples - Texture based (Rotated & Layered)
                // Use Green/Blue channels as X/Y vector components
                // Sample 1: Base Scale (Green=X, Blue=Y) - Soft Noise
                vec2 r1 = texture(u_detailMap, v_world_pos.xy * 0.15).gb * 2.0 - 1.0;
                
                // Sample 2: Rotated & Scaled (Green=X, Blue=Y)
                // Rotation breaks grid alignment
+               // Matrix math must be highp to preserve precision during rotation
                float c = 0.8; // cos(37 deg)
                float s = 0.6; // sin(37 deg)
-               mat2 rot = mat2(c, -s, s, c);
-               vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3); 
+               highp mat2 rot = mat2(c, -s, s, c);
+               highp vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3); 
                vec2 r2 = texture(u_detailMap, uv2).gb * 2.0 - 1.0;
                
                // Combine vectors
