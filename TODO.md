@@ -1,29 +1,13 @@
-- Add small lakes
-  ==> https://land.copernicus.eu/en/products/eu-hydro ?
-  - OSM probably most accurate
-  - consider the CLC water body polygons as shoreline, or use jump flooding
 - Rendering improvements
-  - textures
-  - grass with color patches
-  ...
-- Adjust the sun position according to the date / time
 - Use a clipmap for Copernicus DEM data
 - Maybe combine with more fine-grained elevation data when available
-- Rock geological data?
-- Check performance (use mediump when possible)
-- Render a path on the terrain
 - Take into account earth curvature
 - Check for off-by-one errors
 - Use RGE Alti
   https://medium.com/@gui.attard/pre-processing-the-dem-of-france-rge-alti-5m-for-implementation-into-earth-engine-de9a0778e0d9
 - Zoom out a bit? Gesture for zooming. Pan
 - Improve loading (incremental / web worker)
-- Optimize GL context set-up
-
-- Copyright notices:
-
-Map Data & Terrain Sources:
-
-    Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.
-    Land Use: © European Union, Copernicus Land Monitoring Service [Year], European Environment Agency (EEA)
-    Water Bodies: © OpenStreetMap contributors (Open Database License)
+- Rock geological data?
+- Render a path on the terrain
+- Copyright notices
+- Skymap?

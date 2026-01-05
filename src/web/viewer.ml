@@ -472,6 +472,9 @@ let terrain_program ~use_clc =
         // ========== Main ==========
         
         void main() {
+          // Define fog color early for use in water reflection
+          const vec3 fog_color = vec3(0.1138, 0.2746, 0.6944); // Pre-computed pow((0.37,0.56,0.85), 2.2)
+
           // Decode normal from relief texture
           mediump vec2 encodedN = texture(relief, reliefCoord).ba;
           vec3 normal;
@@ -630,10 +633,24 @@ let terrain_program ~use_clc =
             float skyReflect = max(0.0, reflectDir.z);  // Simple sky gradient
             vec3 envColor = mix(vec3(0.6, 0.7, 0.9), vec3(0.2, 0.4, 0.8), skyReflect);
             
+
             // Apply specular and reflection to terrain color
             vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
             terrain_color += specColor * 0.3;
-            terrain_color = mix(terrain_color, envColor, reflectivity * 0.3);
+            
+            // Fresnel for water
+            if (waterMask > 0.01) {
+               float n_dot_v = max(0.0, dot(final_normal, viewDir));
+               // Schlick's approximation: R(0) + (1 - R(0)) * (1 - cosTheta)^5
+               // Water F0 is approx 0.02
+               float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
+               reflectivity = mix(reflectivity, fresnel, waterMask);
+               envColor = mix(envColor, fog_color, waterMask);
+            }
+            
+            // Apply reflection (remove damping for water)
+            float reflectDamp = (waterMask > 0.01) ? 1.0 : 0.3;
+            terrain_color = mix(terrain_color, envColor, reflectivity * reflectDamp);
             
 #else
             // === FALLBACK: Original slope-based biome logic ===
@@ -702,8 +719,8 @@ let terrain_program ~use_clc =
           float occlusion = texture(ao, reliefCoord).r;
           terrain_color = terrain_color * occlusion;
 
+
           // === Fog ===
-          const vec3 fog_color = vec3(0.1138, 0.2746, 0.6944);  // Pre-computed pow((0.37,0.56,0.85), 2.2)
           float fog_coeff = exp(v_dist * -2e-5);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
@@ -1159,74 +1176,6 @@ let instantiate ~size =
           call global "fetch" [| Jv.of_jstr file |];
           obj [| ("env", obj [| ("memory", memory) |]) |];
         |])
-
-let _precompute tile_height tile_width tile =
-  let normals =
-    Bigarray.(Array3.create Int8_signed C_layout)
-      (tile_height - 2) (tile_width - 2) 2
-  in
-  let heights =
-    Bigarray.(Array2.create Float32 C_layout) (tile_height - 2) (tile_width - 2)
-  in
-  let deltax = deltay *. cos (44. *. pi /. 180.) in
-  if true then (
-    to_lwt
-    @@
-    let tile_size = tile_height * tile_width * 4 in
-    let heights_size = (tile_height - 2) * (tile_width - 2) * 4 in
-    let normals_size = (tile_height - 2) * (tile_width - 2) * 2 in
-    let size = tile_size + heights_size + normals_size in
-    let open Fut.Result_syntax in
-    let+ memory, funcs = instantiate ~size in
-    let t = Unix.gettimeofday () in
-    Brr.Tarray.set_tarray
-      Brr.Tarray.(of_buffer Float32 memory)
-      ~dst:0
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile));
-    let t' = Unix.gettimeofday () in
-    ignore
-      (Jv.call funcs "precompute"
-         [|
-           Jv.of_int tile_width;
-           Jv.of_int tile_height;
-           Jv.of_float deltax;
-           Jv.of_float deltay;
-           Jv.of_int 0;
-           Jv.of_int tile_size;
-           Jv.of_int (tile_size + heights_size);
-         |]);
-    Format.eprintf "precompute (kernel) %f@." (Unix.gettimeofday () -. t');
-    Brr.Tarray.set_tarray
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 heights))
-      ~dst:0
-      Brr.Tarray.(
-        of_buffer ~byte_offset:tile_size ~length:(heights_size / 4) Float32
-          memory);
-    Brr.Tarray.set_tarray
-      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array3 normals))
-      ~dst:0
-      Brr.Tarray.(
-        of_buffer ~byte_offset:(tile_size + heights_size) ~length:normals_size
-          Int8 memory);
-    Format.eprintf "precompute %f@." (Unix.gettimeofday () -. t);
-    (linearize2 heights, linearize3 normals))
-  else
-    let t = Unix.gettimeofday () in
-    for y = 1 to tile_height - 2 do
-      for x = 1 to tile_width - 2 do
-        let nx = (tile.{y, x - 1} -. tile.{y, x + 1}) *. deltay in
-        let ny = (tile.{y - 1, x} -. tile.{y + 1, x}) *. deltax in
-        let nz = 2. *. deltax *. deltay in
-        let n = 127. /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)) in
-        normals.{tile_height - 2 - y, x - 1, 0} <- truncate (nx *. n);
-        normals.{tile_height - 2 - y, x - 1, 1} <- truncate (ny *. n);
-        normals.{tile_height - 2 - y, x - 1, 2} <- truncate (nz *. n);
-        heights.{tile_height - 2 - y, x - 1} <- tile.{y, x}
-      done
-    done;
-    Format.eprintf "PRECOMPUTE %f@." (Unix.gettimeofday () -. t);
-    Lwt.return (linearize2 heights, linearize3 normals)
-(* TODO: Update fallback if keeping it, but plan is to delete *)
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
@@ -2655,7 +2604,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           let max_extent = 2048.0 *. (2.0 ** 6.0) in
           (* 131km *)
           let* _, _, _, _, tiles =
-            Clc_loader.load_tiles_for_gpu ~lat ~lon
+            Clc_loader.load_tiles ~lat ~lon
               ~size:(int_of_float (max_extent /. 30.0))
           in
 
