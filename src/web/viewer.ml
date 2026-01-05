@@ -1975,7 +1975,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let s = scale *. !zoom in
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
-  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:0.1 in
+  let text_scale = scale *. !zoom in
+  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -1994,7 +1995,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let sa = sin angle in
     List.filter_map
       (fun (texture, x, y) ->
-        let p = scale *. ((y *. ca) -. (x *. sa)) in
+        let p = text_scale *. ((y *. ca) -. (x *. sa)) in
         let shown =
           if
             not
@@ -2074,8 +2075,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       let y = y *. y_scale in
       let angle = if shown then -.pi /. 4. else 0. in
       let transform =
-        let sx = 0.6 *. text_height *. x_scale /. scale in
-        let sy = 0.6 *. text_height *. y_scale /. scale in
+        let sx = 0.6 *. text_height *. x_scale /. text_scale in
+        let sy = 0.6 *. text_height *. y_scale /. text_scale in
         Matrix.(
           rotate_z (angle +. (screen_inclination *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
@@ -2095,8 +2096,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         let x = x *. x_scale in
         let y = y *. y_scale in
         let transform =
-          let sx = text_height *. x_scale /. scale in
-          let sy = text_height *. y_scale /. scale in
+          let sx = text_height *. x_scale /. text_scale in
+          let sy = text_height *. y_scale /. text_scale in
           Matrix.(
             translate 0.7 (-0.5) 0.
             * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
@@ -2115,6 +2116,9 @@ let force_redraw = ref true
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
+let last_frame_time = ref 0.
+let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
+let now_ms = now
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -2123,30 +2127,35 @@ let request_animation_frame () =
 
 let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
+    let t = now () in
+    let dt = t -. !last_frame_time in
+    last_frame_time := t;
+
+    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
+      let va, vb = !velocity in
+      (* Friction: 0.95 per 16ms *)
+      let friction = 0.95 ** (dt /. 16.6) in
+      let va = va *. friction in
+      let vb = vb *. friction in
+      let va = if abs_float va < 0.0001 then 0. else va in
+      let vb = if abs_float vb < 0.0001 then 0. else vb in
+      velocity := (va, vb);
+      current_orientation :=
+        {
+          !current_orientation with
+          alpha = !current_orientation.alpha +. (va *. dt);
+          beta = max 60. (min 120. (!current_orientation.beta +. (vb *. dt)));
+        }
+    end;
     let orientation = !current_orientation in
     let z = !zoom in
-    let new_orientation =
-      if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then (
-        let va, vb = !velocity in
-        let va = va *. 0.98 in
-        let vb = vb *. 0.98 in
-        let va = if abs_float va < 0.001 then 0. else va in
-        let vb = if abs_float vb < 0.001 then 0. else vb in
-        velocity := (va, vb);
-        {
-          orientation with
-          alpha = orientation.alpha +. va;
-          beta = max 60. (min 120. (orientation.beta +. vb));
-        })
-      else orientation
-    in
-    if new_orientation <> prev_orientation || z <> prev_zoom || !force_redraw
-    then (
+    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
       force_redraw := false;
-      draw ~orientation:new_orientation ctx);
+      draw ~orientation ctx);
     let* () = request_animation_frame () in
-    loop new_orientation z
+    loop orientation z
   in
+  last_frame_time := now ();
   loop
     { !current_orientation with alpha = !current_orientation.alpha -. 1. }
     (!zoom -. 1.)
@@ -2965,7 +2974,6 @@ let setup_events canvas =
   (* Drag threshold to distinguish tap from drag (in pixels) *)
   let drag_threshold = 10. in
   (* Helper: get current time in ms *)
-  let now_ms () = Jv.to_float (Jv.call (Jv.get Jv.global "Date") "now" [||]) in
 
   (* Helper: calculate distance between two touches *)
   let touch_distance touches =
@@ -3008,6 +3016,9 @@ let setup_events canvas =
       last_tap_time := now
     end
   in
+
+  let min_zoom = 0.5 in
+  let max_zoom = 3. in
 
   (* Device orientation listener - only active in Sensor mode *)
   ignore
@@ -3063,8 +3074,8 @@ let setup_events canvas =
                  !current_orientation with
                  beta = min 120. (!current_orientation.beta +. 5.);
                }
-         | "Equal" | "NumpadAdd" -> zoom := min 4.0 (!zoom *. 1.1)
-         | "Minus" | "NumpadSubtract" -> zoom := max 0.25 (!zoom /. 1.1)
+         | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
+         | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
          | _ -> ())
        (Brr.Window.as_target Brr.G.window));
 
@@ -3079,7 +3090,7 @@ let setup_events canvas =
          let wheel = Brr.Ev.as_type ev in
          let delta_y = Brr.Ev.Wheel.delta_y wheel in
          let factor = if delta_y > 0. then 0.9 else 1.1 in
-         zoom := max 0.25 (min 4.0 (!zoom *. factor)))
+         zoom := max min_zoom (min max_zoom (!zoom *. factor)))
        target);
 
   (* Mouse drag for rotation *)
@@ -3087,9 +3098,16 @@ let setup_events canvas =
     (Brr.Ev.listen Brr.Ev.mousedown
        (fun ev ->
          let mouse = Brr.Ev.as_type ev in
+         let x = Brr.Ev.Mouse.client_x mouse in
+         let y = Brr.Ev.Mouse.client_y mouse in
          mouse_dragging := true;
          is_dragging := true;
          velocity := (0., 0.);
+         last_input_time := now ();
+         mouse_start_x := x;
+         mouse_start_y := y;
+         mouse_last_x := x;
+         mouse_last_y := y;
          if !input_mode = Sensor then begin
            input_mode := Manual;
            display_temporary_message "Manual mode";
@@ -3127,18 +3145,26 @@ let setup_events canvas =
            let dy_eff = (dx *. s) +. (dy *. c) in
            let da = dx_eff *. speed in
            let db = dy_eff *. speed in
-           let vx, vy = !velocity in
-           velocity :=
-             ((-.da *. 0.2) +. (vx *. 0.8), (-.db *. 0.2) +. (vy *. 0.8));
+           let t = now () in
+           let dt = t -. !last_input_time in
+           last_input_time := t;
+           if dt > 0. then begin
+             let v_inst_x = da /. dt in
+             let v_inst_y = db /. dt in
+             let vx, vy = !velocity in
+             (* Smoothing: mix history (0.6) with new (0.4) *)
+             velocity :=
+               ( (v_inst_x *. 0.4) +. (vx *. 0.6),
+                 (v_inst_y *. 0.4) +. (vy *. 0.6) )
+           end;
            is_dragging := true;
-           last_input_time := now_ms ();
            mouse_last_x := x;
            mouse_last_y := y;
            current_orientation :=
              {
                !current_orientation with
-               alpha = !current_orientation.alpha -. da;
-               beta = max 60. (min 120. (!current_orientation.beta -. db));
+               alpha = !current_orientation.alpha +. da;
+               beta = max 60. (min 120. (!current_orientation.beta +. db));
              }
          end)
        (Brr.Window.as_target Brr.G.window));
@@ -3149,9 +3175,7 @@ let setup_events canvas =
          if !mouse_dragging then begin
            mouse_dragging := false;
            is_dragging := false;
-           display_temporary_message
-             (Format.sprintf "Vel: %.2f" (fst !velocity));
-           if now_ms () -. !last_input_time > 150. then velocity := (0., 0.);
+           if now () -. !last_input_time > 300. then velocity := (0., 0.);
            let mouse = Brr.Ev.as_type ev in
            let x = Brr.Ev.Mouse.client_x mouse in
            let y = Brr.Ev.Mouse.client_y mouse in
@@ -3183,7 +3207,8 @@ let setup_events canvas =
            touch_last_y := y;
            touch_dragging := false;
            is_dragging := true;
-           velocity := (0., 0.)
+           velocity := (0., 0.);
+           last_input_time := now ()
          end
          else if num_touches >= 2 then begin
            (* Two or more fingers - pinch zoom *)
@@ -3241,10 +3266,19 @@ let setup_events canvas =
              let dy_eff = (dx *. s) +. (dy *. c) in
              let da = dx_eff *. speed in
              let db = dy_eff *. speed in
-             let vx, vy = !velocity in
-             velocity := ((da *. 0.2) +. (vx *. 0.8), (db *. 0.2) +. (vy *. 0.8));
+             let t = now () in
+             let dt = t -. !last_input_time in
+             last_input_time := t;
+             if dt > 0. then begin
+               let v_inst_x = da /. dt in
+               let v_inst_y = db /. dt in
+               let vx, vy = !velocity in
+               (* Smoothing: mix history (0.6) with new (0.4) *)
+               velocity :=
+                 ( (v_inst_x *. 0.4) +. (vx *. 0.6),
+                   (v_inst_y *. 0.4) +. (vy *. 0.6) )
+             end;
              is_dragging := true;
-             last_input_time := now_ms ();
              touch_last_x := x;
              touch_last_y := y;
              current_orientation :=
@@ -3261,7 +3295,7 @@ let setup_events canvas =
            match touch_distance touches with
            | Some d when !pinch_distance > 0. ->
                let factor = d /. !pinch_distance in
-               zoom := max 0.25 (min 4.0 (!zoom *. factor));
+               zoom := max min_zoom (min max_zoom (!zoom *. factor));
                pinch_distance := d
            | _ -> ()
          end)
@@ -3289,9 +3323,7 @@ let setup_events canvas =
          if num_remaining = 0 then begin
            (* All fingers lifted *)
            is_dragging := false;
-           display_temporary_message
-             (Format.sprintf "Vel: %.2f" (fst !velocity));
-           if now_ms () -. !last_input_time > 150. then velocity := (0., 0.);
+           if now () -. !last_input_time > 300. then velocity := (0., 0.);
            if not !touch_dragging then begin
              Brr.Ev.prevent_default ev;
              (* This was a tap, not a drag *)
