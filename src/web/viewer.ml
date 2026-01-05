@@ -110,6 +110,13 @@ let input_mode = ref Sensor
 let zoom = ref 1.0
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
+let rotation_matrix orientation =
+  let open Matrix in
+  rotate_z (-.orientation.alpha *. pi /. 180.)
+  * rotate_x (-.orientation.beta *. pi /. 180.)
+  * rotate_y (-.orientation.gamma *. pi /. 180.)
+  * rotate_z (orientation.screen *. pi /. 180.)
+
 let compute_azimuth m =
   let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
   let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
@@ -1434,6 +1441,8 @@ let compressed_texture_file = function
   | ASTC -> "assets/details_astc.ktx2"
   | ETC2 -> "assets/details_etc2.ktx2"
 
+let force_redraw = ref true
+
 (* Load compressed KTX2 texture asynchronously *)
 let load_compressed_detail_map ctx tid =
   match detect_compressed_format ctx with
@@ -1498,6 +1507,7 @@ let load_compressed_detail_map ctx tid =
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
             apply_anisotropic_filtering ctx;
             Gl.active_texture ctx Gl.texture0;
+            force_redraw := true;
             Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
               file pixel_width pixel_height level_count)
 
@@ -1954,12 +1964,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
-    Matrix.(
-      translate 0. 0. (-.height -. 2.)
-      * rotate_z (-.orientation.alpha *. pi /. 180.)
-      * rotate_x (-.orientation.beta *. pi /. 180.)
-      * rotate_y (-.orientation.gamma *. pi /. 180.)
-      * rotate_z (orientation.screen *. pi /. 180.))
+    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
   let screen_inclination =
     orientation.screen
@@ -1973,7 +1978,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let s = scale *. !zoom in
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
-  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:0.1 in
+  let text_scale = scale *. !zoom in
+  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -1992,7 +1998,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     let sa = sin angle in
     List.filter_map
       (fun (texture, x, y) ->
-        let p = scale *. ((y *. ca) -. (x *. sa)) in
+        let p = text_scale *. ((y *. ca) -. (x *. sa)) in
         let shown =
           if
             not
@@ -2025,7 +2031,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.clear_color ctx r g b 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-  (* Sky Draw Moved to After Terrain *)
   Gl.depth_mask ctx true;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
@@ -2044,43 +2049,37 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
-  Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
 
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
   Gl.depth_mask ctx false;
-  Gl.enable ctx Gl.depth_test;
   Gl.depth_func ctx Gl.lequal;
   (* Draw if Z <= 1.0 (Far Plane) *)
   Gl.disable ctx Gl.cull_face';
   Gl.use_program ctx sky_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
-
   (* Compute Inverse View *)
   let inv_view = Matrix.inverse transform in
   Matrix.blit inv_view inv_view_ba;
   Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
-
   Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
-
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-  Gl.bind_vertex_array ctx None;
-  (* Restore default *)
-  Gl.depth_func ctx Gl.less;
-  Gl.depth_mask ctx true;
 
-  Gl.use_program ctx triangle_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
+  (* VAO text_geo is still bound, reused for POIs *)
+  Gl.disable ctx Gl.depth_test;
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
+
+  (* 1. Triangles *)
+  Gl.use_program ctx triangle_pid;
   List.iter
     (fun (_, x, y, shown) ->
       let x = x *. x_scale in
       let y = y *. y_scale in
       let angle = if shown then -.pi /. 4. else 0. in
       let transform =
-        let sx = 0.6 *. text_height *. x_scale /. scale in
-        let sy = 0.6 *. text_height *. y_scale /. scale in
+        let sx = 0.6 *. text_height *. x_scale /. text_scale in
+        let sy = 0.6 *. text_height *. y_scale /. text_scale in
         Matrix.(
           rotate_z (angle +. (screen_inclination *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
@@ -2091,21 +2090,17 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
-  Gl.bind_vertex_array ctx None;
-  Gl.disable ctx Gl.blend;
 
+  (* 2. Text *)
   Gl.use_program ctx text_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
-  Gl.enable ctx Gl.blend;
-  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
     (fun (texture, x, y, shown) ->
       if shown then
         let x = x *. x_scale in
         let y = y *. y_scale in
         let transform =
-          let sx = text_height *. x_scale /. scale in
-          let sy = text_height *. y_scale /. scale in
+          let sx = text_height *. x_scale /. text_scale in
+          let sy = text_height *. y_scale /. text_scale in
           Matrix.(
             translate 0.7 (-0.5) 0.
             * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
@@ -2113,13 +2108,19 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         in
         draw_text ctx text_uniforms transform transform_ba transform_ta texture)
     points;
-  Gl.disable ctx Gl.blend;
 
+  Gl.disable ctx Gl.blend;
   Gl.bind_vertex_array ctx None
 
 (* Event loop *)
 
 let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
+let is_dragging = ref false
+let velocity = ref (0., 0.)
+let last_input_time = ref 0.
+let last_frame_time = ref 0.
+let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
+let now_ms = now
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -2128,13 +2129,35 @@ let request_animation_frame () =
 
 let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
+    let t = now () in
+    let dt = t -. !last_frame_time in
+    last_frame_time := t;
+
+    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
+      let va, vb = !velocity in
+      (* Friction: 0.95 per 16ms *)
+      let friction = 0.95 ** (dt /. 16.6) in
+      let va = va *. friction in
+      let vb = vb *. friction in
+      let va = if abs_float va < 0.0001 then 0. else va in
+      let vb = if abs_float vb < 0.0001 then 0. else vb in
+      velocity := (va, vb);
+      current_orientation :=
+        {
+          !current_orientation with
+          alpha = !current_orientation.alpha +. (va *. dt);
+          beta = max 60. (min 120. (!current_orientation.beta +. (vb *. dt)));
+        }
+    end;
     let orientation = !current_orientation in
     let z = !zoom in
-    if orientation <> prev_orientation || z <> prev_zoom then
-      draw ~orientation ctx;
+    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
+      force_redraw := false;
+      draw ~orientation ctx);
     let* () = request_animation_frame () in
     loop orientation z
   in
+  last_frame_time := now ();
   loop
     { !current_orientation with alpha = !current_orientation.alpha -. 1. }
     (!zoom -. 1.)
@@ -2738,7 +2761,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
             Gl.uniform2f ctx u_tex_min min_lon min_lat;
             Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
 
-            (* Enable depth test per level *)
+            (* Enable depth test per level - ensure depth writes are enabled *)
+            Gl.depth_mask ctx true;
             Gl.enable ctx Gl.depth_test;
             Gl.depth_func ctx Gl.less;
 
@@ -2823,6 +2847,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           Gl.delete_vertex_array ctx vao;
           Gl.disable ctx Gl.depth_test;
           Gl.bind_framebuffer ctx Gl.framebuffer None;
+
+          force_redraw := true;
 
           Brr.Console.(
             log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ]);
@@ -2927,7 +2953,6 @@ let setup_events canvas =
   let state = ref `Init in
 
   (* Sensitivity for drag rotation (degrees per pixel) *)
-  let drag_sensitivity = 0.1 in
 
   (* Mouse state *)
   let mouse_dragging = ref false in
@@ -2954,7 +2979,6 @@ let setup_events canvas =
   (* Drag threshold to distinguish tap from drag (in pixels) *)
   let drag_threshold = 10. in
   (* Helper: get current time in ms *)
-  let now_ms () = Jv.to_float (Jv.call (Jv.get Jv.global "Date") "now" [||]) in
 
   (* Helper: calculate distance between two touches *)
   let touch_distance touches =
@@ -2985,8 +3009,6 @@ let setup_events canvas =
     let now = now_ms () in
     if now -. !last_tap_time < double_tap_threshold then begin
       (* Double tap - switch back to sensor mode *)
-      (* Undo the fullscreen toggle from the first tap *)
-      toggle_fullscreen ();
       if !input_mode = Manual then begin
         input_mode := Sensor;
         display_temporary_message "Sensor mode"
@@ -3000,11 +3022,19 @@ let setup_events canvas =
     end
   in
 
+  let min_zoom = 0.5 in
+  let max_zoom = 3. in
+
   (* Device orientation listener - only active in Sensor mode *)
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
-         if !input_mode = Sensor then begin
+         if
+           !input_mode = Sensor
+           &&
+           (* Bogus event on Chrome desktop *)
+           not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha"))
+         then begin
            let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
            let alpha = angle "alpha" in
            let beta = angle "beta" in
@@ -3054,8 +3084,8 @@ let setup_events canvas =
                  !current_orientation with
                  beta = min 120. (!current_orientation.beta +. 5.);
                }
-         | "Equal" | "NumpadAdd" -> zoom := min 4.0 (!zoom *. 1.1)
-         | "Minus" | "NumpadSubtract" -> zoom := max 0.25 (!zoom /. 1.1)
+         | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
+         | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
          | _ -> ())
        (Brr.Window.as_target Brr.G.window));
 
@@ -3070,7 +3100,7 @@ let setup_events canvas =
          let wheel = Brr.Ev.as_type ev in
          let delta_y = Brr.Ev.Wheel.delta_y wheel in
          let factor = if delta_y > 0. then 0.9 else 1.1 in
-         zoom := max 0.25 (min 4.0 (!zoom *. factor)))
+         zoom := max min_zoom (min max_zoom (!zoom *. factor)))
        target);
 
   (* Mouse drag for rotation *)
@@ -3078,10 +3108,25 @@ let setup_events canvas =
     (Brr.Ev.listen Brr.Ev.mousedown
        (fun ev ->
          let mouse = Brr.Ev.as_type ev in
+         let x = Brr.Ev.Mouse.client_x mouse in
+         let y = Brr.Ev.Mouse.client_y mouse in
          mouse_dragging := true;
+         is_dragging := true;
+         velocity := (0., 0.);
+         last_input_time := now ();
+         mouse_start_x := x;
+         mouse_start_y := y;
+         mouse_last_x := x;
+         mouse_last_y := y;
          if !input_mode = Sensor then begin
            input_mode := Manual;
-           display_temporary_message "Manual mode"
+           display_temporary_message "Manual mode";
+           let alpha =
+             compute_azimuth (rotation_matrix !current_orientation)
+             *. 180. /. pi
+           in
+           current_orientation :=
+             { !current_orientation with alpha; gamma = 0. }
          end;
          let x = Brr.Ev.Mouse.client_x mouse in
          let y = Brr.Ev.Mouse.client_y mouse in
@@ -3100,15 +3145,36 @@ let setup_events canvas =
            let y = Brr.Ev.Mouse.client_y mouse in
            let dx = x -. !mouse_last_x in
            let dy = y -. !mouse_last_y in
-           let speed = drag_sensitivity /. !zoom in
+           let h = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight") in
+           let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
+           let speed = 2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi in
+           let gamma = !current_orientation.screen *. Float.pi /. 180. in
+           let c = cos gamma in
+           let s = sin gamma in
+           let dx_eff = (dx *. c) -. (dy *. s) in
+           let dy_eff = (dx *. s) +. (dy *. c) in
+           let da = dx_eff *. speed in
+           let db = dy_eff *. speed in
+           let t = now () in
+           let dt = t -. !last_input_time in
+           last_input_time := t;
+           if dt > 0. then begin
+             let v_inst_x = da /. dt in
+             let v_inst_y = db /. dt in
+             let vx, vy = !velocity in
+             (* Smoothing: mix history (0.6) with new (0.4) *)
+             velocity :=
+               ( (v_inst_x *. 0.4) +. (vx *. 0.6),
+                 (v_inst_y *. 0.4) +. (vy *. 0.6) )
+           end;
+           is_dragging := true;
            mouse_last_x := x;
            mouse_last_y := y;
            current_orientation :=
              {
                !current_orientation with
-               alpha = !current_orientation.alpha -. (dx *. speed);
-               beta =
-                 max 60. (min 120. (!current_orientation.beta -. (dy *. speed)));
+               alpha = !current_orientation.alpha +. da;
+               beta = max 60. (min 120. (!current_orientation.beta +. db));
              }
          end)
        (Brr.Window.as_target Brr.G.window));
@@ -3118,6 +3184,8 @@ let setup_events canvas =
        (fun ev ->
          if !mouse_dragging then begin
            mouse_dragging := false;
+           is_dragging := false;
+           if now () -. !last_input_time > 300. then velocity := (0., 0.);
            let mouse = Brr.Ev.as_type ev in
            let x = Brr.Ev.Mouse.client_x mouse in
            let y = Brr.Ev.Mouse.client_y mouse in
@@ -3147,7 +3215,10 @@ let setup_events canvas =
            touch_start_y := y;
            touch_last_x := x;
            touch_last_y := y;
-           touch_dragging := false
+           touch_dragging := false;
+           is_dragging := true;
+           velocity := (0., 0.);
+           last_input_time := now ()
          end
          else if num_touches >= 2 then begin
            (* Two or more fingers - pinch zoom *)
@@ -3178,22 +3249,53 @@ let setup_events canvas =
              (* Switch to manual mode when user starts dragging *)
              if !input_mode = Sensor then begin
                input_mode := Manual;
-               display_temporary_message "Manual mode"
+               display_temporary_message "Manual mode";
+               let alpha =
+                 compute_azimuth (rotation_matrix !current_orientation)
+                 *. 180. /. pi
+               in
+               Format.eprintf "%f %f => %f@." !current_orientation.alpha
+                 !current_orientation.gamma alpha;
+               current_orientation :=
+                 { !current_orientation with alpha; gamma = 0. }
              end;
              Brr.Ev.prevent_default ev
            end;
            if !touch_dragging then begin
-             Brr.Ev.prevent_default ev;
-             let speed = drag_sensitivity /. !zoom in
+             let h =
+               Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
+             in
+             let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
+             let speed =
+               2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
+             in
+             let gamma = !current_orientation.screen *. Float.pi /. 180. in
+             let c = cos gamma in
+             let s = sin gamma in
+             let dx_eff = (dx *. c) -. (dy *. s) in
+             let dy_eff = (dx *. s) +. (dy *. c) in
+             let da = dx_eff *. speed in
+             let db = dy_eff *. speed in
+             let t = now () in
+             let dt = t -. !last_input_time in
+             last_input_time := t;
+             if dt > 0. then begin
+               let v_inst_x = da /. dt in
+               let v_inst_y = db /. dt in
+               let vx, vy = !velocity in
+               (* Smoothing: mix history (0.6) with new (0.4) *)
+               velocity :=
+                 ( (v_inst_x *. 0.4) +. (vx *. 0.6),
+                   (v_inst_y *. 0.4) +. (vy *. 0.6) )
+             end;
+             is_dragging := true;
              touch_last_x := x;
              touch_last_y := y;
              current_orientation :=
                {
                  !current_orientation with
-                 alpha = !current_orientation.alpha +. (dx *. speed);
-                 beta =
-                   max 60.
-                     (min 120. (!current_orientation.beta +. (dy *. speed)));
+                 alpha = !current_orientation.alpha +. da;
+                 beta = max 60. (min 120. (!current_orientation.beta +. db));
                }
            end
          end
@@ -3203,7 +3305,7 @@ let setup_events canvas =
            match touch_distance touches with
            | Some d when !pinch_distance > 0. ->
                let factor = d /. !pinch_distance in
-               zoom := max 0.25 (min 4.0 (!zoom *. factor));
+               zoom := max min_zoom (min max_zoom (!zoom *. factor));
                pinch_distance := d
            | _ -> ()
          end)
@@ -3230,6 +3332,8 @@ let setup_events canvas =
 
          if num_remaining = 0 then begin
            (* All fingers lifted *)
+           is_dragging := false;
+           if now () -. !last_input_time > 300. then velocity := (0., 0.);
            if not !touch_dragging then begin
              Brr.Ev.prevent_default ev;
              (* This was a tap, not a drag *)
@@ -3239,6 +3343,11 @@ let setup_events canvas =
            pinch_distance := 0.
          end)
        target);
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.resize
+       (fun _ -> force_redraw := true)
+       (Brr.Window.as_target Brr.G.window));
 
   fun () -> state := `Starting
 
@@ -3277,7 +3386,8 @@ let main () =
               {
                 Points.name = poi.name;
                 coord = { Points.lat = poi.lat; lon = poi.lon };
-                elevation = Some poi.elevation;
+                elevation =
+                  (if poi.elevation = 0 then None else Some poi.elevation);
               })
             tile.Clc_loader.pois)
         tiles

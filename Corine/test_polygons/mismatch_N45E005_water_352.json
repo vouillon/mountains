@@ -1,0 +1,20 @@
+{
+  "tile": "N45E005",
+  "type": "water",
+  "expected_area": 5.684250002505218e-10,
+  "actual_area": 0.0,
+  "ratio": 0.0,
+  "outer": [
+    [ 5.2624667, 46.0049716 ],
+    [ 5.2624994, 46.0051136 ],
+    [ 5.2623979, 46.0051322 ],
+    [ 5.2624834, 46.0050787 ],
+    [ 5.2625036, 46.0049849 ],
+    [ 5.2624809, 46.0049739 ]
+  ],
+  "holes": [],
+  "validation_errors": [
+    "Self-intersection between edge 0-1 and 3-4",
+    "Triangle count mismatch: got 0, expected 4"
+  ]
+}

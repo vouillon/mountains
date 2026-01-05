@@ -417,7 +417,7 @@ let process_tile db_path output_dir tile_name =
   (* 
      Recursive helper: clipped multipolygon handling.
   *)
-  let max_clipped_verts = 20000 in
+  let max_clipped_verts = 5000 in
 
   let rec clip_with_split_fixed flat_verts proper_poly region depth =
     let clipped_verts, result_polys =
@@ -574,7 +574,8 @@ let process_tile db_path output_dir tile_name =
                               let tris =
                                 try
                                   Polygon_triangulation.Triangulator
-                                  .triangulate_multi clipped_verts
+                                  .triangulate_multi ~tile:tile_name
+                                    ~feature_type:"clc" clipped_verts
                                     [| clipped_poly |]
                                 with Invalid_argument msg ->
                                   Printf.printf "Triangulation failed: %s\n%!"
@@ -724,6 +725,7 @@ let process_tile db_path output_dir tile_name =
   (* Process each water feature *)
   List.iter
     (fun (feature : Osm_fetch.water_feature) ->
+      let tile_name = Printf.sprintf "%s-%d" tile_name feature.id in
       let flat_arrays = Osm_fetch.feature_to_flat_arrays feature in
       List.iter
         (fun (clc_code, outer_flat, holes_flat) ->
@@ -771,7 +773,8 @@ let process_tile db_path output_dir tile_name =
                 let tris =
                   try
                     Polygon_triangulation.Triangulator.triangulate_multi
-                      clipped_verts [| clipped_poly |]
+                      ~tile:tile_name ~feature_type:"water" clipped_verts
+                      [| clipped_poly |]
                   with Invalid_argument msg ->
                     Printf.printf "Water triangulation failed: %s\n%!" msg;
                     [||]

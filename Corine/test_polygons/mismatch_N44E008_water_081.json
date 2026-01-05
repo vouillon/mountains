@@ -1,0 +1,20 @@
+{
+  "tile": "N44E008",
+  "type": "water",
+  "expected_area": 2.3778550004776306e-09,
+  "actual_area": 2.4199050003126394e-09,
+  "ratio": 1.0176840050493248,
+  "outer": [
+    [ 8.468652499999999, 44.6741184 ],
+    [ 8.468735199999999, 44.6741815 ],
+    [ 8.4688149, 44.6741662 ],
+    [ 8.4687077, 44.6741579 ],
+    [ 8.468676200000001, 44.6740933 ],
+    [ 8.4687058, 44.6740655 ]
+  ],
+  "holes": [],
+  "validation_errors": [
+    "Non-standard winding order (Outer ring is CW) - triangulator will normalize this",
+    "Triangle count mismatch: got 3, expected 4"
+  ]
+}
