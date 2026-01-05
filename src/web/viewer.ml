@@ -1961,7 +1961,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
-    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
+    Matrix.(translate 0. 0. (-.height -. 200.) * rotation_matrix orientation)
   in
   let screen_inclination =
     orientation.screen
@@ -2027,7 +2027,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.clear_color ctx r g b 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-  (* Sky Draw Moved to After Terrain *)
   Gl.depth_mask ctx true;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
@@ -2046,35 +2045,29 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
-  Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
 
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
   Gl.depth_mask ctx false;
-  Gl.enable ctx Gl.depth_test;
   Gl.depth_func ctx Gl.lequal;
   (* Draw if Z <= 1.0 (Far Plane) *)
   Gl.disable ctx Gl.cull_face';
   Gl.use_program ctx sky_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
-
   (* Compute Inverse View *)
   let inv_view = Matrix.inverse transform in
   Matrix.blit inv_view inv_view_ba;
   Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
-
   Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
-
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-  Gl.bind_vertex_array ctx None;
-  (* Restore default *)
-  Gl.depth_func ctx Gl.less;
-  Gl.depth_mask ctx true;
 
-  Gl.use_program ctx triangle_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
+  (* VAO text_geo is still bound, reused for POIs *)
+  Gl.disable ctx Gl.depth_test;
   Gl.enable ctx Gl.blend;
   Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
+
+  (* 1. Triangles *)
+  Gl.use_program ctx triangle_pid;
   List.iter
     (fun (_, x, y, shown) ->
       let x = x *. x_scale in
@@ -2093,13 +2086,9 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
       Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
     points;
-  Gl.bind_vertex_array ctx None;
-  Gl.disable ctx Gl.blend;
 
+  (* 2. Text *)
   Gl.use_program ctx text_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
-  Gl.enable ctx Gl.blend;
-  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
   List.iter
     (fun (texture, x, y, shown) ->
       if shown then
@@ -2115,14 +2104,17 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         in
         draw_text ctx text_uniforms transform transform_ba transform_ta texture)
     points;
-  Gl.disable ctx Gl.blend;
 
+  Gl.disable ctx Gl.blend;
   Gl.bind_vertex_array ctx None
 
 (* Event loop *)
 
 let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
 let force_redraw = ref true
+let is_dragging = ref false
+let velocity = ref (0., 0.)
+let last_input_time = ref 0.
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -2133,11 +2125,27 @@ let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
     let orientation = !current_orientation in
     let z = !zoom in
-    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
+    let new_orientation =
+      if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then (
+        let va, vb = !velocity in
+        let va = va *. 0.98 in
+        let vb = vb *. 0.98 in
+        let va = if abs_float va < 0.001 then 0. else va in
+        let vb = if abs_float vb < 0.001 then 0. else vb in
+        velocity := (va, vb);
+        {
+          orientation with
+          alpha = orientation.alpha +. va;
+          beta = max 60. (min 120. (orientation.beta +. vb));
+        })
+      else orientation
+    in
+    if new_orientation <> prev_orientation || z <> prev_zoom || !force_redraw
+    then (
       force_redraw := false;
-      draw ~orientation ctx);
+      draw ~orientation:new_orientation ctx);
     let* () = request_animation_frame () in
-    loop orientation z
+    loop new_orientation z
   in
   loop
     { !current_orientation with alpha = !current_orientation.alpha -. 1. }
@@ -3080,6 +3088,8 @@ let setup_events canvas =
        (fun ev ->
          let mouse = Brr.Ev.as_type ev in
          mouse_dragging := true;
+         is_dragging := true;
+         velocity := (0., 0.);
          if !input_mode = Sensor then begin
            input_mode := Manual;
            display_temporary_message "Manual mode";
@@ -3115,15 +3125,20 @@ let setup_events canvas =
            let s = sin gamma in
            let dx_eff = (dx *. c) -. (dy *. s) in
            let dy_eff = (dx *. s) +. (dy *. c) in
+           let da = dx_eff *. speed in
+           let db = dy_eff *. speed in
+           let vx, vy = !velocity in
+           velocity :=
+             ((-.da *. 0.2) +. (vx *. 0.8), (-.db *. 0.2) +. (vy *. 0.8));
+           is_dragging := true;
+           last_input_time := now_ms ();
            mouse_last_x := x;
            mouse_last_y := y;
            current_orientation :=
              {
                !current_orientation with
-               alpha = !current_orientation.alpha -. (dx_eff *. speed);
-               beta =
-                 max 60.
-                   (min 120. (!current_orientation.beta -. (dy_eff *. speed)));
+               alpha = !current_orientation.alpha -. da;
+               beta = max 60. (min 120. (!current_orientation.beta -. db));
              }
          end)
        (Brr.Window.as_target Brr.G.window));
@@ -3133,6 +3148,10 @@ let setup_events canvas =
        (fun ev ->
          if !mouse_dragging then begin
            mouse_dragging := false;
+           is_dragging := false;
+           display_temporary_message
+             (Format.sprintf "Vel: %.2f" (fst !velocity));
+           if now_ms () -. !last_input_time > 150. then velocity := (0., 0.);
            let mouse = Brr.Ev.as_type ev in
            let x = Brr.Ev.Mouse.client_x mouse in
            let y = Brr.Ev.Mouse.client_y mouse in
@@ -3162,7 +3181,9 @@ let setup_events canvas =
            touch_start_y := y;
            touch_last_x := x;
            touch_last_y := y;
-           touch_dragging := false
+           touch_dragging := false;
+           is_dragging := true;
+           velocity := (0., 0.)
          end
          else if num_touches >= 2 then begin
            (* Two or more fingers - pinch zoom *)
@@ -3218,15 +3239,19 @@ let setup_events canvas =
              let s = sin gamma in
              let dx_eff = (dx *. c) -. (dy *. s) in
              let dy_eff = (dx *. s) +. (dy *. c) in
+             let da = dx_eff *. speed in
+             let db = dy_eff *. speed in
+             let vx, vy = !velocity in
+             velocity := ((da *. 0.2) +. (vx *. 0.8), (db *. 0.2) +. (vy *. 0.8));
+             is_dragging := true;
+             last_input_time := now_ms ();
              touch_last_x := x;
              touch_last_y := y;
              current_orientation :=
                {
                  !current_orientation with
-                 alpha = !current_orientation.alpha +. (dx_eff *. speed);
-                 beta =
-                   max 60.
-                     (min 120. (!current_orientation.beta +. (dy_eff *. speed)));
+                 alpha = !current_orientation.alpha +. da;
+                 beta = max 60. (min 120. (!current_orientation.beta +. db));
                }
            end
          end
@@ -3263,6 +3288,10 @@ let setup_events canvas =
 
          if num_remaining = 0 then begin
            (* All fingers lifted *)
+           is_dragging := false;
+           display_temporary_message
+             (Format.sprintf "Vel: %.2f" (fst !velocity));
+           if now_ms () -. !last_input_time > 150. then velocity := (0., 0.);
            if not !touch_dragging then begin
              Brr.Ev.prevent_default ev;
              (* This was a tap, not a drag *)
