@@ -38,7 +38,6 @@ type terrain_uniforms = {
   transform : Gl.uniform_location;
   (* Texture samplers *)
   relief : Gl.uniform_location;
-  noise : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   (* Lighting *)
@@ -123,7 +122,6 @@ let init_terrain_uniforms ctx pid =
     proj = u "proj";
     transform = u "transform";
     relief = u "relief";
-    noise = u "noise";
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_lightDir = u "u_lightDir";
@@ -179,7 +177,6 @@ let upload_radial_static_shadow ctx (u : shadow_uniforms) (p : radial_params) =
 (** Upload static texture unit bindings. Call once at initialization. *)
 let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.relief 1;
-  Gl.uniform1i ctx u.noise 2;
   Gl.uniform1i ctx u.ao 3;
   Gl.uniform1i ctx u.shadow_map 4;
   Gl.uniform1i ctx u.u_detailMap 5;

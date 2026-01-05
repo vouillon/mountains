@@ -112,10 +112,8 @@ let compute_azimuth m =
   azimuth -. (pi /. 2.)
 
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
-let terrain_program ~use_clc =
-  let use_clc_define =
-    if use_clc then "#define USE_CLC 1" else "#define USE_CLC 0"
-  in
+let terrain_program =
+  let use_clc_define = "#define USE_CLC 1" in
   {
     vertex_shader =
       {|#version 300 es
@@ -218,7 +216,6 @@ let terrain_program ~use_clc =
         precision highp sampler2DArray;
 
         uniform mediump sampler2D relief;
-        uniform mediump sampler2D noise;
         uniform mediump sampler2D ao;
         uniform mediump sampler2D u_detailMap;  // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
@@ -428,18 +425,20 @@ let terrain_program ~use_clc =
         
         // Procedural water with organic shoreline
         float getWaterMask(highp vec2 worldPos, float waterFactor) {
-          // High-frequency noise for organic shoreline edge
-          float noise_val = texture(noise, worldPos * 0.002).r;
-          float jitter = (noise_val - 0.5) * 0.25;  // +/- 12.5%% variation
-          
-          // Sharp threshold with smooth transition
-          float threshold = 0.5 + jitter;
-          return smoothstep(threshold - 0.15, threshold + 0.15, waterFactor);
+          if (waterFactor >= 0.01 && waterFactor < 0.99) {
+              float noise_val = texture(u_detailMap, worldPos.xy * 0.2).r;
+              float jitter = (noise_val - 0.5) * 0.5;
+
+              // Sharp threshold with smooth transition
+              float threshold = 0.5 + jitter;
+              return smoothstep(threshold - 0.15, threshold + 0.15, waterFactor);
+          }
+          return waterFactor;
         }
         
         vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
           if (waterMask < 0.01) return baseColor;
-          
+
           // Deep water color (linear space)
           vec3 waterColor = vec3(0.01, 0.04, 0.12);
           
@@ -1226,244 +1225,115 @@ let make_tile_texture ctx tile =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-let make_noise_texture ctx =
-  let size = 256 in
-  let data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 3))
-  in
-  for i = 0 to (size * size * 3) - 1 do
-    data.{i} <- Random.int 256
-  done;
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgb8 size size 0 Gl.rgb Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
-    0;
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  tid
+(* Detect supported compressed texture format *)
+type compressed_format = BC7 | ASTC | ETC2
 
-(* Create packed RGBA detail map with distinct patterns per channel:
-   R = Rock/Ground (cracks, rough edges)
-   G = Grass/Vegetation (soft, organic patterns)
-   B = Forest floor (granular, debris-like)
-   A = Ice/Snow (smooth, subtle variation) *)
+let detect_compressed_format ctx =
+  let has_ext name = Jv.is_some (Gl.get_extension ctx (Jstr.v name)) in
+  (* BC7 first for best quality on desktop *)
+  if has_ext "EXT_texture_compression_bptc" then Some BC7
+  else if has_ext "WEBGL_compressed_texture_astc" then Some ASTC
+  else if has_ext "WEBGL_compressed_texture_etc" then Some ETC2
+  else None
+
+(* GL internal format for compressed texture *)
+let compressed_internal_format = function
+  | BC7 -> 0x8E8C (* COMPRESSED_RGBA_BPTC_UNORM_EXT *)
+  | ASTC -> 0x93B0 (* COMPRESSED_RGBA_ASTC_4x4_KHR *)
+  | ETC2 -> 0x9278 (* COMPRESSED_RGBA8_ETC2_EAC *)
+
+(* KTX2 file for each format *)
+let compressed_texture_file = function
+  | BC7 -> "assets/details_bc7.ktx2"
+  | ASTC -> "assets/details_astc.ktx2"
+  | ETC2 -> "assets/details_etc2.ktx2"
+
+(* Load compressed KTX2 texture asynchronously *)
+let load_compressed_detail_map ctx tid =
+  match detect_compressed_format ctx with
+  | None -> Format.eprintf "No compressed texture format supported@."
+  | Some fmt ->
+      let file = compressed_texture_file fmt in
+      let internal_fmt = compressed_internal_format fmt in
+      let fetch =
+        let open Fut.Result_syntax in
+        let* response = Brr_io.Fetch.url (Jstr.v file) in
+        let* buffer =
+          Brr_io.Fetch.Body.array_buffer
+            (Brr_io.Fetch.Response.as_body response)
+        in
+        Fut.return (Ok buffer)
+      in
+      Fut.await fetch (function
+        | Error e ->
+            Format.eprintf "Failed to load %s: %s@." file
+              (Jv.Error.message e |> Jstr.to_string)
+        | Ok buffer ->
+            (* Parse KTX2 header using DataView *)
+            let view =
+              Jv.new'
+                (Jv.get Jv.global "DataView")
+                [| Brr.Tarray.Buffer.to_jv buffer |]
+            in
+            let get_u32 off =
+              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+            in
+            (* Header fields at known offsets:
+               12: vkFormat, 16: typeSize, 20: pixelWidth, 24: pixelHeight,
+               28: pixelDepth, 32: layerCount, 36: faceCount, 40: levelCount *)
+            let pixel_width = get_u32 20 in
+            let pixel_height = get_u32 24 in
+            let level_count = get_u32 40 in
+            (* Level index starts at offset 80, each entry is 24 bytes (3 x uint64) *)
+            let get_u64_low off =
+              (* Just read low 32 bits - file offsets won't exceed 4GB *)
+              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+            in
+            (* Upload each mip level - Level Index is in GL order: [0]=largest, [n-1]=smallest *)
+            Gl.active_texture ctx Gl.texture5;
+            Gl.bind_texture ctx Gl.texture_2d (Some tid);
+            let data = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buffer in
+            for level = 0 to level_count - 1 do
+              let idx = 80 + (level * 24) in
+              let offset = get_u64_low idx in
+              let length = get_u64_low (idx + 8) in
+              let level_data =
+                Brr.Tarray.sub data ~start:offset ~stop:(offset + length)
+              in
+              let w = max 1 (pixel_width lsr level) in
+              let h = max 1 (pixel_height lsr level) in
+              Gl.compressed_tex_image2d ctx Gl.texture_2d level internal_fmt w h
+                0 level_data
+            done;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+              Gl.linear_mipmap_linear;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
+            Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
+            Gl.active_texture ctx Gl.texture0;
+            Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
+              file pixel_width pixel_height level_count)
+
+(* Create 1x1 placeholder detail map texture (grey midtone in all channels) *)
 let make_detail_map ctx =
-  let size = 1024 in
-  let data =
-    Bigarray.(Array1.create int8_unsigned c_layout (size * size * 4))
-  in
-  (* Better hash function with less correlation *)
-  let hash x y seed =
-    let n = x + (y * 57) + (seed * 131) in
-    let n = (n lsl 13) lxor n in
-    let n = (n * ((n * n * 15731) + 789221)) + 839441677 in
-    (* Extra mixing step to reduce correlation *)
-    let n = n lxor (n lsr 16) * 0x45d9f3b in
-    let n = n lxor (n lsr 16) in
-    n land 0x3fffffff
-  in
-  let noise x y seed = float (hash x y seed land 255) /. 255.0 in
-
-  (* Smoothstep function for Hermite interpolation *)
-  let smoothstep t = t *. t *. (3.0 -. (2.0 *. t)) in
-
-  (* Smooth noise with Hermite interpolation - eliminates grid artifacts *)
-  let smooth_noise_tiled fx fy period seed =
-    let x = int_of_float (if fx >= 0.0 then fx else fx -. 1.0) in
-    let y = int_of_float (if fy >= 0.0 then fy else fy -. 1.0) in
-    let x0 = ((x mod period) + period) mod period in
-    let y0 = ((y mod period) + period) mod period in
-    let x1 = (x0 + 1) mod period in
-    let y1 = (y0 + 1) mod period in
-    let frac_x = fx -. float x in
-    let frac_y = fy -. float y in
-    (* Use smoothstep instead of linear interpolation *)
-    let sx = smoothstep frac_x in
-    let sy = smoothstep frac_y in
-    let v00 = noise x0 y0 seed in
-    let v10 = noise x1 y0 seed in
-    let v01 = noise x0 y1 seed in
-    let v11 = noise x1 y1 seed in
-    let i0 = v00 +. (sx *. (v10 -. v00)) in
-    let i1 = v01 +. (sx *. (v11 -. v01)) in
-    i0 +. (sy *. (i1 -. i0))
-  in
-
-  (* Domain warping: offset coordinates by noise to break up grid alignment *)
-  let warp_coords x y seed_offset =
-    let wx = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 (500 + seed_offset) in
-    let wy =
-      smooth_noise_tiled
-        ((x *. 4.0) +. 5.3)
-        ((y *. 4.0) +. 1.7)
-        4 (600 + seed_offset)
-    in
-    (x +. ((wx -. 0.5) *. 0.15), y +. ((wy -. 0.5) *. 0.15))
-  in
-
-  (* Rock pattern: Multi-octave fractal noise with domain warping and rotation *)
-  let rock_pattern x y =
-    (* Apply domain warping to break grid alignment *)
-    let x, y = warp_coords x y 0 in
-    (* Rotate coordinates at each octave to break up directional patterns *)
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
-    let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
-    let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
-    let rot_x4 = (-.x *. 0.707) +. (y *. 0.707) in
-    let rot_y4 = (-.y *. 0.707) -. (x *. 0.707) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 16.0) (rot_y1 *. 16.0) 16 0 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 32.0) (rot_y2 *. 32.0) 32 1 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 64.0) (rot_y3 *. 64.0) 64 2 in
-    let v4 = smooth_noise_tiled (rot_x4 *. 128.0) (rot_y4 *. 128.0) 128 3 in
-    let v = (v1 *. 0.4) +. (v2 *. 0.3) +. (v3 *. 0.2) +. (v4 *. 0.1) in
-    (* Apply contrast curve for sharper cracks *)
-    let v = ((v -. 0.5) *. 1.5) +. 0.5 in
-    max 0.0 (min 1.0 v)
-  in
-
-  (* Grass pattern: Softer, more organic with domain warping and rotation *)
-  let grass_pattern x y =
-    let x, y = warp_coords x y 100 in
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.866) +. (y *. 0.5) in
-    let rot_y2 = (y *. 0.866) -. (x *. 0.5) in
-    let rot_x3 = (x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (y *. 0.5) -. (x *. 0.866) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 8.0) (rot_y1 *. 8.0) 8 100 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 16.0) (rot_y2 *. 16.0) 16 101 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 32.0) (rot_y3 *. 32.0) 32 102 in
-    (* Softer blend, less high-frequency detail *)
-    (v1 *. 0.5) +. (v2 *. 0.35) +. (v3 *. 0.15)
-  in
-
-  (* Forest floor: Granular, debris-like pattern with domain warping *)
-  let forest_pattern x y =
-    let x, y = warp_coords x y 200 in
-    let rot_x1 = x in
-    let rot_y1 = y in
-    let rot_x2 = (x *. 0.707) +. (y *. 0.707) in
-    let rot_y2 = (y *. 0.707) -. (x *. 0.707) in
-    let rot_x3 = (-.x *. 0.5) +. (y *. 0.866) in
-    let rot_y3 = (-.y *. 0.866) -. (x *. 0.5) in
-    let v1 = smooth_noise_tiled (rot_x1 *. 24.0) (rot_y1 *. 24.0) 24 200 in
-    let v2 = smooth_noise_tiled (rot_x2 *. 48.0) (rot_y2 *. 48.0) 48 201 in
-    let v3 = smooth_noise_tiled (rot_x3 *. 96.0) (rot_y3 *. 96.0) 96 202 in
-    (* Medium frequency mix for granular appearance *)
-    (v1 *. 0.3) +. (v2 *. 0.4) +. (v3 *. 0.3)
-  in
-
-  (* Ice pattern: Very smooth, subtle variation *)
-  let ice_pattern x y =
-    let v1 = smooth_noise_tiled (x *. 4.0) (y *. 4.0) 4 300 in
-    let v2 = smooth_noise_tiled (x *. 8.0) (y *. 8.0) 8 301 in
-    (* Very low frequency, subtle variation *)
-    let v = (v1 *. 0.7) +. (v2 *. 0.3) in
-    (* Compress range for subtle effect *)
-    0.4 +. (v *. 0.2)
-  in
-  for py = 0 to size - 1 do
-    for px = 0 to size - 1 do
-      let fx = float px /. float size in
-      let fy = float py /. float size in
-      (* Placeholder for R - will be replaced by rock.png asynchronously *)
-      let r = rock_pattern fx fy in
-      let g = grass_pattern fx fy in
-      let b = forest_pattern fx fy in
-      let a = ice_pattern fx fy in
-      let idx = ((py * size) + px) * 4 in
-      data.{idx} <- min 255 (int_of_float (r *. 255.0));
-      data.{idx + 1} <- min 255 (int_of_float (g *. 255.0));
-      data.{idx + 2} <- min 255 (int_of_float (b *. 255.0));
-      data.{idx + 3} <- min 255 (int_of_float (a *. 255.0))
-    done
-  done;
+  let data = Bigarray.(Array1.create int8_unsigned c_layout 4) in
+  data.{0} <- 128;
+  data.{1} <- 128;
+  data.{2} <- 128;
+  data.{3} <- 128;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 size size 0 Gl.rgba
-    Gl.unsigned_byte
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 1 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
     Gl.linear_mipmap_linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
   Gl.bind_texture ctx Gl.texture_2d None;
-
-  (* Async: Load texture into specific channel *)
-  let load_channel_texture filename channel_idx =
-    let img = Brr.El.img () in
-    let fut, set = Fut.create () in
-    ignore
-      (Brr.Ev.listen Brr.Ev.load
-         (fun _ ->
-           let canvas = Brr.El.canvas [] in
-           let img_w = Jv.Int.get (Brr.El.to_jv img) "naturalWidth" in
-           let img_h = Jv.Int.get (Brr.El.to_jv img) "naturalHeight" in
-           Brr_canvas.Canvas.set_w (Brr_canvas.Canvas.of_el canvas) img_w;
-           Brr_canvas.Canvas.set_h (Brr_canvas.Canvas.of_el canvas) img_h;
-           let c2d =
-             Brr_canvas.C2d.get_context (Brr_canvas.Canvas.of_el canvas)
-           in
-           Brr_canvas.C2d.draw_image c2d
-             (Brr_canvas.C2d.image_src_of_el img)
-             ~x:0.0 ~y:0.0;
-           let img_data =
-             Brr_canvas.C2d.get_image_data c2d ~x:0 ~y:0 ~w:img_w ~h:img_h
-           in
-           let pixels = Brr_canvas.C2d.Image_data.data img_data in
-           let pixels_ba = Brr.Tarray.to_bigarray1 pixels in
-
-           (* Update texture data at specific channel *)
-           for py = 0 to size - 1 do
-             for px = 0 to size - 1 do
-               let src_x = px * img_w / size in
-               let src_y = py * img_h / size in
-               let src_idx = ((src_y * img_w) + src_x) * 4 in
-               let r = pixels_ba.{src_idx} in
-               let g = pixels_ba.{src_idx + 1} in
-               let b = pixels_ba.{src_idx + 2} in
-               let lum = (r + g + b) / 3 in
-               let idx = (((py * size) + px) * 4) + channel_idx in
-               data.{idx} <- lum
-             done
-           done;
-           Gl.active_texture ctx Gl.texture5;
-           Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 size size 0 Gl.rgba
-             Gl.unsigned_byte
-             (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
-             0;
-           Gl.generate_mipmap ctx Gl.texture_2d;
-           Gl.active_texture ctx Gl.texture0;
-           set (Ok ()))
-         (Brr.El.as_target img));
-    ignore
-      (Brr.Ev.listen Brr.Ev.error
-         (fun _ ->
-           set
-             (Error
-                (Jv.Error.v
-                   (Jstr.v (Printf.sprintf "Failed to load %s" filename)))))
-         (Brr.El.as_target img));
-    Brr.El.set_at (Jstr.v "src") (Some (Jstr.v filename)) img;
-    fut
-  in
-  (* Start async loads if enabled *)
-  ignore (load_channel_texture "assets/rock.png" 0);
-  ignore (load_channel_texture "assets/grass.png" 1);
-  ignore (load_channel_texture "assets/forest.png" 2);
-  ignore (load_channel_texture "assets/ice.png" 3);
+  (* Start async load of compressed texture *)
+  load_compressed_detail_map ctx tid;
   tid
 
 (* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
@@ -1857,13 +1727,11 @@ let text_height = 0.07
 
 (** Bind all terrain textures to their units. Call at init and after
     draw_shadows. *)
-let bind_terrain_textures ctx ~relief_texture ~noise_texture ~ao_texture
-    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture =
+let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
+    ~shadow_map ~cover_map_texture ~palette_texture =
   let open Brr_canvas in
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.active_texture ctx Gl.texture2;
-  Gl.bind_texture ctx Gl.texture_2d (Some noise_texture);
   Gl.active_texture ctx Gl.texture3;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
   Gl.active_texture ctx Gl.texture5;
@@ -1884,9 +1752,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     ~(triangle_uniforms : Render_state.triangle_uniforms)
     ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
     ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y ~height ~lat ~lon
-    ~orientation ~points ~tile ~index_count ~noise_texture ~ao_texture
-    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
-    ~cover_map_texture canvas ctx =
+    ~orientation ~points ~tile ~index_count ~ao_texture ~detail_map ~shadow_pid
+    ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
@@ -1960,8 +1827,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
       ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx;
     (* Rebind terrain textures after draw_shadows disturbed them *)
-    bind_terrain_textures ctx ~relief_texture ~noise_texture ~ao_texture
-      ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
+    bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
+      ~shadow_map ~cover_map_texture ~palette_texture
   end;
 
   Gl.clear_color ctx 0.37 0.56 0.85 1.;
@@ -2395,7 +2262,6 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   (* CLC mode toggle - used at shader compile time *)
-  let use_clc = true in
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
@@ -2431,11 +2297,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
   (* Create two terrain program variants: CLC and fallback *)
-  let terrain_pid_clc = create_program ctx (terrain_program ~use_clc:true) in
-  let terrain_pid_fallback =
-    create_program ctx (terrain_program ~use_clc:false)
-  in
-  let terrain_pid = if use_clc then terrain_pid_clc else terrain_pid_fallback in
+  let terrain_pid = create_program ctx terrain_program in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let tile_texture = make_tile_texture ctx tile in
@@ -2470,7 +2332,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
-  let noise_texture = make_noise_texture ctx in
   let detail_map = make_detail_map ctx in
   let scale = deltay in
   (* Approx 30m per pixel *)
@@ -2554,13 +2415,13 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
-  (* Initialize with zeros *)
+  (* Initialize with grass (index 26 = Natural grasslands) *)
   let init_data =
     Bigarray.(
       Array1.create int8_unsigned c_layout
         (cover_map_size * cover_map_size * clc_levels))
   in
-  Bigarray.Array1.fill init_data 0;
+  Bigarray.Array1.fill init_data 26;
   Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
     clc_levels 0 Gl.red_integer Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
@@ -2590,8 +2451,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let palette_texture = make_palette_texture ctx in
 
   (* Bind all terrain textures at init - after all textures are created *)
-  bind_terrain_textures ctx ~relief_texture ~noise_texture ~ao_texture
-    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture;
+  bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
+    ~cover_map_texture ~palette_texture;
 
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
@@ -2767,9 +2628,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
         ~proj_ba ~transform_ba ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y
-        ~lat ~lon ~orientation ~height ~tile ~points ~index_count ~noise_texture
-        ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
-        ~palette_texture ~cover_map_texture canvas ctx)
+        ~lat ~lon ~orientation ~height ~tile ~points ~index_count ~ao_texture
+        ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+        ~cover_map_texture canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
