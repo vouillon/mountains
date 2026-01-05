@@ -724,6 +724,26 @@ let terrain_program =
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
           
+          // DEBUG: Visualize normal-map mip level
+          // Blue(0) -> Cyan(1) -> Green(2) -> Yellow(3) -> Orange(4) -> Red(5) -> Magenta(6) -> White(7+)
+          vec2 dxCoord = dFdx(reliefCoord);
+          vec2 dyCoord = dFdy(reliefCoord);
+          ivec2 texSize = textureSize(relief, 0);
+          float maxDeriv = max(length(dxCoord * vec2(texSize)), length(dyCoord * vec2(texSize)));
+          int mipLevel = int(log2(max(1.0, maxDeriv)));
+          vec3 mipColors[8] = vec3[8](
+              vec3(0.0, 0.0, 1.0),  // 0: Blue
+              vec3(0.0, 1.0, 1.0),  // 1: Cyan
+              vec3(0.0, 1.0, 0.0),  // 2: Green
+              vec3(1.0, 1.0, 0.0),  // 3: Yellow
+              vec3(1.0, 0.5, 0.0),  // 4: Orange
+              vec3(1.0, 0.0, 0.0),  // 5: Red
+              vec3(1.0, 0.0, 1.0),  // 6: Magenta
+              vec3(1.0, 1.0, 1.0)   // 7+: White
+          );
+          // Uncomment below to enable mipmap visualization:
+          // final_color = mipColors[min(mipLevel, 7)];
+          
           // Gamma correction
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
         }
@@ -1225,6 +1245,26 @@ let make_tile_texture ctx tile =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
+(* Anisotropic filtering support *)
+let aniso_ext = ref None
+let max_anisotropy = ref 1.0
+
+let init_anisotropic_filtering ctx =
+  let ext = Gl.get_extension ctx (Jstr.v "EXT_texture_filter_anisotropic") in
+  if Jv.is_some ext then begin
+    aniso_ext := Some ext;
+    (* MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF *)
+    let max_val = Jv.to_float (Gl.get_parameter ctx 0x84FF) in
+    max_anisotropy := max_val;
+    Format.eprintf "Anisotropic filtering enabled: max %.0fx@." max_val
+  end
+  else Format.eprintf "Anisotropic filtering not supported@."
+
+let apply_anisotropic_filtering ctx =
+  if !max_anisotropy > 1.0 then
+    (* TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE *)
+    Gl.tex_parameterf ctx Gl.texture_2d 0x84FE !max_anisotropy
+
 (* Detect supported compressed texture format *)
 type compressed_format = BC7 | ASTC | ETC2
 
@@ -1310,6 +1350,7 @@ let load_compressed_detail_map ctx tid =
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
+            apply_anisotropic_filtering ctx;
             Gl.active_texture ctx Gl.texture0;
             Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
               file pixel_width pixel_height level_count)
@@ -2107,6 +2148,7 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
+  apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
   Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
@@ -2261,6 +2303,8 @@ let compute_relief ctx width height triangle_geo tile_texture =
   (tid, relief_pid)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+  (* Initialize anisotropic filtering extension *)
+  init_anisotropic_filtering ctx;
   (* CLC mode toggle - used at shader compile time *)
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
