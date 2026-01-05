@@ -281,12 +281,11 @@ let terrain_program ~use_clc =
         Surface sampleCLCBilinear(highp vec2 worldPos) {
           // Calculate distance from center (camera) for LOD selection
           highp vec2 relPos = worldPos - u_cameraOffset;
-          highp float dist = max(abs(relPos.x), abs(relPos.y));
           
           // Select clipmap level based on distance
           // Level L covers extent = u_baseExtent * 2^L
           // We want the finest level that covers this point
-          highp float desiredLevel = max(0.0, 1.0 + log2(dist / u_baseExtent));
+          highp float desiredLevel = max(0.0, 1.0 + log2(v_dist / u_baseExtent));
           int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
           
           // Calculate texture coordinates for this level
@@ -364,7 +363,7 @@ let terrain_program ~use_clc =
         // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
         vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
-          highp float scale = 0.003;  // ~500m per texture repeat (matches validated debug scale)
+          highp float scale = 0.002;  // ~500m per texture repeat (matches validated debug scale)
           highp vec2 uv_xz = worldPos.xz * scale;
           highp vec2 uv_xy = worldPos.xy * scale;
           highp vec2 uv_yz = worldPos.yz * scale;
@@ -475,7 +474,7 @@ let terrain_program ~use_clc =
         void main() {
           // Decode normal from relief texture
           mediump vec2 encodedN = texture(relief, reliefCoord).ba;
-          highp vec3 normal;
+          vec3 normal;
           normal.xy = encodedN * 2.0 - 1.0;
           normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
@@ -1314,11 +1313,11 @@ let make_detail_map ctx =
   let hash x y seed =
     let n = x + (y * 57) + (seed * 131) in
     let n = (n lsl 13) lxor n in
-    let n = (n * ((n * n * 15731) + 789221)) + 1376312589 in
+    let n = (n * ((n * n * 15731) + 789221)) + 839441677 in
     (* Extra mixing step to reduce correlation *)
     let n = n lxor (n lsr 16) * 0x45d9f3b in
     let n = n lxor (n lsr 16) in
-    n land 0x7fffffff
+    n land 0x3fffffff
   in
   let noise x y seed = float (hash x y seed land 255) /. 255.0 in
 
