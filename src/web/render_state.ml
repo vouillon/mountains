@@ -48,6 +48,8 @@ type terrain_uniforms = {
   u_cameraOffset : Gl.uniform_location;
   u_baseExtent : Gl.uniform_location;
   u_numLevels : Gl.uniform_location;
+  u_fogColor : Gl.uniform_location;
+  u_zenithColor : Gl.uniform_location;
   (* Shadows *)
   shadow_matrices : Gl.uniform_location;
   shadow_splits : Gl.uniform_location;
@@ -76,6 +78,15 @@ type shadow_uniforms = {
   shadow_view_proj : Gl.uniform_location;
 }
 (** Cached uniform locations for the shadow shader. *)
+
+type sky_uniforms = {
+  inv_view : Gl.uniform_location;
+  u_lightDir : Gl.uniform_location;
+  sky_params : Gl.uniform_location; (* x_scale, y_scale, unused, unused *)
+  u_fogColor : Gl.uniform_location;
+  u_zenithColor : Gl.uniform_location;
+}
+(** Cached uniform locations for the sky shader. *)
 
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
@@ -130,6 +141,8 @@ let init_terrain_uniforms ctx pid =
     u_cameraOffset = u "u_cameraOffset";
     u_baseExtent = u "u_baseExtent";
     u_numLevels = u "u_numLevels";
+    u_fogColor = u "u_fogColor";
+    u_zenithColor = u "u_zenithColor";
     shadow_matrices = u "shadow_matrices";
     shadow_splits = u "shadow_splits";
     shadow_map = u "shadow_map";
@@ -154,6 +167,17 @@ let init_shadow_uniforms ctx pid =
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
     shadow_view_proj = u "shadow_view_proj";
+  }
+
+(** Initialize sky uniform locations. Call once after program creation. *)
+let init_sky_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    inv_view = u "inv_view";
+    u_lightDir = u "u_lightDir";
+    sky_params = u "sky_params";
+    u_fogColor = u "u_fogColor";
+    u_zenithColor = u "u_zenithColor";
   }
 
 (** Upload static radial grid uniforms. Call once at initialization. *)
@@ -193,9 +217,12 @@ let upload_texture_units_shadow ctx (u : shadow_uniforms) =
       center_offset)
     - CLC parameters (u_cameraOffset, u_baseExtent, u_numLevels)
     - Light direction (u_lightDir)
-    - Shadow matrices and splits *)
-let upload_session_static ctx (u : terrain_uniforms) ~w ~lat ~x ~y ~lon
-    ~light_dir ~shadow_matrices ~shadow_splits =
+    - Shadow matrices and splits
+    - Fog Color *)
+let upload_session_static ctx terrain_pid sky_pid (u : terrain_uniforms)
+    (sky_u : sky_uniforms) ~w ~lat ~x ~y ~lon ~light_dir ~shadow_matrices
+    ~shadow_splits ~fog_color ~zenith_color =
+  Gl.use_program ctx terrain_pid;
   let pi = 4. *. atan 1. in
   let deltay = 40_000. /. 360. /. 3600. *. 1000. in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
@@ -227,6 +254,22 @@ let upload_session_static ctx (u : terrain_uniforms) ~w ~lat ~x ~y ~lon
   (* Light direction *)
   Gl.uniform3f ctx u.u_lightDir light_dir.Matrix.x light_dir.Matrix.y
     light_dir.Matrix.z;
+
+  (* Fog & Zenith Color *)
+  let r, g, b = fog_color in
+  Gl.uniform3f ctx u.u_fogColor r g b;
+  let zr, zg, zb = zenith_color in
+  Gl.uniform3f ctx u.u_zenithColor zr zg zb;
+
+  (* Sky Uniforms *)
+  Gl.use_program ctx sky_pid;
+  Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x (-.light_dir.Matrix.y)
+    light_dir.Matrix.z;
+  Gl.uniform3f ctx sky_u.u_fogColor r g b;
+  Gl.uniform3f ctx sky_u.u_zenithColor zr zg zb;
+
+  (* Restore Terrain Program for subsequent uploads (shadow matrices) *)
+  Gl.use_program ctx terrain_pid;
 
   (* Shadow matrices and splits *)
   let flat_matrices =

@@ -35,6 +35,10 @@ let display_temporary_message msg =
   display_message msg;
   ignore (Brr.G.set_timeout ~ms:10000 remove_message)
 
+(* Sky colors *)
+let fog_linear = (0.17, 0.38, 0.79)
+let zenith_linear = (0.02, 0.12, 0.55)
+
 let loading_message () =
   let open Brr.El in
   let small_style = Brr.At.style (Jstr.v "font-size: 11px; color: #666;") in
@@ -470,9 +474,12 @@ let terrain_program =
 
         // ========== Main ==========
         
+        uniform vec3 u_fogColor;
+        uniform vec3 u_zenithColor;
+
         void main() {
           // Define fog color early for use in water reflection
-          const vec3 fog_color = vec3(0.1138, 0.2746, 0.6944); // Pre-computed pow((0.37,0.56,0.85), 2.2)
+          vec3 fog_color = u_fogColor;
 
           // Decode normal from relief texture
           mediump vec2 encodedN = texture(relief, reliefCoord).ba;
@@ -629,8 +636,12 @@ let terrain_program =
             
             // Environment reflection (sky color for glossy surfaces)
             vec3 reflectDir = reflect(-viewDir, final_normal);
-            float skyReflect = max(0.0, reflectDir.z);  // Simple sky gradient
-            vec3 envColor = mix(vec3(0.6, 0.7, 0.9), vec3(0.2, 0.4, 0.8), skyReflect);
+            float skyReflect = max(0.0, reflectDir.z); 
+            // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
+            // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
+            // We use the exact same mixing factor for consistency
+            float sky_mix = smoothstep(0.0, 0.35, skyReflect);
+            vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
             
 
             // Apply specular and reflection to terrain color
@@ -640,11 +651,11 @@ let terrain_program =
             // Fresnel for water
             if (waterMask > 0.01) {
                float n_dot_v = max(0.0, dot(final_normal, viewDir));
-               // Schlick's approximation: R(0) + (1 - R(0)) * (1 - cosTheta)^5
-               // Water F0 is approx 0.02
+               // Schlick's approximation
                float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
                reflectivity = mix(reflectivity, fresnel, waterMask);
-               envColor = mix(envColor, fog_color, waterMask);
+               // Removed explicit fog mixing here; let distance fog handle it
+               // envColor = mix(envColor, fog_color, waterMask); 
             }
             
             // Apply reflection (remove damping for water)
@@ -702,16 +713,17 @@ let terrain_program =
             }
 #endif
           
-          // === Lighting (unchanged) ===
+          // === Lighting ===
           float final_l = max(0.0, dot(final_normal, lightDir));
           
-          vec3 sky_color = vec3(0.4, 0.5, 0.7);
-          vec3 ground_color = vec3(0.15, 0.12, 0.08);
+          // Matched to Sky Shader: Horizon -> Zenith
+          vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2; 
+          vec3 ground_color = vec3(0.1, 0.08, 0.05); // Slightly darker ground bounce
           float sky_factor = final_normal.z * 0.5 + 0.5;
-          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.35;
+          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5; // Tuned intensity
           
-          vec3 sun_color = vec3(1.0, 0.95, 0.85);
-          vec3 direct = sun_color * final_l * shadow_val * 0.75;
+          vec3 sun_color = vec3(1.0, 0.95, 0.9);
+          vec3 direct = sun_color * final_l * shadow_val * 0.5; // Reduced direct intensity slightly to balance
           vec3 lighting = ambient + direct;
 
           // === AO (unchanged) ===
@@ -1107,6 +1119,74 @@ let clc_raster_program =
         }
       |};
     attributes = [ "in_norm_pos"; "in_color_idx" ];
+  }
+
+let sky_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        out mediump vec2 v_uv;
+        void main() {
+          float x = float(gl_VertexID & 1);
+          float y = float(gl_VertexID >> 1);
+          v_uv = vec2(x, y);
+          // Draw at Far Plane (Z=1.0)
+          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision mediump float;
+        uniform mat4 inv_view;
+        uniform vec3 u_lightDir;
+        uniform vec3 u_fogColor;
+        uniform vec3 u_zenithColor;
+        uniform vec2 sky_params; // x_scale, y_scale
+        in vec2 v_uv;
+        out vec4 color;
+
+        void main() {
+          // Reconstruct View Ray in View Space
+          // Clip space: (x, y, -1.0) for forward direction (RH)
+          // View Ray = (clip.x / x_scale, clip.y / y_scale, -1.0)
+          
+          float x = (v_uv.x * 2.0 - 1.0) / sky_params.x;
+          float y = (v_uv.y * 2.0 - 1.0) / sky_params.y;
+          vec3 view_ray = normalize(vec3(x, y, -1.0));
+          
+          // Transform to World Space (Rotation only)
+          highp vec3 view_dir = mat3(inv_view) * view_ray;
+          view_dir = normalize(view_dir);
+
+          float cos_theta = view_dir.z;
+          highp float cos_gamma = dot(view_dir, u_lightDir);
+
+          // Deep blue zenith, lighter horizon (Linear Space)
+          // New Lighter Blue/White Horizon (Matches fog)
+          vec3 horizon = u_fogColor;
+
+          float horizon_factor = smoothstep(0.0, 0.35, cos_theta);
+          vec3 sky_base = mix(horizon, u_zenithColor, horizon_factor);
+
+          float mie = pow(max(0.0, cos_gamma), 400.0) * 0.8;
+          float halo = pow(max(0.0, cos_gamma), 20.0) * 0.2;
+          
+          vec3 sun_color = vec3(1.0, 0.9, 0.7);
+          vec3 sky = sky_base + sun_color * (mie + halo);
+
+          if (cos_gamma > 0.9995) {
+             sky = vec3(1.0, 0.95, 0.8) * 20.0;
+          }
+
+          // Dither to prevent banding
+          float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+          sky += (noise - 0.5) / 255.0;
+
+          // Gamma Correction (Linear -> sRGB)
+          color = vec4(pow(sky, vec3(1.0 / 2.2)), 1.0);
+        }
+      |};
+    attributes = [];
   }
 
 (* OpenGL setup *)
@@ -1792,9 +1872,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
     ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
-    ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y ~height ~lat ~lon
-    ~orientation ~points ~tile ~index_count ~ao_texture ~detail_map ~shadow_pid
-    ~shadow_fbo ~shadow_map ~palette_texture ~cover_map_texture canvas ctx =
+    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~shadow_matrices ~w ~x ~y
+    ~height ~lat ~lon ~orientation ~points ~tile ~index_count ~ao_texture
+    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+    ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
@@ -1872,33 +1953,54 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       ~shadow_map ~cover_map_texture ~palette_texture
   end;
 
-  Gl.clear_color ctx 0.37 0.56 0.85 1.;
+  (* Prepare Clear Color matching fog *)
+  let r, g, b = fog_linear in
+  Gl.clear_color ctx r g b 1.;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
+  (* Sky Draw Moved to After Terrain *)
+  Gl.depth_mask ctx true;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
   Gl.enable ctx Gl.cull_face';
-
   (* Determine snapped alpha - changes with camera orientation *)
   let grid_k = pi /. float n_sectors in
   let current_azimuth = compute_azimuth transform in
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
-
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
   Matrix.blit transform transform_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
-
   Gl.bind_vertex_array ctx (Some terrain_geo);
-
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.cull_face';
-  Gl.active_texture ctx Gl.texture0;
+
+  (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
+  Gl.depth_mask ctx false;
+  Gl.enable ctx Gl.depth_test;
+  Gl.depth_func ctx Gl.lequal;
+  (* Draw if Z <= 1.0 (Far Plane) *)
+  Gl.disable ctx Gl.cull_face';
+  Gl.use_program ctx sky_pid;
+  Gl.bind_vertex_array ctx (Some text_geo);
+
+  (* Compute Inverse View *)
+  let inv_view = Matrix.inverse transform in
+  Matrix.blit inv_view inv_view_ba;
+  Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
+
+  Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
+
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  Gl.bind_vertex_array ctx None;
+  (* Restore default *)
+  Gl.depth_func ctx Gl.less;
+  Gl.depth_mask ctx true;
 
   Gl.use_program ctx triangle_pid;
   Gl.bind_vertex_array ctx (Some text_geo);
@@ -2382,7 +2484,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   let ao_texture = compute_ao ctx w h scale relief_texture in
   let shadow_map = create_shadow_map ctx 2048 2048 3 in
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
+
   let shadow_pid = create_program ctx shadow_program in
+  let sky_pid = create_program ctx sky_program in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
 
   (* Initialize render state - cache uniform locations and pre-compute params *)
   let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
@@ -2406,7 +2511,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     let sx, sy, sz =
       if sz < 0.2 then
         let date = Jv.new' date_ctor [||] in
+        (*
         let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
+*)
         let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
         let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
         let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
@@ -2440,9 +2547,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   in
 
   (* Upload all session-static uniforms *)
-  Gl.use_program ctx terrain_pid;
-  Render_state.upload_session_static ctx terrain_uniforms ~w ~lat ~x ~y ~lon
-    ~light_dir:light_dir_shader ~shadow_matrices ~shadow_splits:splits_dist;
+  Render_state.upload_session_static ctx terrain_pid sky_pid terrain_uniforms
+    sky_uniforms ~w ~lat ~x ~y ~lon ~light_dir:light_dir_shader ~shadow_matrices
+    ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
   let clc_raster_pid = create_program ctx clc_raster_program in
@@ -2666,15 +2773,19 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   in
   let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
   let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
+  let inv_view_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
   let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
 
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
-        ~proj_ba ~transform_ba ~proj_ta ~transform_ta ~shadow_matrices ~w ~x ~y
-        ~lat ~lon ~orientation ~height ~tile ~points ~index_count ~ao_texture
-        ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
-        ~cover_map_texture canvas ctx)
+        ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
+        ~shadow_matrices ~w ~x ~y ~lat ~lon ~orientation ~height ~tile ~points
+        ~index_count ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
+        ~palette_texture ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
