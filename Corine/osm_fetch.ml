@@ -64,7 +64,9 @@ let fetch_overpass_data_once query =
      done
    with End_of_file -> ());
   match Unix.close_process_in ic with
-  | Unix.WEXITED 0 -> Some (Buffer.contents buf)
+  | Unix.WEXITED 0 ->
+      prerr_endline (Buffer.contents buf);
+      Some (Buffer.contents buf)
   | Unix.WEXITED code ->
       Printf.eprintf "curl failed with exit code %d\n%!" code;
       None
@@ -72,7 +74,7 @@ let fetch_overpass_data_once query =
       Printf.eprintf "curl was killed by signal\n%!";
       None
 
-let fetch_overpass_data ?(max_retries = 5) query =
+let fetch_overpass_data ?(max_retries = 10) query =
   let rec retry attempt =
     Printf.printf "Overpass API request (attempt %d/%d)...\n%!" attempt
       max_retries;
@@ -81,7 +83,7 @@ let fetch_overpass_data ?(max_retries = 5) query =
       when String.length response >= 1 && String.sub response 0 1 = "{" ->
         Some response
     | (Some _ | None) when attempt < max_retries ->
-        let delay = 2.0 *. (3.0 ** float (attempt - 1)) in
+        let delay = 2.0 *. (1.5 ** float (attempt - 1)) in
         Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
           delay;
         Unix.sleepf delay;
@@ -125,128 +127,133 @@ let parse_overpass_elements json_str =
       let clc_code = water_tag_to_clc_code water_tag in
 
       match elem_type with
-      | "way" ->
-          (* Way geometry is in "geometry" array *)
-          let geom = elem |> member "geometry" |> to_list in
-          if List.length geom < 3 then None
-          else
-            let ring =
-              List.map
-                (fun pt ->
-                  {
-                    x = pt |> member "lon" |> to_float;
-                    y = pt |> member "lat" |> to_float;
-                  })
-                geom
-            in
-            Some { clc_code; polygons = [ [ ring ] ] }
-      | "relation" ->
+      | "way" -> (
+          (* Way geometry is in "geometry" array - can be null *)
+          match elem |> member "geometry" |> to_option to_list with
+          | None -> None
+          | Some geom when List.length geom < 3 -> None
+          | Some geom ->
+              let ring =
+                List.map
+                  (fun pt ->
+                    {
+                      x = pt |> member "lon" |> to_float;
+                      y = pt |> member "lat" |> to_float;
+                    })
+                  geom
+              in
+              Some { clc_code; polygons = [ [ ring ] ] })
+      | "relation" -> (
           (* Relations have "members" with roles - ways need to be chained together *)
-          let members = elem |> member "members" |> to_list in
-
-          (* Extract all way segments with their role *)
-          let extract_segment role m =
-            let m_role = m |> member "role" |> to_string in
-            if m_role = role then
-              let geom = m |> member "geometry" |> to_list in
-              if List.length geom < 2 then None
-              else
-                Some
-                  (List.map
-                     (fun pt ->
-                       {
-                         x = pt |> member "lon" |> to_float;
-                         y = pt |> member "lat" |> to_float;
-                       })
-                     geom)
-            else None
-          in
-
-          let outer_segments =
-            List.filter_map (extract_segment "outer") members
-          in
-          let inner_segments =
-            List.filter_map (extract_segment "inner") members
-          in
-
-          (* Chain segments together to form closed rings *)
-          let chain_segments segments =
-            if segments = [] then []
-            else
-              let epsilon = 1e-7 in
-              let points_equal p1 p2 =
-                abs_float (p1.x -. p2.x) < epsilon
-                && abs_float (p1.y -. p2.y) < epsilon
+          match elem |> member "members" |> to_option to_list with
+          | None -> None
+          | Some members ->
+              (* Extract all way segments with their role *)
+              let extract_segment role m =
+                let m_role = m |> member "role" |> to_string in
+                if m_role = role then
+                  match m |> member "geometry" |> to_option to_list with
+                  | None -> None
+                  | Some geom when List.length geom < 2 -> None
+                  | Some geom ->
+                      Some
+                        (List.map
+                           (fun pt ->
+                             {
+                               x = pt |> member "lon" |> to_float;
+                               y = pt |> member "lat" |> to_float;
+                             })
+                           geom)
+                else None
               in
 
-              (* Try to chain all segments into rings *)
-              let remaining = ref segments in
-              let rings = ref [] in
+              let outer_segments =
+                List.filter_map (extract_segment "outer") members
+              in
+              let inner_segments =
+                List.filter_map (extract_segment "inner") members
+              in
 
-              while !remaining <> [] do
-                (* Start a new ring with the first remaining segment *)
-                let seg = List.hd !remaining in
-                remaining := List.tl !remaining;
-                let current_ring = ref seg in
+              (* Chain segments together to form closed rings *)
+              let chain_segments segments =
+                if segments = [] then []
+                else
+                  let epsilon = 1e-7 in
+                  let points_equal p1 p2 =
+                    abs_float (p1.x -. p2.x) < epsilon
+                    && abs_float (p1.y -. p2.y) < epsilon
+                  in
 
-                (* Keep trying to extend the ring *)
-                let changed = ref true in
-                while !changed do
-                  changed := false;
-                  let still_remaining = ref [] in
-                  List.iter
-                    (fun s ->
-                      if not !changed then begin
-                        let ring_start = List.hd !current_ring in
-                        let ring_end = List.hd (List.rev !current_ring) in
-                        let seg_start = List.hd s in
-                        let seg_end = List.hd (List.rev s) in
+                  (* Try to chain all segments into rings *)
+                  let remaining = ref segments in
+                  let rings = ref [] in
 
-                        if points_equal ring_end seg_start then begin
-                          (* Append segment (skip first point to avoid duplicate) *)
-                          current_ring := !current_ring @ List.tl s;
-                          changed := true
-                        end
-                        else if points_equal ring_end seg_end then begin
-                          (* Append reversed segment *)
-                          current_ring := !current_ring @ List.tl (List.rev s);
-                          changed := true
-                        end
-                        else if points_equal ring_start seg_end then begin
-                          (* Prepend segment *)
-                          current_ring :=
-                            List.rev (List.tl (List.rev s)) @ !current_ring;
-                          changed := true
-                        end
-                        else if points_equal ring_start seg_start then begin
-                          (* Prepend reversed segment *)
-                          current_ring := List.tl (List.rev s) @ !current_ring;
-                          changed := true
-                        end
-                        else still_remaining := s :: !still_remaining
-                      end
-                      else still_remaining := s :: !still_remaining)
-                    !remaining;
-                  remaining := !still_remaining
-                done;
+                  while !remaining <> [] do
+                    (* Start a new ring with the first remaining segment *)
+                    let seg = List.hd !remaining in
+                    remaining := List.tl !remaining;
+                    let current_ring = ref seg in
 
-                (* Only add if it forms a valid ring (at least 3 points) *)
-                if List.length !current_ring >= 3 then
-                  rings := !current_ring :: !rings
-              done;
-              !rings
-          in
+                    (* Keep trying to extend the ring *)
+                    let changed = ref true in
+                    while !changed do
+                      changed := false;
+                      let still_remaining = ref [] in
+                      List.iter
+                        (fun s ->
+                          if not !changed then begin
+                            let ring_start = List.hd !current_ring in
+                            let ring_end = List.hd (List.rev !current_ring) in
+                            let seg_start = List.hd s in
+                            let seg_end = List.hd (List.rev s) in
 
-          let outer_rings = chain_segments outer_segments in
-          let inner_rings = chain_segments inner_segments in
+                            if points_equal ring_end seg_start then begin
+                              (* Append segment (skip first point to avoid duplicate) *)
+                              current_ring := !current_ring @ List.tl s;
+                              changed := true
+                            end
+                            else if points_equal ring_end seg_end then begin
+                              (* Append reversed segment *)
+                              current_ring :=
+                                !current_ring @ List.tl (List.rev s);
+                              changed := true
+                            end
+                            else if points_equal ring_start seg_end then begin
+                              (* Prepend segment *)
+                              current_ring :=
+                                List.rev (List.tl (List.rev s)) @ !current_ring;
+                              changed := true
+                            end
+                            else if points_equal ring_start seg_start then begin
+                              (* Prepend reversed segment *)
+                              current_ring :=
+                                List.tl (List.rev s) @ !current_ring;
+                              changed := true
+                            end
+                            else still_remaining := s :: !still_remaining
+                          end
+                          else still_remaining := s :: !still_remaining)
+                        !remaining;
+                      remaining := !still_remaining
+                    done;
 
-          if List.length outer_rings = 0 then None
-          else
-            (* Each outer ring becomes a polygon, with inner rings as potential holes *)
-            let polygons =
-              List.map (fun outer -> outer :: inner_rings) outer_rings
-            in
-            Some { clc_code; polygons }
+                    (* Only add if it forms a valid ring (at least 3 points) *)
+                    if List.length !current_ring >= 3 then
+                      rings := !current_ring :: !rings
+                  done;
+                  !rings
+              in
+
+              let outer_rings = chain_segments outer_segments in
+              let inner_rings = chain_segments inner_segments in
+
+              if List.length outer_rings = 0 then None
+              else
+                (* Each outer ring becomes a polygon, with inner rings as potential holes *)
+                let polygons =
+                  List.map (fun outer -> outer :: inner_rings) outer_rings
+                in
+                Some { clc_code; polygons })
       | _ -> None)
     elements
 

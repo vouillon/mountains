@@ -9,16 +9,31 @@ type clc_header = {
   count : int;
   total_verts : int;
   total_indices : int;
-  water_count : int; (* CLC4 only *)
-  water_verts : int; (* CLC4 only *)
-  water_indices : int; (* CLC4 only *)
+  water_count : int; (* CLC4+ only *)
+  water_verts : int; (* CLC4+ only *)
+  water_indices : int; (* CLC4+ only *)
+  poi_count : int; (* CLC5 only *)
   min_lon : float;
   min_lat : float;
   scale_x : float;
   scale_y : float;
-  water_scale_x : float; (* CLC4 only *)
-  water_scale_y : float; (* CLC4 only *)
+  water_scale_x : float; (* CLC4+ only *)
+  water_scale_y : float; (* CLC4+ only *)
+  poi_scale_x : float; (* CLC5 only *)
+  poi_scale_y : float; (* CLC5 only *)
   is_clc4 : bool;
+  is_clc5 : bool;
+}
+
+(* POI data *)
+type poi_type = Peak | Saddle
+
+type poi = {
+  name : string;
+  lat : float;
+  lon : float;
+  elevation : int;
+  poi_type : poi_type;
 }
 
 (* Parsed CLC tile data ready for rasterization *)
@@ -27,10 +42,12 @@ type clc_tile = {
   positions : (int, int16_unsigned_elt, c_layout) Array1.t; (* x,y pairs U16 *)
   colors : (int, int8_unsigned_elt, c_layout) Array1.t; (* palette indices *)
   indices : (int32, int32_elt, c_layout) Array1.t;
-  (* Water layer (CLC4 only) - stored as U16 like CLC after scaling *)
+  (* Water layer (CLC4+ only) - stored as U16 like CLC after scaling *)
   water_positions : (int, int16_unsigned_elt, c_layout) Array1.t;
   water_colors : (int, int8_unsigned_elt, c_layout) Array1.t;
   water_indices : (int32, int32_elt, c_layout) Array1.t;
+  (* POI data (CLC5 only) *)
+  pois : poi list;
 }
 
 (* Read big-endian 32-bit int from string at offset (OCaml's input_binary_int format) *)
@@ -74,21 +91,29 @@ let read_f64_le s offset =
 (* ZigZag decode - for delta-encoded coordinates *)
 let zigzag_decode n = (n lsr 1) lxor -(n land 1)
 
-(* Parse CLC file header - supports both CLC3 and CLC4 formats *)
+(* Parse CLC file header - supports CLC3, CLC4, and CLC5 formats *)
 let parse_header s =
   let magic = String.sub s 0 4 in
   let is_clc4 = magic = "CLC4" in
-  if magic <> "CLC3" && magic <> "CLC4" then
+  let is_clc5 = magic = "CLC5" in
+  if magic <> "CLC3" && magic <> "CLC4" && magic <> "CLC5" then
     failwith ("Invalid CLC magic: " ^ magic);
 
   let count = read_i32_be s 4 in
   let total_verts = read_i32_be s 8 in
   let total_indices = read_i32_be s 12 in
 
-  (* CLC4 has additional water counts after CLC counts *)
-  let water_count, water_verts, water_indices, float_offset =
-    if is_clc4 then (read_i32_be s 16, read_i32_be s 20, read_i32_be s 24, 28)
-    else (0, 0, 0, 16)
+  (* CLC4/5 has additional water counts, CLC5 also has POI count *)
+  let water_count, water_verts, water_indices, poi_count, float_offset =
+    if is_clc5 then
+      ( read_i32_be s 16,
+        read_i32_be s 20,
+        read_i32_be s 24,
+        read_i32_be s 28,
+        32 )
+    else if is_clc4 then
+      (read_i32_be s 16, read_i32_be s 20, read_i32_be s 24, 0, 28)
+    else (0, 0, 0, 0, 16)
   in
 
   let min_lon = read_f64_le s float_offset in
@@ -96,11 +121,19 @@ let parse_header s =
   let scale_x = read_f64_le s (float_offset + 16) in
   let scale_y = read_f64_le s (float_offset + 24) in
 
-  (* CLC4 has water scales *)
-  let water_scale_x, water_scale_y =
-    if is_clc4 then
-      (read_f64_le s (float_offset + 32), read_f64_le s (float_offset + 40))
-    else (0.0, 0.0)
+  (* CLC4/5 has water scales, CLC5 also has POI scales *)
+  let water_scale_x, water_scale_y, poi_scale_x, poi_scale_y =
+    if is_clc5 then
+      ( read_f64_le s (float_offset + 32),
+        read_f64_le s (float_offset + 40),
+        read_f64_le s (float_offset + 48),
+        read_f64_le s (float_offset + 56) )
+    else if is_clc4 then
+      ( read_f64_le s (float_offset + 32),
+        read_f64_le s (float_offset + 40),
+        0.0,
+        0.0 )
+    else (0.0, 0.0, 0.0, 0.0)
   in
 
   {
@@ -110,13 +143,17 @@ let parse_header s =
     water_count;
     water_verts;
     water_indices;
+    poi_count;
     min_lon;
     min_lat;
     scale_x;
     scale_y;
     water_scale_x;
     water_scale_y;
+    poi_scale_x;
+    poi_scale_y;
     is_clc4;
+    is_clc5;
   }
 
 (* Get CLC tile name from lat/lon *)
@@ -304,10 +341,12 @@ let load_full_clc_tile path =
   let open Lwt.Syntax in
   let* data = Reader.read_file path in
   let header = parse_header data in
-  (* Header size varies by format *)
-  let offset = if header.is_clc4 then 76 else 48 in
+  (* Header size varies by format: CLC3=48, CLC4=76, CLC5=92 *)
+  let offset =
+    if header.is_clc5 then 96 else if header.is_clc4 then 76 else 48
+  in
 
-  (* Read CLC streams (7 for CLC3, same for CLC4) *)
+  (* Read CLC streams (7 for CLC3, same for CLC4/5) *)
   let* meta_str, offset = read_stream data offset in
   let* high_x, offset = read_stream data offset in
   let* low_x, offset = read_stream data offset in
@@ -322,9 +361,9 @@ let load_full_clc_tile path =
       low_indices
   in
 
-  (* Read and decode water streams if CLC4 *)
-  let* water_pos, water_col, water_ebo =
-    if header.is_clc4 && header.water_count > 0 then begin
+  (* Read and decode water streams if CLC4/5 *)
+  let* water_pos, water_col, water_ebo, offset =
+    if (header.is_clc4 || header.is_clc5) && header.water_count > 0 then begin
       let* w_meta, offset = read_stream data offset in
       let* w_high_x, offset = read_stream data offset in
       let* w_mid_x, offset = read_stream data offset in
@@ -333,20 +372,79 @@ let load_full_clc_tile path =
       let* w_mid_y, offset = read_stream data offset in
       let* w_low_y, offset = read_stream data offset in
       let* w_high_idx, offset = read_stream data offset in
-      let* w_low_idx, _ = read_stream data offset in
+      let* w_low_idx, offset = read_stream data offset in
       let wp, wc, we =
         decode_water_streams header w_meta w_high_x w_mid_x w_low_x w_high_y
           w_mid_y w_low_y w_high_idx w_low_idx
       in
-      Lwt.return (wp, wc, we)
+      Lwt.return (wp, wc, we, offset)
     end
     else begin
       (* Empty water arrays *)
       Lwt.return
         ( Array1.create int16_unsigned c_layout 0,
           Array1.create int8_unsigned c_layout 0,
-          Array1.create int32 c_layout 0 )
+          Array1.create int32 c_layout 0,
+          offset )
     end
+  in
+
+  (* Read and decode POI streams if CLC5 *)
+  let* pois =
+    if header.is_clc5 && header.poi_count > 0 then begin
+      let* names_str, offset = read_stream data offset in
+      let* coords_str, offset = read_stream data offset in
+      let* elevs_str, offset = read_stream data offset in
+      let* types_str, _ = read_stream data offset in
+
+      (* Decode POIs *)
+      let pois = ref [] in
+      let names_pos = ref 0 in
+      let coords_pos = ref 0 in
+      let elevs_pos = ref 0 in
+      let types_pos = ref 0 in
+
+      for _ = 1 to header.poi_count do
+        (* Read name (length-prefixed) *)
+        let name_len = Char.code names_str.[!names_pos] in
+        incr names_pos;
+        let name = String.sub names_str !names_pos name_len in
+        names_pos := !names_pos + name_len;
+
+        (* Read 3-byte coords (not delta-encoded for POIs, just raw quantized) *)
+        let lx = Char.code coords_str.[!coords_pos] in
+        let mx = Char.code coords_str.[!coords_pos + 1] in
+        let hx = Char.code coords_str.[!coords_pos + 2] in
+        let qx = lx lor (mx lsl 8) lor (hx lsl 16) in
+        coords_pos := !coords_pos + 3;
+
+        let ly = Char.code coords_str.[!coords_pos] in
+        let my = Char.code coords_str.[!coords_pos + 1] in
+        let hy = Char.code coords_str.[!coords_pos + 2] in
+        let qy = ly lor (my lsl 8) lor (hy lsl 16) in
+        coords_pos := !coords_pos + 3;
+
+        (* Convert back to degrees *)
+        let lon = header.min_lon +. (float qx /. header.poi_scale_x) in
+        let lat = header.min_lat +. (float qy /. header.poi_scale_y) in
+
+        (* Read signed 16-bit elevation *)
+        let el = Char.code elevs_str.[!elevs_pos] in
+        let eh = Char.code elevs_str.[!elevs_pos + 1] in
+        let elev = el lor (eh lsl 8) in
+        let elev = if elev >= 0x8000 then elev - 0x10000 else elev in
+        elevs_pos := !elevs_pos + 2;
+
+        (* Read type *)
+        let typ = Char.code types_str.[!types_pos] in
+        incr types_pos;
+        let poi_type = if typ = 0 then Peak else Saddle in
+
+        pois := { name; lat; lon; elevation = elev; poi_type } :: !pois
+      done;
+      Lwt.return (List.rev !pois)
+    end
+    else Lwt.return []
   in
 
   Lwt.return
@@ -358,6 +456,7 @@ let load_full_clc_tile path =
       water_positions = water_pos;
       water_colors = water_col;
       water_indices = water_ebo;
+      pois;
     }
 
 (* Load CLC tiles.

@@ -121,15 +121,16 @@ let marker_vs_src =
    void main() {\n\
   \    vec2 screen_pos = (u_pos - u_view_offset) * u_view_scale * 2.0;\n\
   \    gl_Position = vec4(screen_pos, 0.0, 1.0);\n\
-  \    gl_PointSize = 15.0;\n\
+  \    gl_PointSize = 6.0;\n\
    }\n"
 
 let marker_fs_src =
   "\n\
    #version 300 es\n\
    precision mediump float;\n\
+   uniform vec3 u_color;\n\
    out vec4 out_color;\n\
-   void main() { out_color = vec4(1.0, 0.0, 0.0, 1.0); }\n"
+   void main() { out_color = vec4(u_color, 1.0); }\n"
 
 (* --- Water Shaders (32-bit integer positions) --- *)
 let water_vs_src =
@@ -189,26 +190,37 @@ let read_f64_as_float ic =
   in
   Int64.float_of_bits bits
 
+type poi_type = Peak | Saddle
+type poi = { name : string; lon : float; lat : float; poi_type : poi_type }
+
 let load_clc file =
   Printf.printf "Loading %s...\n%!" file;
   let ic = open_in_bin file in
 
   let magic = really_input_string ic 4 in
   let is_clc4 = magic = "CLC4" in
-  if magic <> "CLC3" && magic <> "CLC4" then failwith ("Invalid magic: " ^ magic);
+  let is_clc5 = magic = "CLC5" in
+  if magic <> "CLC3" && magic <> "CLC4" && magic <> "CLC5" then
+    failwith ("Invalid magic: " ^ magic);
 
   let count = input_binary_int ic in
   let total_verts_header = input_binary_int ic in
   let total_indices_header = input_binary_int ic in
 
-  (* CLC4 has additional water counts - use sequential lets for defined order *)
-  let water_count, water_verts_header, water_indices_header =
-    if is_clc4 then
+  (* CLC4/5 has additional water counts, CLC5 also has POI count *)
+  let water_count, water_verts_header, water_indices_header, poi_count =
+    if is_clc5 then
       let c = input_binary_int ic in
       let v = input_binary_int ic in
       let i = input_binary_int ic in
-      (c, v, i)
-    else (0, 0, 0)
+      let p = input_binary_int ic in
+      (c, v, i, p)
+    else if is_clc4 then
+      let c = input_binary_int ic in
+      let v = input_binary_int ic in
+      let i = input_binary_int ic in
+      (c, v, i, 0)
+    else (0, 0, 0, 0)
   in
 
   let min_lon = read_f64_as_float ic in
@@ -216,17 +228,25 @@ let load_clc file =
   let scale_x = read_f64_as_float ic in
   let scale_y = read_f64_as_float ic in
 
-  (* CLC4 has additional water scales *)
-  let water_scale_x, water_scale_y =
-    if is_clc4 then (read_f64_as_float ic, read_f64_as_float ic) else (0.0, 0.0)
+  (* CLC4/5 has water scales, CLC5 also has POI scales *)
+  let water_scale_x, water_scale_y, poi_scale_x, poi_scale_y =
+    if is_clc5 then
+      let ws_x = read_f64_as_float ic in
+      let ws_y = read_f64_as_float ic in
+      let ps_x = read_f64_as_float ic in
+      let ps_y = read_f64_as_float ic in
+      (ws_x, ws_y, ps_x, ps_y)
+    else if is_clc4 then (read_f64_as_float ic, read_f64_as_float ic, 0.0, 0.0)
+    else (0.0, 0.0, 0.0, 0.0)
   in
 
   Printf.printf
     "Header: count=%d, verts=%d, indices=%d, origin=(%.2f, %.2f)\n%!" count
     total_verts_header total_indices_header min_lon min_lat;
-  if is_clc4 then
+  if is_clc4 || is_clc5 then
     Printf.printf "Water: count=%d, verts=%d, indices=%d\n%!" water_count
       water_verts_header water_indices_header;
+  if is_clc5 then Printf.printf "POIs: %d\n%!" poi_count;
 
   (* Pre-allocate Bigarrays for CLC *)
   let n_verts = total_verts_header in
@@ -288,7 +308,7 @@ let load_clc file =
         water_low_y,
         water_high_indices,
         water_low_indices ) =
-    if is_clc4 && water_count > 0 then
+    if (is_clc4 || is_clc5) && water_count > 0 then
       let s1 = read_stream () in
       let s2 = read_stream () in
       let s3 = read_stream () in
@@ -301,8 +321,6 @@ let load_clc file =
       (s1, s2, s3, s4, s5, s6, s7, s8, s9)
     else ("", "", "", "", "", "", "", "", "")
   in
-
-  close_in ic;
 
   let prev_x = ref 0 in
   let prev_y = ref 0 in
@@ -392,7 +410,7 @@ let load_clc file =
   let water_global_v_offset = ref 0 in
   let water_global_i_offset = ref 0 in
 
-  if is_clc4 && water_count > 0 then begin
+  if (is_clc4 || is_clc5) && water_count > 0 then begin
     Printf.printf "Decoding water: count=%d, expected verts=%d, indices=%d\n%!"
       water_count water_verts_header water_indices_header;
     Printf.printf
@@ -488,7 +506,62 @@ let load_clc file =
     done
   end;
 
-  (* Return CLC data, water data, and metadata *)
+  (* Read and decode POI streams if CLC5 *)
+  let pois =
+    if is_clc5 && poi_count > 0 then begin
+      let names_str = read_stream () in
+      let coords_str = read_stream () in
+      let elevs_str = read_stream () in
+      let types_str = read_stream () in
+
+      let pois = ref [] in
+      let names_pos = ref 0 in
+      let coords_pos = ref 0 in
+      let types_pos = ref 0 in
+
+      for _ = 1 to poi_count do
+        (* Read name (length-prefixed) *)
+        let name_len = Char.code names_str.[!names_pos] in
+        incr names_pos;
+        let name = String.sub names_str !names_pos name_len in
+        names_pos := !names_pos + name_len;
+
+        (* Read 3-byte coords *)
+        let lx = Char.code coords_str.[!coords_pos] in
+        let mx = Char.code coords_str.[!coords_pos + 1] in
+        let hx = Char.code coords_str.[!coords_pos + 2] in
+        let qx = lx lor (mx lsl 8) lor (hx lsl 16) in
+        coords_pos := !coords_pos + 3;
+
+        let ly = Char.code coords_str.[!coords_pos] in
+        let my = Char.code coords_str.[!coords_pos + 1] in
+        let hy = Char.code coords_str.[!coords_pos + 2] in
+        let qy = ly lor (my lsl 8) lor (hy lsl 16) in
+        coords_pos := !coords_pos + 3;
+
+        (* Convert back to degrees *)
+        let lon = min_lon +. (float qx /. poi_scale_x) in
+        let lat = min_lat +. (float qy /. poi_scale_y) in
+
+        (* Skip elevation for now - just types *)
+        let _ = elevs_str in
+
+        (* Read type *)
+        let typ = Char.code types_str.[!types_pos] in
+        incr types_pos;
+        let poi_type = if typ = 0 then Peak else Saddle in
+
+        pois := { name; lon; lat; poi_type } :: !pois
+      done;
+      Printf.printf "Decoded %d POIs\n%!" poi_count;
+      List.rev !pois
+    end
+    else []
+  in
+
+  close_in ic;
+
+  (* Return CLC data, water data, POI data, and metadata *)
   ( n_indices,
     arr_pos,
     arr_col,
@@ -502,7 +575,8 @@ let load_clc file =
     water_arr_col,
     water_arr_ebo,
     water_scale_x,
-    water_scale_y )
+    water_scale_y,
+    pois )
 
 (* --- 4. GL Helper --- *)
 let get_iv get_fn obj param =
@@ -602,7 +676,8 @@ let () =
                 water_data_col,
                 water_data_ebo,
                 water_scale_x,
-                water_scale_y ) =
+                water_scale_y,
+                pois ) =
             load_clc file
           in
 
@@ -629,6 +704,7 @@ let () =
 
           Gl.use_program m_prog;
           let m_u_pos = Gl.get_uniform_location m_prog "u_pos" in
+          let m_u_color = Gl.get_uniform_location m_prog "u_color" in
           let m_u_view_scale = Gl.get_uniform_location m_prog "u_view_scale" in
           let m_u_view_offset =
             Gl.get_uniform_location m_prog "u_view_offset"
@@ -779,12 +855,31 @@ let () =
             | Some (mx, my) ->
                 Gl.disable Gl.depth_test;
                 Gl.use_program m_prog;
+                Gl.uniform3f m_u_color 1.0 1.0 0.0;
                 Gl.uniform2f m_u_pos mx my;
                 Gl.uniform2f m_u_view_scale sx sy;
                 Gl.uniform2f m_u_view_offset !cx !cy;
                 Gl.draw_arrays Gl.points 0 1;
                 Gl.enable Gl.depth_test
             | None -> ());
+
+            (* Draw POI Points - red for peaks, blue for saddles *)
+            if List.length pois > 0 then begin
+              Gl.disable Gl.depth_test;
+              Gl.use_program m_prog;
+              Gl.uniform2f m_u_view_scale sx sy;
+              Gl.uniform2f m_u_view_offset !cx !cy;
+              List.iter
+                (fun poi ->
+                  (* Red for peaks, blue for saddles *)
+                  (match poi.poi_type with
+                  | Peak -> Gl.uniform3f m_u_color 1.0 0.0 0.0
+                  | Saddle -> Gl.uniform3f m_u_color 0.0 0.5 1.0);
+                  Gl.uniform2f m_u_pos poi.lon poi.lat;
+                  Gl.draw_arrays Gl.points 0 1)
+                pois;
+              Gl.enable Gl.depth_test
+            end;
 
             Sdl.gl_swap_window window;
             loop ()

@@ -103,6 +103,11 @@ type orientation = {
   screen : float;
 }
 
+(* Input mode: Sensor (device orientation) vs Manual (touch/mouse drag) *)
+type input_mode = Sensor | Manual
+
+let input_mode = ref Sensor
+let zoom = ref 1.0
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let compute_azimuth m =
@@ -1965,7 +1970,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
             (sin (orientation.beta *. pi /. 180.))
   in
   let x_scale, y_scale =
-    if aspect < 1. then (scale /. aspect, scale) else (scale, scale *. aspect)
+    let s = scale *. !zoom in
+    if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:0.1 in
   let points =
@@ -2121,13 +2127,17 @@ let request_animation_frame () =
   t
 
 let event_loop ctx draw =
-  let rec loop prev_orientation =
+  let rec loop prev_orientation prev_zoom =
     let orientation = !current_orientation in
-    if orientation <> prev_orientation then draw ~orientation ctx;
+    let z = !zoom in
+    if orientation <> prev_orientation || z <> prev_zoom then
+      draw ~orientation ctx;
     let* () = request_animation_frame () in
-    loop orientation
+    loop orientation z
   in
-  loop { !current_orientation with alpha = !current_orientation.alpha -. 1. }
+  loop
+    { !current_orientation with alpha = !current_orientation.alpha -. 1. }
+    (!zoom -. 1.)
 
 (* Main *)
 
@@ -2910,30 +2920,112 @@ let get_position ~size =
   | Some loc -> Ok (true, loc)
   | None -> Ok (false, get_preset_position ())
 
-let setup_events () =
+let setup_events canvas =
   let deviceorientation =
     Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
   in
   let state = ref `Init in
+
+  (* Sensitivity for drag rotation (degrees per pixel) *)
+  let drag_sensitivity = 0.1 in
+
+  (* Mouse state *)
+  let mouse_dragging = ref false in
+  let mouse_start_x = ref 0. in
+  let mouse_start_y = ref 0. in
+  let mouse_last_x = ref 0. in
+  let mouse_last_y = ref 0. in
+
+  (* Touch state *)
+  let touch_start_x = ref 0. in
+  let touch_start_y = ref 0. in
+  let touch_last_x = ref 0. in
+  let touch_last_y = ref 0. in
+  let touch_dragging = ref false in
+  let pinch_distance = ref 0. in
+
+  (* Double-tap detection for returning to sensor mode *)
+  let last_tap_time = ref 0. in
+  let double_tap_threshold =
+    300.
+    (* ms *)
+  in
+
+  (* Drag threshold to distinguish tap from drag (in pixels) *)
+  let drag_threshold = 10. in
+  (* Helper: get current time in ms *)
+  let now_ms () = Jv.to_float (Jv.call (Jv.get Jv.global "Date") "now" [||]) in
+
+  (* Helper: calculate distance between two touches *)
+  let touch_distance touches =
+    if Jv.to_int (Jv.get touches "length") >= 2 then
+      let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+      let t1 = Jv.call touches "item" [| Jv.of_int 1 |] in
+      let x0 = Jv.to_float (Jv.get t0 "clientX") in
+      let y0 = Jv.to_float (Jv.get t0 "clientY") in
+      let x1 = Jv.to_float (Jv.get t1 "clientX") in
+      let y1 = Jv.to_float (Jv.get t1 "clientY") in
+      Some (sqrt (((x1 -. x0) ** 2.) +. ((y1 -. y0) ** 2.)))
+    else None
+  in
+
+  let toggle_fullscreen () =
+    match Brr.Document.fullscreen_element Brr.G.document with
+    | None ->
+        ignore
+          (Brr.El.request_fullscreen
+             ~opts:
+               (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
+                  ())
+             canvas)
+    | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
+  in
+
+  let handle_tap () =
+    let now = now_ms () in
+    if now -. !last_tap_time < double_tap_threshold then begin
+      (* Double tap - switch back to sensor mode *)
+      (* Undo the fullscreen toggle from the first tap *)
+      toggle_fullscreen ();
+      if !input_mode = Manual then begin
+        input_mode := Sensor;
+        display_temporary_message "Sensor mode"
+      end;
+      last_tap_time := 0.
+    end
+    else begin
+      (* First tap - toggle fullscreen only in Sensor mode *)
+      if !input_mode = Sensor then toggle_fullscreen ();
+      last_tap_time := now
+    end
+  in
+
+  (* Device orientation listener - only active in Sensor mode *)
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
-         let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-         let alpha = angle "alpha" in
-         let beta = angle "beta" in
-         let gamma = angle "gamma" in
-         (match !state with
-         | `Init -> ()
-         | `Starting ->
-             state := `Started;
-             if beta < 90. then display_temporary_message "Raise your phone!"
-         | `Started -> if beta >= 90. then remove_message ());
-         let screen =
-           Jv.to_float
-             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
-         in
-         current_orientation := { alpha; beta; gamma; screen })
+         if !input_mode = Sensor then begin
+           let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
+           let alpha = angle "alpha" in
+           let beta = angle "beta" in
+           let gamma = angle "gamma" in
+           (match !state with
+           | `Init -> ()
+           | `Starting ->
+               state := `Started;
+               if beta < 90. then display_temporary_message "Raise your phone!"
+           | `Started -> if beta >= 90. then remove_message ());
+           let screen =
+             Jv.to_float
+               (Jv.get
+                  (Jv.get (Jv.get Jv.global "screen") "orientation")
+                  "angle")
+           in
+           current_orientation := { alpha; beta; gamma; screen }
+         end)
        (Brr.Window.as_target Brr.G.window));
+
+  (* Keyboard controls *)
   ignore
     (Brr.Ev.listen Brr.Ev.keydown
        (fun ev ->
@@ -2962,8 +3054,192 @@ let setup_events () =
                  !current_orientation with
                  beta = min 120. (!current_orientation.beta +. 5.);
                }
+         | "Equal" | "NumpadAdd" -> zoom := min 4.0 (!zoom *. 1.1)
+         | "Minus" | "NumpadSubtract" -> zoom := max 0.25 (!zoom /. 1.1)
          | _ -> ())
        (Brr.Window.as_target Brr.G.window));
+
+  (* Mouse controls *)
+  let target = Brr.El.as_target canvas in
+
+  (* Mouse wheel for zoom *)
+  ignore
+    (Brr.Ev.listen Brr.Ev.wheel
+       (fun ev ->
+         Brr.Ev.prevent_default ev;
+         let wheel = Brr.Ev.as_type ev in
+         let delta_y = Brr.Ev.Wheel.delta_y wheel in
+         let factor = if delta_y > 0. then 0.9 else 1.1 in
+         zoom := max 0.25 (min 4.0 (!zoom *. factor)))
+       target);
+
+  (* Mouse drag for rotation *)
+  ignore
+    (Brr.Ev.listen Brr.Ev.mousedown
+       (fun ev ->
+         let mouse = Brr.Ev.as_type ev in
+         mouse_dragging := true;
+         if !input_mode = Sensor then begin
+           input_mode := Manual;
+           display_temporary_message "Manual mode"
+         end;
+         let x = Brr.Ev.Mouse.client_x mouse in
+         let y = Brr.Ev.Mouse.client_y mouse in
+         mouse_start_x := x;
+         mouse_start_y := y;
+         mouse_last_x := x;
+         mouse_last_y := y)
+       target);
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.mousemove
+       (fun ev ->
+         if !mouse_dragging then begin
+           let mouse = Brr.Ev.as_type ev in
+           let x = Brr.Ev.Mouse.client_x mouse in
+           let y = Brr.Ev.Mouse.client_y mouse in
+           let dx = x -. !mouse_last_x in
+           let dy = y -. !mouse_last_y in
+           let speed = drag_sensitivity /. !zoom in
+           mouse_last_x := x;
+           mouse_last_y := y;
+           current_orientation :=
+             {
+               !current_orientation with
+               alpha = !current_orientation.alpha -. (dx *. speed);
+               beta =
+                 max 60. (min 120. (!current_orientation.beta -. (dy *. speed)));
+             }
+         end)
+       (Brr.Window.as_target Brr.G.window));
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.mouseup
+       (fun ev ->
+         if !mouse_dragging then begin
+           mouse_dragging := false;
+           let mouse = Brr.Ev.as_type ev in
+           let x = Brr.Ev.Mouse.client_x mouse in
+           let y = Brr.Ev.Mouse.client_y mouse in
+           let dx = x -. !mouse_start_x in
+           let dy = y -. !mouse_start_y in
+           let dist = sqrt ((dx ** 2.) +. (dy ** 2.)) in
+           if dist < drag_threshold then handle_tap ()
+         end)
+       (Brr.Window.as_target Brr.G.window));
+
+  (* Touch controls *)
+  let touchstart = Brr.Ev.Type.create (Jstr.v "touchstart") in
+  let touchmove = Brr.Ev.Type.create (Jstr.v "touchmove") in
+  let touchend = Brr.Ev.Type.create (Jstr.v "touchend") in
+
+  ignore
+    (Brr.Ev.listen touchstart
+       (fun ev ->
+         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+         let num_touches = Jv.to_int (Jv.get touches "length") in
+         if num_touches = 1 then begin
+           (* Single touch - potential drag or tap *)
+           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+           let x = Jv.to_float (Jv.get t0 "clientX") in
+           let y = Jv.to_float (Jv.get t0 "clientY") in
+           touch_start_x := x;
+           touch_start_y := y;
+           touch_last_x := x;
+           touch_last_y := y;
+           touch_dragging := false
+         end
+         else if num_touches >= 2 then begin
+           (* Two or more fingers - pinch zoom *)
+           Brr.Ev.prevent_default ev;
+           match touch_distance touches with
+           | Some d -> pinch_distance := d
+           | None -> ()
+         end)
+       target);
+
+  ignore
+    (Brr.Ev.listen touchmove
+       (fun ev ->
+         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+         let num_touches = Jv.to_int (Jv.get touches "length") in
+         if num_touches = 1 then begin
+           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+           let x = Jv.to_float (Jv.get t0 "clientX") in
+           let y = Jv.to_float (Jv.get t0 "clientY") in
+           let dx = x -. !touch_last_x in
+           let dy = y -. !touch_last_y in
+           let total_dx = x -. !touch_start_x in
+           let total_dy = y -. !touch_start_y in
+           let total_dist = sqrt ((total_dx ** 2.) +. (total_dy ** 2.)) in
+           (* Start dragging if moved beyond threshold *)
+           if (not !touch_dragging) && total_dist > drag_threshold then begin
+             touch_dragging := true;
+             (* Switch to manual mode when user starts dragging *)
+             if !input_mode = Sensor then begin
+               input_mode := Manual;
+               display_temporary_message "Manual mode"
+             end;
+             Brr.Ev.prevent_default ev
+           end;
+           if !touch_dragging then begin
+             Brr.Ev.prevent_default ev;
+             let speed = drag_sensitivity /. !zoom in
+             touch_last_x := x;
+             touch_last_y := y;
+             current_orientation :=
+               {
+                 !current_orientation with
+                 alpha = !current_orientation.alpha +. (dx *. speed);
+                 beta =
+                   max 60.
+                     (min 120. (!current_orientation.beta +. (dy *. speed)));
+               }
+           end
+         end
+         else if num_touches >= 2 then begin
+           (* Pinch zoom *)
+           Brr.Ev.prevent_default ev;
+           match touch_distance touches with
+           | Some d when !pinch_distance > 0. ->
+               let factor = d /. !pinch_distance in
+               zoom := max 0.25 (min 4.0 (!zoom *. factor));
+               pinch_distance := d
+           | _ -> ()
+         end)
+       target);
+
+  ignore
+    (Brr.Ev.listen touchend
+       (fun ev ->
+         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+         let num_remaining = Jv.to_int (Jv.get touches "length") in
+
+         if num_remaining = 1 then begin
+           (* Resync drag state when switching to 1 finger (e.g. end of pinch) *)
+           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+           let x = Jv.to_float (Jv.get t0 "clientX") in
+           let y = Jv.to_float (Jv.get t0 "clientY") in
+           touch_start_x := x;
+           touch_start_y := y;
+           touch_last_x := x;
+           touch_last_y := y;
+           touch_dragging := false;
+           pinch_distance := 0.
+         end;
+
+         if num_remaining = 0 then begin
+           (* All fingers lifted *)
+           if not !touch_dragging then begin
+             Brr.Ev.prevent_default ev;
+             (* This was a tap, not a drag *)
+             handle_tap ()
+           end;
+           touch_dragging := false;
+           pinch_distance := 0.
+         end)
+       target);
+
   fun () -> state := `Starting
 
 let main () =
@@ -2975,7 +3251,10 @@ let main () =
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
-  let start = setup_events () in
+  let canvas =
+    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
+  in
+  let start = setup_events canvas in
   display_element (loading_message ());
   let* tile = Loader.f ~size:tile_width ~lat ~lon in
   if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
@@ -2987,29 +3266,32 @@ let main () =
   let* points =
     let width = 3600 in
     let height = 3600 in
-    let* points = Reader.read_file "data/points.geojson" in
-    (*
-    let points =
-      {|
-{"features":[
-    {
-      "properties": {
-        "ele": "2881",
-        "name": "Cime de la Charvie"
-      },
-      "geometry": {
-        "coordinates": [
-          6.7626741,
-          44.8556257
-        ]
-      }
-    }
-]}
-|}
+    (* Load CLC tile(s) covering this area to get POIs - HTTP cache avoids duplicate network requests *)
+    let* _, _, _, _, tiles = Clc_loader.load_tiles ~lat ~lon ~size:tile_width in
+    (* Extract POIs from all loaded tiles and convert to Points.t format *)
+    let pois =
+      List.concat_map
+        (fun (tile, _, _) ->
+          List.map
+            (fun (poi : Clc_loader.poi) ->
+              {
+                Points.name = poi.name;
+                coord = { Points.lat = poi.lat; lon = poi.lon };
+                elevation = Some poi.elevation;
+              })
+            tile.Clc_loader.pois)
+        tiles
     in
- *)
+    (* Filter POIs within the visible tile bounds *)
+    let filtered =
+      List.filter
+        (fun { Points.coord = { lat = pt_lat; lon = pt_lon }; _ } ->
+          tile_coord.lat < pt_lat && pt_lat < tile_coord'.lat
+          && tile_coord.lon < pt_lon && pt_lon < tile_coord'.lon)
+        pois
+    in
     Lwt.return
-      (Points.find tile_coord tile_coord' points
+      (filtered
       |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
           let x =
             min (tile_width - 1)
@@ -3038,21 +3320,7 @@ let main () =
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
 
-  let canvas =
-    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
-  in
-  let toggle_fullscreen _ =
-    match Brr.Document.fullscreen_element Brr.G.document with
-    | None ->
-        ignore
-          (Brr.El.request_fullscreen
-             ~opts:
-               (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
-                  ())
-             canvas)
-    | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
-  in
-  ignore Brr.(Ev.listen Ev.click toggle_fullscreen (El.as_target canvas));
+  (* canvas already defined above *)
   let ctx =
     Option.get
       (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
