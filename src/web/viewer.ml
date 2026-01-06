@@ -1964,7 +1964,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let transform =
-    Matrix.(translate 0. 0. (-.height -. 200.) * rotation_matrix orientation)
+    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
   let screen_inclination =
     orientation.screen
