@@ -377,6 +377,13 @@ let load_full_clc_tile path =
         decode_water_streams header w_meta w_high_x w_mid_x w_low_x w_high_y
           w_mid_y w_low_y w_high_idx w_low_idx
       in
+      Brr.Console.(
+        log
+          [
+            Jstr.v
+              (Printf.sprintf "Water loaded: %d positions, %d indices"
+                 (Bigarray.Array1.dim wp) (Bigarray.Array1.dim we));
+          ]);
       Lwt.return (wp, wc, we, offset)
     end
     else begin

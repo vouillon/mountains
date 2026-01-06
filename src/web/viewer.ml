@@ -1441,6 +1441,8 @@ let compressed_texture_file = function
   | ASTC -> "assets/details_astc.ktx2"
   | ETC2 -> "assets/details_etc2.ktx2"
 
+let force_redraw = ref true
+
 (* Load compressed KTX2 texture asynchronously *)
 let load_compressed_detail_map ctx tid =
   match detect_compressed_format ctx with
@@ -1505,6 +1507,7 @@ let load_compressed_detail_map ctx tid =
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
             apply_anisotropic_filtering ctx;
             Gl.active_texture ctx Gl.texture0;
+            force_redraw := true;
             Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
               file pixel_width pixel_height level_count)
 
@@ -2112,7 +2115,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
 (* Event loop *)
 
 let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
-let force_redraw = ref true
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -2759,7 +2761,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
             Gl.uniform2f ctx u_tex_min min_lon min_lat;
             Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
 
-            (* Enable depth test per level *)
+            (* Enable depth test per level - ensure depth writes are enabled *)
+            Gl.depth_mask ctx true;
             Gl.enable ctx Gl.depth_test;
             Gl.depth_func ctx Gl.less;
 
@@ -2844,6 +2847,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
           Gl.delete_vertex_array ctx vao;
           Gl.disable ctx Gl.depth_test;
           Gl.bind_framebuffer ctx Gl.framebuffer None;
+
+          force_redraw := true;
 
           Brr.Console.(
             log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ]);
@@ -3024,7 +3029,12 @@ let setup_events canvas =
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
-         if !input_mode = Sensor then begin
+         if
+           !input_mode = Sensor
+           &&
+           (* Bogus event on Chrome desktop *)
+           not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha"))
+         then begin
            let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
            let alpha = angle "alpha" in
            let beta = angle "beta" in
