@@ -574,7 +574,8 @@ let process_tile db_path output_dir tile_name =
                               let tris =
                                 try
                                   Polygon_triangulation.Triangulator
-                                  .triangulate_multi clipped_verts
+                                  .triangulate_multi ~tile:tile_name
+                                    ~feature_type:"clc" clipped_verts
                                     [| clipped_poly |]
                                 with Invalid_argument msg ->
                                   Printf.printf "Triangulation failed: %s\n%!"
@@ -771,7 +772,8 @@ let process_tile db_path output_dir tile_name =
                 let tris =
                   try
                     Polygon_triangulation.Triangulator.triangulate_multi
-                      clipped_verts [| clipped_poly |]
+                      ~tile:tile_name ~feature_type:"water" clipped_verts
+                      [| clipped_poly |]
                   with Invalid_argument msg ->
                     Printf.printf "Water triangulation failed: %s\n%!" msg;
                     [||]

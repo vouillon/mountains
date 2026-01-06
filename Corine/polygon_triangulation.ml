@@ -965,8 +965,21 @@ module Triangulator = struct
     in
     outer_area -. holes_area
 
-  let triangulate_multi (verts : float array) polygons =
-    Array.iter (validate_polygon verts) polygons;
+  let triangulate_multi ?(tile = "") ?(feature_type = "") (verts : float array)
+      polygons =
+    Array.iter
+      (fun poly ->
+        validate_polygon verts poly;
+        let cheap_errors = Polygon_validation.validate_cheap verts poly in
+        if cheap_errors <> [] then (
+          Printf.printf "Cheap validation errors for tile %s type %s:\n" tile
+            feature_type;
+          List.iter
+            (fun e ->
+              Printf.printf "  - %s\n" (Polygon_validation.string_of_error e))
+            cheap_errors;
+          Printf.printf "%!"))
+      polygons;
 
     let total_triangles =
       Array.fold_left
@@ -1004,10 +1017,116 @@ module Triangulator = struct
 
         if expected > 1e-10 then begin
           let ratio = !actual /. expected in
-          if ratio < 0.99 || ratio > 1.01 then
+
+          (* Quality Metrics *)
+          let min_angle = ref 180.0 in
+          let max_edge_sq = ref 0.0 in
+          let theoretical_tris =
+            poly.outer.len
+            + Array.fold_left (fun acc h -> acc + h.len) 0 poly.holes
+            + (2 * Array.length poly.holes)
+            - 2
+          in
+
+          for i = 0 to poly_tris - 1 do
+            let v_idx = start_offset + (i * 3) in
+            let i1, i2, i3 =
+              ( out_buffer.(v_idx),
+                out_buffer.(v_idx + 1),
+                out_buffer.(v_idx + 2) )
+            in
+            let x1, y1 = (Geometry.get_x verts i1, Geometry.get_y verts i1) in
+            let x2, y2 = (Geometry.get_x verts i2, Geometry.get_y verts i2) in
+            let x3, y3 = (Geometry.get_x verts i3, Geometry.get_y verts i3) in
+
+            let d12_sq = Geometry.dist_sq verts i1 i2 in
+            let d23_sq = Geometry.dist_sq verts i2 i3 in
+            let d31_sq = Geometry.dist_sq verts i3 i1 in
+
+            max_edge_sq :=
+              Geometry.fmax !max_edge_sq
+                (Geometry.fmax d12_sq (Geometry.fmax d23_sq d31_sq));
+
+            let d12 = sqrt d12_sq in
+            let d23 = sqrt d23_sq in
+            let d31 = sqrt d31_sq in
+
+            (* Cosine rule: c^2 = a^2 + b^2 - 2ab cos(C) => cos(C) = (a^2 + b^2 - c^2) / 2ab *)
+            let angle a b c =
+              let cos_c =
+                ((a *. a) +. (b *. b) -. (c *. c)) /. (2.0 *. a *. b)
+              in
+              let cos_c = Geometry.fmax (-1.0) (Geometry.fmin 1.0 cos_c) in
+              acos cos_c *. 180.0 /. 3.14159265
+            in
+            if d12 > 1e-9 && d23 > 1e-9 && d31 > 1e-9 then begin
+              min_angle := Geometry.fmin !min_angle (angle d12 d23 d31);
+              min_angle := Geometry.fmin !min_angle (angle d23 d31 d12);
+              min_angle := Geometry.fmin !min_angle (angle d31 d12 d23)
+            end
+          done;
+
+          let quality_warnings = ref [] in
+          if poly_tris <> theoretical_tris then
+            quality_warnings :=
+              Printf.sprintf "Triangle count mismatch: got %d, expected %d"
+                poly_tris theoretical_tris
+              :: !quality_warnings;
+          if !min_angle < 1.0 then
+            quality_warnings :=
+              Printf.sprintf "Degenerate triangles: min angle %.2f deg"
+                !min_angle
+              :: !quality_warnings;
+
+          if ratio < 0.99 || ratio > 1.01 then begin
             Printf.printf
               "AREA MISMATCH: expected=%g, actual=%g, ratio=%.4f (%d tris)\n%!"
-              expected !actual ratio poly_tris
+              expected !actual ratio poly_tris;
+
+            List.iter
+              (fun w -> Printf.printf "  QUALITY WARNING: %s\n%!" w)
+              !quality_warnings;
+
+            (* Save failing polygon for debugging if tile is specified *)
+            if tile <> "" then begin
+              (* Run expensive validation diagnostics *)
+              let cheap_errors = Polygon_validation.validate_cheap verts poly in
+              let expensive_errors =
+                Polygon_validation.validate_expensive verts poly
+              in
+              let all_errors = cheap_errors @ expensive_errors in
+              let validation_errors =
+                List.map Polygon_validation.string_of_error all_errors
+                @ !quality_warnings
+              in
+
+              (* Extract outer ring coordinates *)
+              let outer_arr =
+                Array.init (poly.outer.len * 2) (fun i ->
+                    verts.((poly.outer.start * 2) + i))
+              in
+              (* Extract hole coordinates *)
+              let holes_arr =
+                Array.map
+                  (fun h ->
+                    Array.init (h.len * 2) (fun i -> verts.((h.start * 2) + i)))
+                  poly.holes
+              in
+              ignore
+                (Polygon_test_utils.save_polygon_json ~tile ~feature_type
+                   ~expected_area:expected ~actual_area:!actual ~outer:outer_arr
+                   ~holes:holes_arr ~validation_errors ())
+            end
+          end
+          else if !quality_warnings <> [] then begin
+            (* Log quality warnings even if area is correct *)
+            Printf.printf
+              "Triangulation quality warning for %s %s (Area OK): %d tris\n%!"
+              tile feature_type poly_tris;
+            List.iter
+              (fun w -> Printf.printf "  QUALITY WARNING: %s\n%!" w)
+              !quality_warnings
+          end
         end)
       polygons;
 
