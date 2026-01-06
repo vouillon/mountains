@@ -11,7 +11,7 @@
    }
 *)
 
-let test_polygon_dir = "data/test_polygons"
+let test_polygon_dir = "test_polygons"
 
 (* Ensure the test directory exists *)
 let ensure_dir_exists () =

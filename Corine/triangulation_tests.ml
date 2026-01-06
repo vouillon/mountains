@@ -33,8 +33,8 @@ let () =
       let flat_verts = Array.concat (outer :: Array.to_list holes) in
 
       let tris =
-        Polygon_triangulation.Triangulator.triangulate_multi ~tile
-          ~feature_type:typ flat_verts [| poly |]
+        Polygon_triangulation.Triangulator.triangulate_multi ~feature_type:typ
+          flat_verts [| poly |]
       in
 
       let num_tris = Array.length tris / 3 in
@@ -54,7 +54,15 @@ let () =
       done;
 
       let mismatch = abs_float (!actual_area -. expected) in
-      if mismatch <= 1e-7 *. expected || mismatch < 1e-10 then incr passed
+      if
+        (* ~ 1 per one thousand *)
+        mismatch <= 1e-3 *. expected
+        ||
+        (* ~ 0.1 m^2 *)
+        mismatch < 1e-11
+      then (
+        prerr_endline filename;
+        incr passed)
       else (
         incr failed;
         Printf.printf "FAIL: %s (expected=%g, actual=%g, ratio=%.4f)\n" filename

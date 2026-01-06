@@ -6,7 +6,7 @@ open Geometry_types
 (* Types removed - using Geometry_types *)
 
 module Geometry = struct
-  let epsilon = 1e-9
+  let epsilon = 1e-10
 
   let get_x (verts : float array) i = Array.unsafe_get verts (i * 2)
   [@@inline always]
@@ -1015,7 +1015,7 @@ module Triangulator = struct
                  out_buffer.(v_idx + 2)
         done;
 
-        if expected > 1e-10 then begin
+        if abs_float (expected -. !actual) >= 1e-11 then begin
           let ratio = !actual /. expected in
 
           (* Quality Metrics *)
@@ -1035,9 +1035,11 @@ module Triangulator = struct
                 out_buffer.(v_idx + 1),
                 out_buffer.(v_idx + 2) )
             in
+            (*
             let x1, y1 = (Geometry.get_x verts i1, Geometry.get_y verts i1) in
             let x2, y2 = (Geometry.get_x verts i2, Geometry.get_y verts i2) in
             let x3, y3 = (Geometry.get_x verts i3, Geometry.get_y verts i3) in
+*)
 
             let d12_sq = Geometry.dist_sq verts i1 i2 in
             let d23_sq = Geometry.dist_sq verts i2 i3 in
@@ -1078,7 +1080,7 @@ module Triangulator = struct
                 !min_angle
               :: !quality_warnings;
 
-          if ratio < 0.99 || ratio > 1.01 then begin
+          if ratio < 0.995 || ratio > 1.005 then begin
             Printf.printf
               "AREA MISMATCH: expected=%g, actual=%g, ratio=%.4f (%d tris)\n%!"
               expected !actual ratio poly_tris;
