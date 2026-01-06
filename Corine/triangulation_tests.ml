@@ -60,9 +60,7 @@ let () =
         ||
         (* ~ 0.1 m^2 *)
         mismatch < 1e-11
-      then (
-        prerr_endline filename;
-        incr passed)
+      then incr passed
       else (
         incr failed;
         Printf.printf "FAIL: %s (expected=%g, actual=%g, ratio=%.4f)\n" filename

@@ -532,9 +532,9 @@ module Triangulator = struct
     let px, py = (get_x verts p_idx, get_y verts p_idx) in
     let bridge_dist = sqrt (((hx -. px) ** 2.0) +. ((hy -. py) ** 2.0)) in
 
-    (* If bridge distance is too large, the bridge finding failed - skip this hole *)
-    if bridge_dist > 0.005 then begin
-      (* ~500m - reasonable max for a hole bridge *)
+    (* Increased bridge distance limit to handle large tiles (0.275 deg).
+       1.0 deg is safely larger than any expected bridge. *)
+    if bridge_dist > 1.0 then begin
       None
     end
     else begin

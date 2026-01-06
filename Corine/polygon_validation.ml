@@ -92,20 +92,34 @@ let check_self_intersection (verts : float array) start len =
   done;
   !errors
 
-(* Point in polygon test for containment checks *)
+(* Point in ring test for containment checks.
+   Returns true if point is strictly inside OR on the boundary. *)
 let point_in_ring (verts : float array) start len px py =
   let inside = ref false in
+  let on_edge = ref false in
   let j = ref (len - 1) in
   for i = 0 to len - 1 do
     let ix, iy = (get_x verts (start + i), get_y verts (start + i)) in
     let jx, jy = (get_x verts (start + !j), get_y verts (start + !j)) in
+
+    (* Check if point is on edge i-j *)
+    let dx1 = px -. ix in
+    let dy1 = py -. iy in
+    let dx2 = jx -. ix in
+    let dy2 = jy -. iy in
+    let cross = (dx1 *. dy2) -. (dx2 *. dy1) in
+    (if abs_float cross < 1e-12 then
+       let dot = (dx1 *. dx2) +. (dy1 *. dy2) in
+       let seg_len_sq = (dx2 *. dx2) +. (dy2 *. dy2) in
+       if dot >= -.epsilon && dot <= seg_len_sq +. epsilon then on_edge := true);
+
     if
       iy > py <> (jy > py)
       && px < ((jx -. ix) *. (py -. iy) /. (jy -. iy)) +. ix
     then inside := not !inside;
     j := i
   done;
-  !inside
+  !on_edge || !inside
 
 let check_hole_containment (verts : float array) outer_start outer_len holes =
   let errors = ref [] in

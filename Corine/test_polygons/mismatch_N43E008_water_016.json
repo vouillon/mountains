@@ -1,0 +1,15 @@
+{
+  "tile": "N43E008",
+  "type": "water",
+  "expected_area": 1.0371599999188277e-09,
+  "actual_area": 0.0,
+  "ratio": 0.0,
+  "outer": [
+    [ 8.0416344, 43.9043577 ],
+    [ 8.041567499999999, 43.9043955 ],
+    [ 8.0416092, 43.9043421 ],
+    [ 8.041623899999999, 43.9043481 ]
+  ],
+  "holes": [],
+  "validation_errors": [ "Triangle count mismatch: got 0, expected 2" ]
+}
