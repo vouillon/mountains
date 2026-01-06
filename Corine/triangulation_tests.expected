@@ -12,6 +12,10 @@ AREA MISMATCH: expected=0.00448859, actual=0.00578709, ratio=1.2893 (1179 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1179, expected 1197
 FAIL: test_polygons/mismatch_N43E005_clc_031.json (expected=0.00448859, actual=0.00578709, ratio=1.2893)
+Triangulation quality warning for  clc (Area OK): 822 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 822, expected 825
+FAIL: test_polygons/mismatch_N43E005_clc_032.json (expected=0.00581762, actual=0.00582351, ratio=1.0010)
 Triangulation quality warning for  clc (Area OK): 225 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
   QUALITY WARNING: Triangle count mismatch: got 225, expected 226
@@ -24,10 +28,6 @@ Triangulation quality warning for  clc (Area OK): 712 tris
 Triangulation quality warning for  clc (Area OK): 3037 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3037, expected 3052
-AREA MISMATCH: expected=0.0114603, actual=0.0117012, ratio=1.0210 (2121 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2121, expected 2143
-FAIL: test_polygons/mismatch_N43E005_clc_096.json (expected=0.0114603, actual=0.0117012, ratio=1.0210)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -115,9 +115,9 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Triangulation quality warning for  water (Area OK): 3371 tris
+Triangulation quality warning for  water (Area OK): 3370 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3371, expected 3372
+  QUALITY WARNING: Triangle count mismatch: got 3370, expected 3372
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -220,9 +220,10 @@ FAIL: test_polygons/mismatch_N43E008_water_015.json (expected=1.06393e-09, actua
 AREA MISMATCH: expected=1.03716e-09, actual=9.981e-10, ratio=0.9623 (1 tris)
   QUALITY WARNING: Triangle count mismatch: got 1, expected 2
 FAIL: test_polygons/mismatch_N43E008_water_016.json (expected=1.03716e-09, actual=9.981e-10, ratio=0.9623)
-Triangulation quality warning for  clc (Area OK): 3117 tris
+Triangulation quality warning for  clc (Area OK): 2925 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3117, expected 3125
+  QUALITY WARNING: Triangle count mismatch: got 2925, expected 3125
+FAIL: test_polygons/mismatch_N43E009_clc_001.json (expected=0.594719, actual=0.59685, ratio=1.0036)
 Triangulation quality warning for  clc (Area OK): 233 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 233, expected 234
@@ -257,6 +258,9 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
+Triangulation quality warning for  water (Area OK): 3156 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 3156, expected 3158
 Triangulation quality warning for  water (Area OK): 24 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.08 deg
   QUALITY WARNING: Triangle count mismatch: got 24, expected 25
@@ -270,10 +274,6 @@ Triangulation quality warning for  clc (Area OK): 4176 tris
 Triangulation quality warning for  clc (Area OK): 195 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
   QUALITY WARNING: Triangle count mismatch: got 195, expected 196
-AREA MISMATCH: expected=0.00531266, actual=0.00558192, ratio=1.0507 (1537 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1537, expected 1543
-FAIL: test_polygons/mismatch_N44E006_clc_062.json (expected=0.00531266, actual=0.00558192, ratio=1.0507)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -284,6 +284,9 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
+Triangulation quality warning for  water (Area OK): 1094 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 1094, expected 1098
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -309,17 +312,24 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
+Triangulation quality warning for  clc (Area OK): 339 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 339, expected 340
 Triangulation quality warning for  clc (Area OK): 674 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 674, expected 675
-AREA MISMATCH: expected=0.0366429, actual=0.0416328, ratio=1.1362 (3106 tris)
+AREA MISMATCH: expected=0.0366429, actual=0.0505019, ratio=1.3782 (3088 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3106, expected 3153
-FAIL: test_polygons/mismatch_N44E007_clc_030.json (expected=0.0366429, actual=0.0416328, ratio=1.1362)
-AREA MISMATCH: expected=0.0103489, actual=0.0181238, ratio=1.7513 (956 tris)
+  QUALITY WARNING: Triangle count mismatch: got 3088, expected 3153
+FAIL: test_polygons/mismatch_N44E007_clc_030.json (expected=0.0366429, actual=0.0505019, ratio=1.3782)
+AREA MISMATCH: expected=0.0553241, actual=0.0613157, ratio=1.1083 (3355 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 956, expected 973
-FAIL: test_polygons/mismatch_N44E007_clc_031.json (expected=0.0103489, actual=0.0181238, ratio=1.7513)
+  QUALITY WARNING: Triangle count mismatch: got 3355, expected 3395
+FAIL: test_polygons/mismatch_N44E007_clc_032.json (expected=0.0553241, actual=0.0613157, ratio=1.1083)
+AREA MISMATCH: expected=0.0456696, actual=0.0624209, ratio=1.3668 (5358 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 5358, expected 5412
+FAIL: test_polygons/mismatch_N44E007_clc_033.json (expected=0.0456696, actual=0.0624209, ratio=1.3668)
 Triangulation quality warning for  clc (Area OK): 4203 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4203, expected 4220
@@ -366,10 +376,6 @@ AREA MISMATCH: expected=0.0316614, actual=0.0358594, ratio=1.1326 (6077 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 6077, expected 6124
 FAIL: test_polygons/mismatch_N44E008_clc_026.json (expected=0.0316614, actual=0.0358594, ratio=1.1326)
-AREA MISMATCH: expected=0.0209082, actual=0.022881, ratio=1.0944 (1475 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1475, expected 1489
-FAIL: test_polygons/mismatch_N44E008_clc_027.json (expected=0.0209082, actual=0.022881, ratio=1.0944)
 Triangulation quality warning for  clc (Area OK): 2409 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2409, expected 2410
@@ -395,27 +401,26 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-AREA MISMATCH: expected=0.000583633, actual=0.00059477, ratio=1.0191 (2356 tris)
+AREA MISMATCH: expected=0.000583633, actual=0.000588928, ratio=1.0091 (2346 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2356, expected 2428
-FAIL: test_polygons/mismatch_N44E008_water_059.json (expected=0.000583633, actual=0.00059477, ratio=1.0191)
+  QUALITY WARNING: Triangle count mismatch: got 2346, expected 2428
+FAIL: test_polygons/mismatch_N44E008_water_059.json (expected=0.000583633, actual=0.000588928, ratio=1.0091)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177 (3 tris)
   QUALITY WARNING: Triangle count mismatch: got 3, expected 4
 FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177)
-AREA MISMATCH: expected=0.0204203, actual=0.0264245, ratio=1.2940 (4640 tris)
+Triangulation quality warning for  clc (Area OK): 4654 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4640, expected 4678
-FAIL: test_polygons/mismatch_N44E009_clc_004.json (expected=0.0204203, actual=0.0264245, ratio=1.2940)
-AREA MISMATCH: expected=0.0264722, actual=0.0288333, ratio=1.0892 (5229 tris)
+  QUALITY WARNING: Triangle count mismatch: got 4654, expected 4678
+AREA MISMATCH: expected=0.0264722, actual=0.0273618, ratio=1.0336 (5224 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 5229, expected 5264
-FAIL: test_polygons/mismatch_N44E009_clc_005.json (expected=0.0264722, actual=0.0288333, ratio=1.0892)
-AREA MISMATCH: expected=0.0488593, actual=0.0725263, ratio=1.4844 (8389 tris)
+  QUALITY WARNING: Triangle count mismatch: got 5224, expected 5264
+FAIL: test_polygons/mismatch_N44E009_clc_005.json (expected=0.0264722, actual=0.0273618, ratio=1.0336)
+AREA MISMATCH: expected=0.0488593, actual=0.0776078, ratio=1.5884 (8377 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 8389, expected 8463
-FAIL: test_polygons/mismatch_N44E009_clc_006.json (expected=0.0488593, actual=0.0725263, ratio=1.4844)
+  QUALITY WARNING: Triangle count mismatch: got 8377, expected 8463
+FAIL: test_polygons/mismatch_N44E009_clc_006.json (expected=0.0488593, actual=0.0776078, ratio=1.5884)
 Triangulation quality warning for  clc (Area OK): 12368 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 12368, expected 12437
@@ -423,25 +428,24 @@ AREA MISMATCH: expected=0.03601, actual=0.0554857, ratio=1.5408 (7747 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 7747, expected 7818
 FAIL: test_polygons/mismatch_N44E009_clc_009.json (expected=0.03601, actual=0.0554857, ratio=1.5408)
-AREA MISMATCH: expected=0.0540763, actual=0.0981455, ratio=1.8149 (12819 tris)
+AREA MISMATCH: expected=0.00751909, actual=0.00810162, ratio=1.0775 (2443 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 12819, expected 12966
-FAIL: test_polygons/mismatch_N44E009_clc_011.json (expected=0.0540763, actual=0.0981455, ratio=1.8149)
+  QUALITY WARNING: Triangle count mismatch: got 2443, expected 2465
+FAIL: test_polygons/mismatch_N44E009_clc_010.json (expected=0.00751909, actual=0.00810162, ratio=1.0775)
+AREA MISMATCH: expected=0.0540763, actual=0.0745557, ratio=1.3787 (12850 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 12850, expected 12966
+FAIL: test_polygons/mismatch_N44E009_clc_011.json (expected=0.0540763, actual=0.0745557, ratio=1.3787)
 Triangulation quality warning for  clc (Area OK): 14883 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 14883, expected 14938
-AREA MISMATCH: expected=0.0521921, actual=0.0773473, ratio=1.4820 (4474 tris)
+AREA MISMATCH: expected=0.0521921, actual=0.056206, ratio=1.0769 (4468 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4474, expected 4502
-FAIL: test_polygons/mismatch_N44E009_clc_019.json (expected=0.0521921, actual=0.0773473, ratio=1.4820)
-AREA MISMATCH: expected=0.037809, actual=0.0958663, ratio=2.5355 (4903 tris)
+  QUALITY WARNING: Triangle count mismatch: got 4468, expected 4502
+FAIL: test_polygons/mismatch_N44E009_clc_019.json (expected=0.0521921, actual=0.056206, ratio=1.0769)
+Triangulation quality warning for  clc (Area OK): 4140 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4903, expected 4959
-FAIL: test_polygons/mismatch_N44E009_clc_020.json (expected=0.037809, actual=0.0958663, ratio=2.5355)
-AREA MISMATCH: expected=0.0153305, actual=0.0244203, ratio=1.5929 (4109 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4109, expected 4144
-FAIL: test_polygons/mismatch_N44E009_clc_023.json (expected=0.0153305, actual=0.0244203, ratio=1.5929)
+  QUALITY WARNING: Triangle count mismatch: got 4140, expected 4144
 Triangulation quality warning for  clc (Area OK): 3446 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3446, expected 3455
@@ -461,14 +465,9 @@ Triangulation quality warning for  clc (Area OK): 2198 tris
 Triangulation quality warning for  clc (Area OK): 86 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.25 deg
   QUALITY WARNING: Triangle count mismatch: got 86, expected 87
-AREA MISMATCH: expected=0.0159256, actual=0.0181805, ratio=1.1416 (4643 tris)
+Triangulation quality warning for  clc (Area OK): 4643 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4643, expected 4680
-FAIL: test_polygons/mismatch_N45E005_clc_021.json (expected=0.0159256, actual=0.0181805, ratio=1.1416)
-AREA MISMATCH: expected=0.00118725, actual=0.00162574, ratio=1.3693 (397 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 397, expected 402
-FAIL: test_polygons/mismatch_N45E005_clc_028.json (expected=0.00118725, actual=0.00162574, ratio=1.3693)
 Triangulation quality warning for  clc (Area OK): 891 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 891, expected 896
@@ -519,9 +518,9 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Triangulation quality warning for  water (Area OK): 973 tris
+Triangulation quality warning for  water (Area OK): 974 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 973, expected 977
+  QUALITY WARNING: Triangle count mismatch: got 974, expected 977
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -620,9 +619,10 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Triangulation quality warning for  water (Area OK): 1240 tris
+Triangulation quality warning for  water (Area OK): 1237 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1240, expected 1254
+  QUALITY WARNING: Triangle count mismatch: got 1237, expected 1254
+FAIL: test_polygons/mismatch_N45E005_water_114.json (expected=7.09477e-05, actual=7.10391e-05, ratio=1.0013)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -857,10 +857,6 @@ Triangulation quality warning for  clc (Area OK): 511 tris
 Triangulation quality warning for  clc (Area OK): 1763 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1763, expected 1764
-AREA MISMATCH: expected=0.00682947, actual=0.00801777, ratio=1.1740 (2035 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2035, expected 2069
-FAIL: test_polygons/mismatch_N45E006_clc_069.json (expected=0.00682947, actual=0.00801777, ratio=1.1740)
 Triangulation quality warning for  clc (Area OK): 1022 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1022, expected 1023
@@ -1049,23 +1045,19 @@ Triangulation quality warning for  clc (Area OK): 1231 tris
 Triangulation quality warning for  clc (Area OK): 1188 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1188, expected 1189
-AREA MISMATCH: expected=0.0259552, actual=0.0302205, ratio=1.1643 (6377 tris)
+Triangulation quality warning for  clc (Area OK): 6377 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 6377, expected 6391
-FAIL: test_polygons/mismatch_N45E007_clc_016.json (expected=0.0259552, actual=0.0302205, ratio=1.1643)
-Triangulation quality warning for  clc (Area OK): 2929 tris
+AREA MISMATCH: expected=0.0190264, actual=0.019577, ratio=1.0289 (2917 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2929, expected 2956
+  QUALITY WARNING: Triangle count mismatch: got 2917, expected 2956
+FAIL: test_polygons/mismatch_N45E007_clc_035.json (expected=0.0190264, actual=0.019577, ratio=1.0289)
 Triangulation quality warning for  clc (Area OK): 988 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 988, expected 989
 Triangulation quality warning for  clc (Area OK): 2422 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2422, expected 2423
-AREA MISMATCH: expected=0.0111401, actual=0.0127643, ratio=1.1458 (2828 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2828, expected 2844
-FAIL: test_polygons/mismatch_N45E007_clc_061.json (expected=0.0111401, actual=0.0127643, ratio=1.1458)
 Triangulation quality warning for  clc (Area OK): 3670 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3670, expected 3694
@@ -1079,20 +1071,12 @@ Triangulation quality warning for  clc (Area OK): 2102 tris
 Triangulation quality warning for  clc (Area OK): 5821 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 5821, expected 5846
-AREA MISMATCH: expected=0.0029842, actual=0.00393292, ratio=1.3179 (742 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 742, expected 752
-FAIL: test_polygons/mismatch_N45E007_clc_112.json (expected=0.0029842, actual=0.00393292, ratio=1.3179)
-AREA MISMATCH: expected=0.00185273, actual=0.00209344, ratio=1.1299 (303 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 303, expected 311
-FAIL: test_polygons/mismatch_N45E007_clc_113.json (expected=0.00185273, actual=0.00209344, ratio=1.1299)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-AREA MISMATCH: expected=4.25985e-09, actual=4.31073e-09, ratio=1.0119 (5 tris)
+AREA MISMATCH: expected=4.25985e-09, actual=4.42921e-09, ratio=1.0398 (5 tris)
   QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N45E007_water_114.json (expected=4.25985e-09, actual=4.31073e-09, ratio=1.0119)
+FAIL: test_polygons/mismatch_N45E007_water_114.json (expected=4.25985e-09, actual=4.42921e-09, ratio=1.0398)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=4.25483e-09, actual=4.20719e-09, ratio=0.9888 (2 tris)
@@ -1108,6 +1092,10 @@ Cheap validation errors for tile  type water:
 Triangulation quality warning for  water (Area OK): 6 tris
   QUALITY WARNING: Triangle count mismatch: got 6, expected 7
 FAIL: test_polygons/mismatch_N45E007_water_199.json (expected=1.99275e-08, actual=1.99603e-08, ratio=1.0016)
+AREA MISMATCH: expected=0.0269494, actual=0.047047, ratio=1.7458 (1812 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 1812, expected 1845
+FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.047047, ratio=1.7458)
 Triangulation quality warning for  clc (Area OK): 3346 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3346, expected 3360
@@ -1117,20 +1105,23 @@ Triangulation quality warning for  clc (Area OK): 4120 tris
 Triangulation quality warning for  clc (Area OK): 5058 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 5058, expected 5064
-AREA MISMATCH: expected=0.0237868, actual=0.0353695, ratio=1.4869 (3417 tris)
+Triangulation quality warning for  clc (Area OK): 3434 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3417, expected 3454
-FAIL: test_polygons/mismatch_N45E008_clc_044.json (expected=0.0237868, actual=0.0353695, ratio=1.4869)
+  QUALITY WARNING: Triangle count mismatch: got 3434, expected 3454
 Triangulation quality warning for  clc (Area OK): 990 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 990, expected 991
 Triangulation quality warning for  clc (Area OK): 196 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
   QUALITY WARNING: Triangle count mismatch: got 196, expected 197
-AREA MISMATCH: expected=0.0182405, actual=0.018716, ratio=1.0261 (8029 tris)
+AREA MISMATCH: expected=0.00590963, actual=0.00795322, ratio=1.3458 (980 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
+  QUALITY WARNING: Triangle count mismatch: got 980, expected 1011
+FAIL: test_polygons/mismatch_N45E008_clc_073.json (expected=0.00590963, actual=0.00795322, ratio=1.3458)
+AREA MISMATCH: expected=0.0182405, actual=0.0224855, ratio=1.2327 (7994 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 8029, expected 8074
-FAIL: test_polygons/mismatch_N45E008_clc_075.json (expected=0.0182405, actual=0.018716, ratio=1.0261)
+  QUALITY WARNING: Triangle count mismatch: got 7994, expected 8074
+FAIL: test_polygons/mismatch_N45E008_clc_075.json (expected=0.0182405, actual=0.0224855, ratio=1.2327)
 Triangulation quality warning for  clc (Area OK): 7219 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 7219, expected 7234
@@ -1148,14 +1139,9 @@ AREA MISMATCH: expected=0.00557945, actual=0.00876088, ratio=1.5702 (972 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 972, expected 1010
 FAIL: test_polygons/mismatch_N45E008_clc_085.json (expected=0.00557945, actual=0.00876088, ratio=1.5702)
-AREA MISMATCH: expected=0.00282372, actual=0.0032044, ratio=1.1348 (359 tris)
+Triangulation quality warning for  clc (Area OK): 4336 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 359, expected 370
-FAIL: test_polygons/mismatch_N45E008_clc_086.json (expected=0.00282372, actual=0.0032044, ratio=1.1348)
-AREA MISMATCH: expected=0.0284126, actual=0.0285824, ratio=1.0060 (4332 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4332, expected 4348
-FAIL: test_polygons/mismatch_N45E008_clc_088.json (expected=0.0284126, actual=0.0285824, ratio=1.0060)
+  QUALITY WARNING: Triangle count mismatch: got 4336, expected 4348
 Triangulation quality warning for  clc (Area OK): 1065 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 1065, expected 1066
@@ -1202,10 +1188,10 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-AREA MISMATCH: expected=0.00214609, actual=0.00215723, ratio=1.0052 (4409 tris)
+Triangulation quality warning for  water (Area OK): 4399 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4409, expected 4529
-FAIL: test_polygons/mismatch_N45E008_water_101.json (expected=0.00214609, actual=0.00215723, ratio=1.0052)
+  QUALITY WARNING: Triangle count mismatch: got 4399, expected 4529
+FAIL: test_polygons/mismatch_N45E008_water_101.json (expected=0.00214609, actual=0.00215139, ratio=1.0025)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -1259,48 +1245,55 @@ FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.
 Triangulation quality warning for  clc (Area OK): 4299 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4299, expected 4301
-AREA MISMATCH: expected=0.0502253, actual=0.102315, ratio=2.0371 (5833 tris)
+AREA MISMATCH: expected=0.0502253, actual=0.0996933, ratio=1.9849 (5837 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 5833, expected 5926
-FAIL: test_polygons/mismatch_N45E009_clc_011.json (expected=0.0502253, actual=0.102315, ratio=2.0371)
+  QUALITY WARNING: Triangle count mismatch: got 5837, expected 5926
+FAIL: test_polygons/mismatch_N45E009_clc_011.json (expected=0.0502253, actual=0.0996933, ratio=1.9849)
 AREA MISMATCH: expected=0.019934, actual=0.0246222, ratio=1.2352 (4835 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4835, expected 4891
 FAIL: test_polygons/mismatch_N45E009_clc_012.json (expected=0.019934, actual=0.0246222, ratio=1.2352)
-AREA MISMATCH: expected=0.0569869, actual=0.0820522, ratio=1.4398 (6607 tris)
+AREA MISMATCH: expected=0.0269, actual=0.0278505, ratio=1.0353 (2219 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 6607, expected 6694
-FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.0820522, ratio=1.4398)
-AREA MISMATCH: expected=0.0973173, actual=0.209935, ratio=2.1572 (4866 tris)
+  QUALITY WARNING: Triangle count mismatch: got 2219, expected 2240
+FAIL: test_polygons/mismatch_N45E009_clc_013.json (expected=0.0269, actual=0.0278505, ratio=1.0353)
+AREA MISMATCH: expected=0.0569869, actual=0.0764325, ratio=1.3412 (6605 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4866, expected 4980
-FAIL: test_polygons/mismatch_N45E009_clc_015.json (expected=0.0973173, actual=0.209935, ratio=2.1572)
-Triangulation quality warning for  clc (Area OK): 5715 tris
+  QUALITY WARNING: Triangle count mismatch: got 6605, expected 6694
+FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.0764325, ratio=1.3412)
+AREA MISMATCH: expected=0.0973173, actual=0.153439, ratio=1.5767 (4887 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 5715, expected 5769
-FAIL: test_polygons/mismatch_N45E009_clc_016.json (expected=0.0314765, actual=0.0316246, ratio=1.0047)
+  QUALITY WARNING: Triangle count mismatch: got 4887, expected 4980
+FAIL: test_polygons/mismatch_N45E009_clc_015.json (expected=0.0973173, actual=0.153439, ratio=1.5767)
+AREA MISMATCH: expected=0.0314765, actual=0.0320212, ratio=1.0173 (5714 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 5714, expected 5769
+FAIL: test_polygons/mismatch_N45E009_clc_016.json (expected=0.0314765, actual=0.0320212, ratio=1.0173)
+AREA MISMATCH: expected=0.0297897, actual=0.0301682, ratio=1.0127 (3771 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 3771, expected 3816
+FAIL: test_polygons/mismatch_N45E009_clc_017.json (expected=0.0297897, actual=0.0301682, ratio=1.0127)
 Triangulation quality warning for  clc (Area OK): 2340 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2340, expected 2353
-AREA MISMATCH: expected=0.0248131, actual=0.0262792, ratio=1.0591 (3750 tris)
+AREA MISMATCH: expected=0.0248131, actual=0.0256685, ratio=1.0345 (3750 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3750, expected 3776
-FAIL: test_polygons/mismatch_N45E009_clc_027.json (expected=0.0248131, actual=0.0262792, ratio=1.0591)
-AREA MISMATCH: expected=0.0067925, actual=0.00928459, ratio=1.3669 (1413 tris)
+FAIL: test_polygons/mismatch_N45E009_clc_027.json (expected=0.0248131, actual=0.0256685, ratio=1.0345)
+Triangulation quality warning for  clc (Area OK): 1421 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 1413, expected 1430
-FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.00928459, ratio=1.3669)
+  QUALITY WARNING: Triangle count mismatch: got 1421, expected 1430
+FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.006821, ratio=1.0042)
 Triangulation quality warning for  clc (Area OK): 777 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 777, expected 778
-AREA MISMATCH: expected=0.0261249, actual=0.0423411, ratio=1.6207 (4589 tris)
+AREA MISMATCH: expected=0.0261249, actual=0.0376376, ratio=1.4407 (4566 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4589, expected 4635
-FAIL: test_polygons/mismatch_N45E009_clc_056.json (expected=0.0261249, actual=0.0423411, ratio=1.6207)
-AREA MISMATCH: expected=0.0067784, actual=0.00811069, ratio=1.1966 (1801 tris)
+  QUALITY WARNING: Triangle count mismatch: got 4566, expected 4635
+FAIL: test_polygons/mismatch_N45E009_clc_056.json (expected=0.0261249, actual=0.0376376, ratio=1.4407)
+Triangulation quality warning for  clc (Area OK): 1808 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1801, expected 1834
-FAIL: test_polygons/mismatch_N45E009_clc_057.json (expected=0.0067784, actual=0.00811069, ratio=1.1966)
+  QUALITY WARNING: Triangle count mismatch: got 1808, expected 1834
 Triangulation quality warning for  clc (Area OK): 8123 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 8123, expected 8161
@@ -1361,29 +1354,17 @@ Triangulation quality warning for  water (Area OK): 3 tris
   QUALITY WARNING: Triangle count mismatch: got 3, expected 4
 FAIL: test_polygons/mismatch_N45E009_water_219.json (expected=7.30582e-09, actual=7.33869e-09, ratio=1.0045)
 Triangulation quality warning for  clc (Area OK): 833 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 833, expected 836
 Triangulation quality warning for  clc (Area OK): 1608 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1608, expected 1609
-AREA MISMATCH: expected=0.0121757, actual=0.0158584, ratio=1.3025 (3559 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3559, expected 3583
-FAIL: test_polygons/mismatch_N46E005_clc_059.json (expected=0.0121757, actual=0.0158584, ratio=1.3025)
 Triangulation quality warning for  clc (Area OK): 550 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 550, expected 551
 Triangulation quality warning for  clc (Area OK): 620 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 620, expected 621
-AREA MISMATCH: expected=0.00387897, actual=0.00495212, ratio=1.2767 (1390 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1390, expected 1421
-FAIL: test_polygons/mismatch_N46E005_clc_100.json (expected=0.00387897, actual=0.00495212, ratio=1.2767)
-AREA MISMATCH: expected=0.0187914, actual=0.0206915, ratio=1.1011 (2529 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2529, expected 2538
-FAIL: test_polygons/mismatch_N46E005_clc_103.json (expected=0.0187914, actual=0.0206915, ratio=1.1011)
 Triangulation quality warning for  clc (Area OK): 1896 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1896, expected 1907
@@ -1398,10 +1379,6 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-AREA MISMATCH: expected=4.22518e-05, actual=0.000919261, ratio=21.7567 (252 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 252, expected 261
-FAIL: test_polygons/mismatch_N46E005_water_122.json (expected=4.22518e-05, actual=0.000919261, ratio=21.7567)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -1510,6 +1487,6 @@ FAIL: test_polygons/mismatch_N46E005_water_980.json (expected=3.31686e-09, actua
 
 Test Results:
 Total: 1380
-Passed: 1180
-Failed: 200
+Passed: 1191
+Failed: 189
 Regression suite FAILED.

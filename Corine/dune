@@ -9,6 +9,7 @@
   triangulate_test
   polygon_to_svg
   analyze_polygon
+  debug_triangles
   triangulation_tests)
  (flags -w -34-69)
  (libraries sqlite3 str tsdl tgls.tgles3 zip yojson unix)
@@ -20,11 +21,13 @@
  (deps
   (glob_files test_polygons/*))
  (action
-  (with-stdout-to triangulation_tests.output
+  (with-stdout-to
+   triangulation_tests.output
    (with-accepted-exit-codes
     1
     (run ./triangulation_tests.exe)))))
 
 (rule
  (alias runtest)
- (action (diff triangulation_tests.expected triangulation_tests.output)))
+ (action
+  (diff triangulation_tests.expected triangulation_tests.output)))

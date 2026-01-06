@@ -92,6 +92,78 @@ let check_self_intersection (verts : float array) start len =
   done;
   !errors
 
+let check_self_intersection_indices (verts : float array) indices =
+  let len = Array.length indices in
+  let errors = ref [] in
+  for i = 0 to len - 1 do
+    for j = i + 2 to len - 1 do
+      if i = 0 && j = len - 1 then ()
+      else
+        let i1 = indices.(i) in
+        let i2 = indices.((i + 1) mod len) in
+        let j1 = indices.(j) in
+        let j2 = indices.((j + 1) mod len) in
+        if segments_intersect verts i1 i2 j1 j2 then
+          errors :=
+            SelfIntersection
+              ( (indices.(i), indices.((i + 1) mod len)),
+                (indices.(j), indices.((j + 1) mod len)) )
+            :: !errors
+    done
+  done;
+  !errors
+
+let is_self_intersecting (verts : float array) indices =
+  let len = Array.length indices in
+  try
+    for i = 0 to len - 1 do
+      for j = i + 2 to len - 1 do
+        if i = 0 && j = len - 1 then ()
+        else
+          let i1 = indices.(i) in
+          let i2 = indices.((i + 1) mod len) in
+          let j1 = indices.(j) in
+          let j2 = indices.((j + 1) mod len) in
+          if segments_intersect verts i1 i2 j1 j2 then raise Exit
+      done
+    done;
+    false
+  with Exit -> true
+
+let is_hole_contained (verts : float array) hole_indices outer_indices =
+  (* Check if at least one point of the hole is inside the outer ring. *)
+  let px, py = (get_x verts hole_indices.(0), get_y verts hole_indices.(0)) in
+  let start_o = 0 in
+  (* Dummy since we don't have start/len for indices *)
+  (* Wait, point_in_ring also assumes contiguous... let's fix that too later if needed *)
+  let inside = ref false in
+  let on_edge = ref false in
+  let len_o = Array.length outer_indices in
+  let j = ref (len_o - 1) in
+  for i = 0 to len_o - 1 do
+    let ix, iy =
+      (get_x verts outer_indices.(i), get_y verts outer_indices.(i))
+    in
+    let jx, jy =
+      (get_x verts outer_indices.(!j), get_y verts outer_indices.(!j))
+    in
+    let dx1 = px -. ix in
+    let dy1 = py -. iy in
+    let dx2 = jx -. ix in
+    let dy2 = jy -. iy in
+    let cross = (dx1 *. dy2) -. (dx2 *. dy1) in
+    (if abs_float cross < 1e-12 then
+       let dot = (dx1 *. dx2) +. (dy1 *. dy2) in
+       let seg_len_sq = (dx2 *. dx2) +. (dy2 *. dy2) in
+       if dot >= -.epsilon && dot <= seg_len_sq +. epsilon then on_edge := true);
+    if
+      iy > py <> (jy > py)
+      && px < ((jx -. ix) *. (py -. iy) /. (jy -. iy)) +. ix
+    then inside := not !inside;
+    j := i
+  done;
+  !on_edge || !inside
+
 (* Point in ring test for containment checks.
    Returns true if point is strictly inside OR on the boundary. *)
 let point_in_ring (verts : float array) start len px py =
