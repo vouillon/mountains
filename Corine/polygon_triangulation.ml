@@ -519,32 +519,48 @@ module Triangulator = struct
           outer_node)
       end
 
+  (* Returns Some new_outer_node if successful, None if bridge would be too long *)
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
       poly_list =
     let m_node = hole_start_node in
+    let h_idx = poly_list.PolygonList.vert_idx.(m_node) in
+    let hx, hy = (get_x verts h_idx, get_y verts h_idx) in
+
     let p_node = find_bridge_point verts m_node outer_node poly_list in
-    let p_prime = PolygonList.duplicate_node poly_list p_node in
-    let m_prime = PolygonList.duplicate_node poly_list m_node in
 
-    let m_prev = poly_list.prev.(m_node) in
-    let p_next = poly_list.next.(p_node) in
+    let p_idx = poly_list.vert_idx.(p_node) in
+    let px, py = (get_x verts p_idx, get_y verts p_idx) in
+    let bridge_dist = sqrt (((hx -. px) ** 2.0) +. ((hy -. py) ** 2.0)) in
 
-    (* P -> M *)
-    poly_list.next.(p_node) <- m_node;
-    poly_list.prev.(m_node) <- p_node;
+    (* If bridge distance is too large, the bridge finding failed - skip this hole *)
+    if bridge_dist > 0.005 then begin
+      (* ~500m - reasonable max for a hole bridge *)
+      None
+    end
+    else begin
+      let p_prime = PolygonList.duplicate_node poly_list p_node in
+      let m_prime = PolygonList.duplicate_node poly_list m_node in
 
-    (* M_prev -> M' *)
-    poly_list.next.(m_prev) <- m_prime;
-    poly_list.prev.(m_prime) <- m_prev;
+      let m_prev = poly_list.prev.(m_node) in
+      let p_next = poly_list.next.(p_node) in
 
-    (* M' -> P' *)
-    poly_list.next.(m_prime) <- p_prime;
-    poly_list.prev.(p_prime) <- m_prime;
+      (* P -> M *)
+      poly_list.next.(p_node) <- m_node;
+      poly_list.prev.(m_node) <- p_node;
 
-    (* P' -> P_next *)
-    poly_list.next.(p_prime) <- p_next;
-    poly_list.prev.(p_next) <- p_prime;
-    p_node
+      (* M_prev -> M' *)
+      poly_list.next.(m_prev) <- m_prime;
+      poly_list.prev.(m_prime) <- m_prev;
+
+      (* M' -> P' *)
+      poly_list.next.(m_prime) <- p_prime;
+      poly_list.prev.(p_prime) <- m_prime;
+
+      (* P' -> P_next *)
+      poly_list.next.(p_prime) <- p_next;
+      poly_list.prev.(p_next) <- p_prime;
+      Some p_node
+    end
 
   let triangulate_dll (verts : float array) start_node poly_list
       total_active_nodes out_buffer out_offset =
@@ -778,18 +794,19 @@ module Triangulator = struct
       Format.eprintf "Failure: %d remaining vertices after %d iterations@."
         !count max_iter;
       (* Diagnostic: Print the remaining polygon *)
-      Format.eprintf "Remaining polygon vertices:@.";
-      let start = !curr in
-      let n = ref start in
-      let first = ref true in
-      while !first || !n <> start do
-        first := false;
-        let vi = vert_idx.(!n) in
-        Format.eprintf "  [%d] node=%d vert=%d (%.10f, %.10f)@."
-          (if !n = start then 0 else 1)
-          !n vi (get_x verts vi) (get_y verts vi);
-        n := next.(!n)
-      done;
+      if false then (
+        Format.eprintf "Remaining polygon vertices:@.";
+        let start = !curr in
+        let n = ref start in
+        let first = ref true in
+        while !first || !n <> start do
+          first := false;
+          let vi = vert_idx.(!n) in
+          Format.eprintf "  [%d] node=%d vert=%d (%.10f, %.10f)@."
+            (if !n = start then 0 else 1)
+            !n vi (get_x verts vi) (get_y verts vi);
+          n := next.(!n)
+        done);
       let i = ref !curr in
       let stop = !curr in
       let loop = ref true in
@@ -843,7 +860,6 @@ module Triangulator = struct
 
       if num_holes > 0 then begin
         let processed_holes = Array.make num_holes (0, 0.0) in
-        (* Correct Logic: Filter hole first, then find max_x node on active list *)
         for i = 0 to num_holes - 1 do
           let h = polygon.holes.(i) in
           if h.len > 0 then (
@@ -854,8 +870,6 @@ module Triangulator = struct
             let filtered_start =
               PolygonList.filter_points verts poly_list hole_start
             in
-
-            (* Find max X on filtered ring *)
             let max_x = ref (get_x verts poly_list.vert_idx.(filtered_start)) in
             let max_node = ref filtered_start in
             let curr = ref poly_list.next.(filtered_start) in
@@ -878,9 +892,12 @@ module Triangulator = struct
         Array.iter
           (fun (bridge_node, _) ->
             if bridge_node <> -1 then
-              curr_outer_node :=
+              match
                 merge_hole_into_outer verts bridge_node !curr_outer_node
-                  poly_list)
+                  poly_list
+              with
+              | Some new_node -> curr_outer_node := new_node
+              | None -> () (* Skip hole if bridge was invalid *))
           processed_holes
       end;
 
@@ -924,6 +941,30 @@ module Triangulator = struct
 
   (* Use Geometry_types.validate_polygon *)
 
+  (* Compute signed area of a triangle given 3 vertex indices *)
+  let triangle_area verts i0 i1 i2 =
+    let x0 = Geometry.get_x verts i0 in
+    let y0 = Geometry.get_y verts i0 in
+    let x1 = Geometry.get_x verts i1 in
+    let y1 = Geometry.get_y verts i1 in
+    let x2 = Geometry.get_x verts i2 in
+    let y2 = Geometry.get_y verts i2 in
+    abs_float (((x1 -. x0) *. (y2 -. y0)) -. ((x2 -. x0) *. (y1 -. y0))) *. 0.5
+
+  (* Compute polygon area (outer - holes) *)
+  let polygon_area verts poly =
+    let outer_area =
+      abs_float
+        (Geometry.signed_area_range verts poly.outer.start poly.outer.len)
+    in
+    let holes_area =
+      Array.fold_left
+        (fun acc h ->
+          acc +. abs_float (Geometry.signed_area_range verts h.start h.len))
+        0.0 poly.holes
+    in
+    outer_area -. holes_area
+
   let triangulate_multi (verts : float array) polygons =
     Array.iter (validate_polygon verts) polygons;
 
@@ -944,7 +985,30 @@ module Triangulator = struct
     let offset = ref 0 in
 
     Array.iter
-      (fun poly -> offset := triangulate_single verts poly out_buffer !offset)
+      (fun poly ->
+        let start_offset = !offset in
+        let expected = polygon_area verts poly in
+        offset := triangulate_single verts poly out_buffer !offset;
+
+        (* Verify this specific polygon *)
+        let poly_tris = (!offset - start_offset) / 3 in
+        let actual = ref 0.0 in
+        for i = 0 to poly_tris - 1 do
+          let v_idx = start_offset + (i * 3) in
+          actual :=
+            !actual
+            +. triangle_area verts out_buffer.(v_idx)
+                 out_buffer.(v_idx + 1)
+                 out_buffer.(v_idx + 2)
+        done;
+
+        if expected > 1e-10 then begin
+          let ratio = !actual /. expected in
+          if ratio < 0.99 || ratio > 1.01 then
+            Printf.printf
+              "AREA MISMATCH: expected=%g, actual=%g, ratio=%.4f (%d tris)\n%!"
+              expected !actual ratio poly_tris
+        end)
       polygons;
 
     if !offset < Array.length out_buffer then Array.sub out_buffer 0 !offset

@@ -3386,7 +3386,8 @@ let main () =
               {
                 Points.name = poi.name;
                 coord = { Points.lat = poi.lat; lon = poi.lon };
-                elevation = Some poi.elevation;
+                elevation =
+                  (if poi.elevation = 0 then None else Some poi.elevation);
               })
             tile.Clc_loader.pois)
         tiles
