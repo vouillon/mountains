@@ -59,21 +59,42 @@ let cross_product verts ia ib ic =
   let cx, cy = (get_x verts ic, get_y verts ic) in
   ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax))
 
-let segments_intersect verts i1 i2 i3 i4 =
-  let cp1 = cross_product verts i1 i2 i3 in
-  let cp2 = cross_product verts i1 i2 i4 in
-  let cp3 = cross_product verts i3 i4 i1 in
-  let cp4 = cross_product verts i3 i4 i2 in
+let on_segment verts ia ib ip =
+  let ax, ay = (get_x verts ia, get_y verts ia) in
+  let bx, by = (get_x verts ib, get_y verts ib) in
+  let px, py = (get_x verts ip, get_y verts ip) in
+  abs_float (cross_product verts ia ib ip) < epsilon
+  && px >= min ax bx -. epsilon
+  && px <= max ax bx +. epsilon
+  && py >= min ay by -. epsilon
+  && py <= max ay by +. epsilon
 
-  (* Standard intersection check *)
+let segments_intersect verts p1 p2 a b =
+  let cp1 = cross_product verts p1 p2 a in
+  let cp2 = cross_product verts p1 p2 b in
+  let cp3 = cross_product verts a b p1 in
+  let cp4 = cross_product verts a b p2 in
+
+  (* Standard intersection check (strict) *)
   if
     ((cp1 > epsilon && cp2 < -.epsilon) || (cp1 < -.epsilon && cp2 > epsilon))
     && ((cp3 > epsilon && cp4 < -.epsilon) || (cp3 < -.epsilon && cp4 > epsilon))
   then true
   else
-    (* Special cases for endpoints on segments could be added here if needed,
-       but for triangulation debugging, literal intersection is the main enemy. *)
-    false
+    (* Special cases: endpoint lies on other segment (excluding shared endpoints) *)
+    let p1_on_ab =
+      if p1 <> a && p1 <> b then on_segment verts a b p1 else false
+    in
+    let p2_on_ab =
+      if p2 <> a && p2 <> b then on_segment verts a b p2 else false
+    in
+    let a_on_p1p2 =
+      if a <> p1 && a <> p2 then on_segment verts p1 p2 a else false
+    in
+    let b_on_p1p2 =
+      if b <> p1 && b <> p2 then on_segment verts p1 p2 b else false
+    in
+    p1_on_ab || p2_on_ab || a_on_p1p2 || b_on_p1p2
 
 let check_self_intersection (verts : float array) start len =
   let errors = ref [] in
@@ -133,7 +154,6 @@ let is_self_intersecting (verts : float array) indices =
 let is_hole_contained (verts : float array) hole_indices outer_indices =
   (* Check if at least one point of the hole is inside the outer ring. *)
   let px, py = (get_x verts hole_indices.(0), get_y verts hole_indices.(0)) in
-  let start_o = 0 in
   (* Dummy since we don't have start/len for indices *)
   (* Wait, point_in_ring also assumes contiguous... let's fix that too later if needed *)
   let inside = ref false in

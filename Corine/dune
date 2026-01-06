@@ -1,5 +1,13 @@
+(library
+ (name static_r_tree)
+ (modules static_r_tree)
+ (preprocess
+  (pps ppx_inline_test))
+ (inline_tests))
+
 (executables
  (names
+  hilbert
   corine
   draw_clc
   render_clc
@@ -11,8 +19,10 @@
   analyze_polygon
   debug_triangles
   triangulation_tests)
+ (modules
+  (:standard \ static_r_tree))
  (flags -w -34-69)
- (libraries sqlite3 str tsdl tgls.tgles3 zip yojson unix)
+ (libraries static_r_tree sqlite3 str tsdl tgls.tgles3 zip yojson unix)
  (ocamlopt_flags
   (-cclib -lGLESv2)))
 
