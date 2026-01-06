@@ -62,7 +62,7 @@ let fetch_overpass_data_once query =
       Printf.eprintf "curl was killed by signal\n%!";
       None
 
-let fetch_overpass_data ?(max_retries = 5) query =
+let fetch_overpass_data ?(max_retries = 10) query =
   let rec retry attempt =
     Printf.printf "POI Overpass API request (attempt %d/%d)...\n%!" attempt
       max_retries;
@@ -71,7 +71,7 @@ let fetch_overpass_data ?(max_retries = 5) query =
       when String.length response >= 1 && String.sub response 0 1 = "{" ->
         Some response
     | (Some _ | None) when attempt < max_retries ->
-        let delay = 2.0 *. (3.0 ** float (attempt - 1)) in
+        let delay = 2.0 *. (1.5 ** float (attempt - 1)) in
         Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
           delay;
         Unix.sleepf delay;

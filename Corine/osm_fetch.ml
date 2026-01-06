@@ -64,9 +64,7 @@ let fetch_overpass_data_once query =
      done
    with End_of_file -> ());
   match Unix.close_process_in ic with
-  | Unix.WEXITED 0 ->
-      prerr_endline (Buffer.contents buf);
-      Some (Buffer.contents buf)
+  | Unix.WEXITED 0 -> Some (Buffer.contents buf)
   | Unix.WEXITED code ->
       Printf.eprintf "curl failed with exit code %d\n%!" code;
       None
