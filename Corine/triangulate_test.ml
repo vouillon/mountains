@@ -103,6 +103,7 @@ let () =
     (if expected > 0. then !recomputed_actual /. expected else 0.);
   Printf.printf "Time: %.4f seconds\n" (end_time -. start_time);
 
-  if abs_float (!recomputed_actual -. expected) > 1e-7 *. expected then
-    print_endline "\nFAILURE: Area mismatch persisted."
+  if abs_float (!recomputed_actual -. expected) > 1e-7 *. expected then (
+    print_endline "\nFAILURE: Area mismatch persisted.";
+    exit 1)
   else print_endline "\nSUCCESS: Area matches expected (within tolerance)."

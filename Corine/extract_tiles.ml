@@ -725,6 +725,7 @@ let process_tile db_path output_dir tile_name =
   (* Process each water feature *)
   List.iter
     (fun (feature : Osm_fetch.water_feature) ->
+      let tile_name = Printf.sprintf "%s-%d" tile_name feature.id in
       let flat_arrays = Osm_fetch.feature_to_flat_arrays feature in
       List.iter
         (fun (clc_code, outer_flat, holes_flat) ->
