@@ -52,6 +52,9 @@ let generate_svg filename output_file =
   Printf.fprintf oc
     "  .tri { fill: none; stroke: green; stroke-width: %f; opacity: 0.5; }\n"
     (margin *. 0.05);
+  Printf.fprintf oc
+    "  .bridge { stroke: magenta; stroke-width: %f; stroke-dasharray: %f; }\n"
+    (margin *. 0.15) (margin *. 0.1);
   Printf.fprintf oc "</style>\n";
 
   (* Draw Outer *)
@@ -92,9 +95,13 @@ let generate_svg filename output_file =
   in
   let flat_verts = Array.concat (outer :: Array.to_list holes) in
 
+  (* Clear bridges from any previous run and triangulate *)
+  Polygon_triangulation.Triangulator.clear_bridges ();
   let tris =
     Polygon_triangulation.Triangulator.triangulate_multi flat_verts [| poly |]
   in
+
+  (* Draw triangles *)
   for i = 0 to (Array.length tris / 3) - 1 do
     let i1 = tris.(i * 3) in
     let i2 = tris.((i * 3) + 1) in
@@ -107,6 +114,20 @@ let generate_svg filename output_file =
       flat_verts.(i3 * 2)
       flat_verts.((i3 * 2) + 1)
   done;
+
+  (* Draw bridges *)
+  let bridges = Polygon_triangulation.Triangulator.get_bridges () in
+  Printf.printf "Found %d bridges\n%!" (List.length bridges);
+  List.iter
+    (fun (hole_idx, outer_idx) ->
+      let hx = flat_verts.(hole_idx * 2) in
+      let hy = flat_verts.((hole_idx * 2) + 1) in
+      let ox = flat_verts.(outer_idx * 2) in
+      let oy = flat_verts.((outer_idx * 2) + 1) in
+      Printf.fprintf oc
+        "<line class=\"bridge\" x1=\"%f\" y1=\"%f\" x2=\"%f\" y2=\"%f\" />\n" hx
+        hy ox oy)
+    bridges;
 
   Printf.fprintf oc "</svg>\n";
   close_out oc;
