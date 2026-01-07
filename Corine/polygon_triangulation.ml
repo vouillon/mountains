@@ -6,7 +6,7 @@ open Geometry_types
 (* Types removed - using Geometry_types *)
 
 module Geometry = struct
-  let epsilon = 1e-10
+  let epsilon = 1e-12
 
   let get_x (verts : float array) i = Array.unsafe_get verts (i * 2)
   [@@inline always]
@@ -63,8 +63,9 @@ module Geometry = struct
     let cp1 = cross_product verts ia ib ip in
     let cp2 = cross_product verts ib ic ip in
     let cp3 = cross_product verts ic ia ip in
-    (cp1 > epsilon && cp2 > epsilon && cp3 > epsilon)
-    || (cp1 < -.epsilon && cp2 < -.epsilon && cp3 < -.epsilon)
+    (* Inclusive of boundary to catch all possible intrusions *)
+    (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
+    || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
   [@@inline always]
 
   let points_equal (verts : float array) i1 i2 =
@@ -151,20 +152,20 @@ module PolygonList = struct
     next : int array;
     prev : int array;
     vert_idx : int array;
-    mutable count : int;
+    mutable next_node : int;
   }
 
   let create total_verts num_holes =
-    let capacity = total_verts + (num_holes * 2) + 2 in
+    let capacity = total_verts + (num_holes * 2) + 4 in
     {
       next = Array.make capacity 0;
       prev = Array.make capacity 0;
       vert_idx = Array.make capacity 0;
-      count = 0;
+      next_node = 0;
     }
 
   let init_ring t start_vert len is_ccw =
-    let start_node = t.count in
+    let start_node = t.next_node in
     for i = 0 to len - 1 do
       let node = start_node + i in
       let v_idx =
@@ -177,14 +178,14 @@ module PolygonList = struct
       t.prev.(node) <- prev_node;
       t.next.(node) <- next_node
     done;
-    t.count <- t.count + len;
+    t.next_node <- t.next_node + len;
     start_node
 
   let duplicate_node t ref_node =
-    let new_node = t.count in
-    t.vert_idx.(new_node) <- t.vert_idx.(ref_node);
-    t.count <- t.count + 1;
-    new_node
+    let node = t.next_node in
+    t.vert_idx.(node) <- t.vert_idx.(ref_node);
+    t.next_node <- t.next_node + 1;
+    node
 
   (* Helper to count active nodes in circular list *)
   let count_nodes t start_node =
@@ -335,23 +336,36 @@ module Triangulator = struct
   let clear_bridges () = collected_bridges := []
   let get_bridges () = !collected_bridges
 
+  (* Collects the loop state (vertex indices) when triangulation stalls before forcing *)
+  let stalled_loops : int list list ref = ref []
+  let clear_stalled_loops () = stalled_loops := []
+  let get_stalled_loops () = !stalled_loops
+
+  (* Expose normalized coordinates for debugging tools *)
+  let last_normalized_coords : float array ref = ref [||]
+  let get_last_normalized_coords () = !last_normalized_coords
+
   let on_segment (verts : float array) ia ib ip =
     let ax, ay = (get_x verts ia, get_y verts ia) in
     let bx, by = (get_x verts ib, get_y verts ib) in
     let px, py = (get_x verts ip, get_y verts ip) in
-    abs_float (cross_product verts ia ib ip) < epsilon
-    && px >= fmin ax bx -. epsilon
-    && px <= fmax ax bx +. epsilon
-    && py >= fmin ay by -. epsilon
-    && py <= fmax ay by +. epsilon
+    dist_sq_point_segment px py ax ay bx by < epsilon *. epsilon
 
   let segments_overlap verts p1 p2 a b =
-    if p1 = a || p1 = b || p2 = a || p2 = b then
-      (* Shared endpoint - only overlap if the OTHER endpoint of one segment lies on the other segment *)
-      if p1 <> a && p1 <> b && on_segment verts a b p1 then true
-      else if p2 <> a && p2 <> b && on_segment verts a b p2 then true
-      else if a <> p1 && a <> p2 && on_segment verts p1 p2 a then true
-      else if b <> p1 && b <> p2 && on_segment verts p1 p2 b then true
+    (* Use coordinate equality to handle duplicate vertices from bridge merging *)
+    let p1_eq_a = points_equal verts p1 a in
+    let p1_eq_b = points_equal verts p1 b in
+    let p2_eq_a = points_equal verts p2 a in
+    let p2_eq_b = points_equal verts p2 b in
+    if p1_eq_a || p1_eq_b || p2_eq_a || p2_eq_b then
+      (* Shared endpoint (by coordinates) - only overlap if the OTHER endpoint lies on the other segment *)
+      if (not p1_eq_a) && (not p1_eq_b) && on_segment verts a b p1 then true
+      else if (not p2_eq_a) && (not p2_eq_b) && on_segment verts a b p2 then
+        true
+      else if (not p1_eq_a) && (not p2_eq_a) && on_segment verts p1 p2 a then
+        true
+      else if (not p1_eq_b) && (not p2_eq_b) && on_segment verts p1 p2 b then
+        true
       else false
     else
       (* No shared endpoints - standard intersection or any endpoint on segment *)
@@ -459,148 +473,185 @@ module Triangulator = struct
     let next = poly_list.next in
     let prev = poly_list.prev in
 
-    let h_idx = vert_idx.(hole_start_node) in
-
-    let hx, hy = (get_x verts h_idx, get_y verts h_idx) in
-
-    (* Phase 1: Optimized geometric search *)
-    (* Find the edge in the outer polygon that intersects the ray to the right *)
-    let best_edge = ref None in
-    let min_dist = ref infinity in
-    let curr = ref outer_node in
-    let loop = ref true in
+    let m_idx = vert_idx.(hole_start_node) in
+    let mx, my = (get_x verts m_idx, get_y verts m_idx) in
 
     (* Helper to validate a candidate bridge *)
     let is_valid_bridge p_node p_idx =
-      is_visible verts h_idx p_idx outer_node poly_list
+      is_visible verts m_idx p_idx outer_node poly_list
       && not
-           (crosses_pending_holes verts h_idx p_idx poly_list processed_holes
+           (crosses_pending_holes verts m_idx p_idx poly_list processed_holes
               pending_start_idx)
     in
 
+    (* Step 2: Intersect ray M + t(1,0) with all edges of outer polygon *)
+    (* Find closest intersection I on the ray *)
+    let best_t = ref infinity in
+    let best_edge_p = ref (-1) in
+    let best_edge_n = ref (-1) in
+    let best_vi_p = ref (-1) in
+    let best_vi_n = ref (-1) in
+    let intersection_x = ref 0.0 in
+    let intersection_is_vertex = ref false in
+    let intersection_vertex_node = ref (-1) in
+
+    let curr = ref outer_node in
+    let loop = ref true in
     let loop_count = ref 0 in
     while !loop do
       incr loop_count;
       if !loop_count > 20000 then (
-        if !verbose then Printf.printf "Breaking infinite loop in Phase 1\n%!";
+        if !verbose then
+          Printf.printf "Breaking infinite loop in Eberly Phase 1\n%!";
         loop := false);
       let n = next.(!curr) in
       let vi_curr = vert_idx.(!curr) in
       let vi_next = vert_idx.(n) in
-      let cx, cy = (get_x verts vi_curr, get_y verts vi_curr) in
+      let vx, vy = (get_x verts vi_curr, get_y verts vi_curr) in
       let nx, ny = (get_x verts vi_next, get_y verts vi_next) in
 
-      (* Check if edge intersects ray from hole vertex to the right *)
-      if (cy <= hy && ny > hy) || (ny <= hy && cy > hy) then begin
-        let t = (hy -. cy) /. (ny -. cy) in
-        let x_int = cx +. (t *. (nx -. cx)) in
-        if x_int >= hx then
-          let dist = ((x_int -. hx) ** 2.0) +. ((hy -. hy) ** 2.0) in
-          if dist < !min_dist then (
-            min_dist := dist;
-            best_edge := Some (!curr, n, vi_curr, vi_next))
+      (* Edge must have V_i <= my < V_{i+1} or V_{i+1} <= my < V_i *)
+      (* (V_i is at or below ray, V_{i+1} is above ray, or vice versa) *)
+      if (vy <= my && ny > my) || (ny <= my && vy > my) then begin
+        (* Compute intersection x-coordinate *)
+        let t_edge = (my -. vy) /. (ny -. vy) in
+        let x_int = vx +. (t_edge *. (nx -. vx)) in
+        (* Only consider intersections to the right of M *)
+        if x_int >= mx then begin
+          let t = x_int -. mx in
+          (* distance along ray *)
+          if t < !best_t then begin
+            best_t := t;
+            best_edge_p := !curr;
+            best_edge_n := n;
+            best_vi_p := vi_curr;
+            best_vi_n := vi_next;
+            intersection_x := x_int;
+            (* Check if intersection is exactly at a vertex *)
+            if
+              abs_float (x_int -. vx) < epsilon
+              && abs_float (my -. vy) < epsilon
+            then begin
+              intersection_is_vertex := true;
+              intersection_vertex_node := !curr
+            end
+            else if
+              abs_float (x_int -. nx) < epsilon
+              && abs_float (my -. ny) < epsilon
+            then begin
+              intersection_is_vertex := true;
+              intersection_vertex_node := n
+            end
+            else intersection_is_vertex := false
+          end
+        end
       end;
       if n = outer_node then loop := false else curr := n
     done;
 
-    match !best_edge with
-    | Some (edge_p, edge_n, p_idx, n_idx) ->
-        (* Found the edge directly to the right.
-           The bridge point must be one of the endpoints OR a reflex vertex inside the triangle M-EdgeP-EdgeN?
-           Geometric P is the closest intersection.
-           Candidate connection points:
-           1. The vertices of the edge (EdgeP or EdgeN) - usually EdgeP if CCW?
-           2. Any reflex vertex contained in the triangle M-I-P formed by geometric info.
-        *)
-        let p_x = ref (get_x verts p_idx) in
-        let p_y = ref (get_y verts p_idx) in
-
-        let p_node_opt = ref (-1) in
-        let p_idx_opt = ref (-1) in
-
-        (* Evaluate edge endpoints as initial candidates *)
-        let d1 = dist_sq verts h_idx p_idx in
-        let d2 = dist_sq verts h_idx n_idx in
-        if d1 < d2 then (
-          p_node_opt := edge_p;
-          p_idx_opt := p_idx;
-          p_x := get_x verts p_idx;
-          p_y := get_y verts p_idx)
-        else (
-          p_node_opt := edge_n;
-          p_idx_opt := n_idx;
-          p_x := get_x verts n_idx;
-          p_y := get_y verts n_idx);
-
-        (* Check if there are reflex vertices inside the triangle formed by M and the edge endpoints.
-           Actually we want the closest visible point.
-           Standard algorithm checks candidates inside the triangle M - P(projected) - P_closest.
-        *)
-        let best_P = ref !p_node_opt in
-
-        (* Search for reflex vertices in the M-I-P triangle *)
-        (* M = (hx, hy), I = intersection, P = current best *)
-        (* Actually simpler: check all vertices. If a vertex is inside the triangle M-I-P, 
-           and it is reflexive, it might be a better candidate. *)
-
-        (* ... Existing optimization logic ... *)
-
-        (* Verify the optimized candidate *)
-        let valid_cone_opt =
-          let m_prev = prev.(hole_start_node) in
-          let m_next = next.(hole_start_node) in
-          locally_inside verts h_idx vert_idx.(m_prev) vert_idx.(m_next)
-            !p_idx_opt false
+    if !best_t = infinity then None (* No intersection found *)
+    else begin
+      (* Step 3: If I is a vertex, M and I are mutually visible *)
+      if !intersection_is_vertex then begin
+        if !verbose then
+          Printf.printf "  Eberly: I is vertex %d, using directly\n%!"
+            vert_idx.(!intersection_vertex_node);
+        if
+          is_valid_bridge !intersection_vertex_node
+            vert_idx.(!intersection_vertex_node)
+        then Some !intersection_vertex_node
+        else None
+      end
+      else begin
+        (* Step 4: I is interior to edge. Select P = endpoint with max x-value *)
+        let px = get_x verts !best_vi_p in
+        let nx = get_x verts !best_vi_n in
+        let p_node, p_idx =
+          if px >= nx then (!best_edge_p, !best_vi_p)
+          else (!best_edge_n, !best_vi_n)
         in
+        let p_x = get_x verts p_idx in
+        let p_y = get_y verts p_idx in
 
-        if valid_cone_opt && is_valid_bridge !best_P !p_idx_opt then (
-          if !verbose then
-            Printf.printf "  Optimized bridge found: %d -> %d\n%!" h_idx
-              !p_idx_opt;
-          Some !best_P)
+        (* Step 5-6: Search reflex vertices in triangle M-I-P *)
+        (* If all reflex vertices are outside the triangle, M and P are mutually visible *)
+        (* Otherwise, find reflex R that minimizes angle to ray M-I *)
+        let best_reflex_node = ref (-1) in
+        let min_angle_tan = ref infinity in
+        (* we'll use tan(angle) = dy/dx for comparison *)
+
+        let search_curr = ref outer_node in
+        let search_loop = ref true in
+        let search_count = ref 0 in
+        while !search_loop do
+          incr search_count;
+          if !search_count > 20000 then (
+            if !verbose then
+              Printf.printf "Breaking infinite loop in Eberly reflex search\n%!";
+            search_loop := false);
+          let search_node = !search_curr in
+          let v_idx = vert_idx.(search_node) in
+
+          (* Skip P itself *)
+          if search_node <> p_node then begin
+            let prv = prev.(search_node) in
+            let nxt = next.(search_node) in
+            let vi_prv = vert_idx.(prv) in
+            let vi_nxt = vert_idx.(nxt) in
+
+            (* Check if this vertex is reflex (interior angle > 180 degrees) *)
+            (* For CCW polygon, reflex if cross product < 0 *)
+            let cp = cross_product verts vi_prv v_idx vi_nxt in
+            let is_reflex = cp < -.epsilon in
+
+            if is_reflex then begin
+              let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
+
+              (* Check if R is inside triangle M-I-P *)
+              (* M = (mx, my), I = (intersection_x, my), P = (p_x, p_y) *)
+              let in_triangle =
+                point_in_triangle_coords mx my !intersection_x my p_x p_y rx ry
+              in
+
+              if in_triangle then begin
+                (* Compute angle between ray M-I (horizontal) and M-R *)
+                (* tan(angle) = |ry - my| / |rx - mx| *)
+                let dx = rx -. mx in
+                let dy = abs_float (ry -. my) in
+                if dx > epsilon then begin
+                  let angle_tan = dy /. dx in
+                  if angle_tan < !min_angle_tan then begin
+                    min_angle_tan := angle_tan;
+                    best_reflex_node := search_node
+                  end
+                end
+              end
+            end
+          end;
+
+          let nxt = next.(!search_curr) in
+          if nxt = outer_node then search_loop := false else search_curr := nxt
+        done;
+
+        (* Select final bridge point *)
+        let result_node =
+          if !best_reflex_node <> -1 then !best_reflex_node else p_node
+        in
+        let result_idx = vert_idx.(result_node) in
+
+        if !verbose then
+          Printf.printf "  Eberly: selected bridge point %d (reflex=%b)\n%!"
+            result_idx (!best_reflex_node <> -1);
+
+        if is_valid_bridge result_node result_idx then Some result_node
         else begin
-          if !verbose then
-            Printf.printf "  Optimized bridge failed, using fallback...\n%!";
-
-          (* Fallback: Full search *)
-          let best_cand = ref (-1) in
-          let min_d = ref infinity in
-          let curr = ref outer_node in
-          let loop = ref true in
-          let loop_count = ref 0 in
-          while !loop do
-            incr loop_count;
-            if !loop_count > 50000 then (
-              if !verbose then
-                Printf.printf "Breaking infinite loop in Fallback\n%!";
-              loop := false);
-            let v = vert_idx.(!curr) in
-            let d = dist_sq verts h_idx v in
-            let nxt = next.(!curr) in
-            let prv = prev.(!curr) in
-            let vi_n = vert_idx.(nxt) in
-            let vi_p = vert_idx.(prv) in
-
-            if
-              locally_inside verts h_idx
-                vert_idx.(prev.(hole_start_node))
-                vert_idx.(next.(hole_start_node))
-                v false
-              && locally_inside verts v vi_p vi_n h_idx true
-              && is_visible verts h_idx v outer_node poly_list
-              && not
-                   (crosses_pending_holes verts h_idx v poly_list
-                      processed_holes pending_start_idx)
-            then
-              if d < !min_d then (
-                min_d := d;
-                best_cand := !curr);
-
-            if nxt = outer_node then loop := false else curr := nxt
-          done;
-          if !best_cand <> -1 then Some !best_cand else None
+          (* Fallback: try P if reflex failed *)
+          if !best_reflex_node <> -1 && is_valid_bridge p_node p_idx then
+            Some p_node
+          else None
         end
-    | None -> None
+      end
+    end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
       poly_list processed_holes pending_start_idx =
@@ -614,6 +665,19 @@ module Triangulator = struct
         let h_idx = poly_list.vert_idx.(hole_start_node) in
         let outer_idx = poly_list.vert_idx.(target) in
         collected_bridges := (h_idx, outer_idx) :: !collected_bridges;
+        if !verbose then
+          Printf.printf
+            "  DEBUG: Bridge created between Hole node %d (vert %d) and Outer \
+             node %d (vert %d)\n\
+             %!"
+            hole_start_node h_idx target outer_idx;
+        Printf.printf
+          "  DEBUG: Bridge created between Hole vert %d and Outer vert %d\n%!"
+          h_idx outer_idx;
+        if !verbose then
+          Printf.printf
+            "  Hole merged with bridge: Hole vert %d -> Outer vert %d\n%!" h_idx
+            outer_idx;
 
         let p_prime = PolygonList.duplicate_node poly_list target in
         let m_prime = PolygonList.duplicate_node poly_list hole_start_node in
@@ -636,7 +700,33 @@ module Triangulator = struct
     let next = poly_list.next in
     let prev = poly_list.prev in
     let vert_idx = poly_list.vert_idx in
-    let active = Array.make poly_list.count true in
+    let active = Array.make poly_list.next_node true in
+
+    let out_idx = ref out_offset in
+    let count = ref total_active_nodes in
+    let curr = ref start_node in
+    let iterations = ref 0 in
+    let max_iter = total_active_nodes * total_active_nodes in
+    let since_last_progress = ref 0 in
+
+    if !verbose then (
+      let c = ref !curr in
+      let ring_indices = ref [] in
+      for _ = 1 to !count do
+        ring_indices := vert_idx.(!c) :: !ring_indices;
+        c := next.(!c)
+      done;
+      let ring = Array.of_list (List.rev !ring_indices) in
+      let self_int_errors =
+        Polygon_validation.check_self_intersection_indices verts ring
+      in
+      if self_int_errors <> [] then (
+        Printf.printf "  CRITICAL: DLL started with self-intersection!\n";
+        List.iter
+          (fun e ->
+            Printf.printf "    -> %s\n" (Polygon_validation.string_of_error e))
+          self_int_errors;
+        Printf.printf "%!"));
 
     let is_ear i =
       let node_prev = prev.(i) in
@@ -645,34 +735,28 @@ module Triangulator = struct
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
 
-      if cross_product verts vi_prev vi_curr vi_next <= 0.0 then false
+      if cross_product verts vi_prev vi_curr vi_next < epsilon then false
       else
         try
+          (* Check all active nodes for intrusions *)
           let check_node = ref next.(node_next) in
           while !check_node <> node_prev do
             let r_node = !check_node in
             (if active.(r_node) then
                let vi_r = vert_idx.(r_node) in
-               if
-                 not
-                   (points_equal verts vi_r vi_prev
-                   || points_equal verts vi_r vi_curr
-                   || points_equal verts vi_r vi_next)
-               then
-                 if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
-                   raise Exit);
+               if r_node = node_prev || r_node = i || r_node = node_next then ()
+               else if
+                 points_equal verts vi_r vi_prev
+                 || points_equal verts vi_r vi_curr
+                 || points_equal verts vi_r vi_next
+               then ()
+               else if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
+                 raise Exit);
             check_node := next.(!check_node)
           done;
           true
         with Exit -> false
     in
-
-    let out_idx = ref out_offset in
-    let count = ref total_active_nodes in
-    let curr = ref start_node in
-    let iterations = ref 0 in
-    let max_iter = total_active_nodes * total_active_nodes in
-    let since_last_progress = ref 0 in
 
     while !count > 2 && !iterations < max_iter do
       incr iterations;
@@ -706,7 +790,29 @@ module Triangulator = struct
           prev.(n) <- p;
           decr count;
           since_last_progress := 0;
-          curr := p)
+          curr := p;
+          if !verbose then (
+            let c = ref !curr in
+            let ring_indices = ref [] in
+            for _ = 1 to !count do
+              ring_indices := vert_idx.(!c) :: !ring_indices;
+              c := next.(!c)
+            done;
+            let ring = Array.of_list (List.rev !ring_indices) in
+            let self_int_errors =
+              Polygon_validation.check_self_intersection_indices verts ring
+            in
+            if self_int_errors <> [] then (
+              Printf.printf
+                "  CRITICAL: Clip introduced self-intersection! (count %d, \
+                 tri: %d-%d-%d)\n"
+                !count vi_p vi_i vi_n;
+              List.iter
+                (fun e ->
+                  Printf.printf "    -> %s\n"
+                    (Polygon_validation.string_of_error e))
+                self_int_errors;
+              Printf.printf "%!")))
         else if abs_float cp < epsilon then (
           (* Collinear - remove it *)
           active.(i) <- false;
@@ -714,14 +820,59 @@ module Triangulator = struct
           prev.(n) <- p;
           decr count;
           since_last_progress := 0;
-          curr := p)
+          curr := p;
+          if !verbose then (
+            let c = ref !curr in
+            let ring_indices = ref [] in
+            for _ = 1 to !count do
+              ring_indices := vert_idx.(!c) :: !ring_indices;
+              c := next.(!c)
+            done;
+            let ring = Array.of_list (List.rev !ring_indices) in
+            let self_int_errors =
+              Polygon_validation.check_self_intersection_indices verts ring
+            in
+            if self_int_errors <> [] then (
+              Printf.printf
+                "  CRITICAL: Collinear removal introduced self-intersection! \
+                 (count %d)\n"
+                !count;
+              List.iter
+                (fun e ->
+                  Printf.printf "    -> %s\n"
+                    (Polygon_validation.string_of_error e))
+                self_int_errors;
+              Printf.printf "%!")))
         else
           (* Concave or convex-but-not-ear - skip *)
           curr := n
       else curr := next.(i);
 
       if !since_last_progress > !count && !count > 2 then (
-        (* Progress stalled - find the best convex node to force *)
+        (* Progress stalled - capture vertex indices for visualization *)
+        let c = ref !curr in
+        let stalled_idx = ref [] in
+        for _ = 1 to !count do
+          stalled_idx := vert_idx.(!c) :: !stalled_idx;
+          c := next.(!c)
+        done;
+        stalled_loops := List.rev !stalled_idx :: !stalled_loops;
+
+        (if !verbose then
+           let ring = Array.of_list (List.rev !stalled_idx) in
+           let self_int_errors =
+             Polygon_validation.check_self_intersection_indices verts ring
+           in
+           if self_int_errors <> [] then (
+             Printf.printf "  STALL DIAGNOSTIC: Self-intersection detected!\n";
+             List.iter
+               (fun e ->
+                 Printf.printf "    -> %s\n"
+                   (Polygon_validation.string_of_error e))
+               self_int_errors;
+             Printf.printf "%!"));
+
+        (* Find the best convex node to force *)
         let best_node = ref !curr in
         let best_cp = ref neg_infinity in
         let found_convex = ref false in
@@ -751,8 +902,40 @@ module Triangulator = struct
              %!"
             !count i !iterations !found_convex !best_cp;
 
+          if !iterations > 1000 then begin
+            (* Save stalled state for analysis *)
+            let c = ref i in
+            let nodes = ref [] in
+            for _ = 1 to !count do
+              nodes := !c :: !nodes;
+              c := next.(!c)
+            done;
+            let nodes = List.rev !nodes in
+            let coords =
+              List.map
+                (fun n -> (get_x verts vert_idx.(n), get_y verts vert_idx.(n)))
+                nodes
+            in
+            Printf.printf "STALLED POLYGON (%d nodes): " !count;
+            List.iter (fun (x, y) -> Printf.printf "(%g,%g) " x y) coords;
+            Printf.printf "\n%!"
+          end;
+
           if !count < 200 then (
-            Printf.printf "EAR ANALYSIS (%d nodes):\n" !count;
+            let sum_area = ref 0.0 in
+            let c_area = ref i in
+            for _ = 1 to !count do
+              let v1 = vert_idx.(!c_area) in
+              let v2 = vert_idx.(next.(!c_area)) in
+              sum_area :=
+                !sum_area
+                +. ((get_x verts v1 *. get_y verts v2)
+                   -. (get_x verts v2 *. get_y verts v1));
+              c_area := next.(!c_area)
+            done;
+            let loop_area = !sum_area *. 0.5 in
+            Printf.printf "EAR ANALYSIS (%d nodes, signed area %.6g):\n" !count
+              loop_area;
             let c_diag = ref i in
             for _ = 1 to !count do
               let curr_node = !c_diag in
@@ -780,8 +963,14 @@ module Triangulator = struct
                      || points_equal verts v vi_n)
                   then
                     if point_in_triangle verts v vi_p vi_i vi_n then (
+                      let vx, vy = (get_x verts v, get_y verts v) in
+                      let px, py = (get_x verts vi_p, get_y verts vi_p) in
+                      let ix, iy = (get_x verts vi_i, get_y verts vi_i) in
+                      let nx, ny = (get_x verts vi_n, get_y verts vi_n) in
                       Printf.printf
-                        "    -> FAILED: Contains node %d (vert %d)\n" !check v;
+                        "    -> FAILED: Contains node %d (vert %d) (%.6f, \
+                         %.6f) in tri [(%.6f,%.6f), (%.6f,%.6f), (%.6f,%.6f)]\n"
+                        !check v vx vy px py ix iy nx ny;
                       found := true);
                   check := next.(!check)
                 done;
@@ -802,8 +991,8 @@ module Triangulator = struct
         (* Only emit triangle during FORCING if:
            1. Positive cross product (valid orientation)
            2. Triangle edges aren't excessively long (prevents massive triangles) *)
-        let max_reasonable_edge = 0.02 in
-        (* ~2km at 45° latitude *)
+        let max_reasonable_edge = 5.0 in
+        (* In normalized space, max distance is ~2.82. 5.0 is safe. *)
         let edge1 = dist_sq verts vi_p vi_i in
         let edge2 = dist_sq verts vi_i vi_n in
         let edge3 = dist_sq verts vi_n vi_p in
@@ -892,6 +1081,11 @@ module Triangulator = struct
         PolygonList.init_ring poly_list polygon.outer.start polygon.outer.len
           outer_ccw
       in
+      if !verbose then
+        Printf.printf
+          "  Triangulate: outer_len %d, total_verts %d, next_node after outer %d\n\
+           %!"
+          outer_len total_verts poly_list.next_node;
 
       let curr_outer_node =
         ref (PolygonList.filter_points verts poly_list outer_start_node)
@@ -921,6 +1115,14 @@ module Triangulator = struct
                 max_node := !curr);
               curr := poly_list.next.(!curr)
             done;
+            if !verbose then
+              Printf.printf
+                "  Hole %d: start_node %d (vert %d), filtered_node %d (vert %d)\n\
+                 %!"
+                i hole_start
+                poly_list.vert_idx.(hole_start)
+                filtered_start
+                poly_list.vert_idx.(filtered_start);
             processed_holes.(i) <- (!max_node, !max_x))
           else processed_holes.(i) <- (-1, neg_infinity)
         done;
@@ -1097,6 +1299,7 @@ module Triangulator = struct
 
     (* Normalize vertices for robustness *)
     let norm_verts, scale_factor = Geometry.normalize_vertices verts in
+    last_normalized_coords := norm_verts;
     if !verbose then
       Printf.printf "Normalized vertices with scale factor: %f\n%!" scale_factor;
 
@@ -1114,15 +1317,17 @@ module Triangulator = struct
         let actual = ref 0.0 in
         for i = 0 to poly_tris - 1 do
           let v_idx = start_offset + (i * 3) in
-          actual :=
-            !actual
-            +. triangle_area verts out_buffer.(v_idx)
-                 out_buffer.(v_idx + 1)
-                 out_buffer.(v_idx + 2)
+          let i1, i2, i3 =
+            (out_buffer.(v_idx), out_buffer.(v_idx + 1), out_buffer.(v_idx + 2))
+          in
+          actual := !actual +. triangle_area verts i1 i2 i3
         done;
-
         if abs_float (expected -. !actual) >= 1e-11 then begin
           let ratio = !actual /. expected in
+
+          if !verbose then
+            Printf.printf "  Captured Actual Area: %g (ratio: %.4f)\n" !actual
+              ratio;
 
           (* Quality Metrics *)
           let min_angle = ref 180.0 in

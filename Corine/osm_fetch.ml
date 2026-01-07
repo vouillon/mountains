@@ -19,7 +19,7 @@
 type point = { x : float; y : float }
 type ring = point list
 type polygon = ring list (* outer ring + holes *)
-type water_feature = { clc_code : int; polygons : polygon list }
+type water_feature = { id : int; clc_code : int; polygons : polygon list }
 
 (* --- CLC Code Mapping --- *)
 
@@ -419,7 +419,7 @@ let parse_overpass_elements json_str =
                   outer :: holes)
                 outer_point_rings
             in
-            { clc_code; polygons } :: acc)
+            { id = rel.rel_id; clc_code; polygons } :: acc)
       relations []
   in
 
@@ -447,7 +447,7 @@ let parse_overpass_elements json_str =
             let clc_code = water_tag_to_clc_code water_tag in
             let points = nodes_to_points w.node_ids in
             if List.length points >= 3 then
-              { clc_code; polygons = [ [ points ] ] } :: acc
+              { id = wid; clc_code; polygons = [ [ points ] ] } :: acc
             else acc)
       ways []
   in

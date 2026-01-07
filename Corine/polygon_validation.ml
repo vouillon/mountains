@@ -10,7 +10,7 @@ type validation_error =
   | HoleNotContained of int (* hole_index *)
   | HolesIntersect of int * int
 
-let epsilon = 1e-9
+let epsilon = 1e-12
 let get_x (verts : float array) i = verts.(i * 2)
 let get_y (verts : float array) i = verts.((i * 2) + 1)
 
@@ -18,6 +18,11 @@ let dist_sq x1 y1 x2 y2 =
   let dx = x1 -. x2 in
   let dy = y1 -. y2 in
   (dx *. dx) +. (dy *. dy)
+
+let points_equal verts i1 i2 =
+  let x1, y1 = (get_x verts i1, get_y verts i1) in
+  let x2, y2 = (get_x verts i2, get_y verts i2) in
+  dist_sq x1 y1 x2 y2 < epsilon *. epsilon
 
 (* --- Cheap Checks O(n) --- *)
 
@@ -83,16 +88,24 @@ let segments_intersect verts p1 p2 a b =
   else
     (* Special cases: endpoint lies on other segment (excluding shared endpoints) *)
     let p1_on_ab =
-      if p1 <> a && p1 <> b then on_segment verts a b p1 else false
+      if not (points_equal verts p1 a || points_equal verts p1 b) then
+        on_segment verts a b p1
+      else false
     in
     let p2_on_ab =
-      if p2 <> a && p2 <> b then on_segment verts a b p2 else false
+      if not (points_equal verts p2 a || points_equal verts p2 b) then
+        on_segment verts a b p2
+      else false
     in
     let a_on_p1p2 =
-      if a <> p1 && a <> p2 then on_segment verts p1 p2 a else false
+      if not (points_equal verts a p1 || points_equal verts a p2) then
+        on_segment verts p1 p2 a
+      else false
     in
     let b_on_p1p2 =
-      if b <> p1 && b <> p2 then on_segment verts p1 p2 b else false
+      if not (points_equal verts b p1 || points_equal verts b p2) then
+        on_segment verts p1 p2 b
+      else false
     in
     p1_on_ab || p2_on_ab || a_on_p1p2 || b_on_p1p2
 
