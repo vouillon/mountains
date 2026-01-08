@@ -1048,6 +1048,11 @@ module Triangulator = struct
             if active.(r_node) then (
               let vi_r = vert_idx.(r_node) in
               if r_node = node_prev || r_node = i || r_node = node_next then ()
+              else if
+                points_equal verts vi_r vi_prev
+                || points_equal verts vi_r vi_curr
+                || points_equal verts vi_r vi_next
+              then ()
               else
                 (* Check if reflex vertex intrudes into the ear triangle *)
                 let vi_rp = vert_idx.(prev.(r_node)) in
