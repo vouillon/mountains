@@ -595,9 +595,6 @@ module Triangulator = struct
       Printf.printf
         "  Merging touching hole: hole vert %d touches outer vert %d\n%!" h_idx
         o_idx;
-    Printf.printf
-      "  DEBUG: Touching merge: Hole vert %d touches Outer vert %d\n%!" h_idx
-      o_idx;
     (* The hole traversal order is: hole_touch -> ... -> hole_prev -> hole_touch
        We want to insert the hole between outer_touch and outer_next.
        After merge: outer_touch -> hole_next -> ... -> hole_prev -> outer_next *)
@@ -644,13 +641,7 @@ module Triangulator = struct
     let intersection_vertex_node = ref (-1) in
     let curr = ref outer_node in
     let loop = ref true in
-    let loop_count = ref 0 in
     while !loop do
-      incr loop_count;
-      if !loop_count > 20000 then (
-        if !verbose then
-          Printf.printf "Breaking infinite loop in Eberly Phase 1\n%!";
-        loop := false);
       let n = next.(!curr) in
       let vi_curr = vert_idx.(!curr) in
       let vi_next = vert_idx.(n) in
@@ -664,21 +655,15 @@ module Triangulator = struct
       let horizontal =
         abs_float dy < epsilon && abs_float (vy -. my) < epsilon
       in
+      (* Edge straddles if it crosses the ray Y-level in either direction *)
+      (* Need strict inequality on one side to avoid double-counting at vertices *)
       let straddles = vy <= my && ny > my in
 
       if straddles || horizontal then begin
         (* Calculate intersection *)
         let x_int_opt =
           if horizontal then
-            (* Horizontal edge collinear with ray *)
-            (* Ray starts at mx, goes right (x+) *)
-            (* Edge covers [min(vx, nx), max(vx, nx)] *)
-            let min_x_edge = fmin vx nx in
-            let max_x_edge = fmax vx nx in
-            (* Overlap start *)
-            let overlap_start = fmax mx min_x_edge in
-            if overlap_start <= max_x_edge +. epsilon then Some overlap_start
-            else None
+            if mx <= nx || mx <= vx then Some (fmax mx vx) else None
           else
             (* Standard intersection *)
             let t_edge = (my -. vy) /. dy in
@@ -746,12 +731,13 @@ module Triangulator = struct
                     ((best_nx -. best_px) ** 2.0)
                     +. ((best_ny -. best_py) ** 2.0)
                   in
-                  Printf.eprintf
-                    "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
-                     Best %d (len %g)\n\
-                     %!"
-                    !intersection_x my mx my node len !intersection_vertex_node
-                    best_len;
+                  if !verbose then
+                    Printf.eprintf
+                      "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
+                       Best %d (len %g)\n\
+                       %!"
+                      !intersection_x my mx my node len
+                      !intersection_vertex_node best_len;
 
                   (* User hint: Connect to the node added with previous bridge (the bridge node).
                       The bridge edge is shorter than the original boundary edge.
@@ -943,10 +929,6 @@ module Triangulator = struct
                  Outer node %d (vert %d)\n\
                  %!"
                 hole_start_node h_idx target outer_idx;
-            Printf.printf
-              "  DEBUG: Bridge created between Hole vert %d and Outer vert %d\n\
-               %!"
-              h_idx outer_idx;
             if !verbose then
               Printf.printf
                 "  Hole merged with bridge: Hole vert %d -> Outer vert %d\n%!"
