@@ -758,9 +758,11 @@ module Triangulator = struct
     else begin
       (* Step 4: I is an interior point. Select P = max X endpoint. *)
       let p_node =
-        let vx = get_x verts !best_vi_p in
-        let nx = get_x verts !best_vi_n in
-        if vx >= nx then !best_edge_p else !best_edge_n
+        let vx, nx = (get_x verts !best_vi_p, get_x verts !best_vi_n) in
+        (* Robust Vertical Edge Handling: Ambiguous Max X -> Force Start Node *)
+        if abs_float (vx -. nx) < epsilon then !best_edge_p
+        else if vx >= nx then !best_edge_p
+        else !best_edge_n
       in
       let p_idx = vert_idx.(p_node) in
       let p_x = get_x verts p_idx in
