@@ -479,18 +479,47 @@ module Triangulator = struct
         (* Skip edges incident to the node we are connecting to *)
         (* Note: we DO NOT skip other nodes at the same vertex, which is correct *)
         if !curr = p_node || n = p_node then ()
-        else if
-          Geometry.segments_overlap verts vi_m vi_p vert_idx.(!curr)
-            vert_idx.(n)
-        then (
-          if !verbose then
-            Printf.printf
-              "  Visibility: bridge %d->%d blocked by edge %d-%d (nodes %d-%d)\n\
-               %!"
-              m_node p_node vert_idx.(!curr) vert_idx.(n) !curr n;
-          raise Exit);
+        else
+          let vi_a = vert_idx.(!curr) in
+          let vi_b = vert_idx.(n) in
+          (* Nuanced check: Block if Strict crossing OR vertex obstruction *)
+          (* ALLOW overlapping if P is on the edge (grazing/collinear) *)
+          let strict_cross =
+            Geometry.segments_cross verts vi_m vi_p vi_a vi_b
+          in
+          let vertex_on_ray =
+            (if vi_a <> vi_m && vi_a <> vi_p then
+               Geometry.dist_sq_point_segment
+                 (Geometry.get_x verts vi_a)
+                 (Geometry.get_y verts vi_a)
+                 (Geometry.get_x verts vi_m)
+                 (Geometry.get_y verts vi_m)
+                 (Geometry.get_x verts vi_p)
+                 (Geometry.get_y verts vi_p)
+               < Geometry.epsilon
+             else false)
+            ||
+            if vi_b <> vi_m && vi_b <> vi_p then
+              Geometry.dist_sq_point_segment
+                (Geometry.get_x verts vi_b)
+                (Geometry.get_y verts vi_b)
+                (Geometry.get_x verts vi_m)
+                (Geometry.get_y verts vi_m)
+                (Geometry.get_x verts vi_p)
+                (Geometry.get_y verts vi_p)
+              < Geometry.epsilon
+            else false
+          in
 
-        if n = poly_start_node then loop := false else curr := n
+          if strict_cross || vertex_on_ray then (
+            if !verbose then
+              Printf.printf
+                "  Visibility: bridge %d->%d blocked by edge %d-%d (nodes %d-%d)\n\
+                 %!"
+                m_node p_node vert_idx.(!curr) vert_idx.(n) !curr n;
+            raise Exit);
+
+          if n = poly_start_node then loop := false else curr := n
       done;
       true
     with Exit -> false
@@ -517,7 +546,7 @@ module Triangulator = struct
     let result = ref false in
     let i = ref start_idx in
     while !i < num_holes && not !result do
-      let hole_node, _ = processed_holes.(!i) in
+      let hole_node, _, _ = processed_holes.(!i) in
       if hole_node <> -1 then
         if segment_crosses_ring verts p1_idx p2_idx hole_node poly_list then
           result := true;
@@ -1163,7 +1192,7 @@ module Triangulator = struct
       in
 
       if num_holes > 0 then begin
-        let processed_holes = Array.make num_holes (-1, 0.0) in
+        let processed_holes = Array.make num_holes (-1, 0.0, 0.0) in
         for i = 0 to num_holes - 1 do
           let h = polygon.holes.(i) in
           if h.len > 0 then (
@@ -1175,33 +1204,45 @@ module Triangulator = struct
               PolygonList.filter_points verts poly_list hole_start
             in
             let max_x = ref (get_x verts poly_list.vert_idx.(filtered_start)) in
+            let max_y = ref (get_y verts poly_list.vert_idx.(filtered_start)) in
             let max_node = ref filtered_start in
             let curr = ref poly_list.next.(filtered_start) in
 
             (* Loop until we hit start again *)
             while !curr <> filtered_start do
               let vx = get_x verts poly_list.vert_idx.(!curr) in
-              if vx > !max_x then (
+              let vy = get_y verts poly_list.vert_idx.(!curr) in
+              (* Find rightmost, then topmost *)
+              if
+                vx > !max_x
+                || (abs_float (vx -. !max_x) < epsilon && vy > !max_y)
+              then (
                 max_x := vx;
+                max_y := vy;
                 max_node := !curr);
               curr := poly_list.next.(!curr)
             done;
             if !verbose then
-              Printf.printf "  Hole %d: bridge_node %d (vert %d), max_x %g\n%!"
-                i !max_node
+              Printf.printf
+                "  Hole %d: bridge_node %d (vert %d), max_x %g, max_y %g\n%!" i
+                !max_node
                 poly_list.vert_idx.(!max_node)
-                !max_x;
-            processed_holes.(i) <- (!max_node, !max_x))
-          else processed_holes.(i) <- (-1, neg_infinity)
+                !max_x !max_y;
+            processed_holes.(i) <- (!max_node, !max_x, !max_y))
+          else processed_holes.(i) <- (-1, neg_infinity, neg_infinity)
         done;
 
-        (* Sort holes by max X desc *)
-        Array.sort (fun (_, x1) (_, x2) -> compare x2 x1) processed_holes;
+        (* Sort holes by max X desc, then max Y desc (Step 1 of Eberly) *)
+        Array.sort
+          (fun (_, x1, y1) (_, x2, y2) ->
+            let cx = compare x2 x1 in
+            if cx <> 0 then cx else compare y2 y1)
+          processed_holes;
 
         if !verbose then
           Printf.printf "Merging %d holes...\n%!" (Array.length processed_holes);
         Array.iteri
-          (fun i (bridge_node, _) ->
+          (fun i (bridge_node, _, _) ->
             if bridge_node <> -1 then
               match
                 merge_hole_into_outer verts bridge_node !curr_outer_node
