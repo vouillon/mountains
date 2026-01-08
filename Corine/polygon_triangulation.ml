@@ -552,6 +552,67 @@ module Triangulator = struct
     done;
     !result
 
+  (* Find if any vertex in the hole touches (has same coordinates as) any vertex
+     in the current outer ring. If found, returns Some (hole_node, outer_node). *)
+  let find_touching_point (verts : float array) hole_start_node outer_node
+      poly_list =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let next = poly_list.next in
+    (* Iterate through all hole vertices *)
+    let hole_curr = ref hole_start_node in
+    let hole_loop = ref true in
+    let result = ref None in
+    while !hole_loop && !result = None do
+      let h_vi = vert_idx.(!hole_curr) in
+      let hx = get_x verts h_vi in
+      let hy = get_y verts h_vi in
+      (* Check against all outer ring vertices *)
+      let outer_curr = ref outer_node in
+      let outer_loop = ref true in
+      while !outer_loop && !result = None do
+        let o_vi = vert_idx.(!outer_curr) in
+        let ox = get_x verts o_vi in
+        let oy = get_y verts o_vi in
+        if abs_float (hx -. ox) < epsilon && abs_float (hy -. oy) < epsilon then
+          result := Some (!hole_curr, !outer_curr);
+        outer_curr := next.(!outer_curr);
+        if !outer_curr = outer_node then outer_loop := false
+      done;
+      hole_curr := next.(!hole_curr);
+      if !hole_curr = hole_start_node then hole_loop := false
+    done;
+    !result
+
+  (* Merge a touching hole directly at the shared vertex without creating bridges.
+     The hole is spliced into the outer ring at the touching point. *)
+  let merge_touching_hole (verts : float array) hole_touch_node outer_touch_node
+      poly_list =
+    let open PolygonList in
+    let h_idx = poly_list.vert_idx.(hole_touch_node) in
+    let o_idx = poly_list.vert_idx.(outer_touch_node) in
+    if !verbose then
+      Printf.printf
+        "  Merging touching hole: hole vert %d touches outer vert %d\n%!" h_idx
+        o_idx;
+    Printf.printf
+      "  DEBUG: Touching merge: Hole vert %d touches Outer vert %d\n%!" h_idx
+      o_idx;
+    (* The hole traversal order is: hole_touch -> ... -> hole_prev -> hole_touch
+       We want to insert the hole between outer_touch and outer_next.
+       After merge: outer_touch -> hole_next -> ... -> hole_prev -> outer_next *)
+    let hole_prev = poly_list.prev.(hole_touch_node) in
+    let hole_next = poly_list.next.(hole_touch_node) in
+    let outer_next = poly_list.next.(outer_touch_node) in
+    (* Connect outer_touch to hole_next (skipping hole_touch since it's the same point) *)
+    poly_list.next.(outer_touch_node) <- hole_next;
+    poly_list.prev.(hole_next) <- outer_touch_node;
+    (* Connect hole_prev back to outer_next *)
+    poly_list.next.(hole_prev) <- outer_next;
+    poly_list.prev.(outer_next) <- hole_prev;
+    (* Return the outer touch node as the new start *)
+    outer_touch_node
+
   let find_bridge_point (verts : float array) hole_start_node outer_node
       poly_list processed_holes pending_start_idx =
     let open PolygonList in
@@ -856,44 +917,57 @@ module Triangulator = struct
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
       poly_list processed_holes pending_start_idx =
-    match
-      find_bridge_point verts hole_start_node outer_node poly_list
-        processed_holes pending_start_idx
-    with
-    | Some target ->
-        let open PolygonList in
-        (* Record the bridge for visualization *)
-        let h_idx = poly_list.vert_idx.(hole_start_node) in
-        let outer_idx = poly_list.vert_idx.(target) in
-        collected_bridges := (h_idx, outer_idx) :: !collected_bridges;
-        if !verbose then
-          Printf.printf
-            "  DEBUG: Bridge created between Hole node %d (vert %d) and Outer \
-             node %d (vert %d)\n\
-             %!"
-            hole_start_node h_idx target outer_idx;
-        Printf.printf
-          "  DEBUG: Bridge created between Hole vert %d and Outer vert %d\n%!"
-          h_idx outer_idx;
-        if !verbose then
-          Printf.printf
-            "  Hole merged with bridge: Hole vert %d -> Outer vert %d\n%!" h_idx
-            outer_idx;
+    (* First check if the hole touches the outer ring at any vertex *)
+    match find_touching_point verts hole_start_node outer_node poly_list with
+    | Some (hole_touch, outer_touch) ->
+        (* Hole touches outer ring - merge directly without bridge *)
+        let new_outer =
+          merge_touching_hole verts hole_touch outer_touch poly_list
+        in
+        Some new_outer
+    | None -> (
+        (* No touching point - use standard bridge-based merge *)
+        match
+          find_bridge_point verts hole_start_node outer_node poly_list
+            processed_holes pending_start_idx
+        with
+        | Some target ->
+            let open PolygonList in
+            (* Record the bridge for visualization *)
+            let h_idx = poly_list.vert_idx.(hole_start_node) in
+            let outer_idx = poly_list.vert_idx.(target) in
+            collected_bridges := (h_idx, outer_idx) :: !collected_bridges;
+            if !verbose then
+              Printf.printf
+                "  DEBUG: Bridge created between Hole node %d (vert %d) and \
+                 Outer node %d (vert %d)\n\
+                 %!"
+                hole_start_node h_idx target outer_idx;
+            Printf.printf
+              "  DEBUG: Bridge created between Hole vert %d and Outer vert %d\n\
+               %!"
+              h_idx outer_idx;
+            if !verbose then
+              Printf.printf
+                "  Hole merged with bridge: Hole vert %d -> Outer vert %d\n%!"
+                h_idx outer_idx;
 
-        let p_prime = PolygonList.duplicate_node poly_list target in
-        let m_prime = PolygonList.duplicate_node poly_list hole_start_node in
-        let m_prev_n = poly_list.prev.(hole_start_node) in
-        let p_next_n = poly_list.next.(target) in
-        poly_list.next.(target) <- hole_start_node;
-        poly_list.prev.(hole_start_node) <- target;
-        poly_list.next.(m_prev_n) <- m_prime;
-        poly_list.prev.(m_prime) <- m_prev_n;
-        poly_list.next.(m_prime) <- p_prime;
-        poly_list.prev.(p_prime) <- m_prime;
-        poly_list.next.(p_prime) <- p_next_n;
-        poly_list.prev.(p_next_n) <- p_prime;
-        Some target
-    | None -> None
+            let p_prime = PolygonList.duplicate_node poly_list target in
+            let m_prime =
+              PolygonList.duplicate_node poly_list hole_start_node
+            in
+            let m_prev_n = poly_list.prev.(hole_start_node) in
+            let p_next_n = poly_list.next.(target) in
+            poly_list.next.(target) <- hole_start_node;
+            poly_list.prev.(hole_start_node) <- target;
+            poly_list.next.(m_prev_n) <- m_prime;
+            poly_list.prev.(m_prime) <- m_prev_n;
+            poly_list.next.(m_prime) <- p_prime;
+            poly_list.prev.(p_prime) <- m_prime;
+            poly_list.next.(p_prime) <- p_next_n;
+            poly_list.prev.(p_next_n) <- p_prime;
+            Some target
+        | None -> None)
 
   let triangulate_dll (verts : float array) start_node poly_list
       total_active_nodes out_buffer out_offset =
@@ -974,19 +1048,15 @@ module Triangulator = struct
             if active.(r_node) then (
               let vi_r = vert_idx.(r_node) in
               if r_node = node_prev || r_node = i || r_node = node_next then ()
-              else if
-                points_equal verts vi_r vi_prev
-                || points_equal verts vi_r vi_curr
-                || points_equal verts vi_r vi_next
-              then ()
               else
-                (* Standard Ear Clipping Optimization: Only reflex vertices can be intrusions *)
+                (* Check if reflex vertex intrudes into the ear triangle *)
                 let vi_rp = vert_idx.(prev.(r_node)) in
                 let vi_rn = vert_idx.(next.(r_node)) in
                 if cross_product verts vi_rp vi_r vi_rn < -.epsilon then
                   if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
                     raise Exit;
 
+                (* Check if edge from r_node crosses the ear's base diagonal *)
                 let r_next = next.(r_node) in
                 if active.(r_next) then
                   let vi_rnext = vert_idx.(r_next) in
