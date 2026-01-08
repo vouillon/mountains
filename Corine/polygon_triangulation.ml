@@ -166,6 +166,17 @@ module Geometry = struct
       p1_on_ab || p2_on_ab || a_on_p1p2 || b_on_p1p2
   [@@inline always]
 
+  let segments_cross (verts : float array) p1 p2 a b =
+    let cp1 = cross_product verts p1 p2 a in
+    let cp2 = cross_product verts p1 p2 b in
+    let cp3 = cross_product verts a b p1 in
+    let cp4 = cross_product verts a b p2 in
+
+    (* Strict intersection check only *)
+    ((cp1 > epsilon && cp2 < -.epsilon) || (cp1 < -.epsilon && cp2 > epsilon))
+    && ((cp3 > epsilon && cp4 < -.epsilon) || (cp3 < -.epsilon && cp4 > epsilon))
+  [@@inline always]
+
   let is_in_cone (verts : float array) ia ib ic ip =
     let cp_abc = cross_product verts ia ib ic in
     if cp_abc >= -.epsilon then
@@ -869,8 +880,7 @@ module Triangulator = struct
                     || (r_node = i && r_next = node_next)
                   then ()
                   else if
-                    Geometry.segments_overlap verts vi_prev vi_next vi_r
-                      vi_rnext
+                    Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
                   then raise Exit);
             check_node := next.(!check_node);
             if !check_node = start_node then loop := false
