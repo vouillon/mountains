@@ -71,8 +71,8 @@ Running 1381 regression tests...
   DEBUG: Bridge created between Hole vert 309 and Outer vert 171
   DEBUG: Bridge created between Hole vert 231 and Outer vert 165
   DEBUG: Bridge created between Hole vert 255 and Outer vert 126
-  DEBUG: Bridge created between Hole vert 1100 and Outer vert 1082
   DEBUG: Bridge created between Hole vert 1151 and Outer vert 1082
+  DEBUG: Bridge created between Hole vert 1100 and Outer vert 1082
   DEBUG: Bridge created between Hole vert 1168 and Outer vert 1155
   DEBUG: Bridge created between Hole vert 571 and Outer vert 332
   DEBUG: Bridge created between Hole vert 756 and Outer vert 332
@@ -241,6 +241,7 @@ Running 1381 regression tests...
   DEBUG: Bridge created between Hole vert 2057 and Outer vert 2035
   DEBUG: Bridge created between Hole vert 1733 and Outer vert 137
   DEBUG: Bridge created between Hole vert 1890 and Outer vert 179
+  DEBUG: Bridge created between Hole vert 1718 and Outer vert 197
   DEBUG: Bridge created between Hole vert 1983 and Outer vert 950
   DEBUG: Bridge created between Hole vert 1832 and Outer vert 1954
   DEBUG: Bridge created between Hole vert 2077 and Outer vert 816
@@ -248,10 +249,6 @@ Running 1381 regression tests...
   DEBUG: Bridge created between Hole vert 1932 and Outer vert 2065
   DEBUG: Bridge created between Hole vert 1992 and Outer vert 809
   DEBUG: Bridge created between Hole vert 1715 and Outer vert 2109
-Triangulation quality warning for  clc (Area OK): 2116 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2116, expected 2143
-FAIL: test_polygons/mismatch_N43E005_clc_096.json (expected=0.0114603, actual=0.0114748, ratio=1.0013)
   DEBUG: Bridge created between Hole vert 389 and Outer vert 266
   DEBUG: Bridge created between Hole vert 344 and Outer vert 280
   DEBUG: Bridge created between Hole vert 193 and Outer vert 108
@@ -626,7 +623,7 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 856 and Outer vert 675
   DEBUG: Bridge created between Hole vert 884 and Outer vert 835
   DEBUG: Bridge created between Hole vert 4474 and Outer vert 2497
-  DEBUG: Bridge created between Hole vert 4111 and Outer vert 4473
+  DEBUG: Bridge created between Hole vert 4111 and Outer vert 4474
   DEBUG: Bridge created between Hole vert 4408 and Outer vert 2098
   DEBUG: Bridge created between Hole vert 3957 and Outer vert 2539
   DEBUG: Bridge created between Hole vert 4722 and Outer vert 2273
@@ -653,9 +650,9 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 1652 and Outer vert 677
   DEBUG: Bridge created between Hole vert 1813 and Outer vert 673
   DEBUG: Bridge created between Hole vert 180 and Outer vert 45
-  DEBUG: Bridge created between Hole vert 600 and Outer vert 423
-  DEBUG: Bridge created between Hole vert 816 and Outer vert 423
-  DEBUG: Bridge created between Hole vert 709 and Outer vert 646
+  DEBUG: Bridge created between Hole vert 825 and Outer vert 423
+  DEBUG: Bridge created between Hole vert 647 and Outer vert 423
+  DEBUG: Bridge created between Hole vert 709 and Outer vert 647
   DEBUG: Bridge created between Hole vert 834 and Outer vert 509
   DEBUG: Bridge created between Hole vert 654 and Outer vert 474
   DEBUG: Bridge created between Hole vert 774 and Outer vert 560
@@ -670,19 +667,19 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 705 and Outer vert 506
   DEBUG: Bridge created between Hole vert 893 and Outer vert 764
   DEBUG: Bridge created between Hole vert 790 and Outer vert 776
-  DEBUG: Bridge created between Hole vert 509 and Outer vert 470
+  DEBUG: Bridge created between Hole vert 524 and Outer vert 470
   DEBUG: Bridge created between Hole vert 525 and Outer vert 22
   DEBUG: Bridge created between Hole vert 471 and Outer vert 6
   DEBUG: Bridge created between Hole vert 546 and Outer vert 113
-  DEBUG: Bridge created between Hole vert 216 and Outer vert 215
+  DEBUG: Bridge created between Hole vert 247 and Outer vert 215
   DEBUG: Bridge created between Hole vert 240 and Outer vert 124
   DEBUG: Bridge created between Hole vert 1552 and Outer vert 1424
   DEBUG: Bridge created between Hole vert 1467 and Outer vert 770
   DEBUG: Bridge created between Hole vert 1528 and Outer vert 834
-  DEBUG: Bridge created between Hole vert 431 and Outer vert 430
+  DEBUG: Bridge created between Hole vert 433 and Outer vert 430
   DEBUG: Bridge created between Hole vert 434 and Outer vert 426
-  DEBUG: Bridge created between Hole vert 3416 and Outer vert 2580
   DEBUG: Bridge created between Hole vert 3331 and Outer vert 2580
+  DEBUG: Bridge created between Hole vert 3416 and Outer vert 2580
   DEBUG: Bridge created between Hole vert 2936 and Outer vert 2364
   DEBUG: Bridge created between Hole vert 3148 and Outer vert 3047
   DEBUG: Bridge created between Hole vert 3359 and Outer vert 3295
@@ -781,11 +778,9 @@ FAIL: test_polygons/mismatch_N43E006_water_118.json (expected=1.0886e-08, actual
   DEBUG: Bridge created between Hole vert 168 and Outer vert 72
   DEBUG: Bridge created between Hole vert 209 and Outer vert 177
   DEBUG: Bridge created between Hole vert 200 and Outer vert 259
+  DEBUG: Bridge created between Hole vert 853 and Outer vert 837
   DEBUG: Bridge created between Hole vert 860 and Outer vert 512
   DEBUG: Bridge created between Hole vert 842 and Outer vert 813
-Triangulation quality warning for  clc (Area OK): 872 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 872, expected 883
   DEBUG: Bridge created between Hole vert 532 and Outer vert 320
   DEBUG: Bridge created between Hole vert 572 and Outer vert 277
   DEBUG: Bridge created between Hole vert 173 and Outer vert 17
@@ -970,8 +965,8 @@ Triangulation quality warning for  clc (Area OK): 188 tris
   DEBUG: Bridge created between Hole vert 2669 and Outer vert 1372
   DEBUG: Bridge created between Hole vert 1844 and Outer vert 2420
   DEBUG: Bridge created between Hole vert 2491 and Outer vert 2445
-  DEBUG: Bridge created between Hole vert 3232 and Outer vert 2755
-  DEBUG: Bridge created between Hole vert 3791 and Outer vert 2755
+  DEBUG: Bridge created between Hole vert 3319 and Outer vert 2755
+  DEBUG: Bridge created between Hole vert 3791 and Outer vert 3319
   DEBUG: Bridge created between Hole vert 3925 and Outer vert 3255
   DEBUG: Bridge created between Hole vert 3846 and Outer vert 2697
   DEBUG: Bridge created between Hole vert 3789 and Outer vert 2688
@@ -991,10 +986,6 @@ Triangulation quality warning for  clc (Area OK): 188 tris
   DEBUG: Bridge created between Hole vert 3874 and Outer vert 3568
   DEBUG: Bridge created between Hole vert 3690 and Outer vert 3847
   DEBUG: Bridge created between Hole vert 3428 and Outer vert 3885
-AREA MISMATCH: expected=0.0213867, actual=0.0227199, ratio=1.0623 (3958 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3958, expected 3972
-FAIL: test_polygons/mismatch_N44E005_clc_027.json (expected=0.0213867, actual=0.0227199, ratio=1.0623)
   DEBUG: Bridge created between Hole vert 1556 and Outer vert 384
   DEBUG: Bridge created between Hole vert 962 and Outer vert 504
   DEBUG: Bridge created between Hole vert 1486 and Outer vert 376
@@ -1014,7 +1005,7 @@ FAIL: test_polygons/mismatch_N44E005_clc_027.json (expected=0.0213867, actual=0.
   DEBUG: Bridge created between Hole vert 597 and Outer vert 577
   DEBUG: Bridge created between Hole vert 581 and Outer vert 457
   DEBUG: Bridge created between Hole vert 405 and Outer vert 333
-  DEBUG: Bridge created between Hole vert 305 and Outer vert 283
+  DEBUG: Bridge created between Hole vert 335 and Outer vert 283
   DEBUG: Bridge created between Hole vert 288 and Outer vert 273
   DEBUG: Bridge created between Hole vert 430 and Outer vert 229
   DEBUG: Bridge created between Hole vert 273 and Outer vert 164
@@ -1057,7 +1048,7 @@ FAIL: test_polygons/mismatch_N44E005_clc_027.json (expected=0.0213867, actual=0.
   DEBUG: Bridge created between Hole vert 216 and Outer vert 157
   DEBUG: Bridge created between Hole vert 326 and Outer vert 138
   DEBUG: Bridge created between Hole vert 279 and Outer vert 275
-  DEBUG: Bridge created between Hole vert 105 and Outer vert 104
+  DEBUG: Bridge created between Hole vert 110 and Outer vert 104
   DEBUG: Bridge created between Hole vert 2565 and Outer vert 2052
   DEBUG: Bridge created between Hole vert 2642 and Outer vert 2283
   DEBUG: Bridge created between Hole vert 2686 and Outer vert 2546
@@ -1188,13 +1179,10 @@ FAIL: test_polygons/mismatch_N44E005_clc_027.json (expected=0.0213867, actual=0.
   DEBUG: Bridge created between Hole vert 261 and Outer vert 189
   DEBUG: Bridge created between Hole vert 196 and Outer vert 131
   DEBUG: Bridge created between Hole vert 245 and Outer vert 241
+  DEBUG: Bridge created between Hole vert 788 and Outer vert 718
   DEBUG: Bridge created between Hole vert 844 and Outer vert 688
   DEBUG: Bridge created between Hole vert 848 and Outer vert 494
-  DEBUG: Bridge created between Hole vert 723 and Outer vert 712
-AREA MISMATCH: expected=0.0035027, actual=0.00355131, ratio=1.0139 (825 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 825, expected 876
-FAIL: test_polygons/mismatch_N44E005_clc_092.json (expected=0.0035027, actual=0.00355131, ratio=1.0139)
+  DEBUG: Bridge created between Hole vert 723 and Outer vert 808
   DEBUG: Bridge created between Hole vert 218 and Outer vert 32
   DEBUG: Bridge created between Hole vert 297 and Outer vert 195
   DEBUG: Bridge created between Hole vert 136 and Outer vert 101
@@ -1323,7 +1311,7 @@ FAIL: test_polygons/mismatch_N44E005_water_133.json (expected=4.5333e-08, actual
   DEBUG: Bridge created between Hole vert 828 and Outer vert 487
   DEBUG: Bridge created between Hole vert 527 and Outer vert 1
   DEBUG: Bridge created between Hole vert 449 and Outer vert 332
-  DEBUG: Bridge created between Hole vert 421 and Outer vert 420
+  DEBUG: Bridge created between Hole vert 423 and Outer vert 420
   DEBUG: Bridge created between Hole vert 424 and Outer vert 416
   DEBUG: Bridge created between Hole vert 691 and Outer vert 671
   DEBUG: Bridge created between Hole vert 675 and Outer vert 446
@@ -1382,8 +1370,8 @@ FAIL: test_polygons/mismatch_N44E005_water_133.json (expected=4.5333e-08, actual
   DEBUG: Bridge created between Hole vert 2028 and Outer vert 1447
   DEBUG: Bridge created between Hole vert 1007 and Outer vert 722
   DEBUG: Bridge created between Hole vert 995 and Outer vert 663
-  DEBUG: Bridge created between Hole vert 3868 and Outer vert 3664
-  DEBUG: Bridge created between Hole vert 3899 and Outer vert 3660
+  DEBUG: Bridge created between Hole vert 3868 and Outer vert 3661
+  DEBUG: Bridge created between Hole vert 3899 and Outer vert 3661
   DEBUG: Bridge created between Hole vert 3931 and Outer vert 3866
   DEBUG: Bridge created between Hole vert 4111 and Outer vert 3817
   DEBUG: Bridge created between Hole vert 4159 and Outer vert 3553
@@ -1393,10 +1381,6 @@ FAIL: test_polygons/mismatch_N44E005_water_133.json (expected=4.5333e-08, actual
   DEBUG: Bridge created between Hole vert 4029 and Outer vert 1712
   DEBUG: Bridge created between Hole vert 4133 and Outer vert 1673
   DEBUG: Bridge created between Hole vert 4076 and Outer vert 2633
-AREA MISMATCH: expected=0.0210878, actual=0.0221437, ratio=1.0501 (4175 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4175, expected 4184
-FAIL: test_polygons/mismatch_N44E006_clc_056.json (expected=0.0210878, actual=0.0221437, ratio=1.0501)
   DEBUG: Bridge created between Hole vert 262 and Outer vert 236
   DEBUG: Bridge created between Hole vert 177 and Outer vert 152
   DEBUG: Bridge created between Hole vert 528 and Outer vert 317
@@ -1415,10 +1399,7 @@ FAIL: test_polygons/mismatch_N44E006_clc_056.json (expected=0.0210878, actual=0.
   DEBUG: Bridge created between Hole vert 616 and Outer vert 481
   DEBUG: Bridge created between Hole vert 1447 and Outer vert 1240
   DEBUG: Bridge created between Hole vert 1508 and Outer vert 1355
-AREA MISMATCH: expected=0.00531266, actual=0.00538564, ratio=1.0137 (1484 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1484, expected 1543
-FAIL: test_polygons/mismatch_N44E006_clc_062.json (expected=0.00531266, actual=0.00538564, ratio=1.0137)
+  DEBUG: Bridge created between Hole vert 1396 and Outer vert 1374
   DEBUG: Bridge created between Hole vert 669 and Outer vert 596
   DEBUG: Bridge created between Hole vert 467 and Outer vert 398
   DEBUG: Bridge created between Hole vert 272 and Outer vert 214
@@ -1427,9 +1408,9 @@ FAIL: test_polygons/mismatch_N44E006_clc_062.json (expected=0.00531266, actual=0
   DEBUG: Bridge created between Hole vert 287 and Outer vert 230
   DEBUG: Bridge created between Hole vert 170 and Outer vert 160
   DEBUG: Bridge created between Hole vert 385 and Outer vert 309
-  DEBUG: Bridge created between Hole vert 2973 and Outer vert 2972
-  DEBUG: Bridge created between Hole vert 3261 and Outer vert 2972
-  DEBUG: Bridge created between Hole vert 3401 and Outer vert 3267
+  DEBUG: Bridge created between Hole vert 3033 and Outer vert 2972
+  DEBUG: Bridge created between Hole vert 3268 and Outer vert 2972
+  DEBUG: Bridge created between Hole vert 3401 and Outer vert 3268
   DEBUG: Bridge created between Hole vert 3470 and Outer vert 814
   DEBUG: Bridge created between Hole vert 3482 and Outer vert 678
   DEBUG: Bridge created between Hole vert 3622 and Outer vert 907
@@ -1494,14 +1475,11 @@ FAIL: test_polygons/mismatch_N44E006_clc_062.json (expected=0.00531266, actual=0
   DEBUG: Bridge created between Hole vert 792 and Outer vert 716
   DEBUG: Bridge created between Hole vert 216 and Outer vert 211
   DEBUG: Bridge created between Hole vert 122 and Outer vert 93
-  DEBUG: Bridge created between Hole vert 154 and Outer vert 153
+  DEBUG: Bridge created between Hole vert 181 and Outer vert 153
   DEBUG: Bridge created between Hole vert 189 and Outer vert 15
   DEBUG: Bridge created between Hole vert 393 and Outer vert 296
   DEBUG: Bridge created between Hole vert 207 and Outer vert 134
-AREA MISMATCH: expected=0.00101167, actual=0.00106551, ratio=1.0532 (158 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 158, expected 184
-FAIL: test_polygons/mismatch_N44E006_clc_087.json (expected=0.00101167, actual=0.00106551, ratio=1.0532)
+  DEBUG: Bridge created between Hole vert 182 and Outer vert 161
   DEBUG: Bridge created between Hole vert 523 and Outer vert 414
   DEBUG: Bridge created between Hole vert 527 and Outer vert 466
   DEBUG: Bridge created between Hole vert 210 and Outer vert 148
@@ -1671,18 +1649,18 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 365 and Outer vert 192
   DEBUG: Bridge created between Hole vert 851 and Outer vert 502
   DEBUG: Bridge created between Hole vert 151 and Outer vert 107
-  DEBUG: Bridge created between Hole vert 2154 and Outer vert 1803
   DEBUG: Bridge created between Hole vert 1823 and Outer vert 1803
-  DEBUG: Bridge created between Hole vert 2349 and Outer vert 1803
-  DEBUG: Bridge created between Hole vert 1898 and Outer vert 1803
   DEBUG: Bridge created between Hole vert 2586 and Outer vert 1803
-  DEBUG: Bridge created between Hole vert 1933 and Outer vert 1803
-  DEBUG: Bridge created between Hole vert 2281 and Outer vert 1803
-  DEBUG: Bridge created between Hole vert 2665 and Outer vert 1822
-  DEBUG: Bridge created between Hole vert 2849 and Outer vert 1278
+  DEBUG: Bridge created between Hole vert 2405 and Outer vert 1803
+  DEBUG: Bridge created between Hole vert 1932 and Outer vert 1803
+  DEBUG: Bridge created between Hole vert 2158 and Outer vert 1803
+  DEBUG: Bridge created between Hole vert 2004 and Outer vert 1803
+  DEBUG: Bridge created between Hole vert 2281 and Outer vert 1823
+  DEBUG: Bridge created between Hole vert 2665 and Outer vert 1823
+  DEBUG: Bridge created between Hole vert 2849 and Outer vert 1279
   DEBUG: Bridge created between Hole vert 2873 and Outer vert 1872
   DEBUG: Bridge created between Hole vert 2176 and Outer vert 1605
-  DEBUG: Bridge created between Hole vert 2022 and Outer vert 1278
+  DEBUG: Bridge created between Hole vert 2022 and Outer vert 1279
   DEBUG: Bridge created between Hole vert 3060 and Outer vert 720
   DEBUG: Bridge created between Hole vert 3095 and Outer vert 2251
   DEBUG: Bridge created between Hole vert 2966 and Outer vert 2192
@@ -1695,17 +1673,15 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 2736 and Outer vert 2380
   DEBUG: Bridge created between Hole vert 2886 and Outer vert 2072
   DEBUG: Bridge created between Hole vert 2877 and Outer vert 2034
-  DEBUG: Bridge created between Hole vert 3020 and Outer vert 2153
+  DEBUG: Bridge created between Hole vert 3020 and Outer vert 2157
   DEBUG: Bridge created between Hole vert 2321 and Outer vert 2815
   DEBUG: Bridge created between Hole vert 2833 and Outer vert 1929
-AREA MISMATCH: expected=0.0366429, actual=0.127358, ratio=3.4756 (3078 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3078, expected 3153
-FAIL: test_polygons/mismatch_N44E007_clc_030.json (expected=0.0366429, actual=0.127358, ratio=3.4756)
   DEBUG: Bridge created between Hole vert 685 and Outer vert 448
+  DEBUG: Bridge created between Hole vert 504 and Outer vert 488
   DEBUG: Bridge created between Hole vert 786 and Outer vert 393
   DEBUG: Bridge created between Hole vert 609 and Outer vert 335
-  DEBUG: Bridge created between Hole vert 744 and Outer vert 475
+  DEBUG: Bridge created between Hole vert 702 and Outer vert 533
+  DEBUG: Bridge created between Hole vert 744 and Outer vert 523
   DEBUG: Bridge created between Hole vert 839 and Outer vert 421
   DEBUG: Bridge created between Hole vert 764 and Outer vert 625
   DEBUG: Bridge created between Hole vert 665 and Outer vert 856
@@ -1713,15 +1689,11 @@ FAIL: test_polygons/mismatch_N44E007_clc_030.json (expected=0.0366429, actual=0.
   DEBUG: Bridge created between Hole vert 545 and Outer vert 227
   DEBUG: Bridge created between Hole vert 908 and Outer vert 793
   DEBUG: Bridge created between Hole vert 945 and Outer vert 623
-AREA MISMATCH: expected=0.0103489, actual=0.0104009, ratio=1.0050 (933 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 933, expected 973
-FAIL: test_polygons/mismatch_N44E007_clc_031.json (expected=0.0103489, actual=0.0104009, ratio=1.0050)
+  DEBUG: Bridge created between Hole vert 2814 and Outer vert 766
   DEBUG: Bridge created between Hole vert 1011 and Outer vert 766
-  DEBUG: Bridge created between Hole vert 2812 and Outer vert 766
   DEBUG: Bridge created between Hole vert 2793 and Outer vert 766
   DEBUG: Bridge created between Hole vert 2334 and Outer vert 745
-  DEBUG: Bridge created between Hole vert 2522 and Outer vert 2813
+  DEBUG: Bridge created between Hole vert 2522 and Outer vert 2814
   DEBUG: Bridge created between Hole vert 2744 and Outer vert 722
   DEBUG: Bridge created between Hole vert 1367 and Outer vert 2518
   DEBUG: Bridge created between Hole vert 1873 and Outer vert 940
@@ -1751,10 +1723,6 @@ FAIL: test_polygons/mismatch_N44E007_clc_031.json (expected=0.0103489, actual=0.
   DEBUG: Bridge created between Hole vert 2824 and Outer vert 2636
   DEBUG: Bridge created between Hole vert 3126 and Outer vert 2390
   DEBUG: Bridge created between Hole vert 2313 and Outer vert 2661
-AREA MISMATCH: expected=0.0553241, actual=0.07799, ratio=1.4097 (3346 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3346, expected 3395
-FAIL: test_polygons/mismatch_N44E007_clc_032.json (expected=0.0553241, actual=0.07799, ratio=1.4097)
   DEBUG: Bridge created between Hole vert 5040 and Outer vert 2254
   DEBUG: Bridge created between Hole vert 5018 and Outer vert 2254
   DEBUG: Bridge created between Hole vert 3962 and Outer vert 5018
@@ -1824,13 +1792,9 @@ FAIL: test_polygons/mismatch_N44E007_clc_032.json (expected=0.0553241, actual=0.
   DEBUG: Bridge created between Hole vert 640 and Outer vert 576
   DEBUG: Bridge created between Hole vert 781 and Outer vert 694
   DEBUG: Bridge created between Hole vert 2918 and Outer vert 2913
-  DEBUG: Bridge created between Hole vert 3235 and Outer vert 2494
+  DEBUG: Bridge created between Hole vert 3235 and Outer vert 2473
   DEBUG: Bridge created between Hole vert 3195 and Outer vert 3231
   DEBUG: Bridge created between Hole vert 3258 and Outer vert 1087
-AREA MISMATCH: expected=0.0136736, actual=0.0153084, ratio=1.1196 (3294 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3294, expected 3318
-FAIL: test_polygons/mismatch_N44E007_clc_039.json (expected=0.0136736, actual=0.0153084, ratio=1.1196)
   DEBUG: Bridge created between Hole vert 1568 and Outer vert 725
   DEBUG: Bridge created between Hole vert 1431 and Outer vert 770
   DEBUG: Bridge created between Hole vert 1522 and Outer vert 1586
@@ -1851,10 +1815,10 @@ FAIL: test_polygons/mismatch_N44E007_clc_039.json (expected=0.0136736, actual=0.
   DEBUG: Bridge created between Hole vert 4586 and Outer vert 71
   DEBUG: Bridge created between Hole vert 4526 and Outer vert 1989
   DEBUG: Bridge created between Hole vert 4421 and Outer vert 1886
-  DEBUG: Bridge created between Hole vert 772 and Outer vert 771
+  DEBUG: Bridge created between Hole vert 786 and Outer vert 771
   DEBUG: Bridge created between Hole vert 797 and Outer vert 780
   DEBUG: Bridge created between Hole vert 602 and Outer vert 431
-  DEBUG: Bridge created between Hole vert 995 and Outer vert 755
+  DEBUG: Bridge created between Hole vert 995 and Outer vert 757
   DEBUG: Bridge created between Hole vert 1455 and Outer vert 854
   DEBUG: Bridge created between Hole vert 1359 and Outer vert 871
   DEBUG: Bridge created between Hole vert 1105 and Outer vert 909
@@ -1868,11 +1832,8 @@ FAIL: test_polygons/mismatch_N44E007_clc_039.json (expected=0.0136736, actual=0.
   DEBUG: Bridge created between Hole vert 642 and Outer vert 609
   DEBUG: Bridge created between Hole vert 264 and Outer vert 212
   DEBUG: Bridge created between Hole vert 201 and Outer vert 199
-  DEBUG: Bridge created between Hole vert 280 and Outer vert 83
-AREA MISMATCH: expected=0.000343448, actual=0.000409789, ratio=1.1932 (224 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 224, expected 283
-FAIL: test_polygons/mismatch_N44E007_clc_051.json (expected=0.000343448, actual=0.000409789, ratio=1.1932)
+  DEBUG: Bridge created between Hole vert 214 and Outer vert 128
+  DEBUG: Bridge created between Hole vert 280 and Outer vert 244
   DEBUG: Bridge created between Hole vert 476 and Outer vert 382
   DEBUG: Bridge created between Hole vert 917 and Outer vert 395
   DEBUG: Bridge created between Hole vert 504 and Outer vert 328
@@ -1884,7 +1845,7 @@ FAIL: test_polygons/mismatch_N44E007_clc_051.json (expected=0.000343448, actual=
   DEBUG: Bridge created between Hole vert 388 and Outer vert 258
   DEBUG: Bridge created between Hole vert 300 and Outer vert 274
   DEBUG: Bridge created between Hole vert 4801 and Outer vert 2315
-  DEBUG: Bridge created between Hole vert 5326 and Outer vert 2354
+  DEBUG: Bridge created between Hole vert 5326 and Outer vert 2349
   DEBUG: Bridge created between Hole vert 4228 and Outer vert 2352
   DEBUG: Bridge created between Hole vert 5039 and Outer vert 2762
   DEBUG: Bridge created between Hole vert 4651 and Outer vert 4369
@@ -1899,6 +1860,10 @@ FAIL: test_polygons/mismatch_N44E007_clc_051.json (expected=0.000343448, actual=
   DEBUG: Bridge created between Hole vert 4710 and Outer vert 3177
   DEBUG: Bridge created between Hole vert 5243 and Outer vert 4886
   DEBUG: Bridge created between Hole vert 5121 and Outer vert 3349
+AREA MISMATCH: expected=0.0240442, actual=0.0258925, ratio=1.0769 (5334 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 5334, expected 5365
+FAIL: test_polygons/mismatch_N44E007_clc_060.json (expected=0.0240442, actual=0.0258925, ratio=1.0769)
   DEBUG: Bridge created between Hole vert 280 and Outer vert 229
   DEBUG: Bridge created between Hole vert 187 and Outer vert 149
   DEBUG: Bridge created between Hole vert 1827 and Outer vert 859
@@ -1909,18 +1874,14 @@ FAIL: test_polygons/mismatch_N44E007_clc_051.json (expected=0.000343448, actual=
   DEBUG: Bridge created between Hole vert 575 and Outer vert 549
   DEBUG: Bridge created between Hole vert 606 and Outer vert 580
   DEBUG: Bridge created between Hole vert 261 and Outer vert 243
-  DEBUG: Bridge created between Hole vert 608 and Outer vert 427
   DEBUG: Bridge created between Hole vert 522 and Outer vert 427
+  DEBUG: Bridge created between Hole vert 608 and Outer vert 427
   DEBUG: Bridge created between Hole vert 543 and Outer vert 423
-  DEBUG: Bridge created between Hole vert 1167 and Outer vert 961
-  DEBUG: Bridge created between Hole vert 1261 and Outer vert 961
+  DEBUG: Bridge created between Hole vert 1213 and Outer vert 961
+  DEBUG: Bridge created between Hole vert 1261 and Outer vert 875
   DEBUG: Bridge created between Hole vert 1465 and Outer vert 1181
   DEBUG: Bridge created between Hole vert 1393 and Outer vert 769
   DEBUG: Bridge created between Hole vert 1323 and Outer vert 1404
-AREA MISMATCH: expected=0.0030923, actual=0.00367785, ratio=1.1894 (1459 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1459, expected 1475
-FAIL: test_polygons/mismatch_N44E007_clc_067.json (expected=0.0030923, actual=0.00367785, ratio=1.1894)
   DEBUG: Bridge created between Hole vert 2267 and Outer vert 1321
   DEBUG: Bridge created between Hole vert 2172 and Outer vert 1401
   DEBUG: Bridge created between Hole vert 2235 and Outer vert 1362
@@ -1941,6 +1902,7 @@ FAIL: test_polygons/mismatch_N44E007_clc_067.json (expected=0.0030923, actual=0.
   DEBUG: Bridge created between Hole vert 1464 and Outer vert 925
   DEBUG: Bridge created between Hole vert 1389 and Outer vert 185
   DEBUG: Bridge created between Hole vert 1205 and Outer vert 702
+  DEBUG: Bridge created between Hole vert 5667 and Outer vert 0
   DEBUG: Bridge created between Hole vert 3943 and Outer vert 3365
   DEBUG: Bridge created between Hole vert 6925 and Outer vert 3365
   DEBUG: Bridge created between Hole vert 3973 and Outer vert 3361
@@ -1949,8 +1911,8 @@ FAIL: test_polygons/mismatch_N44E007_clc_067.json (expected=0.0030923, actual=0.
   DEBUG: Bridge created between Hole vert 4063 and Outer vert 3994
   DEBUG: Bridge created between Hole vert 3512 and Outer vert 3365
   DEBUG: Bridge created between Hole vert 3397 and Outer vert 2930
-  DEBUG: Bridge created between Hole vert 5448 and Outer vert 6925
-  DEBUG: Bridge created between Hole vert 3487 and Outer vert 6848
+  DEBUG: Bridge created between Hole vert 5448 and Outer vert 5648
+  DEBUG: Bridge created between Hole vert 3487 and Outer vert 5550
   DEBUG: Bridge created between Hole vert 4506 and Outer vert 4072
   DEBUG: Bridge created between Hole vert 4088 and Outer vert 3125
   DEBUG: Bridge created between Hole vert 3706 and Outer vert 2893
@@ -1975,10 +1937,6 @@ FAIL: test_polygons/mismatch_N44E007_clc_067.json (expected=0.0030923, actual=0.
   DEBUG: Bridge created between Hole vert 4328 and Outer vert 3552
   DEBUG: Bridge created between Hole vert 4587 and Outer vert 6219
   DEBUG: Bridge created between Hole vert 3418 and Outer vert 4601
-AREA MISMATCH: expected=0.0388449, actual=0.0398148, ratio=1.0250 (6674 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 6674, expected 7071
-FAIL: test_polygons/mismatch_N44E007_clc_079.json (expected=0.0388449, actual=0.0398148, ratio=1.0250)
   DEBUG: Bridge created between Hole vert 4810 and Outer vert 0
   DEBUG: Bridge created between Hole vert 3293 and Outer vert 137
   DEBUG: Bridge created between Hole vert 2223 and Outer vert 171
@@ -2005,7 +1963,7 @@ FAIL: test_polygons/mismatch_N44E007_clc_079.json (expected=0.0388449, actual=0.
   DEBUG: Bridge created between Hole vert 2233 and Outer vert 2153
   DEBUG: Bridge created between Hole vert 2445 and Outer vert 2690
   DEBUG: Bridge created between Hole vert 2475 and Outer vert 1814
-  DEBUG: Bridge created between Hole vert 66 and Outer vert 65
+  DEBUG: Bridge created between Hole vert 71 and Outer vert 65
   DEBUG: Bridge created between Hole vert 78 and Outer vert 15
   DEBUG: Bridge created between Hole vert 38 and Outer vert 4
 AREA MISMATCH: expected=1.03649e-06, actual=1.12367e-06, ratio=1.0841 (90 tris)
@@ -2023,17 +1981,17 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 438 and Outer vert 253
   DEBUG: Bridge created between Hole vert 464 and Outer vert 256
   DEBUG: Bridge created between Hole vert 446 and Outer vert 256
-  DEBUG: Bridge created between Hole vert 454 and Outer vert 467
+  DEBUG: Bridge created between Hole vert 454 and Outer vert 442
   DEBUG: Bridge created between Hole vert 519 and Outer vert 271
   DEBUG: Bridge created between Hole vert 490 and Outer vert 518
   DEBUG: Bridge created between Hole vert 480 and Outer vert 281
   DEBUG: Bridge created between Hole vert 533 and Outer vert 317
   DEBUG: Bridge created between Hole vert 539 and Outer vert 406
   DEBUG: Bridge created between Hole vert 547 and Outer vert 540
-AREA MISMATCH: expected=1.20187e-05, actual=1.67238e-05, ratio=1.3915 (546 tris)
+AREA MISMATCH: expected=1.20187e-05, actual=1.53992e-05, ratio=1.2813 (554 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 546, expected 570
-FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=1.67238e-05, ratio=1.3915)
+  QUALITY WARNING: Triangle count mismatch: got 554, expected 570
+FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=1.53992e-05, ratio=1.2813)
   DEBUG: Bridge created between Hole vert 1181 and Outer vert 1015
   DEBUG: Bridge created between Hole vert 1250 and Outer vert 142
   DEBUG: Bridge created between Hole vert 1354 and Outer vert 875
@@ -2077,6 +2035,7 @@ FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actua
   DEBUG: Bridge created between Hole vert 164 and Outer vert 161
   DEBUG: Bridge created between Hole vert 228 and Outer vert 138
   DEBUG: Bridge created between Hole vert 700 and Outer vert 224
+  DEBUG: Bridge created between Hole vert 2924 and Outer vert 0
   DEBUG: Bridge created between Hole vert 2650 and Outer vert 2462
   DEBUG: Bridge created between Hole vert 3699 and Outer vert 2438
   DEBUG: Bridge created between Hole vert 3372 and Outer vert 2322
@@ -2104,16 +2063,13 @@ FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actua
   DEBUG: Bridge created between Hole vert 3091 and Outer vert 2962
   DEBUG: Bridge created between Hole vert 2677 and Outer vert 3182
   DEBUG: Bridge created between Hole vert 2510 and Outer vert 3415
-Triangulation quality warning for  clc (Area OK): 4623 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4623, expected 4663
-  DEBUG: Bridge created between Hole vert 1782 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 1308 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 1406 and Outer vert 0
   DEBUG: Bridge created between Hole vert 1389 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 1312 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 1817 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 1406 and Outer vert 0
   DEBUG: Bridge created between Hole vert 2433 and Outer vert 1816
-  DEBUG: Bridge created between Hole vert 1651 and Outer vert 1311
-  DEBUG: Bridge created between Hole vert 1242 and Outer vert 1645
+  DEBUG: Bridge created between Hole vert 1651 and Outer vert 1312
+  DEBUG: Bridge created between Hole vert 1242 and Outer vert 1312
   DEBUG: Bridge created between Hole vert 1419 and Outer vert 34
   DEBUG: Bridge created between Hole vert 2611 and Outer vert 2408
   DEBUG: Bridge created between Hole vert 1540 and Outer vert 45
@@ -2121,7 +2077,7 @@ Triangulation quality warning for  clc (Area OK): 4623 tris
   DEBUG: Bridge created between Hole vert 3218 and Outer vert 1412
   DEBUG: Bridge created between Hole vert 1994 and Outer vert 1567
   DEBUG: Bridge created between Hole vert 1828 and Outer vert 2640
-  DEBUG: Bridge created between Hole vert 1584 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 1584 and Outer vert 1406
   DEBUG: Bridge created between Hole vert 3606 and Outer vert 3288
   DEBUG: Bridge created between Hole vert 2152 and Outer vert 871
   DEBUG: Bridge created between Hole vert 1302 and Outer vert 914
@@ -2133,11 +2089,7 @@ Triangulation quality warning for  clc (Area OK): 4623 tris
   DEBUG: Bridge created between Hole vert 1641 and Outer vert 2863
   DEBUG: Bridge created between Hole vert 1317 and Outer vert 2242
   DEBUG: Bridge created between Hole vert 1374 and Outer vert 1164
-AREA MISMATCH: expected=0.0298632, actual=0.0628062, ratio=2.1031 (3675 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3675, expected 3731
-FAIL: test_polygons/mismatch_N44E008_clc_022.json (expected=0.0298632, actual=0.0628062, ratio=2.1031)
-  DEBUG: Bridge created between Hole vert 3735 and Outer vert 3139
+  DEBUG: Bridge created between Hole vert 3744 and Outer vert 3139
   DEBUG: Bridge created between Hole vert 4038 and Outer vert 3098
   DEBUG: Bridge created between Hole vert 3469 and Outer vert 305
   DEBUG: Bridge created between Hole vert 3686 and Outer vert 4058
@@ -2168,7 +2120,7 @@ FAIL: test_polygons/mismatch_N44E008_clc_022.json (expected=0.0298632, actual=0.
   DEBUG: Bridge created between Hole vert 2952 and Outer vert 2010
   DEBUG: Bridge created between Hole vert 2342 and Outer vert 2010
   DEBUG: Bridge created between Hole vert 3154 and Outer vert 2935
-  DEBUG: Bridge created between Hole vert 2233 and Outer vert 2951
+  DEBUG: Bridge created between Hole vert 2233 and Outer vert 2952
   DEBUG: Bridge created between Hole vert 2141 and Outer vert 1663
   DEBUG: Bridge created between Hole vert 2066 and Outer vert 2917
   DEBUG: Bridge created between Hole vert 2145 and Outer vert 3269
@@ -2187,8 +2139,8 @@ FAIL: test_polygons/mismatch_N44E008_clc_022.json (expected=0.0298632, actual=0.
   DEBUG: Bridge created between Hole vert 2677 and Outer vert 515
   DEBUG: Bridge created between Hole vert 2256 and Outer vert 2657
   DEBUG: Bridge created between Hole vert 2452 and Outer vert 554
+  DEBUG: Bridge created between Hole vert 1665 and Outer vert 1492
   DEBUG: Bridge created between Hole vert 1498 and Outer vert 1209
-  DEBUG: Bridge created between Hole vert 1661 and Outer vert 1492
   DEBUG: Bridge created between Hole vert 1614 and Outer vert 1038
   DEBUG: Bridge created between Hole vert 2018 and Outer vert 1312
   DEBUG: Bridge created between Hole vert 1733 and Outer vert 1056
@@ -2196,20 +2148,20 @@ FAIL: test_polygons/mismatch_N44E008_clc_022.json (expected=0.0298632, actual=0.
   DEBUG: Bridge created between Hole vert 1543 and Outer vert 2083
   DEBUG: Bridge created between Hole vert 1669 and Outer vert 785
   DEBUG: Bridge created between Hole vert 1564 and Outer vert 2165
-  DEBUG: Bridge created between Hole vert 4166 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 6039 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 5054 and Outer vert 0
   DEBUG: Bridge created between Hole vert 3664 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 5048 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 4777 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 4956 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 3709 and Outer vert 4203
+  DEBUG: Bridge created between Hole vert 4835 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 4205 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 6039 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 4956 and Outer vert 3664
+  DEBUG: Bridge created between Hole vert 3709 and Outer vert 4205
   DEBUG: Bridge created between Hole vert 3838 and Outer vert 4796
   DEBUG: Bridge created between Hole vert 3608 and Outer vert 4926
-  DEBUG: Bridge created between Hole vert 4332 and Outer vert 5053
+  DEBUG: Bridge created between Hole vert 4332 and Outer vert 5054
   DEBUG: Bridge created between Hole vert 3376 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 3934 and Outer vert 5053
+  DEBUG: Bridge created between Hole vert 3934 and Outer vert 5054
   DEBUG: Bridge created between Hole vert 4260 and Outer vert 408
-  DEBUG: Bridge created between Hole vert 3656 and Outer vert 5053
+  DEBUG: Bridge created between Hole vert 3656 and Outer vert 5054
   DEBUG: Bridge created between Hole vert 4122 and Outer vert 4913
   DEBUG: Bridge created between Hole vert 3265 and Outer vert 3956
   DEBUG: Bridge created between Hole vert 4385 and Outer vert 6053
@@ -2227,13 +2179,10 @@ FAIL: test_polygons/mismatch_N44E008_clc_022.json (expected=0.0298632, actual=0.
   DEBUG: Bridge created between Hole vert 3168 and Outer vert 4768
   DEBUG: Bridge created between Hole vert 3533 and Outer vert 4771
   DEBUG: Bridge created between Hole vert 3236 and Outer vert 2136
-AREA MISMATCH: expected=0.0316614, actual=0.0508164, ratio=1.6050 (6065 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 6065, expected 6124
-FAIL: test_polygons/mismatch_N44E008_clc_026.json (expected=0.0316614, actual=0.0508164, ratio=1.6050)
-  DEBUG: Bridge created between Hole vert 1411 and Outer vert 1145
-  DEBUG: Bridge created between Hole vert 1452 and Outer vert 974
-  DEBUG: Bridge created between Hole vert 1255 and Outer vert 1430
+  DEBUG: Bridge created between Hole vert 1432 and Outer vert 1145
+  DEBUG: Bridge created between Hole vert 1452 and Outer vert 975
+  DEBUG: Bridge created between Hole vert 1402 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 1255 and Outer vert 1432
   DEBUG: Bridge created between Hole vert 1383 and Outer vert 1468
   DEBUG: Bridge created between Hole vert 1157 and Outer vert 772
   DEBUG: Bridge created between Hole vert 1433 and Outer vert 1468
@@ -2241,10 +2190,6 @@ FAIL: test_polygons/mismatch_N44E008_clc_026.json (expected=0.0316614, actual=0.
   DEBUG: Bridge created between Hole vert 1317 and Outer vert 1468
   DEBUG: Bridge created between Hole vert 1277 and Outer vert 1271
   DEBUG: Bridge created between Hole vert 1347 and Outer vert 1451
-Triangulation quality warning for  clc (Area OK): 1471 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1471, expected 1489
-FAIL: test_polygons/mismatch_N44E008_clc_027.json (expected=0.0209082, actual=0.0209345, ratio=1.0013)
   DEBUG: Bridge created between Hole vert 63 and Outer vert 38
   DEBUG: Bridge created between Hole vert 2241 and Outer vert 1549
   DEBUG: Bridge created between Hole vert 2185 and Outer vert 1574
@@ -2271,7 +2216,7 @@ FAIL: test_polygons/mismatch_N44E008_clc_027.json (expected=0.0209082, actual=0.
   DEBUG: Bridge created between Hole vert 363 and Outer vert 250
   DEBUG: Bridge created between Hole vert 144 and Outer vert 103
   DEBUG: Bridge created between Hole vert 2615 and Outer vert 2419
-  DEBUG: Bridge created between Hole vert 2806 and Outer vert 2614
+  DEBUG: Bridge created between Hole vert 2806 and Outer vert 2615
   DEBUG: Bridge created between Hole vert 2745 and Outer vert 167
   DEBUG: Bridge created between Hole vert 2464 and Outer vert 933
   DEBUG: Bridge created between Hole vert 3226 and Outer vert 1953
@@ -2364,7 +2309,7 @@ FAIL: test_polygons/mismatch_N44E008_clc_027.json (expected=0.0209082, actual=0.
   DEBUG: Bridge created between Hole vert 3359 and Outer vert 796
   DEBUG: Bridge created between Hole vert 3302 and Outer vert 2004
   DEBUG: Bridge created between Hole vert 3342 and Outer vert 1928
-  DEBUG: Bridge created between Hole vert 56 and Outer vert 55
+  DEBUG: Bridge created between Hole vert 68 and Outer vert 55
   DEBUG: Bridge created between Hole vert 1794 and Outer vert 1265
   DEBUG: Bridge created between Hole vert 1673 and Outer vert 1405
   DEBUG: Bridge created between Hole vert 1576 and Outer vert 1051
@@ -2462,11 +2407,11 @@ FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actua
   DEBUG: Bridge created between Hole vert 110 and Outer vert 2
   DEBUG: Bridge created between Hole vert 373 and Outer vert 281
   DEBUG: Bridge created between Hole vert 942 and Outer vert 845
-  DEBUG: Bridge created between Hole vert 3476 and Outer vert 1930
+  DEBUG: Bridge created between Hole vert 3483 and Outer vert 1930
   DEBUG: Bridge created between Hole vert 3438 and Outer vert 3476
-  DEBUG: Bridge created between Hole vert 3406 and Outer vert 2319
+  DEBUG: Bridge created between Hole vert 3406 and Outer vert 2321
   DEBUG: Bridge created between Hole vert 3474 and Outer vert 3432
-  DEBUG: Bridge created between Hole vert 2398 and Outer vert 2319
+  DEBUG: Bridge created between Hole vert 2398 and Outer vert 2321
   DEBUG: Bridge created between Hole vert 3053 and Outer vert 2293
   DEBUG: Bridge created between Hole vert 2820 and Outer vert 3048
   DEBUG: Bridge created between Hole vert 3582 and Outer vert 3361
@@ -2476,6 +2421,7 @@ FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actua
   DEBUG: Bridge created between Hole vert 3167 and Outer vert 3551
   DEBUG: Bridge created between Hole vert 3186 and Outer vert 2167
   DEBUG: Bridge created between Hole vert 2777 and Outer vert 3159
+  DEBUG: Bridge created between Hole vert 4613 and Outer vert 0
   DEBUG: Bridge created between Hole vert 4312 and Outer vert 2754
   DEBUG: Bridge created between Hole vert 2743 and Outer vert 1146
   DEBUG: Bridge created between Hole vert 4207 and Outer vert 3675
@@ -2486,18 +2432,16 @@ FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actua
   DEBUG: Bridge created between Hole vert 3762 and Outer vert 4279
   DEBUG: Bridge created between Hole vert 3265 and Outer vert 4247
   DEBUG: Bridge created between Hole vert 3919 and Outer vert 3729
-  DEBUG: Bridge created between Hole vert 3057 and Outer vert 3161
+  DEBUG: Bridge created between Hole vert 3057 and Outer vert 4620
   DEBUG: Bridge created between Hole vert 2556 and Outer vert 462
   DEBUG: Bridge created between Hole vert 2481 and Outer vert 3711
   DEBUG: Bridge created between Hole vert 2560 and Outer vert 4034
-Triangulation quality warning for  clc (Area OK): 4647 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4647, expected 4678
+  DEBUG: Bridge created between Hole vert 4906 and Outer vert 4057
   DEBUG: Bridge created between Hole vert 4701 and Outer vert 4057
-  DEBUG: Bridge created between Hole vert 4888 and Outer vert 4057
   DEBUG: Bridge created between Hole vert 4589 and Outer vert 4700
-  DEBUG: Bridge created between Hole vert 5220 and Outer vert 1909
+  DEBUG: Bridge created between Hole vert 5220 and Outer vert 1929
   DEBUG: Bridge created between Hole vert 4174 and Outer vert 4751
+  DEBUG: Bridge created between Hole vert 4549 and Outer vert 0
   DEBUG: Bridge created between Hole vert 4646 and Outer vert 3612
   DEBUG: Bridge created between Hole vert 4061 and Outer vert 3658
   DEBUG: Bridge created between Hole vert 4807 and Outer vert 1013
@@ -2514,24 +2458,21 @@ Triangulation quality warning for  clc (Area OK): 4647 tris
   DEBUG: Bridge created between Hole vert 4128 and Outer vert 5046
   DEBUG: Bridge created between Hole vert 4096 and Outer vert 1558
   DEBUG: Bridge created between Hole vert 4847 and Outer vert 4380
-Triangulation quality warning for  clc (Area OK): 5231 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 5231, expected 5264
-  DEBUG: Bridge created between Hole vert 2533 and Outer vert 2421
-  DEBUG: Bridge created between Hole vert 4751 and Outer vert 2421
-  DEBUG: Bridge created between Hole vert 5572 and Outer vert 2421
   DEBUG: Bridge created between Hole vert 2651 and Outer vert 2421
+  DEBUG: Bridge created between Hole vert 4751 and Outer vert 2421
+  DEBUG: Bridge created between Hole vert 2533 and Outer vert 2421
   DEBUG: Bridge created between Hole vert 3033 and Outer vert 2421
-  DEBUG: Bridge created between Hole vert 5528 and Outer vert 3032
-  DEBUG: Bridge created between Hole vert 3724 and Outer vert 5589
-  DEBUG: Bridge created between Hole vert 5640 and Outer vert 5589
+  DEBUG: Bridge created between Hole vert 5590 and Outer vert 2421
+  DEBUG: Bridge created between Hole vert 5528 and Outer vert 3033
+  DEBUG: Bridge created between Hole vert 3724 and Outer vert 5590
+  DEBUG: Bridge created between Hole vert 5640 and Outer vert 5590
   DEBUG: Bridge created between Hole vert 5171 and Outer vert 2679
-  DEBUG: Bridge created between Hole vert 7530 and Outer vert 4750
-  DEBUG: Bridge created between Hole vert 6321 and Outer vert 3032
-  DEBUG: Bridge created between Hole vert 5817 and Outer vert 3032
-  DEBUG: Bridge created between Hole vert 2495 and Outer vert 3032
+  DEBUG: Bridge created between Hole vert 7530 and Outer vert 4751
+  DEBUG: Bridge created between Hole vert 6321 and Outer vert 3033
+  DEBUG: Bridge created between Hole vert 5817 and Outer vert 3033
+  DEBUG: Bridge created between Hole vert 2495 and Outer vert 3033
   DEBUG: Bridge created between Hole vert 5191 and Outer vert 3779
-  DEBUG: Bridge created between Hole vert 4199 and Outer vert 7530
+  DEBUG: Bridge created between Hole vert 4199 and Outer vert 4751
   DEBUG: Bridge created between Hole vert 2899 and Outer vert 5797
   DEBUG: Bridge created between Hole vert 6453 and Outer vert 5585
   DEBUG: Bridge created between Hole vert 2523 and Outer vert 2479
@@ -2575,15 +2516,11 @@ Triangulation quality warning for  clc (Area OK): 5231 tris
   DEBUG: Bridge created between Hole vert 2585 and Outer vert 2038
   DEBUG: Bridge created between Hole vert 3232 and Outer vert 6255
   DEBUG: Bridge created between Hole vert 2687 and Outer vert 2625
-AREA MISMATCH: expected=0.0488593, actual=0.142088, ratio=2.9081 (8401 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 8401, expected 8463
-FAIL: test_polygons/mismatch_N44E009_clc_006.json (expected=0.0488593, actual=0.142088, ratio=2.9081)
   DEBUG: Bridge created between Hole vert 10313 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 9342 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 7550 and Outer vert 0
-  DEBUG: Bridge created between Hole vert 8759 and Outer vert 7567
-  DEBUG: Bridge created between Hole vert 8573 and Outer vert 7567
+  DEBUG: Bridge created between Hole vert 9403 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 7568 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 8759 and Outer vert 7568
+  DEBUG: Bridge created between Hole vert 8573 and Outer vert 7568
   DEBUG: Bridge created between Hole vert 8040 and Outer vert 623
   DEBUG: Bridge created between Hole vert 7548 and Outer vert 0
   DEBUG: Bridge created between Hole vert 6830 and Outer vert 8142
@@ -2651,10 +2588,10 @@ FAIL: test_polygons/mismatch_N44E009_clc_006.json (expected=0.0488593, actual=0.
   DEBUG: Bridge created between Hole vert 6483 and Outer vert 8477
   DEBUG: Bridge created between Hole vert 7218 and Outer vert 8306
   DEBUG: Bridge created between Hole vert 1150 and Outer vert 943
+  DEBUG: Bridge created between Hole vert 4632 and Outer vert 2617
   DEBUG: Bridge created between Hole vert 6856 and Outer vert 2617
-  DEBUG: Bridge created between Hole vert 4607 and Outer vert 2617
   DEBUG: Bridge created between Hole vert 4644 and Outer vert 4625
-  DEBUG: Bridge created between Hole vert 5352 and Outer vert 4629
+  DEBUG: Bridge created between Hole vert 5352 and Outer vert 4632
   DEBUG: Bridge created between Hole vert 5186 and Outer vert 6852
   DEBUG: Bridge created between Hole vert 4415 and Outer vert 4680
   DEBUG: Bridge created between Hole vert 5443 and Outer vert 1873
@@ -2690,33 +2627,31 @@ FAIL: test_polygons/mismatch_N44E009_clc_006.json (expected=0.0488593, actual=0.
   DEBUG: Bridge created between Hole vert 6251 and Outer vert 129
   DEBUG: Bridge created between Hole vert 6584 and Outer vert 6428
   DEBUG: Bridge created between Hole vert 6163 and Outer vert 146
-  DEBUG: Bridge created between Hole vert 2247 and Outer vert 2193
-  DEBUG: Bridge created between Hole vert 2333 and Outer vert 2193
+  DEBUG: Bridge created between Hole vert 2434 and Outer vert 2206
+  DEBUG: Bridge created between Hole vert 2247 and Outer vert 2194
+  DEBUG: Bridge created between Hole vert 2333 and Outer vert 2194
   DEBUG: Bridge created between Hole vert 2290 and Outer vert 1996
   DEBUG: Bridge created between Hole vert 2210 and Outer vert 2298
   DEBUG: Bridge created between Hole vert 2386 and Outer vert 662
-Triangulation quality warning for  clc (Area OK): 2430 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2430, expected 2465
-FAIL: test_polygons/mismatch_N44E009_clc_010.json (expected=0.00751909, actual=0.00754943, ratio=1.0040)
-  DEBUG: Bridge created between Hole vert 5504 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 6533 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 12361 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 5979 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 8623 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 7326 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 11205 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 8121 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 8160 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 6592 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 7361 and Outer vert 4684
   DEBUG: Bridge created between Hole vert 7855 and Outer vert 4684
-  DEBUG: Bridge created between Hole vert 8575 and Outer vert 8157
-  DEBUG: Bridge created between Hole vert 6595 and Outer vert 4449
-  DEBUG: Bridge created between Hole vert 7237 and Outer vert 6591
+  DEBUG: Bridge created between Hole vert 5515 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 5982 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 12361 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 8623 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 11300 and Outer vert 4684
+  DEBUG: Bridge created between Hole vert 8575 and Outer vert 8160
+  DEBUG: Bridge created between Hole vert 6595 and Outer vert 4450
+  DEBUG: Bridge created between Hole vert 7237 and Outer vert 6592
   DEBUG: Bridge created between Hole vert 11613 and Outer vert 7340
   DEBUG: Bridge created between Hole vert 5263 and Outer vert 7877
   DEBUG: Bridge created between Hole vert 6488 and Outer vert 6595
   DEBUG: Bridge created between Hole vert 5420 and Outer vert 7310
-  DEBUG: Bridge created between Hole vert 7939 and Outer vert 4449
-  DEBUG: Bridge created between Hole vert 6725 and Outer vert 4449
+  DEBUG: Bridge created between Hole vert 7939 and Outer vert 4450
+  DEBUG: Bridge created between Hole vert 7210 and Outer vert 4708
+  DEBUG: Bridge created between Hole vert 6725 and Outer vert 4450
   DEBUG: Bridge created between Hole vert 5843 and Outer vert 6488
   DEBUG: Bridge created between Hole vert 7468 and Outer vert 11527
   DEBUG: Bridge created between Hole vert 6917 and Outer vert 6531
@@ -2735,6 +2670,7 @@ FAIL: test_polygons/mismatch_N44E009_clc_010.json (expected=0.00751909, actual=0
   DEBUG: Bridge created between Hole vert 5890 and Outer vert 7610
   DEBUG: Bridge created between Hole vert 6258 and Outer vert 7040
   DEBUG: Bridge created between Hole vert 5739 and Outer vert 11951
+  DEBUG: Bridge created between Hole vert 7323 and Outer vert 11961
   DEBUG: Bridge created between Hole vert 8997 and Outer vert 11394
   DEBUG: Bridge created between Hole vert 7788 and Outer vert 8778
   DEBUG: Bridge created between Hole vert 10450 and Outer vert 5757
@@ -2752,6 +2688,7 @@ FAIL: test_polygons/mismatch_N44E009_clc_010.json (expected=0.00751909, actual=0
   DEBUG: Bridge created between Hole vert 7677 and Outer vert 819
   DEBUG: Bridge created between Hole vert 5569 and Outer vert 7101
   DEBUG: Bridge created between Hole vert 9192 and Outer vert 9712
+  DEBUG: Bridge created between Hole vert 10428 and Outer vert 10613
   DEBUG: Bridge created between Hole vert 8169 and Outer vert 5659
   DEBUG: Bridge created between Hole vert 9924 and Outer vert 755
   DEBUG: Bridge created between Hole vert 7206 and Outer vert 2034
@@ -2770,13 +2707,12 @@ FAIL: test_polygons/mismatch_N44E009_clc_010.json (expected=0.00751909, actual=0
   DEBUG: Bridge created between Hole vert 6764 and Outer vert 9018
   DEBUG: Bridge created between Hole vert 10009 and Outer vert 2133
   DEBUG: Bridge created between Hole vert 5770 and Outer vert 8248
-AREA MISMATCH: expected=0.0540763, actual=0.10563, ratio=1.9534 (12843 tris)
+Triangulation quality warning for  clc (Area OK): 12901 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 12843, expected 12966
-FAIL: test_polygons/mismatch_N44E009_clc_011.json (expected=0.0540763, actual=0.10563, ratio=1.9534)
-  DEBUG: Bridge created between Hole vert 10390 and Outer vert 2568
+  QUALITY WARNING: Triangle count mismatch: got 12901, expected 12966
   DEBUG: Bridge created between Hole vert 18153 and Outer vert 4886
   DEBUG: Bridge created between Hole vert 13776 and Outer vert 4886
+  DEBUG: Bridge created between Hole vert 10397 and Outer vert 2568
   DEBUG: Bridge created between Hole vert 10905 and Outer vert 2568
   DEBUG: Bridge created between Hole vert 14173 and Outer vert 2959
   DEBUG: Bridge created between Hole vert 10081 and Outer vert 4454
@@ -2880,7 +2816,7 @@ FAIL: test_polygons/mismatch_N44E009_clc_011.json (expected=0.0540763, actual=0.
   DEBUG: Bridge created between Hole vert 476 and Outer vert 434
   DEBUG: Bridge created between Hole vert 2616 and Outer vert 2588
   DEBUG: Bridge created between Hole vert 2735 and Outer vert 1384
-  DEBUG: Bridge created between Hole vert 3138 and Outer vert 2615
+  DEBUG: Bridge created between Hole vert 3138 and Outer vert 2616
   DEBUG: Bridge created between Hole vert 3377 and Outer vert 2320
   DEBUG: Bridge created between Hole vert 3290 and Outer vert 1336
   DEBUG: Bridge created between Hole vert 2645 and Outer vert 2203
@@ -2891,36 +2827,33 @@ FAIL: test_polygons/mismatch_N44E009_clc_011.json (expected=0.0540763, actual=0.
   DEBUG: Bridge created between Hole vert 2595 and Outer vert 274
   DEBUG: Bridge created between Hole vert 2922 and Outer vert 3359
   DEBUG: Bridge created between Hole vert 2933 and Outer vert 3110
-  DEBUG: Bridge created between Hole vert 4222 and Outer vert 1942
-  DEBUG: Bridge created between Hole vert 2828 and Outer vert 1942
-  DEBUG: Bridge created between Hole vert 3546 and Outer vert 1942
   DEBUG: Bridge created between Hole vert 3311 and Outer vert 1942
-  DEBUG: Bridge created between Hole vert 2089 and Outer vert 1942
+  DEBUG: Bridge created between Hole vert 3546 and Outer vert 1942
+  DEBUG: Bridge created between Hole vert 4449 and Outer vert 1942
+  DEBUG: Bridge created between Hole vert 2834 and Outer vert 1942
+  DEBUG: Bridge created between Hole vert 2089 and Outer vert 3546
   DEBUG: Bridge created between Hole vert 2601 and Outer vert 1669
   DEBUG: Bridge created between Hole vert 2865 and Outer vert 1996
   DEBUG: Bridge created between Hole vert 2207 and Outer vert 2636
   DEBUG: Bridge created between Hole vert 2161 and Outer vert 1982
   DEBUG: Bridge created between Hole vert 4057 and Outer vert 4416
   DEBUG: Bridge created between Hole vert 2052 and Outer vert 3557
-  DEBUG: Bridge created between Hole vert 2694 and Outer vert 4441
+  DEBUG: Bridge created between Hole vert 2694 and Outer vert 4449
   DEBUG: Bridge created between Hole vert 3081 and Outer vert 3364
   DEBUG: Bridge created between Hole vert 2537 and Outer vert 2232
   DEBUG: Bridge created between Hole vert 3768 and Outer vert 3556
   DEBUG: Bridge created between Hole vert 2457 and Outer vert 3331
   DEBUG: Bridge created between Hole vert 2409 and Outer vert 3977
+  DEBUG: Bridge created between Hole vert 2956 and Outer vert 2019
   DEBUG: Bridge created between Hole vert 3184 and Outer vert 3588
-  DEBUG: Bridge created between Hole vert 2184 and Outer vert 2857
+  DEBUG: Bridge created between Hole vert 2184 and Outer vert 3033
   DEBUG: Bridge created between Hole vert 2269 and Outer vert 2198
   DEBUG: Bridge created between Hole vert 3413 and Outer vert 3058
   DEBUG: Bridge created between Hole vert 2766 and Outer vert 3675
   DEBUG: Bridge created between Hole vert 2495 and Outer vert 2840
-  DEBUG: Bridge created between Hole vert 2070 and Outer vert 2852
+  DEBUG: Bridge created between Hole vert 2070 and Outer vert 3027
   DEBUG: Bridge created between Hole vert 2113 and Outer vert 3233
   DEBUG: Bridge created between Hole vert 2104 and Outer vert 2797
-AREA MISMATCH: expected=0.0521921, actual=0.094008, ratio=1.8012 (4357 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4357, expected 4502
-FAIL: test_polygons/mismatch_N44E009_clc_019.json (expected=0.0521921, actual=0.094008, ratio=1.8012)
   DEBUG: Bridge created between Hole vert 4355 and Outer vert 3334
   DEBUG: Bridge created between Hole vert 4513 and Outer vert 3348
   DEBUG: Bridge created between Hole vert 4530 and Outer vert 3302
@@ -2928,22 +2861,23 @@ FAIL: test_polygons/mismatch_N44E009_clc_019.json (expected=0.0521921, actual=0.
   DEBUG: Bridge created between Hole vert 4628 and Outer vert 3236
   DEBUG: Bridge created between Hole vert 4834 and Outer vert 4550
   DEBUG: Bridge created between Hole vert 4217 and Outer vert 3774
+  DEBUG: Bridge created between Hole vert 3820 and Outer vert 3377
   DEBUG: Bridge created between Hole vert 4003 and Outer vert 3262
   DEBUG: Bridge created between Hole vert 3911 and Outer vert 1756
   DEBUG: Bridge created between Hole vert 4793 and Outer vert 4510
   DEBUG: Bridge created between Hole vert 4676 and Outer vert 2338
   DEBUG: Bridge created between Hole vert 4171 and Outer vert 1690
+  DEBUG: Bridge created between Hole vert 3796 and Outer vert 3823
   DEBUG: Bridge created between Hole vert 4439 and Outer vert 993
+  DEBUG: Bridge created between Hole vert 3814 and Outer vert 4469
   DEBUG: Bridge created between Hole vert 4417 and Outer vert 4469
   DEBUG: Bridge created between Hole vert 3843 and Outer vert 4428
   DEBUG: Bridge created between Hole vert 4117 and Outer vert 744
   DEBUG: Bridge created between Hole vert 4640 and Outer vert 3879
   DEBUG: Bridge created between Hole vert 4748 and Outer vert 750
+  DEBUG: Bridge created between Hole vert 4559 and Outer vert 3893
   DEBUG: Bridge created between Hole vert 4400 and Outer vert 3883
   DEBUG: Bridge created between Hole vert 4517 and Outer vert 759
-Triangulation quality warning for  clc (Area OK): 4899 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4899, expected 4959
   DEBUG: Bridge created between Hole vert 200 and Outer vert 169
   DEBUG: Bridge created between Hole vert 599 and Outer vert 530
   DEBUG: Bridge created between Hole vert 4064 and Outer vert 2004
@@ -2952,6 +2886,7 @@ Triangulation quality warning for  clc (Area OK): 4899 tris
   DEBUG: Bridge created between Hole vert 3293 and Outer vert 2157
   DEBUG: Bridge created between Hole vert 3024 and Outer vert 2663
   DEBUG: Bridge created between Hole vert 3446 and Outer vert 2563
+  DEBUG: Bridge created between Hole vert 4107 and Outer vert 2691
   DEBUG: Bridge created between Hole vert 3880 and Outer vert 3114
   DEBUG: Bridge created between Hole vert 3548 and Outer vert 2931
   DEBUG: Bridge created between Hole vert 3739 and Outer vert 3104
@@ -2961,10 +2896,6 @@ Triangulation quality warning for  clc (Area OK): 4899 tris
   DEBUG: Bridge created between Hole vert 3254 and Outer vert 3624
   DEBUG: Bridge created between Hole vert 2855 and Outer vert 3152
   DEBUG: Bridge created between Hole vert 3833 and Outer vert 532
-Triangulation quality warning for  clc (Area OK): 4126 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4126, expected 4144
-FAIL: test_polygons/mismatch_N44E009_clc_023.json (expected=0.0153305, actual=0.0153495, ratio=1.0012)
   DEBUG: Bridge created between Hole vert 1467 and Outer vert 833
   DEBUG: Bridge created between Hole vert 1429 and Outer vert 583
   DEBUG: Bridge created between Hole vert 296 and Outer vert 55
@@ -3019,14 +2950,14 @@ FAIL: test_polygons/mismatch_N44E009_clc_023.json (expected=0.0153305, actual=0.
   DEBUG: Bridge created between Hole vert 1975 and Outer vert 1580
   DEBUG: Bridge created between Hole vert 1938 and Outer vert 1882
   DEBUG: Bridge created between Hole vert 729 and Outer vert 321
-  DEBUG: Bridge created between Hole vert 1853 and Outer vert 1441
-  DEBUG: Bridge created between Hole vert 2184 and Outer vert 1441
   DEBUG: Bridge created between Hole vert 3970 and Outer vert 1441
-  DEBUG: Bridge created between Hole vert 5177 and Outer vert 1302
-  DEBUG: Bridge created between Hole vert 4284 and Outer vert 2187
+  DEBUG: Bridge created between Hole vert 1853 and Outer vert 1441
+  DEBUG: Bridge created between Hole vert 2237 and Outer vert 1441
+  DEBUG: Bridge created between Hole vert 5177 and Outer vert 1303
+  DEBUG: Bridge created between Hole vert 4284 and Outer vert 2186
   DEBUG: Bridge created between Hole vert 3776 and Outer vert 5175
   DEBUG: Bridge created between Hole vert 4898 and Outer vert 1300
-  DEBUG: Bridge created between Hole vert 5154 and Outer vert 2236
+  DEBUG: Bridge created between Hole vert 5154 and Outer vert 2237
   DEBUG: Bridge created between Hole vert 4615 and Outer vert 1472
   DEBUG: Bridge created between Hole vert 3434 and Outer vert 1736
   DEBUG: Bridge created between Hole vert 4190 and Outer vert 2101
@@ -3067,10 +2998,7 @@ FAIL: test_polygons/mismatch_N44E009_clc_023.json (expected=0.0153305, actual=0.
   DEBUG: Bridge created between Hole vert 1857 and Outer vert 1497
   DEBUG: Bridge created between Hole vert 1799 and Outer vert 1937
   DEBUG: Bridge created between Hole vert 355 and Outer vert 252
-AREA MISMATCH: expected=7.48412e-05, actual=7.71885e-05, ratio=1.0314 (43 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.36 deg
-  QUALITY WARNING: Triangle count mismatch: got 43, expected 58
-FAIL: test_polygons/mismatch_N45E005_clc_006.json (expected=7.48412e-05, actual=7.71885e-05, ratio=1.0314)
+  DEBUG: Bridge created between Hole vert 47 and Outer vert 36
   DEBUG: Bridge created between Hole vert 225 and Outer vert 129
   DEBUG: Bridge created between Hole vert 215 and Outer vert 140
   DEBUG: Bridge created between Hole vert 2073 and Outer vert 821
@@ -3130,24 +3058,16 @@ Triangulation quality warning for  clc (Area OK): 86 tris
   DEBUG: Bridge created between Hole vert 3740 and Outer vert 2508
   DEBUG: Bridge created between Hole vert 4572 and Outer vert 2390
   DEBUG: Bridge created between Hole vert 4431 and Outer vert 3587
+  DEBUG: Bridge created between Hole vert 4515 and Outer vert 2532
   DEBUG: Bridge created between Hole vert 4368 and Outer vert 3612
-Triangulation quality warning for  clc (Area OK): 4642 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4642, expected 4680
   DEBUG: Bridge created between Hole vert 770 and Outer vert 706
   DEBUG: Bridge created between Hole vert 651 and Outer vert 397
   DEBUG: Bridge created between Hole vert 600 and Outer vert 472
   DEBUG: Bridge created between Hole vert 113 and Outer vert 20
-AREA MISMATCH: expected=1.90135e-05, actual=2.38031e-05, ratio=1.2519 (9 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.56 deg
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 19
-FAIL: test_polygons/mismatch_N45E005_clc_026.json (expected=1.90135e-05, actual=2.38031e-05, ratio=1.2519)
+  DEBUG: Bridge created between Hole vert 11 and Outer vert 10
   DEBUG: Bridge created between Hole vert 219 and Outer vert 174
   DEBUG: Bridge created between Hole vert 363 and Outer vert 265
-AREA MISMATCH: expected=0.00118725, actual=0.00122342, ratio=1.0305 (370 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 370, expected 402
-FAIL: test_polygons/mismatch_N45E005_clc_028.json (expected=0.00118725, actual=0.00122342, ratio=1.0305)
+  DEBUG: Bridge created between Hole vert 370 and Outer vert 354
   DEBUG: Bridge created between Hole vert 120 and Outer vert 14
   DEBUG: Bridge created between Hole vert 116 and Outer vert 121
   DEBUG: Bridge created between Hole vert 792 and Outer vert 374
@@ -3432,7 +3352,7 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 388 and Outer vert 155
   DEBUG: Bridge created between Hole vert 487 and Outer vert 407
   DEBUG: Bridge created between Hole vert 376 and Outer vert 155
-  DEBUG: Bridge created between Hole vert 478 and Outer vert 455
+  DEBUG: Bridge created between Hole vert 474 and Outer vert 453
   DEBUG: Bridge created between Hole vert 642 and Outer vert 392
   DEBUG: Bridge created between Hole vert 733 and Outer vert 640
   DEBUG: Bridge created between Hole vert 563 and Outer vert 152
@@ -3580,8 +3500,8 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 328 and Outer vert 436
   DEBUG: Bridge created between Hole vert 354 and Outer vert 436
   DEBUG: Bridge created between Hole vert 778 and Outer vert 1051
-  DEBUG: Bridge created between Hole vert 367 and Outer vert 327
   DEBUG: Bridge created between Hole vert 341 and Outer vert 329
+  DEBUG: Bridge created between Hole vert 367 and Outer vert 327
   DEBUG: Bridge created between Hole vert 358 and Outer vert 166
   DEBUG: Bridge created between Hole vert 1024 and Outer vert 243
   DEBUG: Bridge created between Hole vert 406 and Outer vert 171
@@ -3721,11 +3641,8 @@ Cheap validation errors for tile  type water:
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  DEBUG: Bridge created between Hole vert 40 and Outer vert 6
-AREA MISMATCH: expected=1.23564e-05, actual=4.18934e-05, ratio=3.3904 (32 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 32, expected 49
-FAIL: test_polygons/mismatch_N45E005_water_122.json (expected=1.23564e-05, actual=4.18934e-05, ratio=3.3904)
+  DEBUG: Bridge created between Hole vert 37 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 40 and Outer vert 30
 Triangulation quality warning for  water (Area OK): 24 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
   QUALITY WARNING: Triangle count mismatch: got 24, expected 25
@@ -4026,7 +3943,7 @@ FAIL: test_polygons/mismatch_N45E005_water_542.json (expected=1.58443e-08, actua
   DEBUG: Bridge created between Hole vert 1721 and Outer vert 1445
   DEBUG: Bridge created between Hole vert 4168 and Outer vert 3231
   DEBUG: Bridge created between Hole vert 4614 and Outer vert 3231
-  DEBUG: Bridge created between Hole vert 3232 and Outer vert 3231
+  DEBUG: Bridge created between Hole vert 3866 and Outer vert 3231
   DEBUG: Bridge created between Hole vert 4659 and Outer vert 3207
   DEBUG: Bridge created between Hole vert 4335 and Outer vert 2822
   DEBUG: Bridge created between Hole vert 3919 and Outer vert 2848
@@ -4054,18 +3971,16 @@ FAIL: test_polygons/mismatch_N45E005_water_542.json (expected=1.58443e-08, actua
   DEBUG: Bridge created between Hole vert 3079 and Outer vert 3351
   DEBUG: Bridge created between Hole vert 340 and Outer vert 245
   DEBUG: Bridge created between Hole vert 749 and Outer vert 462
+  DEBUG: Bridge created between Hole vert 1740 and Outer vert 1739
   DEBUG: Bridge created between Hole vert 1950 and Outer vert 1738
-  DEBUG: Bridge created between Hole vert 1835 and Outer vert 254
+  DEBUG: Bridge created between Hole vert 1835 and Outer vert 1814
   DEBUG: Bridge created between Hole vert 1992 and Outer vert 863
+  DEBUG: Bridge created between Hole vert 1824 and Outer vert 1856
   DEBUG: Bridge created between Hole vert 2023 and Outer vert 1982
   DEBUG: Bridge created between Hole vert 1890 and Outer vert 961
   DEBUG: Bridge created between Hole vert 2018 and Outer vert 1926
-AREA MISMATCH: expected=0.00682947, actual=0.00706299, ratio=1.0342 (1953 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1953, expected 2069
-FAIL: test_polygons/mismatch_N45E006_clc_069.json (expected=0.00682947, actual=0.00706299, ratio=1.0342)
-  DEBUG: Bridge created between Hole vert 3039 and Outer vert 1753
-  DEBUG: Bridge created between Hole vert 3393 and Outer vert 1753
+  DEBUG: Bridge created between Hole vert 3416 and Outer vert 1753
+  DEBUG: Bridge created between Hole vert 3041 and Outer vert 1753
   DEBUG: Bridge created between Hole vert 3292 and Outer vert 3040
   DEBUG: Bridge created between Hole vert 3464 and Outer vert 2621
   DEBUG: Bridge created between Hole vert 3112 and Outer vert 3298
@@ -4360,12 +4275,10 @@ FAIL: test_polygons/mismatch_N45E006_water_434.json (expected=1.8623e-08, actual
   DEBUG: Bridge created between Hole vert 5931 and Outer vert 1460
   DEBUG: Bridge created between Hole vert 4729 and Outer vert 4381
   DEBUG: Bridge created between Hole vert 6220 and Outer vert 1983
+  DEBUG: Bridge created between Hole vert 4394 and Outer vert 4750
   DEBUG: Bridge created between Hole vert 6299 and Outer vert 6210
   DEBUG: Bridge created between Hole vert 5339 and Outer vert 2081
   DEBUG: Bridge created between Hole vert 6246 and Outer vert 5375
-Triangulation quality warning for  clc (Area OK): 6375 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 6375, expected 6391
   DEBUG: Bridge created between Hole vert 5749 and Outer vert 1457
   DEBUG: Bridge created between Hole vert 5884 and Outer vert 1368
   DEBUG: Bridge created between Hole vert 5668 and Outer vert 2841
@@ -4495,12 +4408,12 @@ Triangulation quality warning for  clc (Area OK): 6375 tris
   DEBUG: Bridge created between Hole vert 1903 and Outer vert 1511
   DEBUG: Bridge created between Hole vert 1716 and Outer vert 685
   DEBUG: Bridge created between Hole vert 1734 and Outer vert 861
-  DEBUG: Bridge created between Hole vert 250 and Outer vert 141
-  DEBUG: Bridge created between Hole vert 230 and Outer vert 276
+  DEBUG: Bridge created between Hole vert 278 and Outer vert 141
+  DEBUG: Bridge created between Hole vert 230 and Outer vert 278
   DEBUG: Bridge created between Hole vert 162 and Outer vert 128
   DEBUG: Bridge created between Hole vert 206 and Outer vert 144
   DEBUG: Bridge created between Hole vert 347 and Outer vert 260
-  DEBUG: Bridge created between Hole vert 86 and Outer vert 85
+  DEBUG: Bridge created between Hole vert 140 and Outer vert 85
   DEBUG: Bridge created between Hole vert 813 and Outer vert 611
   DEBUG: Bridge created between Hole vert 717 and Outer vert 513
   DEBUG: Bridge created between Hole vert 2577 and Outer vert 2240
@@ -4510,11 +4423,9 @@ Triangulation quality warning for  clc (Area OK): 6375 tris
   DEBUG: Bridge created between Hole vert 2489 and Outer vert 2253
   DEBUG: Bridge created between Hole vert 2781 and Outer vert 2427
   DEBUG: Bridge created between Hole vert 2797 and Outer vert 491
-Triangulation quality warning for  clc (Area OK): 2825 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2825, expected 2844
+  DEBUG: Bridge created between Hole vert 2659 and Outer vert 2547
+  DEBUG: Bridge created between Hole vert 3598 and Outer vert 2925
   DEBUG: Bridge created between Hole vert 3396 and Outer vert 2925
-  DEBUG: Bridge created between Hole vert 3575 and Outer vert 2925
   DEBUG: Bridge created between Hole vert 3610 and Outer vert 2722
   DEBUG: Bridge created between Hole vert 3487 and Outer vert 2735
   DEBUG: Bridge created between Hole vert 3410 and Outer vert 2589
@@ -4558,10 +4469,10 @@ Triangulation quality warning for  clc (Area OK): 2825 tris
   DEBUG: Bridge created between Hole vert 2246 and Outer vert 2466
   DEBUG: Bridge created between Hole vert 1986 and Outer vert 1833
   DEBUG: Bridge created between Hole vert 133 and Outer vert 132
-  DEBUG: Bridge created between Hole vert 6990 and Outer vert 6253
-  DEBUG: Bridge created between Hole vert 8696 and Outer vert 6320
-  DEBUG: Bridge created between Hole vert 6321 and Outer vert 6320
-  DEBUG: Bridge created between Hole vert 8109 and Outer vert 7011
+  DEBUG: Bridge created between Hole vert 8749 and Outer vert 6320
+  DEBUG: Bridge created between Hole vert 6989 and Outer vert 6320
+  DEBUG: Bridge created between Hole vert 7013 and Outer vert 6253
+  DEBUG: Bridge created between Hole vert 8109 and Outer vert 7013
   DEBUG: Bridge created between Hole vert 7923 and Outer vert 5333
   DEBUG: Bridge created between Hole vert 7367 and Outer vert 5409
   DEBUG: Bridge created between Hole vert 8578 and Outer vert 2530
@@ -4583,10 +4494,10 @@ Triangulation quality warning for  clc (Area OK): 2825 tris
   DEBUG: Bridge created between Hole vert 4547 and Outer vert 2653
   DEBUG: Bridge created between Hole vert 4678 and Outer vert 2530
   DEBUG: Bridge created between Hole vert 4721 and Outer vert 4149
-  DEBUG: Bridge created between Hole vert 2496 and Outer vert 2061
   DEBUG: Bridge created between Hole vert 3435 and Outer vert 2061
+  DEBUG: Bridge created between Hole vert 2496 and Outer vert 2061
   DEBUG: Bridge created between Hole vert 2372 and Outer vert 2146
-  DEBUG: Bridge created between Hole vert 3394 and Outer vert 3434
+  DEBUG: Bridge created between Hole vert 3394 and Outer vert 3435
   DEBUG: Bridge created between Hole vert 3024 and Outer vert 2390
   DEBUG: Bridge created between Hole vert 3526 and Outer vert 2049
   DEBUG: Bridge created between Hole vert 3081 and Outer vert 2053
@@ -4606,7 +4517,7 @@ Triangulation quality warning for  clc (Area OK): 2825 tris
   DEBUG: Bridge created between Hole vert 2835 and Outer vert 1193
   DEBUG: Bridge created between Hole vert 3211 and Outer vert 2872
   DEBUG: Bridge created between Hole vert 3101 and Outer vert 3189
-  DEBUG: Bridge created between Hole vert 386 and Outer vert 211
+  DEBUG: Bridge created between Hole vert 411 and Outer vert 211
   DEBUG: Bridge created between Hole vert 414 and Outer vert 266
   DEBUG: Bridge created between Hole vert 1800 and Outer vert 1060
   DEBUG: Bridge created between Hole vert 512 and Outer vert 445
@@ -4689,15 +4600,9 @@ Triangulation quality warning for  clc (Area OK): 2825 tris
   DEBUG: Bridge created between Hole vert 208 and Outer vert 146
   DEBUG: Bridge created between Hole vert 746 and Outer vert 648
   DEBUG: Bridge created between Hole vert 688 and Outer vert 637
-AREA MISMATCH: expected=0.0029842, actual=0.00301251, ratio=1.0095 (729 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 729, expected 752
-FAIL: test_polygons/mismatch_N45E007_clc_112.json (expected=0.0029842, actual=0.00301251, ratio=1.0095)
+  DEBUG: Bridge created between Hole vert 713 and Outer vert 236
   DEBUG: Bridge created between Hole vert 256 and Outer vert 239
-AREA MISMATCH: expected=0.00185273, actual=0.00189063, ratio=1.0205 (289 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 289, expected 311
-FAIL: test_polygons/mismatch_N45E007_clc_113.json (expected=0.00185273, actual=0.00189063, ratio=1.0205)
+  DEBUG: Bridge created between Hole vert 302 and Outer vert 249
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -4780,13 +4685,13 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 122 and Outer vert 49
   DEBUG: Bridge created between Hole vert 238 and Outer vert 176
   DEBUG: Bridge created between Hole vert 213 and Outer vert 99
-  DEBUG: Bridge created between Hole vert 1226 and Outer vert 864
-  DEBUG: Bridge created between Hole vert 1170 and Outer vert 864
-  DEBUG: Bridge created between Hole vert 1238 and Outer vert 746
-  DEBUG: Bridge created between Hole vert 1160 and Outer vert 1189
+  DEBUG: Bridge created between Hole vert 1237 and Outer vert 864
+  DEBUG: Bridge created between Hole vert 1191 and Outer vert 864
+  DEBUG: Bridge created between Hole vert 1238 and Outer vert 747
+  DEBUG: Bridge created between Hole vert 1160 and Outer vert 1191
   DEBUG: Bridge created between Hole vert 1212 and Outer vert 75
   DEBUG: Bridge created between Hole vert 1113 and Outer vert 60
-  DEBUG: Bridge created between Hole vert 972 and Outer vert 1189
+  DEBUG: Bridge created between Hole vert 972 and Outer vert 1191
   DEBUG: Bridge created between Hole vert 1137 and Outer vert 1254
   DEBUG: Bridge created between Hole vert 876 and Outer vert 544
   DEBUG: Bridge created between Hole vert 1192 and Outer vert 1254
@@ -4830,22 +4735,18 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 386 and Outer vert 337
   DEBUG: Bridge created between Hole vert 594 and Outer vert 591
   DEBUG: Bridge created between Hole vert 985 and Outer vert 591
-  DEBUG: Bridge created between Hole vert 713 and Outer vert 592
-  DEBUG: Bridge created between Hole vert 682 and Outer vert 591
+  DEBUG: Bridge created between Hole vert 713 and Outer vert 594
+  DEBUG: Bridge created between Hole vert 682 and Outer vert 594
   DEBUG: Bridge created between Hole vert 626 and Outer vert 591
-  DEBUG: Bridge created between Hole vert 802 and Outer vert 972
+  DEBUG: Bridge created between Hole vert 802 and Outer vert 592
   DEBUG: Bridge created between Hole vert 630 and Outer vert 693
-AREA MISMATCH: expected=0.0114618, actual=0.0207759, ratio=1.8126 (1037 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1037, expected 1063
-FAIL: test_polygons/mismatch_N45E008_clc_033.json (expected=0.0114618, actual=0.0207759, ratio=1.8126)
-  DEBUG: Bridge created between Hole vert 1053 and Outer vert 594
   DEBUG: Bridge created between Hole vert 1154 and Outer vert 611
-  DEBUG: Bridge created between Hole vert 885 and Outer vert 611
+  DEBUG: Bridge created between Hole vert 1053 and Outer vert 594
+  DEBUG: Bridge created between Hole vert 885 and Outer vert 1154
   DEBUG: Bridge created between Hole vert 1050 and Outer vert 611
   DEBUG: Bridge created between Hole vert 1689 and Outer vert 611
   DEBUG: Bridge created between Hole vert 695 and Outer vert 1070
-  DEBUG: Bridge created between Hole vert 1557 and Outer vert 1137
+  DEBUG: Bridge created between Hole vert 1557 and Outer vert 1154
   DEBUG: Bridge created between Hole vert 980 and Outer vert 608
   DEBUG: Bridge created between Hole vert 1429 and Outer vert 1137
   DEBUG: Bridge created between Hole vert 844 and Outer vert 637
@@ -4869,20 +4770,20 @@ FAIL: test_polygons/mismatch_N45E008_clc_033.json (expected=0.0114618, actual=0.
   DEBUG: Bridge created between Hole vert 792 and Outer vert 786
   DEBUG: Bridge created between Hole vert 1088 and Outer vert 786
   DEBUG: Bridge created between Hole vert 657 and Outer vert 741
-AREA MISMATCH: expected=0.0269494, actual=0.0501833, ratio=1.8621 (1811 tris)
+AREA MISMATCH: expected=0.0269494, actual=0.0496888, ratio=1.8438 (1811 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1811, expected 1845
-FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.0501833, ratio=1.8621)
-  DEBUG: Bridge created between Hole vert 1651 and Outer vert 651
-  DEBUG: Bridge created between Hole vert 2841 and Outer vert 651
+FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.0496888, ratio=1.8438)
+  DEBUG: Bridge created between Hole vert 2886 and Outer vert 651
+  DEBUG: Bridge created between Hole vert 1654 and Outer vert 651
   DEBUG: Bridge created between Hole vert 3253 and Outer vert 655
   DEBUG: Bridge created between Hole vert 2378 and Outer vert 604
   DEBUG: Bridge created between Hole vert 1492 and Outer vert 672
-  DEBUG: Bridge created between Hole vert 1942 and Outer vert 1653
+  DEBUG: Bridge created between Hole vert 1942 and Outer vert 1654
   DEBUG: Bridge created between Hole vert 2069 and Outer vert 2403
   DEBUG: Bridge created between Hole vert 1795 and Outer vert 346
   DEBUG: Bridge created between Hole vert 2573 and Outer vert 254
-  DEBUG: Bridge created between Hole vert 1444 and Outer vert 1653
+  DEBUG: Bridge created between Hole vert 1444 and Outer vert 1654
   DEBUG: Bridge created between Hole vert 2714 and Outer vert 245
   DEBUG: Bridge created between Hole vert 1433 and Outer vert 235
   DEBUG: Bridge created between Hole vert 2464 and Outer vert 2402
@@ -4916,10 +4817,10 @@ FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.
   DEBUG: Bridge created between Hole vert 2330 and Outer vert 2659
   DEBUG: Bridge created between Hole vert 1516 and Outer vert 2308
   DEBUG: Bridge created between Hole vert 1428 and Outer vert 2174
-  DEBUG: Bridge created between Hole vert 2040 and Outer vert 653
-  DEBUG: Bridge created between Hole vert 2625 and Outer vert 653
   DEBUG: Bridge created between Hole vert 3032 and Outer vert 653
-  DEBUG: Bridge created between Hole vert 2597 and Outer vert 3031
+  DEBUG: Bridge created between Hole vert 2631 and Outer vert 653
+  DEBUG: Bridge created between Hole vert 2248 and Outer vert 653
+  DEBUG: Bridge created between Hole vert 2597 and Outer vert 3032
   DEBUG: Bridge created between Hole vert 3923 and Outer vert 2247
   DEBUG: Bridge created between Hole vert 2861 and Outer vert 2232
   DEBUG: Bridge created between Hole vert 2494 and Outer vert 2236
@@ -4953,11 +4854,11 @@ FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.
   DEBUG: Bridge created between Hole vert 648 and Outer vert 538
   DEBUG: Bridge created between Hole vert 672 and Outer vert 573
   DEBUG: Bridge created between Hole vert 3333 and Outer vert 1903
-  DEBUG: Bridge created between Hole vert 4635 and Outer vert 1903
-  DEBUG: Bridge created between Hole vert 3451 and Outer vert 3332
+  DEBUG: Bridge created between Hole vert 4642 and Outer vert 1903
+  DEBUG: Bridge created between Hole vert 3451 and Outer vert 3333
   DEBUG: Bridge created between Hole vert 4471 and Outer vert 3449
-  DEBUG: Bridge created between Hole vert 4818 and Outer vert 3332
-  DEBUG: Bridge created between Hole vert 3401 and Outer vert 3332
+  DEBUG: Bridge created between Hole vert 4818 and Outer vert 3333
+  DEBUG: Bridge created between Hole vert 3401 and Outer vert 3333
   DEBUG: Bridge created between Hole vert 4542 and Outer vert 4498
   DEBUG: Bridge created between Hole vert 3212 and Outer vert 3521
   DEBUG: Bridge created between Hole vert 4414 and Outer vert 1801
@@ -5004,6 +4905,7 @@ FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.
   DEBUG: Bridge created between Hole vert 2221 and Outer vert 1908
   DEBUG: Bridge created between Hole vert 1540 and Outer vert 2328
   DEBUG: Bridge created between Hole vert 1416 and Outer vert 1882
+  DEBUG: Bridge created between Hole vert 2272 and Outer vert 2563
   DEBUG: Bridge created between Hole vert 1573 and Outer vert 1123
   DEBUG: Bridge created between Hole vert 2045 and Outer vert 799
   DEBUG: Bridge created between Hole vert 2799 and Outer vert 2446
@@ -5023,13 +4925,11 @@ FAIL: test_polygons/mismatch_N45E008_clc_034.json (expected=0.0269494, actual=0.
   DEBUG: Bridge created between Hole vert 1276 and Outer vert 1689
   DEBUG: Bridge created between Hole vert 1377 and Outer vert 3386
   DEBUG: Bridge created between Hole vert 1303 and Outer vert 1853
+  DEBUG: Bridge created between Hole vert 2247 and Outer vert 1401
   DEBUG: Bridge created between Hole vert 1441 and Outer vert 1700
   DEBUG: Bridge created between Hole vert 1489 and Outer vert 3066
   DEBUG: Bridge created between Hole vert 1451 and Outer vert 3123
-Triangulation quality warning for  clc (Area OK): 3389 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3389, expected 3454
-FAIL: test_polygons/mismatch_N45E008_clc_044.json (expected=0.0237868, actual=0.0238516, ratio=1.0027)
+  DEBUG: Bridge created between Hole vert 2029 and Outer vert 2271
   DEBUG: Bridge created between Hole vert 4409 and Outer vert 1150
   DEBUG: Bridge created between Hole vert 4366 and Outer vert 4367
   DEBUG: Bridge created between Hole vert 3429 and Outer vert 1568
@@ -5111,29 +5011,25 @@ FAIL: test_polygons/mismatch_N45E008_clc_044.json (expected=0.0237868, actual=0.
   DEBUG: Bridge created between Hole vert 241 and Outer vert 190
   DEBUG: Bridge created between Hole vert 256 and Outer vert 183
   DEBUG: Bridge created between Hole vert 133 and Outer vert 111
-  DEBUG: Bridge created between Hole vert 807 and Outer vert 473
-  DEBUG: Bridge created between Hole vert 612 and Outer vert 473
   DEBUG: Bridge created between Hole vert 835 and Outer vert 473
-  DEBUG: Bridge created between Hole vert 865 and Outer vert 473
+  DEBUG: Bridge created between Hole vert 648 and Outer vert 473
+  DEBUG: Bridge created between Hole vert 807 and Outer vert 473
+  DEBUG: Bridge created between Hole vert 865 and Outer vert 648
   DEBUG: Bridge created between Hole vert 897 and Outer vert 617
   DEBUG: Bridge created between Hole vert 977 and Outer vert 823
-  DEBUG: Bridge created between Hole vert 952 and Outer vert 449
+  DEBUG: Bridge created between Hole vert 952 and Outer vert 808
   DEBUG: Bridge created between Hole vert 704 and Outer vert 833
   DEBUG: Bridge created between Hole vert 912 and Outer vert 960
   DEBUG: Bridge created between Hole vert 733 and Outer vert 879
   DEBUG: Bridge created between Hole vert 935 and Outer vert 963
-AREA MISMATCH: expected=0.00590963, actual=0.0106734, ratio=1.8061 (991 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 991, expected 1011
-FAIL: test_polygons/mismatch_N45E008_clc_073.json (expected=0.00590963, actual=0.0106734, ratio=1.8061)
   DEBUG: Bridge created between Hole vert 139 and Outer vert 131
-  DEBUG: Bridge created between Hole vert 6336 and Outer vert 4832
-  DEBUG: Bridge created between Hole vert 5661 and Outer vert 4832
   DEBUG: Bridge created between Hole vert 6262 and Outer vert 4832
-  DEBUG: Bridge created between Hole vert 6742 and Outer vert 4832
+  DEBUG: Bridge created between Hole vert 5707 and Outer vert 4832
+  DEBUG: Bridge created between Hole vert 6757 and Outer vert 4832
+  DEBUG: Bridge created between Hole vert 6336 and Outer vert 4832
   DEBUG: Bridge created between Hole vert 6165 and Outer vert 4832
-  DEBUG: Bridge created between Hole vert 5244 and Outer vert 4832
-  DEBUG: Bridge created between Hole vert 7626 and Outer vert 6261
+  DEBUG: Bridge created between Hole vert 5244 and Outer vert 6757
+  DEBUG: Bridge created between Hole vert 7626 and Outer vert 6262
   DEBUG: Bridge created between Hole vert 5433 and Outer vert 5243
   DEBUG: Bridge created between Hole vert 5783 and Outer vert 6406
   DEBUG: Bridge created between Hole vert 5022 and Outer vert 6312
@@ -5144,12 +5040,8 @@ FAIL: test_polygons/mismatch_N45E008_clc_073.json (expected=0.00590963, actual=0
   DEBUG: Bridge created between Hole vert 5007 and Outer vert 453
   DEBUG: Bridge created between Hole vert 5483 and Outer vert 6424
   DEBUG: Bridge created between Hole vert 4875 and Outer vert 2172
-AREA MISMATCH: expected=0.0182405, actual=0.0329206, ratio=1.8048 (8001 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 8001, expected 8074
-FAIL: test_polygons/mismatch_N45E008_clc_075.json (expected=0.0182405, actual=0.0329206, ratio=1.8048)
-  DEBUG: Bridge created between Hole vert 728 and Outer vert 0
   DEBUG: Bridge created between Hole vert 567 and Outer vert 0
+  DEBUG: Bridge created between Hole vert 728 and Outer vert 0
   DEBUG: Bridge created between Hole vert 5251 and Outer vert 4641
   DEBUG: Bridge created between Hole vert 5780 and Outer vert 4261
   DEBUG: Bridge created between Hole vert 6477 and Outer vert 4778
@@ -5202,8 +5094,8 @@ Triangulation quality warning for  clc (Area OK): 3311 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3311, expected 3320
   DEBUG: Bridge created between Hole vert 87 and Outer vert 66
-  DEBUG: Bridge created between Hole vert 2124 and Outer vert 1969
   DEBUG: Bridge created between Hole vert 2340 and Outer vert 1969
+  DEBUG: Bridge created between Hole vert 2124 and Outer vert 1969
   DEBUG: Bridge created between Hole vert 2355 and Outer vert 1533
   DEBUG: Bridge created between Hole vert 2755 and Outer vert 856
   DEBUG: Bridge created between Hole vert 2585 and Outer vert 2330
@@ -5230,31 +5122,25 @@ Triangulation quality warning for  clc (Area OK): 3311 tris
   DEBUG: Bridge created between Hole vert 1775 and Outer vert 875
   DEBUG: Bridge created between Hole vert 1717 and Outer vert 798
   DEBUG: Bridge created between Hole vert 307 and Outer vert 253
-  DEBUG: Bridge created between Hole vert 305 and Outer vert 304
-  DEBUG: Bridge created between Hole vert 802 and Outer vert 304
-  DEBUG: Bridge created between Hole vert 878 and Outer vert 304
+  DEBUG: Bridge created between Hole vert 830 and Outer vert 304
   DEBUG: Bridge created between Hole vert 918 and Outer vert 304
-  DEBUG: Bridge created between Hole vert 695 and Outer vert 917
+  DEBUG: Bridge created between Hole vert 312 and Outer vert 304
+  DEBUG: Bridge created between Hole vert 878 and Outer vert 304
+  DEBUG: Bridge created between Hole vert 695 and Outer vert 918
   DEBUG: Bridge created between Hole vert 972 and Outer vert 252
   DEBUG: Bridge created between Hole vert 895 and Outer vert 242
   DEBUG: Bridge created between Hole vert 732 and Outer vert 476
   DEBUG: Bridge created between Hole vert 853 and Outer vert 472
-AREA MISMATCH: expected=0.00557945, actual=0.00994775, ratio=1.7829 (977 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 977, expected 1010
-FAIL: test_polygons/mismatch_N45E008_clc_085.json (expected=0.00557945, actual=0.00994775, ratio=1.7829)
   DEBUG: Bridge created between Hole vert 362 and Outer vert 287
   DEBUG: Bridge created between Hole vert 327 and Outer vert 267
-AREA MISMATCH: expected=0.00282372, actual=0.00285713, ratio=1.0118 (333 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 333, expected 370
-FAIL: test_polygons/mismatch_N45E008_clc_086.json (expected=0.00282372, actual=0.00285713, ratio=1.0118)
+  DEBUG: Bridge created between Hole vert 293 and Outer vert 134
   DEBUG: Bridge created between Hole vert 452 and Outer vert 398
   DEBUG: Bridge created between Hole vert 3969 and Outer vert 2774
+  DEBUG: Bridge created between Hole vert 3278 and Outer vert 2807
   DEBUG: Bridge created between Hole vert 2970 and Outer vert 2741
   DEBUG: Bridge created between Hole vert 3524 and Outer vert 1819
   DEBUG: Bridge created between Hole vert 4133 and Outer vert 1894
-  DEBUG: Bridge created between Hole vert 3872 and Outer vert 2783
+  DEBUG: Bridge created between Hole vert 3872 and Outer vert 3325
   DEBUG: Bridge created between Hole vert 3845 and Outer vert 1882
   DEBUG: Bridge created between Hole vert 4245 and Outer vert 3009
   DEBUG: Bridge created between Hole vert 3462 and Outer vert 1738
@@ -5280,10 +5166,6 @@ FAIL: test_polygons/mismatch_N45E008_clc_086.json (expected=0.00282372, actual=0
   DEBUG: Bridge created between Hole vert 4062 and Outer vert 844
   DEBUG: Bridge created between Hole vert 4101 and Outer vert 2928
   DEBUG: Bridge created between Hole vert 4015 and Outer vert 4118
-Triangulation quality warning for  clc (Area OK): 4230 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4230, expected 4348
-FAIL: test_polygons/mismatch_N45E008_clc_088.json (expected=0.0284126, actual=0.0285488, ratio=1.0048)
   DEBUG: Bridge created between Hole vert 1091 and Outer vert 949
   DEBUG: Bridge created between Hole vert 105 and Outer vert 91
   DEBUG: Bridge created between Hole vert 1415 and Outer vert 1183
@@ -5400,17 +5282,17 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 3602 and Outer vert 4308
   DEBUG: Bridge created between Hole vert 3629 and Outer vert 3604
   DEBUG: Bridge created between Hole vert 3611 and Outer vert 4306
-  DEBUG: Bridge created between Hole vert 3619 and Outer vert 4314
+  DEBUG: Bridge created between Hole vert 3619 and Outer vert 88
   DEBUG: Bridge created between Hole vert 3646 and Outer vert 2545
   DEBUG: Bridge created between Hole vert 3642 and Outer vert 2595
   DEBUG: Bridge created between Hole vert 3191 and Outer vert 2662
   DEBUG: Bridge created between Hole vert 3213 and Outer vert 3175
   DEBUG: Bridge created between Hole vert 3163 and Outer vert 2705
   DEBUG: Bridge created between Hole vert 3159 and Outer vert 3117
-AREA MISMATCH: expected=0.00214609, actual=0.00499819, ratio=2.3290 (4450 tris)
+AREA MISMATCH: expected=0.00214609, actual=0.0166541, ratio=7.7602 (4446 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4450, expected 4529
-FAIL: test_polygons/mismatch_N45E008_water_101.json (expected=0.00214609, actual=0.00499819, ratio=2.3290)
+  QUALITY WARNING: Triangle count mismatch: got 4446, expected 4529
+FAIL: test_polygons/mismatch_N45E008_water_101.json (expected=0.00214609, actual=0.0166541, ratio=7.7602)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -5520,11 +5402,11 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 1785 and Outer vert 1234
   DEBUG: Bridge created between Hole vert 1633 and Outer vert 807
   DEBUG: Bridge created between Hole vert 2189 and Outer vert 3568
-  DEBUG: Bridge created between Hole vert 2853 and Outer vert 2176
+  DEBUG: Bridge created between Hole vert 2856 and Outer vert 2176
   DEBUG: Bridge created between Hole vert 3357 and Outer vert 2176
-  DEBUG: Bridge created between Hole vert 2599 and Outer vert 2855
-  DEBUG: Bridge created between Hole vert 3182 and Outer vert 2005
-  DEBUG: Bridge created between Hole vert 4342 and Outer vert 2176
+  DEBUG: Bridge created between Hole vert 2599 and Outer vert 2856
+  DEBUG: Bridge created between Hole vert 3182 and Outer vert 2007
+  DEBUG: Bridge created between Hole vert 4342 and Outer vert 2007
   DEBUG: Bridge created between Hole vert 4209 and Outer vert 2117
   DEBUG: Bridge created between Hole vert 3525 and Outer vert 1971
   DEBUG: Bridge created between Hole vert 3787 and Outer vert 2779
@@ -5553,10 +5435,6 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 4004 and Outer vert 141
   DEBUG: Bridge created between Hole vert 3865 and Outer vert 3155
   DEBUG: Bridge created between Hole vert 4028 and Outer vert 693
-AREA MISMATCH: expected=0.0454781, actual=0.0585172, ratio=1.2867 (4418 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4418, expected 4443
-FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.0585172, ratio=1.2867)
   DEBUG: Bridge created between Hole vert 1442 and Outer vert 574
   DEBUG: Bridge created between Hole vert 1058 and Outer vert 247
   DEBUG: Bridge created between Hole vert 1240 and Outer vert 261
@@ -5587,18 +5465,18 @@ FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.
   DEBUG: Bridge created between Hole vert 3373 and Outer vert 3743
   DEBUG: Bridge created between Hole vert 2974 and Outer vert 3271
   DEBUG: Bridge created between Hole vert 3952 and Outer vert 621
-  DEBUG: Bridge created between Hole vert 507 and Outer vert 493
-  DEBUG: Bridge created between Hole vert 495 and Outer vert 225
+  DEBUG: Bridge created between Hole vert 519 and Outer vert 493
+  DEBUG: Bridge created between Hole vert 495 and Outer vert 228
   DEBUG: Bridge created between Hole vert 445 and Outer vert 384
   DEBUG: Bridge created between Hole vert 406 and Outer vert 367
-  DEBUG: Bridge created between Hole vert 5468 and Outer vert 1582
-  DEBUG: Bridge created between Hole vert 2746 and Outer vert 1797
-  DEBUG: Bridge created between Hole vert 5599 and Outer vert 1797
-  DEBUG: Bridge created between Hole vert 2183 and Outer vert 1797
-  DEBUG: Bridge created between Hole vert 3753 and Outer vert 1797
+  DEBUG: Bridge created between Hole vert 2757 and Outer vert 1797
+  DEBUG: Bridge created between Hole vert 5787 and Outer vert 1797
+  DEBUG: Bridge created between Hole vert 3793 and Outer vert 1797
   DEBUG: Bridge created between Hole vert 4596 and Outer vert 1797
+  DEBUG: Bridge created between Hole vert 2183 and Outer vert 1797
   DEBUG: Bridge created between Hole vert 3407 and Outer vert 1582
-  DEBUG: Bridge created between Hole vert 2938 and Outer vert 2756
+  DEBUG: Bridge created between Hole vert 5468 and Outer vert 1582
+  DEBUG: Bridge created between Hole vert 2938 and Outer vert 2757
   DEBUG: Bridge created between Hole vert 1811 and Outer vert 2755
   DEBUG: Bridge created between Hole vert 2052 and Outer vert 5777
   DEBUG: Bridge created between Hole vert 3548 and Outer vert 1632
@@ -5606,7 +5484,7 @@ FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.
   DEBUG: Bridge created between Hole vert 3083 and Outer vert 4582
   DEBUG: Bridge created between Hole vert 2097 and Outer vert 5738
   DEBUG: Bridge created between Hole vert 3662 and Outer vert 4536
-  DEBUG: Bridge created between Hole vert 2420 and Outer vert 2756
+  DEBUG: Bridge created between Hole vert 2420 and Outer vert 2757
   DEBUG: Bridge created between Hole vert 2862 and Outer vert 4502
   DEBUG: Bridge created between Hole vert 3449 and Outer vert 5780
   DEBUG: Bridge created between Hole vert 1847 and Outer vert 5469
@@ -5661,10 +5539,10 @@ FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.
   DEBUG: Bridge created between Hole vert 2295 and Outer vert 1011
   DEBUG: Bridge created between Hole vert 2382 and Outer vert 983
   DEBUG: Bridge created between Hole vert 2075 and Outer vert 1032
-  DEBUG: Bridge created between Hole vert 2581 and Outer vert 1960
-  DEBUG: Bridge created between Hole vert 3352 and Outer vert 1960
+  DEBUG: Bridge created between Hole vert 2611 and Outer vert 1960
+  DEBUG: Bridge created between Hole vert 2571 and Outer vert 1960
   DEBUG: Bridge created between Hole vert 2705 and Outer vert 1960
-  DEBUG: Bridge created between Hole vert 2549 and Outer vert 1960
+  DEBUG: Bridge created between Hole vert 3352 and Outer vert 1960
   DEBUG: Bridge created between Hole vert 2404 and Outer vert 1943
   DEBUG: Bridge created between Hole vert 2501 and Outer vert 2585
   DEBUG: Bridge created between Hole vert 1993 and Outer vert 2552
@@ -5697,10 +5575,6 @@ FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.
   DEBUG: Bridge created between Hole vert 4590 and Outer vert 3007
   DEBUG: Bridge created between Hole vert 2623 and Outer vert 3921
   DEBUG: Bridge created between Hole vert 2077 and Outer vert 1477
-AREA MISMATCH: expected=0.019934, actual=0.0200994, ratio=1.0083 (4867 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4867, expected 4891
-FAIL: test_polygons/mismatch_N45E009_clc_012.json (expected=0.019934, actual=0.0200994, ratio=1.0083)
   DEBUG: Bridge created between Hole vert 1319 and Outer vert 476
   DEBUG: Bridge created between Hole vert 955 and Outer vert 476
   DEBUG: Bridge created between Hole vert 1001 and Outer vert 471
@@ -5728,21 +5602,22 @@ FAIL: test_polygons/mismatch_N45E009_clc_012.json (expected=0.019934, actual=0.0
   DEBUG: Bridge created between Hole vert 1060 and Outer vert 641
   DEBUG: Bridge created between Hole vert 1245 and Outer vert 2086
   DEBUG: Bridge created between Hole vert 1351 and Outer vert 2185
-  DEBUG: Bridge created between Hole vert 1513 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 3263 and Outer vert 885
+  DEBUG: Bridge created between Hole vert 3336 and Outer vert 886
+  DEBUG: Bridge created between Hole vert 1544 and Outer vert 885
+  DEBUG: Bridge created between Hole vert 3269 and Outer vert 885
+  DEBUG: Bridge created between Hole vert 3455 and Outer vert 885
+  DEBUG: Bridge created between Hole vert 2404 and Outer vert 885
   DEBUG: Bridge created between Hole vert 4141 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 3449 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 2393 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 4684 and Outer vert 3454
+  DEBUG: Bridge created between Hole vert 4684 and Outer vert 3455
   DEBUG: Bridge created between Hole vert 3755 and Outer vert 885
   DEBUG: Bridge created between Hole vert 1580 and Outer vert 1516
   DEBUG: Bridge created between Hole vert 1348 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 2455 and Outer vert 3267
-  DEBUG: Bridge created between Hole vert 1030 and Outer vert 909
-  DEBUG: Bridge created between Hole vert 2127 and Outer vert 885
-  DEBUG: Bridge created between Hole vert 2896 and Outer vert 4134
-  DEBUG: Bridge created between Hole vert 1442 and Outer vert 2454
-  DEBUG: Bridge created between Hole vert 1121 and Outer vert 4891
+  DEBUG: Bridge created between Hole vert 2455 and Outer vert 3269
+  DEBUG: Bridge created between Hole vert 1030 and Outer vert 3352
+  DEBUG: Bridge created between Hole vert 2127 and Outer vert 3269
+  DEBUG: Bridge created between Hole vert 2896 and Outer vert 2400
+  DEBUG: Bridge created between Hole vert 1442 and Outer vert 3269
+  DEBUG: Bridge created between Hole vert 1121 and Outer vert 4668
   DEBUG: Bridge created between Hole vert 2262 and Outer vert 1543
   DEBUG: Bridge created between Hole vert 1481 and Outer vert 4077
   DEBUG: Bridge created between Hole vert 2790 and Outer vert 4712
@@ -5756,7 +5631,7 @@ FAIL: test_polygons/mismatch_N45E009_clc_012.json (expected=0.019934, actual=0.0
   DEBUG: Bridge created between Hole vert 1166 and Outer vert 2157
   DEBUG: Bridge created between Hole vert 2169 and Outer vert 3815
   DEBUG: Bridge created between Hole vert 1874 and Outer vert 4867
-  DEBUG: Bridge created between Hole vert 5418 and Outer vert 4790
+  DEBUG: Bridge created between Hole vert 5418 and Outer vert 4793
   DEBUG: Bridge created between Hole vert 3066 and Outer vert 1592
   DEBUG: Bridge created between Hole vert 2917 and Outer vert 3792
   DEBUG: Bridge created between Hole vert 3512 and Outer vert 2
@@ -5820,26 +5695,27 @@ FAIL: test_polygons/mismatch_N45E009_clc_012.json (expected=0.019934, actual=0.0
   DEBUG: Bridge created between Hole vert 2618 and Outer vert 6463
   DEBUG: Bridge created between Hole vert 3316 and Outer vert 1039
   DEBUG: Bridge created between Hole vert 1779 and Outer vert 5150
-AREA MISMATCH: expected=0.0569869, actual=0.165717, ratio=2.9080 (6552 tris)
+AREA MISMATCH: expected=0.0569869, actual=0.0997209, ratio=1.7499 (6617 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 6552, expected 6694
-FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.165717, ratio=2.9080)
-  DEBUG: Bridge created between Hole vert 1069 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 1350 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 1782 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 1451 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 4791 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 3564 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 2506 and Outer vert 946
-  DEBUG: Bridge created between Hole vert 2318 and Outer vert 946
+  QUALITY WARNING: Triangle count mismatch: got 6617, expected 6694
+FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.0997209, ratio=1.7499)
+  DEBUG: Bridge created between Hole vert 2528 and Outer vert 947
+  DEBUG: Bridge created between Hole vert 3569 and Outer vert 946
   DEBUG: Bridge created between Hole vert 2705 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 1792 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 2318 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 1451 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 1069 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 4813 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 2527 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 1353 and Outer vert 946
   DEBUG: Bridge created between Hole vert 1669 and Outer vert 944
   DEBUG: Bridge created between Hole vert 1089 and Outer vert 2327
   DEBUG: Bridge created between Hole vert 3427 and Outer vert 1084
   DEBUG: Bridge created between Hole vert 989 and Outer vert 1457
-  DEBUG: Bridge created between Hole vert 3056 and Outer vert 1351
-  DEBUG: Bridge created between Hole vert 1325 and Outer vert 2525
-  DEBUG: Bridge created between Hole vert 4236 and Outer vert 946
+  DEBUG: Bridge created between Hole vert 3056 and Outer vert 1353
+  DEBUG: Bridge created between Hole vert 1325 and Outer vert 2527
+  DEBUG: Bridge created between Hole vert 4236 and Outer vert 2527
   DEBUG: Bridge created between Hole vert 2544 and Outer vert 2682
   DEBUG: Bridge created between Hole vert 1117 and Outer vert 1099
   DEBUG: Bridge created between Hole vert 3061 and Outer vert 3055
@@ -5858,8 +5734,8 @@ FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.
   DEBUG: Bridge created between Hole vert 1762 and Outer vert 4129
   DEBUG: Bridge created between Hole vert 2974 and Outer vert 2559
   DEBUG: Bridge created between Hole vert 1680 and Outer vert 2502
-  DEBUG: Bridge created between Hole vert 2329 and Outer vert 3055
-  DEBUG: Bridge created between Hole vert 4069 and Outer vert 3568
+  DEBUG: Bridge created between Hole vert 2329 and Outer vert 2525
+  DEBUG: Bridge created between Hole vert 4069 and Outer vert 2537
   DEBUG: Bridge created between Hole vert 3665 and Outer vert 4219
   DEBUG: Bridge created between Hole vert 4518 and Outer vert 2327
   DEBUG: Bridge created between Hole vert 1520 and Outer vert 1129
@@ -5890,6 +5766,7 @@ FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.
   DEBUG: Bridge created between Hole vert 1726 and Outer vert 4712
   DEBUG: Bridge created between Hole vert 1168 and Outer vert 2940
   DEBUG: Bridge created between Hole vert 1052 and Outer vert 145
+  DEBUG: Bridge created between Hole vert 3886 and Outer vert 965
   DEBUG: Bridge created between Hole vert 1232 and Outer vert 3606
   DEBUG: Bridge created between Hole vert 2275 and Outer vert 3801
   DEBUG: Bridge created between Hole vert 1504 and Outer vert 2338
@@ -5906,17 +5783,13 @@ FAIL: test_polygons/mismatch_N45E009_clc_014.json (expected=0.0569869, actual=0.
   DEBUG: Bridge created between Hole vert 3556 and Outer vert 956
   DEBUG: Bridge created between Hole vert 1307 and Outer vert 3197
   DEBUG: Bridge created between Hole vert 4360 and Outer vert 4350
-AREA MISMATCH: expected=0.0973173, actual=0.307789, ratio=3.1627 (4866 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4866, expected 4980
-FAIL: test_polygons/mismatch_N45E009_clc_015.json (expected=0.0973173, actual=0.307789, ratio=3.1627)
-  DEBUG: Bridge created between Hole vert 3606 and Outer vert 831
+  DEBUG: Bridge created between Hole vert 4054 and Outer vert 831
   DEBUG: Bridge created between Hole vert 3740 and Outer vert 831
-  DEBUG: Bridge created between Hole vert 4314 and Outer vert 831
-  DEBUG: Bridge created between Hole vert 4016 and Outer vert 831
-  DEBUG: Bridge created between Hole vert 4775 and Outer vert 831
-  DEBUG: Bridge created between Hole vert 4994 and Outer vert 3616
-  DEBUG: Bridge created between Hole vert 3597 and Outer vert 4053
+  DEBUG: Bridge created between Hole vert 4875 and Outer vert 831
+  DEBUG: Bridge created between Hole vert 3617 and Outer vert 831
+  DEBUG: Bridge created between Hole vert 4333 and Outer vert 831
+  DEBUG: Bridge created between Hole vert 4994 and Outer vert 3617
+  DEBUG: Bridge created between Hole vert 3597 and Outer vert 4054
   DEBUG: Bridge created between Hole vert 3826 and Outer vert 1529
   DEBUG: Bridge created between Hole vert 3421 and Outer vert 1543
   DEBUG: Bridge created between Hole vert 5282 and Outer vert 3814
@@ -5956,17 +5829,13 @@ FAIL: test_polygons/mismatch_N45E009_clc_015.json (expected=0.0973173, actual=0.
   DEBUG: Bridge created between Hole vert 4304 and Outer vert 5160
   DEBUG: Bridge created between Hole vert 4230 and Outer vert 636
   DEBUG: Bridge created between Hole vert 4644 and Outer vert 1286
-AREA MISMATCH: expected=0.0314765, actual=0.0322156, ratio=1.0235 (5716 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 5716, expected 5769
-FAIL: test_polygons/mismatch_N45E009_clc_016.json (expected=0.0314765, actual=0.0322156, ratio=1.0235)
   DEBUG: Bridge created between Hole vert 2560 and Outer vert 0
   DEBUG: Bridge created between Hole vert 2159 and Outer vert 101
-  DEBUG: Bridge created between Hole vert 2610 and Outer vert 1778
-  DEBUG: Bridge created between Hole vert 2509 and Outer vert 1778
-  DEBUG: Bridge created between Hole vert 2107 and Outer vert 1778
+  DEBUG: Bridge created between Hole vert 2610 and Outer vert 1779
+  DEBUG: Bridge created between Hole vert 2509 and Outer vert 1779
+  DEBUG: Bridge created between Hole vert 2107 and Outer vert 1779
   DEBUG: Bridge created between Hole vert 2232 and Outer vert 51
-  DEBUG: Bridge created between Hole vert 1982 and Outer vert 1776
+  DEBUG: Bridge created between Hole vert 1982 and Outer vert 1779
   DEBUG: Bridge created between Hole vert 2023 and Outer vert 2503
   DEBUG: Bridge created between Hole vert 2447 and Outer vert 2546
   DEBUG: Bridge created between Hole vert 2047 and Outer vert 194
@@ -6049,7 +5918,7 @@ Triangulation quality warning for  clc (Area OK): 2340 tris
   DEBUG: Bridge created between Hole vert 146 and Outer vert 138
   DEBUG: Bridge created between Hole vert 102 and Outer vert 92
   DEBUG: Bridge created between Hole vert 138 and Outer vert 52
-  DEBUG: Bridge created between Hole vert 2559 and Outer vert 1010
+  DEBUG: Bridge created between Hole vert 2584 and Outer vert 1010
   DEBUG: Bridge created between Hole vert 3528 and Outer vert 1013
   DEBUG: Bridge created between Hole vert 3366 and Outer vert 1054
   DEBUG: Bridge created between Hole vert 2937 and Outer vert 3382
@@ -6074,10 +5943,6 @@ Triangulation quality warning for  clc (Area OK): 2340 tris
   DEBUG: Bridge created between Hole vert 3600 and Outer vert 3648
   DEBUG: Bridge created between Hole vert 3060 and Outer vert 3338
   DEBUG: Bridge created between Hole vert 3623 and Outer vert 3651
-AREA MISMATCH: expected=0.0248131, actual=0.0315624, ratio=1.2720 (3741 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3741, expected 3776
-FAIL: test_polygons/mismatch_N45E009_clc_027.json (expected=0.0248131, actual=0.0315624, ratio=1.2720)
   DEBUG: Bridge created between Hole vert 2121 and Outer vert 506
   DEBUG: Bridge created between Hole vert 2039 and Outer vert 555
   DEBUG: Bridge created between Hole vert 1781 and Outer vert 501
@@ -6094,6 +5959,7 @@ FAIL: test_polygons/mismatch_N45E009_clc_027.json (expected=0.0248131, actual=0.
   DEBUG: Bridge created between Hole vert 171 and Outer vert 111
   DEBUG: Bridge created between Hole vert 238 and Outer vert 203
   DEBUG: Bridge created between Hole vert 1190 and Outer vert 979
+  DEBUG: Bridge created between Hole vert 1397 and Outer vert 844
   DEBUG: Bridge created between Hole vert 1315 and Outer vert 802
   DEBUG: Bridge created between Hole vert 1178 and Outer vert 766
   DEBUG: Bridge created between Hole vert 1130 and Outer vert 792
@@ -6106,10 +5972,10 @@ FAIL: test_polygons/mismatch_N45E009_clc_027.json (expected=0.0248131, actual=0.
   DEBUG: Bridge created between Hole vert 1111 and Outer vert 1237
   DEBUG: Bridge created between Hole vert 1085 and Outer vert 368
   DEBUG: Bridge created between Hole vert 1069 and Outer vert 1287
-Triangulation quality warning for  clc (Area OK): 1414 tris
+Triangulation quality warning for  clc (Area OK): 1421 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 1414, expected 1430
-FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.0068118, ratio=1.0028)
+  QUALITY WARNING: Triangle count mismatch: got 1421, expected 1430
+FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.0068001, ratio=1.0011)
   DEBUG: Bridge created between Hole vert 2642 and Outer vert 1609
   DEBUG: Bridge created between Hole vert 2972 and Outer vert 1449
   DEBUG: Bridge created between Hole vert 3380 and Outer vert 1936
@@ -6177,15 +6043,15 @@ FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.
   DEBUG: Bridge created between Hole vert 1555 and Outer vert 1199
   DEBUG: Bridge created between Hole vert 1340 and Outer vert 820
   DEBUG: Bridge created between Hole vert 1260 and Outer vert 1089
-  DEBUG: Bridge created between Hole vert 3945 and Outer vert 712
-  DEBUG: Bridge created between Hole vert 3906 and Outer vert 712
-  DEBUG: Bridge created between Hole vert 2662 and Outer vert 712
-  DEBUG: Bridge created between Hole vert 2306 and Outer vert 712
-  DEBUG: Bridge created between Hole vert 4027 and Outer vert 712
   DEBUG: Bridge created between Hole vert 2692 and Outer vert 720
-  DEBUG: Bridge created between Hole vert 2614 and Outer vert 3905
+  DEBUG: Bridge created between Hole vert 3906 and Outer vert 712
+  DEBUG: Bridge created between Hole vert 4090 and Outer vert 712
+  DEBUG: Bridge created between Hole vert 2669 and Outer vert 712
+  DEBUG: Bridge created between Hole vert 4026 and Outer vert 712
+  DEBUG: Bridge created between Hole vert 2339 and Outer vert 712
+  DEBUG: Bridge created between Hole vert 2614 and Outer vert 3906
   DEBUG: Bridge created between Hole vert 2275 and Outer vert 2663
-  DEBUG: Bridge created between Hole vert 2865 and Outer vert 3905
+  DEBUG: Bridge created between Hole vert 2865 and Outer vert 3906
   DEBUG: Bridge created between Hole vert 3340 and Outer vert 3931
   DEBUG: Bridge created between Hole vert 2745 and Outer vert 3947
   DEBUG: Bridge created between Hole vert 2840 and Outer vert 4003
@@ -6203,40 +6069,39 @@ FAIL: test_polygons/mismatch_N45E009_clc_033.json (expected=0.0067925, actual=0.
   DEBUG: Bridge created between Hole vert 2128 and Outer vert 2171
   DEBUG: Bridge created between Hole vert 2249 and Outer vert 1539
   DEBUG: Bridge created between Hole vert 2506 and Outer vert 1012
+  DEBUG: Bridge created between Hole vert 2900 and Outer vert 1545
   DEBUG: Bridge created between Hole vert 1999 and Outer vert 30
   DEBUG: Bridge created between Hole vert 2560 and Outer vert 3843
   DEBUG: Bridge created between Hole vert 2477 and Outer vert 2529
-  DEBUG: Bridge created between Hole vert 3472 and Outer vert 2263
+  DEBUG: Bridge created between Hole vert 3472 and Outer vert 2896
   DEBUG: Bridge created between Hole vert 2210 and Outer vert 1127
   DEBUG: Bridge created between Hole vert 3190 and Outer vert 1115
   DEBUG: Bridge created between Hole vert 3042 and Outer vert 1152
-  DEBUG: Bridge created between Hole vert 2972 and Outer vert 3871
+  DEBUG: Bridge created between Hole vert 2972 and Outer vert 2935
   DEBUG: Bridge created between Hole vert 2381 and Outer vert 1139
   DEBUG: Bridge created between Hole vert 2348 and Outer vert 3059
   DEBUG: Bridge created between Hole vert 2022 and Outer vert 2216
   DEBUG: Bridge created between Hole vert 2376 and Outer vert 2207
-AREA MISMATCH: expected=0.0261249, actual=0.0323503, ratio=1.2383 (4527 tris)
+AREA MISMATCH: expected=0.0261249, actual=0.0318878, ratio=1.2206 (4597 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4527, expected 4635
-FAIL: test_polygons/mismatch_N45E009_clc_056.json (expected=0.0261249, actual=0.0323503, ratio=1.2383)
-  DEBUG: Bridge created between Hole vert 1365 and Outer vert 1306
+  QUALITY WARNING: Triangle count mismatch: got 4597, expected 4635
+FAIL: test_polygons/mismatch_N45E009_clc_056.json (expected=0.0261249, actual=0.0318878, ratio=1.2206)
+  DEBUG: Bridge created between Hole vert 1394 and Outer vert 1306
   DEBUG: Bridge created between Hole vert 1448 and Outer vert 1285
   DEBUG: Bridge created between Hole vert 1414 and Outer vert 1279
+  DEBUG: Bridge created between Hole vert 1557 and Outer vert 1444
   DEBUG: Bridge created between Hole vert 1465 and Outer vert 1256
+  DEBUG: Bridge created between Hole vert 1811 and Outer vert 1634
   DEBUG: Bridge created between Hole vert 1349 and Outer vert 667
   DEBUG: Bridge created between Hole vert 1504 and Outer vert 664
   DEBUG: Bridge created between Hole vert 1742 and Outer vert 1545
   DEBUG: Bridge created between Hole vert 1312 and Outer vert 1540
-AREA MISMATCH: expected=0.0067784, actual=0.00711818, ratio=1.0501 (1726 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1726, expected 1834
-FAIL: test_polygons/mismatch_N45E009_clc_057.json (expected=0.0067784, actual=0.00711818, ratio=1.0501)
   DEBUG: Bridge created between Hole vert 3029 and Outer vert 27
-  DEBUG: Bridge created between Hole vert 2531 and Outer vert 27
+  DEBUG: Bridge created between Hole vert 2534 and Outer vert 27
   DEBUG: Bridge created between Hole vert 4750 and Outer vert 27
-  DEBUG: Bridge created between Hole vert 3100 and Outer vert 3028
+  DEBUG: Bridge created between Hole vert 3100 and Outer vert 3029
   DEBUG: Bridge created between Hole vert 2592 and Outer vert 3027
-  DEBUG: Bridge created between Hole vert 3902 and Outer vert 3097
+  DEBUG: Bridge created between Hole vert 3902 and Outer vert 3029
   DEBUG: Bridge created between Hole vert 4260 and Outer vert 3091
   DEBUG: Bridge created between Hole vert 2465 and Outer vert 2625
   DEBUG: Bridge created between Hole vert 2907 and Outer vert 27
@@ -6385,8 +6250,8 @@ FAIL: test_polygons/mismatch_N45E009_clc_065.json (expected=0.000321401, actual=
   DEBUG: Bridge created between Hole vert 502 and Outer vert 313
   DEBUG: Bridge created between Hole vert 740 and Outer vert 649
   DEBUG: Bridge created between Hole vert 701 and Outer vert 614
-  DEBUG: Bridge created between Hole vert 134 and Outer vert 125
-  DEBUG: Bridge created between Hole vert 126 and Outer vert 125
+  DEBUG: Bridge created between Hole vert 146 and Outer vert 125
+  DEBUG: Bridge created between Hole vert 133 and Outer vert 125
   DEBUG: Bridge created between Hole vert 121 and Outer vert 97
   DEBUG: Bridge created between Hole vert 159 and Outer vert 66
   DEBUG: Bridge created between Hole vert 118 and Outer vert 84
@@ -6629,21 +6494,18 @@ Cheap validation errors for tile  type water:
   DEBUG: Bridge created between Hole vert 3170 and Outer vert 605
   DEBUG: Bridge created between Hole vert 2708 and Outer vert 643
   DEBUG: Bridge created between Hole vert 2740 and Outer vert 3060
-  DEBUG: Bridge created between Hole vert 3378 and Outer vert 2575
+  DEBUG: Bridge created between Hole vert 3432 and Outer vert 2575
   DEBUG: Bridge created between Hole vert 3110 and Outer vert 2724
   DEBUG: Bridge created between Hole vert 3501 and Outer vert 2105
   DEBUG: Bridge created between Hole vert 3557 and Outer vert 3519
   DEBUG: Bridge created between Hole vert 3223 and Outer vert 1612
   DEBUG: Bridge created between Hole vert 3375 and Outer vert 3244
+  DEBUG: Bridge created between Hole vert 2797 and Outer vert 59
   DEBUG: Bridge created between Hole vert 3308 and Outer vert 953
   DEBUG: Bridge created between Hole vert 2884 and Outer vert 234
   DEBUG: Bridge created between Hole vert 2993 and Outer vert 699
   DEBUG: Bridge created between Hole vert 3462 and Outer vert 259
   DEBUG: Bridge created between Hole vert 3468 and Outer vert 2955
-AREA MISMATCH: expected=0.0121757, actual=0.0123346, ratio=1.0131 (3492 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3492, expected 3583
-FAIL: test_polygons/mismatch_N46E005_clc_059.json (expected=0.0121757, actual=0.0123346, ratio=1.0131)
   DEBUG: Bridge created between Hole vert 2861 and Outer vert 2279
   DEBUG: Bridge created between Hole vert 2903 and Outer vert 811
   DEBUG: Bridge created between Hole vert 2712 and Outer vert 2175
@@ -6683,11 +6545,9 @@ FAIL: test_polygons/mismatch_N46E005_clc_059.json (expected=0.0121757, actual=0.
   DEBUG: Bridge created between Hole vert 948 and Outer vert 824
   DEBUG: Bridge created between Hole vert 1081 and Outer vert 930
   DEBUG: Bridge created between Hole vert 1076 and Outer vert 911
+  DEBUG: Bridge created between Hole vert 361 and Outer vert 272
   DEBUG: Bridge created between Hole vert 340 and Outer vert 266
   DEBUG: Bridge created between Hole vert 367 and Outer vert 357
-Triangulation quality warning for  clc (Area OK): 367 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 367, expected 380
   DEBUG: Bridge created between Hole vert 462 and Outer vert 213
   DEBUG: Bridge created between Hole vert 341 and Outer vert 284
   DEBUG: Bridge created between Hole vert 450 and Outer vert 425
@@ -6727,17 +6587,13 @@ Triangulation quality warning for  clc (Area OK): 367 tris
   DEBUG: Bridge created between Hole vert 355 and Outer vert 278
   DEBUG: Bridge created between Hole vert 62 and Outer vert 18
   DEBUG: Bridge created between Hole vert 120 and Outer vert 17
-  DEBUG: Bridge created between Hole vert 825 and Outer vert 738
-  DEBUG: Bridge created between Hole vert 739 and Outer vert 738
+  DEBUG: Bridge created between Hole vert 845 and Outer vert 738
   DEBUG: Bridge created between Hole vert 920 and Outer vert 738
-  DEBUG: Bridge created between Hole vert 765 and Outer vert 738
+  DEBUG: Bridge created between Hole vert 764 and Outer vert 738
+  DEBUG: Bridge created between Hole vert 812 and Outer vert 738
   DEBUG: Bridge created between Hole vert 849 and Outer vert 496
-  DEBUG: Bridge created between Hole vert 896 and Outer vert 843
+  DEBUG: Bridge created between Hole vert 896 and Outer vert 845
   DEBUG: Bridge created between Hole vert 862 and Outer vert 397
-AREA MISMATCH: expected=0.00331936, actual=0.00492011, ratio=1.4822 (940 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 940, expected 964
-FAIL: test_polygons/mismatch_N46E005_clc_096.json (expected=0.00331936, actual=0.00492011, ratio=1.4822)
   DEBUG: Bridge created between Hole vert 1702 and Outer vert 1329
   DEBUG: Bridge created between Hole vert 1657 and Outer vert 1298
   DEBUG: Bridge created between Hole vert 1547 and Outer vert 1716
@@ -6748,11 +6604,8 @@ FAIL: test_polygons/mismatch_N46E005_clc_096.json (expected=0.00331936, actual=0
   DEBUG: Bridge created between Hole vert 1658 and Outer vert 1349
   DEBUG: Bridge created between Hole vert 390 and Outer vert 242
   DEBUG: Bridge created between Hole vert 617 and Outer vert 543
+  DEBUG: Bridge created between Hole vert 1332 and Outer vert 993
   DEBUG: Bridge created between Hole vert 1367 and Outer vert 342
-AREA MISMATCH: expected=0.00387897, actual=0.00406513, ratio=1.0480 (1318 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1318, expected 1421
-FAIL: test_polygons/mismatch_N46E005_clc_100.json (expected=0.00387897, actual=0.00406513, ratio=1.0480)
   DEBUG: Bridge created between Hole vert 299 and Outer vert 289
   DEBUG: Bridge created between Hole vert 359 and Outer vert 326
   DEBUG: Bridge created between Hole vert 622 and Outer vert 518
@@ -6761,6 +6614,7 @@ FAIL: test_polygons/mismatch_N46E005_clc_100.json (expected=0.00387897, actual=0
   DEBUG: Bridge created between Hole vert 602 and Outer vert 634
   DEBUG: Bridge created between Hole vert 2424 and Outer vert 1625
   DEBUG: Bridge created between Hole vert 2057 and Outer vert 1783
+  DEBUG: Bridge created between Hole vert 2206 and Outer vert 1916
   DEBUG: Bridge created between Hole vert 2300 and Outer vert 1597
   DEBUG: Bridge created between Hole vert 2349 and Outer vert 1643
   DEBUG: Bridge created between Hole vert 2456 and Outer vert 1568
@@ -6772,18 +6626,11 @@ FAIL: test_polygons/mismatch_N46E005_clc_100.json (expected=0.00387897, actual=0
   DEBUG: Bridge created between Hole vert 2184 and Outer vert 2386
   DEBUG: Bridge created between Hole vert 2412 and Outer vert 2192
   DEBUG: Bridge created between Hole vert 2487 and Outer vert 457
-Triangulation quality warning for  clc (Area OK): 2525 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2525, expected 2538
-FAIL: test_polygons/mismatch_N46E005_clc_103.json (expected=0.0187914, actual=0.0188135, ratio=1.0012)
   DEBUG: Bridge created between Hole vert 479 and Outer vert 310
   DEBUG: Bridge created between Hole vert 524 and Outer vert 450
   DEBUG: Bridge created between Hole vert 519 and Outer vert 400
   DEBUG: Bridge created between Hole vert 68 and Outer vert 21
-AREA MISMATCH: expected=0.000374017, actual=0.000391413, ratio=1.0465 (45 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 45, expected 59
-FAIL: test_polygons/mismatch_N46E005_clc_106.json (expected=0.000374017, actual=0.000391413, ratio=1.0465)
+  DEBUG: Bridge created between Hole vert 47 and Outer vert 46
   DEBUG: Bridge created between Hole vert 1756 and Outer vert 414
   DEBUG: Bridge created between Hole vert 1584 and Outer vert 1188
   DEBUG: Bridge created between Hole vert 1734 and Outer vert 896
@@ -6820,11 +6667,8 @@ Cheap validation errors for tile  type water:
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   DEBUG: Bridge created between Hole vert 129 and Outer vert 71
+  DEBUG: Bridge created between Hole vert 211 and Outer vert 105
   DEBUG: Bridge created between Hole vert 248 and Outer vert 55
-AREA MISMATCH: expected=4.22518e-05, actual=4.95838e-05, ratio=1.1735 (223 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 223, expected 261
-FAIL: test_polygons/mismatch_N46E005_water_122.json (expected=4.22518e-05, actual=4.95838e-05, ratio=1.1735)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -6925,6 +6769,6 @@ FAIL: test_polygons/mismatch_N46E005_water_980.json (expected=3.31686e-09, actua
 
 Test Results:
 Total: 1381
-Passed: 1210
-Failed: 171
+Passed: 1256
+Failed: 125
 Regression suite FAILED.

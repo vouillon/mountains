@@ -600,62 +600,82 @@ module Triangulator = struct
 
       (* Eberly Step 2: Check ANY edge that straddles the ray y-level *)
       (* Removed "upward only" restriction to handle CCW holes/bridges robustly *)
-      (* Eberly Step 2: upward edges only (Vi <= my < Vi+1) *)
+      (* Eberly Step 2: Check edge that straddles the ray y-level *)
+      let dy = ny -. vy in
+      let horizontal =
+        abs_float dy < epsilon && abs_float (vy -. my) < epsilon
+      in
       let straddles = vy <= my && ny > my in
 
-      if straddles then begin
+      if straddles || horizontal then begin
         (* Calculate intersection *)
-        (* Careful with horizontal edges - straddle check (max>min) should exclude them *)
-        let t_edge = (my -. vy) /. (ny -. vy) in
-        let x_int = vx +. (t_edge *. (nx -. vx)) in
+        let x_int_opt =
+          if horizontal then
+            (* Horizontal edge collinear with ray *)
+            (* Ray starts at mx, goes right (x+) *)
+            (* Edge covers [min(vx, nx), max(vx, nx)] *)
+            let min_x_edge = fmin vx nx in
+            let max_x_edge = fmax vx nx in
+            (* Overlap start *)
+            let overlap_start = fmax mx min_x_edge in
+            if overlap_start <= max_x_edge +. epsilon then Some overlap_start
+            else None
+          else
+            (* Standard intersection *)
+            let t_edge = (my -. vy) /. dy in
+            Some (vx +. (t_edge *. (nx -. vx)))
+        in
 
-        (* Only consider intersections to the right of M *)
-        if x_int >= mx then begin
-          let t = x_int -. mx in
-          if t < !best_t -. epsilon then (
-            best_t := t;
-            best_edge_p := !curr;
-            best_edge_n := n;
-            best_vi_p := vi_curr;
-            best_vi_n := vi_next;
-            intersection_x := x_int;
-            if
-              abs_float (x_int -. vx) < epsilon
-              && abs_float (my -. vy) < epsilon
-            then (
-              intersection_is_vertex := true;
-              intersection_vertex_node := !curr)
-            else if
-              abs_float (x_int -. nx) < epsilon
-              && abs_float (my -. ny) < epsilon
-            then (
-              intersection_is_vertex := true;
-              intersection_vertex_node := n)
-            else intersection_is_vertex := false)
-          else if abs_float (t -. !best_t) < epsilon then
-            (* Same intersection distance - multiple nodes share vertex? *)
-            let cp_new =
-              cross_product verts
-                poly_list.vert_idx.(poly_list.prev.(!curr))
-                vi_curr poly_list.vert_idx.(n)
-            in
-            let node_to_check =
-              if abs_float (x_int -. vx) < epsilon then !curr else n
-            in
-            if !intersection_is_vertex then
-              let cp_old =
-                cross_product verts
-                  poly_list.vert_idx.(poly_list.prev.(!intersection_vertex_node))
-                  poly_list.vert_idx.(!intersection_vertex_node)
-                  poly_list.vert_idx.(poly_list.next.(!intersection_vertex_node))
-              in
-              if cp_new > cp_old then (
-                intersection_vertex_node := node_to_check;
+        match x_int_opt with
+        | Some x_int ->
+            (* Only consider intersections to the right of M *)
+            if x_int >= mx then begin
+              let t = x_int -. mx in
+              if t < !best_t -. epsilon then (
+                best_t := t;
                 best_edge_p := !curr;
                 best_edge_n := n;
                 best_vi_p := vi_curr;
-                best_vi_n := vi_next)
-        end
+                best_vi_n := vi_next;
+                intersection_x := x_int;
+                if
+                  abs_float (x_int -. vx) < epsilon
+                  && abs_float (my -. vy) < epsilon
+                then (
+                  intersection_is_vertex := true;
+                  intersection_vertex_node := !curr)
+                else if
+                  abs_float (x_int -. nx) < epsilon
+                  && abs_float (my -. ny) < epsilon
+                then (
+                  intersection_is_vertex := true;
+                  intersection_vertex_node := n)
+                else intersection_is_vertex := false)
+              else if abs_float (t -. !best_t) < epsilon then
+                (* Same intersection distance - multiple nodes share vertex? *)
+                let cp_new =
+                  cross_product verts
+                    poly_list.vert_idx.(poly_list.prev.(!curr))
+                    vi_curr poly_list.vert_idx.(n)
+                in
+                let node_to_check =
+                  if abs_float (x_int -. vx) < epsilon then !curr else n
+                in
+                if !intersection_is_vertex then
+                  let cp_old =
+                    cross_product verts
+                      poly_list.vert_idx.(poly_list.prev.(!intersection_vertex_node))
+                      poly_list.vert_idx.(!intersection_vertex_node)
+                      poly_list.vert_idx.(poly_list.next.(!intersection_vertex_node))
+                  in
+                  if cp_new > cp_old then (
+                    intersection_vertex_node := node_to_check;
+                    best_edge_p := !curr;
+                    best_edge_n := n;
+                    best_vi_p := vi_curr;
+                    best_vi_n := vi_next)
+            end
+        | None -> ()
       end;
       if n = outer_node then loop := false else curr := n
     done;
