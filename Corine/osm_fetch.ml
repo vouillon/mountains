@@ -567,9 +567,13 @@ let parse_overpass_elements json_str =
           if natural_tag <> Some "water" && water_tag = None then acc
           else
             let clc_code = water_tag_to_clc_code water_tag in
-            let points = nodes_to_points w.node_ids in
-            if List.length points >= 3 then
-              { id = wid; clc_code; polygons = [ [ points ] ] } :: acc
+            let n_nodes = Array.length w.node_ids in
+            if n_nodes > 0 && w.node_ids.(0) = w.node_ids.(n_nodes - 1) then
+              let points = nodes_to_points w.node_ids in
+              (* A valid polygon must have at least 4 points (A-B-C-A) *)
+              if List.length points >= 4 then
+                { id = wid; clc_code; polygons = [ [ points ] ] } :: acc
+              else acc
             else acc)
       ways []
   in
