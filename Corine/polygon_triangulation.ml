@@ -292,7 +292,6 @@ module PolygonList = struct
         (* At least 3 nodes *)
         let p1 = t.vert_idx.(prev_i) in
         let p2 = t.vert_idx.(i) in
-        let p3 = t.vert_idx.(next_i) in
 
         let is_dup = Geometry.points_equal verts p1 p2 in
 
@@ -463,7 +462,6 @@ module Triangulator = struct
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
-    let prev = poly_list.prev in
     let vi_m = vert_idx.(m_node) in
     let vi_p = vert_idx.(p_node) in
 
@@ -638,38 +636,105 @@ module Triangulator = struct
                 best_vi_p := vi_curr;
                 best_vi_n := vi_next;
                 intersection_x := x_int;
+                let is_v_curr =
+                  abs_float (x_int -. vx) < epsilon
+                  && abs_float (my -. vy) < epsilon
+                in
+                let is_v_next =
+                  abs_float (x_int -. nx) < epsilon
+                  && abs_float (my -. ny) < epsilon
+                in
+
+                if is_v_curr then (
+                  intersection_is_vertex := true;
+                  intersection_vertex_node := !curr)
+                else if is_v_next then (
+                  intersection_is_vertex := true;
+                  intersection_vertex_node := n)
+                else (
+                  intersection_is_vertex := false;
+                  if !verbose then
+                    Printf.eprintf
+                      "Hit edge %d-%d at t=%g (x_int=%g). Not a vertex hit? \
+                       vx=%g vy=%g nx=%g ny=%g my=%g\n\
+                       %!"
+                      !curr n t x_int vx vy nx ny my))
+              else if abs_float (t -. !best_t) < epsilon then
+                (* Same intersection distance *)
+                let update_if_shorter node =
+                  let nx, ny =
+                    ( get_x verts vert_idx.(poly_list.next.(node)),
+                      get_y verts vert_idx.(poly_list.next.(node)) )
+                  in
+                  let px, py =
+                    (get_x verts vert_idx.(node), get_y verts vert_idx.(node))
+                  in
+                  let len = ((nx -. px) ** 2.0) +. ((ny -. py) ** 2.0) in
+
+                  let best_nx, best_ny =
+                    ( get_x verts
+                        vert_idx.(poly_list.next.(!intersection_vertex_node)),
+                      get_y verts
+                        vert_idx.(poly_list.next.(!intersection_vertex_node)) )
+                  in
+                  let best_px, best_py =
+                    ( get_x verts vert_idx.(!intersection_vertex_node),
+                      get_y verts vert_idx.(!intersection_vertex_node) )
+                  in
+                  let best_len =
+                    ((best_nx -. best_px) ** 2.0)
+                    +. ((best_ny -. best_py) ** 2.0)
+                  in
+                  Printf.eprintf
+                    "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
+                     Best %d (len %g)\n\
+                     %!"
+                    !intersection_x my mx my node len !intersection_vertex_node
+                    best_len;
+
+                  (* User hint: Connect to the node added with previous bridge (the bridge node).
+                      The bridge edge is shorter than the original boundary edge.
+                      So we want the SHORTER outgoing edge. *)
+                  if len < best_len then (
+                    Printf.eprintf "  -> Swapping to %d (Shorter)\n%!" node;
+                    intersection_vertex_node := node;
+                    best_edge_p := !curr;
+                    best_edge_n := n;
+                    best_vi_p := vi_curr;
+                    best_vi_n := vi_next)
+                in
+
                 if
                   abs_float (x_int -. vx) < epsilon
                   && abs_float (my -. vy) < epsilon
-                then (
-                  intersection_is_vertex := true;
-                  intersection_vertex_node := !curr)
+                then
+                  if !intersection_is_vertex then update_if_shorter !curr
+                  else (
+                    intersection_is_vertex := true;
+                    intersection_vertex_node := !curr)
                 else if
                   abs_float (x_int -. nx) < epsilon
                   && abs_float (my -. ny) < epsilon
-                then (
-                  intersection_is_vertex := true;
-                  intersection_vertex_node := n)
-                else intersection_is_vertex := false)
-              else if abs_float (t -. !best_t) < epsilon then
-                (* Same intersection distance - multiple nodes share vertex? *)
-                let cp_new =
-                  cross_product verts
-                    poly_list.vert_idx.(poly_list.prev.(!curr))
-                    vi_curr poly_list.vert_idx.(n)
-                in
-                let node_to_check =
-                  if abs_float (x_int -. vx) < epsilon then !curr else n
-                in
-                if !intersection_is_vertex then
-                  let cp_old =
-                    cross_product verts
-                      poly_list.vert_idx.(poly_list.prev.(!intersection_vertex_node))
-                      poly_list.vert_idx.(!intersection_vertex_node)
-                      poly_list.vert_idx.(poly_list.next.(!intersection_vertex_node))
+                then
+                  if !intersection_is_vertex then update_if_shorter n
+                  else (
+                    intersection_is_vertex := true;
+                    intersection_vertex_node := n)
+                else if not !intersection_is_vertex then
+                  (* Edge hit (interior). If edges overlap, prefer the SHORTER one. *)
+                  let curr_len_sq =
+                    ((nx -. vx) ** 2.0) +. ((ny -. vy) ** 2.0)
                   in
-                  if cp_new > cp_old then (
-                    intersection_vertex_node := node_to_check;
+                  let best_vx = get_x verts !best_vi_p in
+                  let best_vy = get_y verts !best_vi_p in
+                  let best_nx = get_x verts !best_vi_n in
+                  let best_ny = get_y verts !best_vi_n in
+                  let best_len_sq =
+                    ((best_nx -. best_vx) ** 2.0)
+                    +. ((best_ny -. best_vy) ** 2.0)
+                  in
+                  (* Prefer SHORTER edge *)
+                  if curr_len_sq < best_len_sq then (
                     best_edge_p := !curr;
                     best_edge_n := n;
                     best_vi_p := vi_curr;
@@ -685,10 +750,9 @@ module Triangulator = struct
       (* Step 3: I is vertex of outer polygon. Terminates. *)
       (* Use the SPECIFIC node found by intersection logic *)
       let p_node = !intersection_vertex_node in
-      let p_idx = vert_idx.(p_node) in
       if !verbose then
         Printf.printf "  Eberly Step 3: Hit vertex %d (node %d). Visible!\n%!"
-          p_idx p_node;
+          vert_idx.(p_node) p_node;
       Some p_node
     end
     else begin
