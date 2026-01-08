@@ -569,15 +569,10 @@ module Triangulator = struct
         let t_edge = (my -. vy) /. (ny -. vy) in
         let x_int = vx +. (t_edge *. (nx -. vx)) in
 
-        if !verbose then
-          Printf.printf "    Edge %d-%d (nodes %d-%d): t=%.6f, x_int=%.6f\n%!"
-            vi_curr vi_next !curr n (x_int -. mx) x_int;
-
         (* Only consider intersections to the right of M *)
         if x_int >= mx then begin
           let t = x_int -. mx in
           if t < !best_t -. epsilon then (
-            if !verbose then Printf.printf "      -> NEW BEST\n%!";
             best_t := t;
             best_edge_p := !curr;
             best_edge_n := n;
@@ -597,7 +592,7 @@ module Triangulator = struct
               intersection_is_vertex := true;
               intersection_vertex_node := n)
             else intersection_is_vertex := false)
-          else if abs_float (t -. !best_t) < epsilon then (
+          else if abs_float (t -. !best_t) < epsilon then
             (* Same intersection distance - multiple nodes share vertex? *)
             let cp_new =
               cross_product verts
@@ -607,9 +602,6 @@ module Triangulator = struct
             let node_to_check =
               if abs_float (x_int -. vx) < epsilon then !curr else n
             in
-            if !verbose then
-              Printf.printf "      -> TIE at t=%.6f. node %d cp=%.6f\n%!" t
-                node_to_check cp_new;
             if !intersection_is_vertex then
               let cp_old =
                 cross_product verts
@@ -618,12 +610,11 @@ module Triangulator = struct
                   poly_list.vert_idx.(poly_list.next.(!intersection_vertex_node))
               in
               if cp_new > cp_old then (
-                if !verbose then Printf.printf "      -> WINNING TIE\n%!";
                 intersection_vertex_node := node_to_check;
                 best_edge_p := !curr;
                 best_edge_n := n;
                 best_vi_p := vi_curr;
-                best_vi_n := vi_next))
+                best_vi_n := vi_next)
         end
       end;
       if n = outer_node then loop := false else curr := n
@@ -631,32 +622,14 @@ module Triangulator = struct
 
     if !best_t = infinity then None (* No intersection found *)
     else if !intersection_is_vertex then begin
-      (* Step 3: I is vertex. Find the VISIBLE node at this vertex. *)
-      let target_v_idx = vert_idx.(!intersection_vertex_node) in
+      (* Step 3: I is vertex of outer polygon. Terminates. *)
+      (* Use the SPECIFIC node found by intersection logic *)
+      let p_node = !intersection_vertex_node in
+      let p_idx = vert_idx.(p_node) in
       if !verbose then
-        Printf.printf
-          "  Eberly Step 3: Hit vertex %d. Searching for visible node...\n%!"
-          target_v_idx;
-
-      let best_node = ref (-1) in
-      let search_curr = ref outer_node in
-      let search_loop = ref true in
-      while !search_loop do
-        if vert_idx.(!search_curr) = target_v_idx then
-          if is_valid_bridge !search_curr then (
-            best_node := !search_curr;
-            search_loop := false (* Found a valid one! *));
-        let nxt = next.(!search_curr) in
-        if nxt = outer_node then search_loop := false else search_curr := nxt
-      done;
-
-      if !best_node <> -1 then Some !best_node
-      else (
-        if !verbose then
-          Printf.printf
-            "  Eberly: Vertex %d not visible, attempting Step 4/5/6\n%!"
-            target_v_idx;
-        None)
+        Printf.printf "  Eberly Step 3: Hit vertex %d (node %d). Visible!\n%!"
+          p_idx p_node;
+      Some p_node
     end
     else begin
       (* Step 4: I is an interior point. Select P = max X endpoint. *)
@@ -696,19 +669,25 @@ module Triangulator = struct
           let vi_prv = vert_idx.(prv) in
           let vi_rn = vert_idx.(nxt) in
 
-          let cp = cross_product verts vi_prv v_idx vi_rn in
-          let is_reflex = cp < -.epsilon in
+          (* STRICTLY OUTSIDE check: Skip nodes co-located with P or M *)
+          (* A reflex vertex at P or M does not block visibility to P *)
+          if
+            (not (points_equal verts v_idx p_idx))
+            && not (points_equal verts v_idx vert_idx.(hole_start_node))
+          then
+            let cp = cross_product verts vi_prv v_idx vi_rn in
+            let is_reflex = cp < -.epsilon in
 
-          if is_reflex then begin
-            let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
-            if point_in_triangle_coords mx my !intersection_x my p_x p_y rx ry
-            then
-              let dx = rx -. mx in
-              let dy = abs_float (ry -. my) in
-              if dx > epsilon then
-                reflex_candidates :=
-                  (dy /. dx, search_node) :: !reflex_candidates
-          end
+            if is_reflex then begin
+              let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
+              if point_in_triangle_coords mx my !intersection_x my p_x p_y rx ry
+              then
+                let dx = rx -. mx in
+                let dy = abs_float (ry -. my) in
+                if dx > epsilon then
+                  reflex_candidates :=
+                    (dy /. dx, search_node) :: !reflex_candidates
+            end
         end;
 
         let nxt = next.(!search_curr) in
@@ -727,20 +706,8 @@ module Triangulator = struct
       let rec try_reflex = function
         | [] -> None
         | (_, ref_node) :: rest ->
-            let v_idx = vert_idx.(ref_node) in
-            (* Try all nodes at this vertex *)
-            let bridge_node = ref (-1) in
-            let s_curr = ref outer_node in
-            let s_loop = ref true in
-            while !s_loop do
-              if vert_idx.(!s_curr) = v_idx then
-                if is_valid_bridge !s_curr then (
-                  bridge_node := !s_curr;
-                  s_loop := false);
-              let nxt = next.(!s_curr) in
-              if nxt = outer_node then s_loop := false else s_curr := nxt
-            done;
-            if !bridge_node <> -1 then Some !bridge_node else try_reflex rest
+            (* Trust the specific reflex node found *)
+            if is_valid_bridge ref_node then Some ref_node else try_reflex rest
       in
 
       let final_bridge = try_reflex sorted_reflex in
@@ -758,19 +725,7 @@ module Triangulator = struct
             Printf.printf
               "  Eberly: No visible reflex vertex, trying ray vertex %d\n%!"
               p_idx;
-
-          let best_p = ref (-1) in
-          let s_curr = ref outer_node in
-          let s_loop = ref true in
-          while !s_loop do
-            if vert_idx.(!s_curr) = p_idx then
-              if is_valid_bridge !s_curr then (
-                best_p := !s_curr;
-                s_loop := false);
-            let nxt = next.(!s_curr) in
-            if nxt = outer_node then s_loop := false else s_curr := nxt
-          done;
-          if !best_p <> -1 then Some !best_p else None
+          Some p_node
     end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
