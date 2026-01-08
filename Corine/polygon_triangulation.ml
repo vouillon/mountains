@@ -219,13 +219,8 @@ module PolygonList = struct
         (* p3 coords retrieved implicitly inside cross_product calls *)
 
         let is_dup = p1x = p2x && p1y = p2y in
-        let is_collinear =
-          if is_dup then true
-          else
-            abs_float (Geometry.cross_product verts p1 p2 p3) < Geometry.epsilon
-        in
 
-        if is_collinear then (
+        if is_dup then (
           t.prev.(next_i) <- prev_i;
           t.next.(prev_i) <- next_i;
           (* FIXED: Do NOT decrement t.count allocator cursor *)

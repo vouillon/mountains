@@ -100,58 +100,7 @@ module FloatBuffer = struct
         if (dx *. dx) +. (dy *. dy) <= epsilon_sq then decr write_idx
       end;
 
-      t.count <- !write_idx;
-
-      (* Pass 2: Collinearity Filter *)
-      if t.count >= 3 then begin
-        let collinear_eps = 1e-9 in
-        let w_idx = ref 1 in
-
-        for r_idx = 2 to t.count - 1 do
-          let ax, ay = (get_x data (!w_idx - 1), get_y data (!w_idx - 1)) in
-          let bx, by = (get_x data !w_idx, get_y data !w_idx) in
-          let cx, cy = (get_x data r_idx, get_y data r_idx) in
-
-          let cp = ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax)) in
-
-          if abs_float cp < collinear_eps then begin
-            (* Collinear: Drop B (current w_idx), replace with C *)
-            set_pt data !w_idx cx cy
-          end
-          else begin
-            (* Significant turn: Advance write head, keep C *)
-            incr w_idx;
-            if !w_idx <> r_idx then set_pt data !w_idx cx cy
-          end
-        done;
-
-        (* Final check: Ensure closure is not collinear *)
-        let count_after_pass = !w_idx + 1 in
-        if count_after_pass >= 3 then begin
-          let last_idx = count_after_pass - 1 in
-          let ax, ay = (get_x data last_idx, get_y data last_idx) in
-          let bx, by = (get_x data 0, get_y data 0) in
-          let cx, cy = (get_x data 1, get_y data 1) in
-
-          let cp = ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax)) in
-
-          if abs_float cp < collinear_eps then begin
-            (* Shift array left by 1 to delete index 0 *)
-            for i = 0 to last_idx - 1 do
-              let x = get_x data (i + 1) in
-              let y = get_y data (i + 1) in
-              set_pt data i x y
-            done;
-            t.count <- count_after_pass - 1
-          end
-          else begin
-            t.count <- count_after_pass
-          end
-        end
-        else begin
-          t.count <- count_after_pass
-        end
-      end
+      t.count <- !write_idx
     end
 end
 

@@ -387,6 +387,128 @@ let parse_overpass_elements json_str =
           let outer_rings = chain_ways_by_id rel.rel_id outer_way_ids in
           let inner_rings = chain_ways_by_id rel.rel_id inner_way_ids in
 
+          (* Merge touching inner rings (OSM specific extension to Simple Features) *)
+          let inner_rings =
+            if inner_rings = [] then []
+            else
+              let rec merge_all rings =
+                let n = List.length rings in
+                let rings_arr = Array.of_list rings in
+                let merged = ref false in
+                let result = ref [] in
+                let used = Array.make n false in
+
+                for i = 0 to n - 1 do
+                  if not used.(i) then (
+                    let current = ref (Array.to_list rings_arr.(i)) in
+                    used.(i) <- true;
+                    let found_match = ref true in
+                    while !found_match do
+                      found_match := false;
+                      for j = 0 to n - 1 do
+                        if (not !found_match) && not used.(j) then (
+                          let other = rings_arr.(j) in
+                          (* Use hash table for O(L) detection instead of O(L^2) *)
+                          let nodes_in_current = Hashtbl.create 512 in
+                          List.iter
+                            (fun nid ->
+                              Hashtbl.replace nodes_in_current nid true)
+                            !current;
+
+                          (* Check if rings share any node ID *)
+                          let share_node = ref None in
+                          for k = 0 to Array.length other - 1 do
+                            let nid = other.(k) in
+                            if Hashtbl.mem nodes_in_current nid then
+                              share_node := Some nid
+                          done;
+
+                          match !share_node with
+                          | Some shared_nid ->
+                              (* Splice them! *)
+                              let rotate_to_nid nid l =
+                                let n = Array.length l in
+                                if n < 2 then l
+                                else
+                                  let nodes =
+                                    Array.to_list (Array.sub l 0 (n - 1))
+                                  in
+                                  let rec rotate acc = function
+                                    | [] -> l (* Fallback *)
+                                    | x :: xs ->
+                                        if x = nid then
+                                          Array.of_list
+                                            ((x :: xs) @ List.rev acc @ [ x ])
+                                        else rotate (x :: acc) xs
+                                  in
+                                  rotate [] nodes
+                              in
+                              let is_ccw_nodes node_ids =
+                                let n = Array.length node_ids in
+                                if n < 3 then true
+                                else
+                                  let acc = ref 0.0 in
+                                  match Hashtbl.find_opt nodes node_ids.(0) with
+                                  | None -> true
+                                  | Some (ref_x, ref_y) ->
+                                      for i = 0 to n - 1 do
+                                        let n1 = node_ids.(i) in
+                                        let n2 =
+                                          if i = n - 1 then node_ids.(0)
+                                          else node_ids.(i + 1)
+                                        in
+                                        match
+                                          ( Hashtbl.find_opt nodes n1,
+                                            Hashtbl.find_opt nodes n2 )
+                                        with
+                                        | Some (x1, y1), Some (x2, y2) ->
+                                            let p1x, p1y =
+                                              (x1 -. ref_x, y1 -. ref_y)
+                                            in
+                                            let p2x, p2y =
+                                              (x2 -. ref_x, y2 -. ref_y)
+                                            in
+                                            acc :=
+                                              !acc
+                                              +. ((p1x *. p2y) -. (p2x *. p1y))
+                                        | _ -> ()
+                                      done;
+                                      !acc > 0.0
+                              in
+
+                              let r1_arr = Array.of_list !current in
+                              let r1_ccw = is_ccw_nodes r1_arr in
+                              let r2_ccw = is_ccw_nodes other in
+
+                              let other_normalized =
+                                if r1_ccw <> r2_ccw then
+                                  Array.of_list (List.rev (Array.to_list other))
+                                else other
+                              in
+
+                              let r1 = rotate_to_nid shared_nid r1_arr in
+                              let r2 =
+                                rotate_to_nid shared_nid other_normalized
+                              in
+                              (* Combine: r1 starts with shared_nid, r2 starts with shared_nid *)
+                              (* Both are [shared...shared] *)
+                              let r1_list = Array.to_list r1 in
+                              let r2_list = Array.to_list r2 in
+                              current := r1_list @ List.tl r2_list;
+                              used.(j) <- true;
+                              merged := true;
+                              found_match := true
+                          | None -> ())
+                      done
+                    done;
+                    result := Array.of_list !current :: !result)
+                done;
+                if !merged then merge_all (List.rev !result)
+                else List.rev !result
+              in
+              merge_all inner_rings
+          in
+
           if outer_rings = [] then (
             if inner_rings <> [] then
               Printf.printf
