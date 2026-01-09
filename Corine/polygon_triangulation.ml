@@ -671,22 +671,7 @@ module Triangulator = struct
       if straddles || horizontal then begin
         (* Calculate intersection *)
         let x_int_opt =
-          if horizontal then
-            (* Horizontal edge collinear with ray *)
-            (* Ray starts at mx, goes right (x+) *)
-            (* Edge covers [min(vx, nx), max(vx, nx)] *)
-            let min_x_edge = fmin vx nx in
-            let max_x_edge = fmax vx nx in
-            (* Overlap start *)
-            let overlap_start = fmax mx min_x_edge in
-            if overlap_start <= max_x_edge +. epsilon then Some overlap_start
-              (* If the edge is entirely to the left of mx, no intersection *)
-            else if nx < mx -. epsilon then None
-              (* If mx is within or at the edge, intersection is at max(mx, left_x) *)
-              (* But for bridge finding, we want the RIGHT vertex of a horizontal edge *)
-              (* because that's where the ray "exits" to continue into the polygon interior *)
-            else if nx >= mx -. epsilon then Some nx
-            else None
+          if horizontal then Some (fmax vx nx)
           else
             (* Standard intersection *)
             let t_edge = (my -. vy) /. dy in
