@@ -644,13 +644,7 @@ module Triangulator = struct
     let intersection_vertex_node = ref (-1) in
     let curr = ref outer_node in
     let loop = ref true in
-    let loop_count = ref 0 in
     while !loop do
-      incr loop_count;
-      if !loop_count > 20000 then (
-        if !verbose then
-          Printf.printf "Breaking infinite loop in Eberly Phase 1\n%!";
-        loop := false);
       let n = next.(!curr) in
       let vi_curr = vert_idx.(!curr) in
       let vi_next = vert_idx.(n) in
