@@ -228,7 +228,7 @@ let parse_overpass_elements json_str =
                   in
 
                   let changed = ref true in
-                  while !changed do
+                  while !changed && !curr_end <> !chain_start do
                     changed := false;
 
                     (* Try to extend forward from curr_end *)
@@ -398,6 +398,52 @@ let parse_overpass_elements json_str =
                 let result = ref [] in
                 let used = Array.make n false in
 
+                let is_ccw_nodes node_ids =
+                  let n = Array.length node_ids in
+                  if n < 3 then true
+                  else
+                    let acc = ref 0.0 in
+                    match Hashtbl.find_opt nodes node_ids.(0) with
+                    | None -> true
+                    | Some (ref_x, ref_y) ->
+                        for i = 0 to n - 1 do
+                          let n1 = node_ids.(i) in
+                          let n2 =
+                            if i = n - 1 then node_ids.(0) else node_ids.(i + 1)
+                          in
+                          match
+                            ( Hashtbl.find_opt nodes n1,
+                              Hashtbl.find_opt nodes n2 )
+                          with
+                          | Some (x1, y1), Some (x2, y2) ->
+                              let p1x, p1y = (x1 -. ref_x, y1 -. ref_y) in
+                              let p2x, p2y = (x2 -. ref_x, y2 -. ref_y) in
+                              acc := !acc +. ((p1x *. p2y) -. (p2x *. p1y))
+                          | _ -> ()
+                        done;
+                        !acc > 0.0
+                in
+
+                let rotate_to_nid nid arr =
+                  let n = Array.length arr in
+                  if n < 2 then arr
+                  else
+                    let rec find k =
+                      if k >= n - 1 then None
+                      else if arr.(k) = nid then Some k
+                      else find (k + 1)
+                    in
+                    match find 0 with
+                    | None -> arr
+                    | Some idx ->
+                        let res = Array.make n 0 in
+                        for i = 0 to n - 2 do
+                          res.(i) <- arr.((idx + i) mod (n - 1))
+                        done;
+                        res.(n - 1) <- res.(0);
+                        res
+                in
+
                 for i = 0 to n - 1 do
                   if not used.(i) then (
                     let current = ref (Array.to_list rings_arr.(i)) in
@@ -414,180 +460,73 @@ let parse_overpass_elements json_str =
                               Hashtbl.replace nodes_in_current nid true)
                             !current;
 
-                          let share_node = ref None in
-                          let max_common = ref 0 in
+                          let r1_arr = Array.of_list !current in
+                          let r1_ccw = is_ccw_nodes r1_arr in
+                          let r2_ccw = is_ccw_nodes other in
+                          let other_norm =
+                            if r1_ccw <> r2_ccw then
+                              Array.of_list (List.rev (Array.to_list other))
+                            else other
+                          in
 
-                          for k = 0 to Array.length other - 1 do
-                            let nid = other.(k) in
-                            if Hashtbl.mem nodes_in_current nid then (
-                              (* Evaluate this shared node as a potential start *)
-                              let is_ccw_nodes node_ids =
-                                let n = Array.length node_ids in
-                                if n < 3 then true
-                                else
-                                  let acc = ref 0.0 in
-                                  match Hashtbl.find_opt nodes node_ids.(0) with
-                                  | None -> true
-                                  | Some (ref_x, ref_y) ->
-                                      for i = 0 to n - 1 do
-                                        let n1 = node_ids.(i) in
-                                        let n2 =
-                                          if i = n - 1 then node_ids.(0)
-                                          else node_ids.(i + 1)
-                                        in
-                                        match
-                                          ( Hashtbl.find_opt nodes n1,
-                                            Hashtbl.find_opt nodes n2 )
-                                        with
-                                        | Some (x1, y1), Some (x2, y2) ->
-                                            let p1x, p1y =
-                                              (x1 -. ref_x, y1 -. ref_y)
-                                            in
-                                            let p2x, p2y =
-                                              (x2 -. ref_x, y2 -. ref_y)
-                                            in
-                                            acc :=
-                                              !acc
-                                              +. ((p1x *. p2y) -. (p2x *. p1y))
-                                        | _ -> ()
-                                      done;
-                                      !acc > 0.0
-                              in
+                          let best_nid = ref None in
+                          let best_common = ref 0 in
+                          let best_is_dup = ref false in
 
-                              let r1_arr = Array.of_list !current in
-                              let r1_ccw = is_ccw_nodes r1_arr in
-                              let r2_ccw = is_ccw_nodes other in
-                              let other_norm =
-                                if r1_ccw <> r2_ccw then
-                                  Array.of_list (List.rev (Array.to_list other))
-                                else other
-                              in
-
-                              let rotate_to_nid nid arr =
-                                let n = Array.length arr in
-                                if n < 2 then arr
-                                else
-                                  let rec find k =
-                                    if k >= n - 1 then None
-                                    else if arr.(k) = nid then Some k
-                                    else find (k + 1)
-                                  in
-                                  match find 0 with
-                                  | None -> arr
-                                  | Some idx ->
-                                      let res = Array.make n 0 in
-                                      for i = 0 to n - 2 do
-                                        res.(i) <- arr.((idx + i) mod (n - 1))
-                                      done;
-                                      res.(n - 1) <- res.(0);
-                                      res
-                              in
-
+                          for k = 0 to Array.length other_norm - 1 do
+                            let nid = other_norm.(k) in
+                            if Hashtbl.mem nodes_in_current nid then
                               let r1_tmp = rotate_to_nid nid r1_arr in
                               let r2_tmp = rotate_to_nid nid other_norm in
-                              let r1_rev_tmp =
-                                Array.of_list (List.rev (Array.to_list r1_tmp))
-                              in
-                              let common = ref 0 in
-                              let limit =
-                                min (Array.length r1_tmp) (Array.length r2_tmp)
-                                - 1
-                              in
-                              while
-                                !common < limit
-                                && r1_rev_tmp.(!common) = r2_tmp.(!common)
-                              do
-                                incr common
-                              done;
-                              if !common > !max_common then (
-                                max_common := !common;
-                                share_node := Some (nid, !common)))
-                          done;
 
-                          match !share_node with
-                          | Some (shared_nid, common_len) ->
-                              let is_ccw_nodes node_ids =
-                                let n = Array.length node_ids in
-                                if n < 3 then true
-                                else
-                                  let acc = ref 0.0 in
-                                  match Hashtbl.find_opt nodes node_ids.(0) with
-                                  | None -> true
-                                  | Some (ref_x, ref_y) ->
-                                      for i = 0 to n - 1 do
-                                        let n1 = node_ids.(i) in
-                                        let n2 =
-                                          if i = n - 1 then node_ids.(0)
-                                          else node_ids.(i + 1)
-                                        in
-                                        match
-                                          ( Hashtbl.find_opt nodes n1,
-                                            Hashtbl.find_opt nodes n2 )
-                                        with
-                                        | Some (x1, y1), Some (x2, y2) ->
-                                            let p1x, p1y =
-                                              (x1 -. ref_x, y1 -. ref_y)
-                                            in
-                                            let p2x, p2y =
-                                              (x2 -. ref_x, y2 -. ref_y)
-                                            in
-                                            acc :=
-                                              !acc
-                                              +. ((p1x *. p2y) -. (p2x *. p1y))
-                                        | _ -> ()
-                                      done;
-                                      !acc > 0.0
-                              in
-
-                              let r1_arr = Array.of_list !current in
-                              let r1_ccw = is_ccw_nodes r1_arr in
-                              let r2_ccw = is_ccw_nodes other in
-                              let other_norm =
-                                if r1_ccw <> r2_ccw then
-                                  Array.of_list (List.rev (Array.to_list other))
-                                else other
-                              in
-
-                              (* Improved Merge: Find all shared nodes and remove shared edges *)
-                              let rotate_to_nid nid arr =
-                                let n = Array.length arr in
-                                if n < 2 then arr
-                                else
-                                  let rec find k =
-                                    if k >= n - 1 then None
-                                    else if arr.(k) = nid then Some k
-                                    else find (k + 1)
-                                  in
-                                  match find 0 with
-                                  | None -> arr
-                                  | Some idx ->
-                                      let res = Array.make n 0 in
-                                      for i = 0 to n - 2 do
-                                        res.(i) <- arr.((idx + i) mod (n - 1))
-                                      done;
-                                      res.(n - 1) <- res.(0);
-                                      res
-                              in
-
-                              let r1 = rotate_to_nid shared_nid r1_arr in
-                              let r2 = rotate_to_nid shared_nid other_norm in
-
-                              (* Check for identical rings *)
-                              let is_identical =
-                                Array.length r1 = Array.length r2
+                              (* 1. Check for Duplicate Ring (Forward match) *)
+                              let is_duplicate =
+                                Array.length r1_tmp = Array.length r2_tmp
                                 &&
                                 let same = ref true in
-                                for k = 0 to Array.length r1 - 1 do
-                                  if r1.(k) <> r2.(k) then same := false
+                                for i = 0 to Array.length r1_tmp - 1 do
+                                  if r1_tmp.(i) <> r2_tmp.(i) then same := false
                                 done;
                                 !same
                               in
 
-                              if is_identical then (
+                              if is_duplicate then (
+                                best_common := Array.length r1_tmp;
+                                best_nid := Some nid;
+                                best_is_dup := true)
+                              else if not !best_is_dup then (
+                                (* 2. Check for Shared Edges (Reverse match) *)
+                                let r1_rev_tmp =
+                                  Array.of_list
+                                    (List.rev (Array.to_list r1_tmp))
+                                in
+                                let common = ref 0 in
+                                let limit =
+                                  min (Array.length r1_tmp)
+                                    (Array.length r2_tmp)
+                                  - 1
+                                in
+                                while
+                                  !common < limit
+                                  && r1_rev_tmp.(!common) = r2_tmp.(!common)
+                                do
+                                  incr common
+                                done;
+                                if !common > !best_common then (
+                                  best_common := !common;
+                                  best_nid := Some nid))
+                          done;
+
+                          match !best_nid with
+                          | Some shared_nid ->
+                              if !best_is_dup then (
                                 used.(j) <- true;
                                 merged := true;
                                 found_match := true)
                               else
+                                let r1 = rotate_to_nid shared_nid r1_arr in
+                                let r2 = rotate_to_nid shared_nid other_norm in
+                                let common_len = !best_common in
                                 (* Splice: R1 path + R2 path, skipping shared segment *)
                                 let new_ring = ref [] in
                                 (* Path from R2: from R2[common_len] to R2[end] *)
