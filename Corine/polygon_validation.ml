@@ -259,8 +259,15 @@ let validate_expensive (verts : float array) poly =
   let e2 =
     check_hole_containment verts poly.outer.start poly.outer.len poly.holes
   in
+  let e3 =
+    Array.to_list
+      (Array.map
+         (fun h -> check_self_intersection verts h.start h.len)
+         poly.holes)
+    |> List.flatten
+  in
   (* Could add hole-hole intersection check here *)
-  e1 @ e2
+  e1 @ e2 @ e3
 
 let string_of_error = function
   | DuplicatePoint (i, (x, y)) ->

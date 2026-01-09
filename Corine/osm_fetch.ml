@@ -527,22 +527,46 @@ let parse_overpass_elements json_str =
                                 let r1 = rotate_to_nid shared_nid r1_arr in
                                 let r2 = rotate_to_nid shared_nid other_norm in
                                 let common_len = !best_common in
-                                (* Splice: R1 path + R2 path, skipping shared segment *)
+                                (* 
+                                   r1 and r2 both start at shared_nid.
+                                   r1_rev matches r2 for common_len nodes.
+                                   This means: r1[0] = r2[0], r1[len-1-1] = r2[1], r1[len-1-2] = r2[2], etc.
+                                   
+                                   To merge without the shared segment:
+                                   - Take r1 from index (common_len-1) going forward to (len-2)
+                                   - Take r2 from index common_len going forward to (len-2)
+                                   - This skips r2[0..common_len-1] which equals reverse of r1's tail
+                                *)
                                 let new_ring = ref [] in
-                                (* Path from R2: from R2[common_len] to R2[end] *)
+
+                                (* Path from R1: skip first node (shared), take from index common_len-1 to end-1 *)
+                                (* Actually, since r1_rev[0..common_len-1] = r2[0..common_len-1], 
+                                   r1[0] = r2[0] = shared_nid
+                                   r1[len-2] = r2[1]
+                                   r1[len-3] = r2[2]
+                                   ...
+                                   r1[len-1-common_len+1] = r2[common_len-1]
+                                   
+                                   So we want r1 from index 0 to index (len-1-common_len) inclusive *)
+                                for k = 0 to Array.length r1 - 1 - common_len do
+                                  new_ring := r1.(k) :: !new_ring
+                                done;
+
+                                (* Path from R2: skip shared segment, take from common_len to end-1 *)
                                 for k = common_len to Array.length r2 - 2 do
                                   new_ring := r2.(k) :: !new_ring
                                 done;
-                                (* Path from R1: from R1[0] to R1[end-common_len] *)
-                                for k = 0 to Array.length r1 - common_len - 1 do
-                                  new_ring := r1.(k) :: !new_ring
-                                done;
+
                                 (* Close it *)
                                 let final = List.rev !new_ring in
-                                current := final @ [ List.hd final ];
-                                used.(j) <- true;
-                                merged := true;
-                                found_match := true
+                                if List.length final >= 3 then (
+                                  current := final @ [ List.hd final ];
+                                  used.(j) <- true;
+                                  merged := true;
+                                  found_match := true)
+                                else
+                                  (* Degenerate result, skip this merge *)
+                                  ()
                           | None -> ())
                       done
                     done;
