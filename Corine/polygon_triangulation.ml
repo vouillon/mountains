@@ -665,7 +665,8 @@ module Triangulator = struct
       if straddles || horizontal then begin
         (* Calculate intersection *)
         let x_int_opt =
-          if horizontal then Some (fmax vx nx)
+          if horizontal then
+            if mx <= nx || mx <= vx then Some (fmax mx vx) else None
           else
             (* Standard intersection *)
             let t_edge = (my -. vy) /. dy in
