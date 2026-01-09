@@ -595,9 +595,6 @@ module Triangulator = struct
       Printf.printf
         "  Merging touching hole: hole vert %d touches outer vert %d\n%!" h_idx
         o_idx;
-    Printf.printf
-      "  DEBUG: Touching merge: Hole vert %d touches Outer vert %d\n%!" h_idx
-      o_idx;
     (* The hole traversal order is: hole_touch -> ... -> hole_prev -> hole_touch
        We want to insert the hole between outer_touch and outer_next.
        After merge: outer_touch -> hole_next -> ... -> hole_prev -> outer_next *)
@@ -932,10 +929,6 @@ module Triangulator = struct
                  Outer node %d (vert %d)\n\
                  %!"
                 hole_start_node h_idx target outer_idx;
-            Printf.printf
-              "  DEBUG: Bridge created between Hole vert %d and Outer vert %d\n\
-               %!"
-              h_idx outer_idx;
             if !verbose then
               Printf.printf
                 "  Hole merged with bridge: Hole vert %d -> Outer vert %d\n%!"
