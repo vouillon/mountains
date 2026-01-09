@@ -474,9 +474,9 @@ module Triangulator = struct
         if !loop_count > 20000 then loop := false;
         let n = next.(!curr) in
 
-        (* Skip edges incident to the node we are connecting to *)
+        (* Skip edges incident to nodes we are connecting (M or P) *)
         (* Note: we DO NOT skip other nodes at the same vertex, which is correct *)
-        if !curr = p_node || n = p_node then ()
+        if !curr = p_node || n = p_node || !curr = m_node || n = m_node then ()
         else
           let vi_a = vert_idx.(!curr) in
           let vi_b = vert_idx.(n) in
