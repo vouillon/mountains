@@ -666,7 +666,7 @@ module Triangulator = struct
       in
       (* Edge straddles if it crosses the ray Y-level in either direction *)
       (* Need strict inequality on one side to avoid double-counting at vertices *)
-      let straddles = (vy <= my && ny > my) || (ny <= my && vy > my) in
+      let straddles = vy <= my && ny > my in
 
       if straddles || horizontal then begin
         (* Calculate intersection *)
@@ -674,16 +674,18 @@ module Triangulator = struct
           if horizontal then
             (* Horizontal edge collinear with ray *)
             (* Ray starts at mx, goes right (x+) *)
-            (* For a horizontal edge, the ray "enters" the polygon at a vertex *)
-            (* We want the vertex that the ray hits first (smallest X >= mx) *)
-            let left_x = fmin vx nx in
-            let right_x = fmax vx nx in
-            (* If the edge is entirely to the left of mx, no intersection *)
-            if right_x < mx -. epsilon then None
+            (* Edge covers [min(vx, nx), max(vx, nx)] *)
+            let min_x_edge = fmin vx nx in
+            let max_x_edge = fmax vx nx in
+            (* Overlap start *)
+            let overlap_start = fmax mx min_x_edge in
+            if overlap_start <= max_x_edge +. epsilon then Some overlap_start
+              (* If the edge is entirely to the left of mx, no intersection *)
+            else if nx < mx -. epsilon then None
               (* If mx is within or at the edge, intersection is at max(mx, left_x) *)
               (* But for bridge finding, we want the RIGHT vertex of a horizontal edge *)
               (* because that's where the ray "exits" to continue into the polygon interior *)
-            else if right_x >= mx -. epsilon then Some right_x
+            else if nx >= mx -. epsilon then Some nx
             else None
           else
             (* Standard intersection *)
