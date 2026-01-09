@@ -664,7 +664,9 @@ module Triangulator = struct
       let horizontal =
         abs_float dy < epsilon && abs_float (vy -. my) < epsilon
       in
-      let straddles = vy <= my && ny > my in
+      (* Edge straddles if it crosses the ray Y-level in either direction *)
+      (* Need strict inequality on one side to avoid double-counting at vertices *)
+      let straddles = (vy <= my && ny > my) || (ny <= my && vy > my) in
 
       if straddles || horizontal then begin
         (* Calculate intersection *)
@@ -672,12 +674,16 @@ module Triangulator = struct
           if horizontal then
             (* Horizontal edge collinear with ray *)
             (* Ray starts at mx, goes right (x+) *)
-            (* Edge covers [min(vx, nx), max(vx, nx)] *)
-            let min_x_edge = fmin vx nx in
-            let max_x_edge = fmax vx nx in
-            (* Overlap start *)
-            let overlap_start = fmax mx min_x_edge in
-            if overlap_start <= max_x_edge +. epsilon then Some overlap_start
+            (* For a horizontal edge, the ray "enters" the polygon at a vertex *)
+            (* We want the vertex that the ray hits first (smallest X >= mx) *)
+            let left_x = fmin vx nx in
+            let right_x = fmax vx nx in
+            (* If the edge is entirely to the left of mx, no intersection *)
+            if right_x < mx -. epsilon then None
+              (* If mx is within or at the edge, intersection is at max(mx, left_x) *)
+              (* But for bridge finding, we want the RIGHT vertex of a horizontal edge *)
+              (* because that's where the ray "exits" to continue into the polygon interior *)
+            else if right_x >= mx -. epsilon then Some right_x
             else None
           else
             (* Standard intersection *)
@@ -746,12 +752,13 @@ module Triangulator = struct
                     ((best_nx -. best_px) ** 2.0)
                     +. ((best_ny -. best_py) ** 2.0)
                   in
-                  Printf.eprintf
-                    "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
-                     Best %d (len %g)\n\
-                     %!"
-                    !intersection_x my mx my node len !intersection_vertex_node
-                    best_len;
+                  if !verbose then
+                    Printf.eprintf
+                      "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
+                       Best %d (len %g)\n\
+                       %!"
+                      !intersection_x my mx my node len
+                      !intersection_vertex_node best_len;
 
                   (* User hint: Connect to the node added with previous bridge (the bridge node).
                       The bridge edge is shorter than the original boundary edge.

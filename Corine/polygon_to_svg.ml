@@ -83,9 +83,8 @@ let generate_svg filename output_file use_normalized =
     "  .bridge { stroke: magenta; stroke-width: %f; stroke-dasharray: %f; }\n"
     (margin *. 0.15) (margin *. 0.1);
   Printf.fprintf oc
-    "  .stalled { fill: none; stroke: red; stroke-width: %f; stroke-dasharray: \
-     %f; opacity: 0.8; }\n"
-    (margin *. 0.2) (margin *. 0.15);
+    "  .stalled { fill: none; stroke: red; stroke-width: %f; opacity: 0.8; }\n"
+    (margin *. 0.02);
   Printf.fprintf oc "</style>\n";
 
   (* Draw Outer *)
@@ -152,7 +151,11 @@ let generate_svg filename output_file use_normalized =
     bridges;
 
   (* Draw stalled loops *)
-  let stalled = Polygon_triangulation.Triangulator.get_stalled_loops () in
+  let stalled =
+    match Polygon_triangulation.Triangulator.get_stalled_loops () with
+    | [] -> []
+    | l -> [ List.hd (List.rev l) ]
+  in
   Printf.printf "Found %d stalled loops\n%!" (List.length stalled);
   List.iter
     (fun indices ->
