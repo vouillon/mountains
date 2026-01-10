@@ -1016,6 +1016,36 @@ module Triangulator = struct
           self_int_errors;
         Printf.printf "%!"));
 
+    (* Build Spatial Index for Ear Clipping *)
+    let items = Array.make !count 0 in
+    let c = ref !curr in
+    for i = 0 to !count - 1 do
+      items.(i) <- !c;
+      c := next.(!c)
+    done;
+
+    let min_x = ref infinity and min_y = ref infinity in
+    let max_x = ref neg_infinity and max_y = ref neg_infinity in
+    Array.iter
+      (fun idx ->
+        let v = vert_idx.(idx) in
+        let x = Geometry.get_x verts v in
+        let y = Geometry.get_y verts v in
+        if x < !min_x then min_x := x;
+        if y < !min_y then min_y := y;
+        if x > !max_x then max_x := x;
+        if y > !max_y then max_y := y)
+      items;
+
+    (* If degenerate bounds (point or line), expand slightly to avoid 0 size *)
+    if !max_x <= !min_x then max_x := !min_x +. Geometry.epsilon;
+    if !max_y <= !min_y then max_y := !min_y +. Geometry.epsilon;
+
+    let tree =
+      Static_r_tree.build ~verts ~vert_idx ~items ~min_x:!min_x ~min_y:!min_y
+        ~max_x:!max_x ~max_y:!max_y
+    in
+
     let is_ear i =
       let node_prev = prev.(i) in
       let node_next = next.(i) in
@@ -1026,13 +1056,22 @@ module Triangulator = struct
       if cross_product verts vi_prev vi_curr vi_next < epsilon then false
       else
         try
-          let start_node = next.(node_next) in
-          let check_node = ref start_node in
-          let loop = ref true in
-          if start_node = node_prev then loop := false;
+          (* Triangle bounding box *)
+          let ax, ay =
+            (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
+          in
+          let bx, by =
+            (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
+          in
+          let cx, cy =
+            (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
+          in
+          let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
+          let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
+          let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
+          let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
 
-          while !loop do
-            let r_node = !check_node in
+          let check_node r_node =
             if active.(r_node) then (
               let vi_r = vert_idx.(r_node) in
               if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
@@ -1054,10 +1093,10 @@ module Triangulator = struct
                   then ()
                   else if
                     Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
-                  then raise Exit);
-            check_node := next.(!check_node);
-            if !check_node = start_node then loop := false
-          done;
+                  then raise Exit)
+          in
+
+          Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
           true
         with Exit -> false
     in
