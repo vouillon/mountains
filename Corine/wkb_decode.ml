@@ -29,8 +29,8 @@ let combine_bbox b p =
   }
 
 let get_bbox geom =
-  let rec from_points points acc = List.fold_left combine_bbox acc points in
-  let rec from_rings rings acc =
+  let from_points points acc = List.fold_left combine_bbox acc points in
+  let from_rings rings acc =
     List.fold_left (fun acc ring -> from_points ring acc) acc rings
   in
   match geom with

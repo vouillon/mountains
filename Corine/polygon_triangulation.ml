@@ -1,9 +1,7 @@
 (** Fast Polygon Triangulation with Holes in OCaml Algorithm: Ear Clipping with
-    Spatial Hashing (and Brute-force fallback) *)
+    Static R-tree (and Brute-force fallback) *)
 
 open Geometry_types
-
-(* Types removed - using Geometry_types *)
 
 module Geometry = struct
   let epsilon = 1e-12
@@ -56,8 +54,6 @@ module Geometry = struct
     let cx, cy = (get_x verts ic, get_y verts ic) in
     ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax))
   [@@inline always]
-
-  let cross_product_2d ax ay bx by = (ax *. by) -. (ay *. bx) [@@inline always]
 
   let point_in_triangle (verts : float array) ip ia ib ic =
     let cp1 = cross_product verts ia ib ip in
@@ -177,19 +173,6 @@ module Geometry = struct
     && ((cp3 > epsilon && cp4 < -.epsilon) || (cp3 < -.epsilon && cp4 > epsilon))
   [@@inline always]
 
-  let is_in_cone (verts : float array) ia ib ic ip =
-    let cp_abc = cross_product verts ia ib ic in
-    if cp_abc >= -.epsilon then
-      (* Convex or flat: must be left of BOTH edges to be interior *)
-      cross_product verts ia ib ip >= -.epsilon
-      && cross_product verts ib ic ip >= -.epsilon
-    else
-      (* Reflex: must NOT be strictly in the exterior sector (Right of both rays) *)
-      not
-        (cross_product verts ia ib ip < -.epsilon
-        && cross_product verts ib ic ip < -.epsilon)
-  [@@inline always]
-
   let signed_area_range (verts : float array) start len =
     if len < 3 then 0.0
     else
@@ -211,20 +194,6 @@ module Geometry = struct
   let is_ccw_range (verts : float array) start len =
     (* Counter-Clockwise polygon has POSITIVE area with standard Shoelace *)
     signed_area_range verts start len > 0.0
-
-  let find_rightmost_idx_range (verts : float array) start len =
-    if len = 0 then start
-    else
-      let max_idx = ref start in
-      let max_x = ref (get_x verts start) in
-      for i = 1 to len - 1 do
-        let idx = start + i in
-        let x = get_x verts idx in
-        if x > !max_x then (
-          max_x := x;
-          max_idx := idx)
-      done;
-      !max_idx
 end
 
 module PolygonList = struct
@@ -308,94 +277,6 @@ module PolygonList = struct
     !curr
 end
 
-module SpatialIndex = struct
-  type t = {
-    grid_head : int array;
-    next_in_bucket : int array;
-    inv_cell_size : float;
-    min_x : float;
-    min_y : float;
-    width : int;
-    height : int;
-  }
-
-  let empty_index =
-    {
-      grid_head = [||];
-      next_in_bucket = [||];
-      inv_cell_size = 0.0;
-      min_x = 0.0;
-      min_y = 0.0;
-      width = 0;
-      height = 0;
-    }
-
-  let create nodes_to_index count n_total (verts : float array) vert_idx_map =
-    if count = 0 then empty_index
-    else begin
-      let max_float = infinity in
-      let min_float = neg_infinity in
-
-      let min_x = ref max_float and min_y = ref max_float in
-      let max_x = ref min_float and max_y = ref min_float in
-
-      for i = 0 to count - 1 do
-        let node = nodes_to_index.(i) in
-        let v_idx = vert_idx_map.(node) in
-        let x = Geometry.get_x verts v_idx in
-        let y = Geometry.get_y verts v_idx in
-        if x < !min_x then min_x := x;
-        if y < !min_y then min_y := y;
-        if x > !max_x then max_x := x;
-        if y > !max_y then max_y := y
-      done;
-
-      let range_x = !max_x -. !min_x in
-      let range_y = !max_y -. !min_y in
-      let cell_size =
-        Geometry.fmax range_x range_y /. sqrt (float_of_int n_total)
-      in
-      let cell_size = if cell_size < Geometry.epsilon then 1.0 else cell_size in
-      let inv_cell_size = 1.0 /. cell_size in
-
-      let width = int_of_float (range_x *. inv_cell_size) + 1 in
-      let height = int_of_float (range_y *. inv_cell_size) + 1 in
-
-      let grid_head = Array.make (width * height) (-1) in
-      let next_in_bucket = Array.make n_total (-1) in
-
-      for i = 0 to count - 1 do
-        let item = nodes_to_index.(i) in
-        let v_idx = vert_idx_map.(item) in
-        let x = Geometry.get_x verts v_idx in
-        let y = Geometry.get_y verts v_idx in
-
-        let cx = int_of_float ((x -. !min_x) *. inv_cell_size) in
-        let cy = int_of_float ((y -. !min_y) *. inv_cell_size) in
-
-        let cx = if cx >= width then width - 1 else cx in
-        let cy = if cy >= height then height - 1 else cy in
-
-        let cell_idx = cx + (cy * width) in
-
-        if cell_idx >= 0 && cell_idx < Array.length grid_head then begin
-          next_in_bucket.(item) <- grid_head.(cell_idx);
-          grid_head.(cell_idx) <- item
-        end
-      done;
-
-      {
-        grid_head;
-        next_in_bucket;
-        inv_cell_size;
-        min_x = !min_x;
-        min_y = !min_y;
-        width;
-        height;
-      }
-    end
-end
-
 module Triangulator = struct
   open Geometry
 
@@ -415,48 +296,14 @@ module Triangulator = struct
   let last_normalized_coords : float array ref = ref [||]
   let get_last_normalized_coords () = !last_normalized_coords
 
-  (* Check if segment a->b is strictly internal to the polygon at vertex a.
-     a_prev and a_next are neighbors of a.
-     ccw indicates if the ring containing a is counter-clockwise. *)
-  let locally_inside (verts : float array) a a_prev a_next b ccw =
-    let ax, ay = (get_x verts a, get_y verts a) in
-    let px, py = (get_x verts a_prev, get_y verts a_prev) in
-    let nx, ny = (get_x verts a_next, get_y verts a_next) in
-    let bx, by = (get_x verts b, get_y verts b) in
-
-    let cp_prev =
-      Geometry.cross_product_2d (ax -. px) (ay -. py) (nx -. ax) (ny -. ay)
-    in
-    let cp_b_prev =
-      Geometry.cross_product_2d (ax -. px) (ay -. py) (bx -. ax) (by -. ay)
-    in
-    let cp_b_next =
-      Geometry.cross_product_2d (nx -. ax) (ny -. ay) (bx -. ax) (by -. ay)
-    in
-
-    let is_reflex = if ccw then cp_prev < -.epsilon else cp_prev > epsilon in
-
-    if is_reflex then
-      (* Reflex vertex - inside if it's NOT in the exterior cone (right of both) *)
-      cp_b_prev > -.epsilon || cp_b_next > -.epsilon
-    else
-      (* Convex vertex - inside if it's in the interior cone (left of both) *)
-      cp_b_prev > -.epsilon && cp_b_next > -.epsilon
-
   (* Check if a segment p1-p2 intersects any edge of a ring in poly_list *)
-  let segment_crosses_ring (verts : float array) p1_idx p2_idx ring_start
-      poly_list =
-    let curr = ref ring_start in
-    let result = ref false in
-    let loop = ref true in
-    while !loop && not !result do
-      let next_node = poly_list.PolygonList.next.(!curr) in
-      let a = poly_list.PolygonList.vert_idx.(!curr) in
-      let b = poly_list.PolygonList.vert_idx.(next_node) in
-      if segments_overlap verts p1_idx p2_idx a b then result := true;
-      if next_node = ring_start then loop := false else curr := next_node
-    done;
-    !result
+
+  (* Helper: Validates if point P lies on segment AB *)
+  let is_on_segment verts p_idx a_idx b_idx =
+    let px, py = (get_x verts p_idx, get_y verts p_idx) in
+    let ax, ay = (get_x verts a_idx, get_y verts a_idx) in
+    let bx, by = (get_x verts b_idx, get_y verts b_idx) in
+    dist_sq_point_segment px py ax ay bx by < epsilon
 
   let is_visible verts m_node p_node poly_start_node poly_list =
     let open PolygonList in
@@ -484,25 +331,11 @@ module Triangulator = struct
            in
            let vertex_on_ray =
              (if vi_a <> vi_m && vi_a <> vi_p then
-                Geometry.dist_sq_point_segment
-                  (Geometry.get_x verts vi_a)
-                  (Geometry.get_y verts vi_a)
-                  (Geometry.get_x verts vi_m)
-                  (Geometry.get_y verts vi_m)
-                  (Geometry.get_x verts vi_p)
-                  (Geometry.get_y verts vi_p)
-                < Geometry.epsilon
+                is_on_segment verts vi_a vi_m vi_p
               else false)
              ||
              if vi_b <> vi_m && vi_b <> vi_p then
-               Geometry.dist_sq_point_segment
-                 (Geometry.get_x verts vi_b)
-                 (Geometry.get_y verts vi_b)
-                 (Geometry.get_x verts vi_m)
-                 (Geometry.get_y verts vi_m)
-                 (Geometry.get_x verts vi_p)
-                 (Geometry.get_y verts vi_p)
-               < Geometry.epsilon
+               is_on_segment verts vi_b vi_m vi_p
              else false
            in
 
@@ -534,21 +367,6 @@ module Triangulator = struct
     in
     (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
     || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
-
-  (* Check if segment p1-p2 intersects any pending holes *)
-  let crosses_pending_holes (verts : float array) p1_idx p2_idx poly_list
-      processed_holes start_idx =
-    let num_holes = Array.length processed_holes in
-    let result = ref false in
-    let i = ref start_idx in
-    while !i < num_holes && not !result do
-      let hole_node, _, _ = processed_holes.(!i) in
-      if hole_node <> -1 then
-        if segment_crosses_ring verts p1_idx p2_idx hole_node poly_list then
-          result := true;
-      incr i
-    done;
-    !result
 
   (* Find if any vertex in the hole touches (has same coordinates as) any vertex
      in the current outer ring. If found, returns Some (hole_node, outer_node). *)
@@ -584,7 +402,7 @@ module Triangulator = struct
 
   (* Merge a touching hole directly at the shared vertex without creating bridges.
      The hole is spliced into the outer ring at the touching point. *)
-  let merge_touching_hole (verts : float array) hole_touch_node outer_touch_node
+  let merge_touching_hole (_ : float array) hole_touch_node outer_touch_node
       poly_list =
     let open PolygonList in
     let h_idx = poly_list.vert_idx.(hole_touch_node) in
@@ -608,8 +426,83 @@ module Triangulator = struct
     (* Return the outer touch node as the new start *)
     outer_touch_node
 
+  type bridge_candidate = {
+    t : float;
+    edge_p : int;
+    edge_n : int;
+    vi_p : int;
+    vi_n : int;
+    intersection_x : float;
+    is_vertex : bool;
+    vertex_node : int;
+  }
+
+  let empty_candidate =
+    {
+      t = infinity;
+      edge_p = -1;
+      edge_n = -1;
+      vi_p = -1;
+      vi_n = -1;
+      intersection_x = 0.0;
+      is_vertex = false;
+      vertex_node = -1;
+    }
+
+  (* Helper: Intersect ray from (mx, my) in +X direction with segment *)
+  let intersect_ray_segment verts my mx vi_curr vi_next =
+    let vx, vy = (get_x verts vi_curr, get_y verts vi_curr) in
+    let nx, ny = (get_x verts vi_next, get_y verts vi_next) in
+    let dy = ny -. vy in
+    let horizontal = abs_float dy < epsilon && abs_float (vy -. my) < epsilon in
+    (* Edge straddles if it crosses the ray Y-level in either direction *)
+    (* Need strict inequality on one side to avoid double-counting at vertices *)
+    let straddles = vy <= my && ny > my in
+
+    if straddles || horizontal then
+      let x_int_opt =
+        if horizontal then
+          if mx <= nx || mx <= vx then Some (fmax mx vx) else None
+        else
+          (* Standard intersection *)
+          let t_edge = (my -. vy) /. dy in
+          Some (vx +. (t_edge *. (nx -. vx)))
+      in
+      match x_int_opt with
+      | Some x_int -> if x_int >= mx then Some (x_int, x_int -. mx) else None
+      | None -> None
+    else None
+
+  (* Helper: Resolve tie when we hit a vertex. Prefer simpler/shorter connections *)
+  let resolve_vertex_tie verts poly_list current_vertex_node candidate_node
+      candidate_len_sq my mx intersection_x =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let n_node = poly_list.next.(current_vertex_node) in
+    let best_nx, best_ny =
+      (get_x verts vert_idx.(n_node), get_y verts vert_idx.(n_node))
+    in
+    let best_px, best_py =
+      ( get_x verts vert_idx.(current_vertex_node),
+        get_y verts vert_idx.(current_vertex_node) )
+    in
+    let best_len_sq =
+      ((best_nx -. best_px) ** 2.0) +. ((best_ny -. best_py) ** 2.0)
+    in
+
+    if !verbose then
+      Printf.eprintf
+        "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs Best %d (len \
+         %g)\n\
+         %!"
+        intersection_x my mx my candidate_node candidate_len_sq
+        current_vertex_node best_len_sq;
+
+    (* Return true if we should swap to candidate *)
+    candidate_len_sq < best_len_sq
+
   let find_bridge_point (verts : float array) hole_start_node outer_node
-      poly_list processed_holes pending_start_idx =
+      poly_list _ _ =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
@@ -620,272 +513,201 @@ module Triangulator = struct
 
     (* Helper to validate a candidate bridge *)
     let is_valid_bridge p_node =
-      let p_idx = vert_idx.(p_node) in
       is_visible verts hole_start_node p_node outer_node poly_list
     in
 
     (* Step 2: Intersect ray M + t(1,0) with all edges of outer polygon *)
-    (* Find closest intersection I on the ray *)
-    let best_t = ref infinity in
-    let best_edge_p = ref (-1) in
-    let best_edge_n = ref (-1) in
-    let best_vi_p = ref (-1) in
-    let best_vi_n = ref (-1) in
-    let intersection_x = ref 0.0 in
-    let intersection_is_vertex = ref false in
-    let intersection_vertex_node = ref (-1) in
+    let best = ref empty_candidate in
     let curr = ref outer_node in
     let loop = ref true in
+
     while !loop do
       let n = next.(!curr) in
       let vi_curr = vert_idx.(!curr) in
       let vi_next = vert_idx.(n) in
-      let vx, vy = (get_x verts vi_curr, get_y verts vi_curr) in
-      let nx, ny = (get_x verts vi_next, get_y verts vi_next) in
 
-      (* Eberly Step 2: Check ANY edge that straddles the ray y-level *)
-      (* Removed "upward only" restriction to handle CCW holes/bridges robustly *)
-      (* Eberly Step 2: Check edge that straddles the ray y-level *)
-      let dy = ny -. vy in
-      let horizontal =
-        abs_float dy < epsilon && abs_float (vy -. my) < epsilon
-      in
-      (* Edge straddles if it crosses the ray Y-level in either direction *)
-      (* Need strict inequality on one side to avoid double-counting at vertices *)
-      let straddles = vy <= my && ny > my in
+      begin match intersect_ray_segment verts my mx vi_curr vi_next with
+      | Some (x_int, t) ->
+          if t < !best.t -. epsilon then (
+            (* New best hit *)
+            let vx, vy = (get_x verts vi_curr, get_y verts vi_curr) in
+            let nx, ny = (get_x verts vi_next, get_y verts vi_next) in
+            let is_v_curr =
+              abs_float (x_int -. vx) < epsilon
+              && abs_float (my -. vy) < epsilon
+            in
+            let is_v_next =
+              abs_float (x_int -. nx) < epsilon
+              && abs_float (my -. ny) < epsilon
+            in
+            let is_v, v_node =
+              if is_v_curr then (true, !curr)
+              else if is_v_next then (true, n)
+              else (false, -1)
+            in
 
-      if straddles || horizontal then begin
-        (* Calculate intersection *)
-        let x_int_opt =
-          if horizontal then
-            if mx <= nx || mx <= vx then Some (fmax mx vx) else None
-          else
-            (* Standard intersection *)
-            let t_edge = (my -. vy) /. dy in
-            Some (vx +. (t_edge *. (nx -. vx)))
-        in
+            if (not is_v) && !verbose then
+              Printf.eprintf
+                "Hit edge %d-%d at t=%g (x_int=%g). Not a vertex hit? vx=%g \
+                 vy=%g nx=%g ny=%g my=%g\n\
+                 %!"
+                !curr n t x_int vx vy nx ny my;
 
-        match x_int_opt with
-        | Some x_int ->
-            (* Only consider intersections to the right of M *)
-            if x_int >= mx then begin
-              let t = x_int -. mx in
-              if t < !best_t -. epsilon then (
-                best_t := t;
-                best_edge_p := !curr;
-                best_edge_n := n;
-                best_vi_p := vi_curr;
-                best_vi_n := vi_next;
-                intersection_x := x_int;
-                let is_v_curr =
-                  abs_float (x_int -. vx) < epsilon
-                  && abs_float (my -. vy) < epsilon
-                in
-                let is_v_next =
-                  abs_float (x_int -. nx) < epsilon
-                  && abs_float (my -. ny) < epsilon
-                in
+            best :=
+              {
+                t;
+                edge_p = !curr;
+                edge_n = n;
+                vi_p = vi_curr;
+                vi_n = vi_next;
+                intersection_x = x_int;
+                is_vertex = is_v;
+                vertex_node = v_node;
+              })
+          else if abs_float (t -. !best.t) < epsilon then
+            (* Tie handling *)
+            let vx, vy = (get_x verts vi_curr, get_y verts vi_curr) in
+            let nx, ny = (get_x verts vi_next, get_y verts vi_next) in
 
-                if is_v_curr then (
-                  intersection_is_vertex := true;
-                  intersection_vertex_node := !curr)
-                else if is_v_next then (
-                  intersection_is_vertex := true;
-                  intersection_vertex_node := n)
-                else (
-                  intersection_is_vertex := false;
-                  if !verbose then
-                    Printf.eprintf
-                      "Hit edge %d-%d at t=%g (x_int=%g). Not a vertex hit? \
-                       vx=%g vy=%g nx=%g ny=%g my=%g\n\
-                       %!"
-                      !curr n t x_int vx vy nx ny my))
-              else if abs_float (t -. !best_t) < epsilon then
-                (* Same intersection distance *)
-                let update_if_shorter node =
-                  let nx, ny =
-                    ( get_x verts vert_idx.(poly_list.next.(node)),
-                      get_y verts vert_idx.(poly_list.next.(node)) )
-                  in
-                  let px, py =
-                    (get_x verts vert_idx.(node), get_y verts vert_idx.(node))
-                  in
-                  let len = ((nx -. px) ** 2.0) +. ((ny -. py) ** 2.0) in
+            let is_v_curr =
+              abs_float (x_int -. vx) < epsilon
+              && abs_float (my -. vy) < epsilon
+            in
+            let is_v_next =
+              abs_float (x_int -. nx) < epsilon
+              && abs_float (my -. ny) < epsilon
+            in
 
-                  let best_nx, best_ny =
-                    ( get_x verts
-                        vert_idx.(poly_list.next.(!intersection_vertex_node)),
-                      get_y verts
-                        vert_idx.(poly_list.next.(!intersection_vertex_node)) )
-                  in
-                  let best_px, best_py =
-                    ( get_x verts vert_idx.(!intersection_vertex_node),
-                      get_y verts vert_idx.(!intersection_vertex_node) )
-                  in
-                  let best_len =
-                    ((best_nx -. best_px) ** 2.0)
-                    +. ((best_ny -. best_py) ** 2.0)
-                  in
-                  if !verbose then
-                    Printf.eprintf
-                      "VERTEX TIE at %g,%g (M=%g,%g). Candidate %d (len %g) vs \
-                       Best %d (len %g)\n\
-                       %!"
-                      !intersection_x my mx my node len
-                      !intersection_vertex_node best_len;
+            (* Helper to update if shorter edge *)
+            let check_swap candidate_node =
+              let px, py =
+                ( get_x verts vert_idx.(candidate_node),
+                  get_y verts vert_idx.(candidate_node) )
+              in
+              let n_node = next.(candidate_node) in
+              let nx2, ny2 =
+                (get_x verts vert_idx.(n_node), get_y verts vert_idx.(n_node))
+              in
+              let len_sq = ((nx2 -. px) ** 2.0) +. ((ny2 -. py) ** 2.0) in
 
-                  (* User hint: Connect to the node added with previous bridge (the bridge node).
-                      The bridge edge is shorter than the original boundary edge.
-                      So we want the SHORTER outgoing edge. *)
-                  if len < best_len then (
-                    Printf.eprintf "  -> Swapping to %d (Shorter)\n%!" node;
-                    intersection_vertex_node := node;
-                    best_edge_p := !curr;
-                    best_edge_n := n;
-                    best_vi_p := vi_curr;
-                    best_vi_n := vi_next)
-                in
+              if
+                resolve_vertex_tie verts poly_list !best.vertex_node
+                  candidate_node len_sq my mx x_int
+              then
+                best :=
+                  {
+                    !best with
+                    vertex_node = candidate_node;
+                    edge_p = !curr;
+                    edge_n = n;
+                    vi_p = vi_curr;
+                    vi_n = vi_next;
+                  }
+            in
 
-                if
-                  abs_float (x_int -. vx) < epsilon
-                  && abs_float (my -. vy) < epsilon
-                then
-                  if !intersection_is_vertex then update_if_shorter !curr
-                  else (
-                    intersection_is_vertex := true;
-                    intersection_vertex_node := !curr)
-                else if
-                  abs_float (x_int -. nx) < epsilon
-                  && abs_float (my -. ny) < epsilon
-                then
-                  if !intersection_is_vertex then update_if_shorter n
-                  else (
-                    intersection_is_vertex := true;
-                    intersection_vertex_node := n)
-                else if not !intersection_is_vertex then
-                  (* Edge hit (interior). If edges overlap, prefer the SHORTER one. *)
-                  let curr_len_sq =
-                    ((nx -. vx) ** 2.0) +. ((ny -. vy) ** 2.0)
-                  in
-                  let best_vx = get_x verts !best_vi_p in
-                  let best_vy = get_y verts !best_vi_p in
-                  let best_nx = get_x verts !best_vi_n in
-                  let best_ny = get_y verts !best_vi_n in
-                  let best_len_sq =
-                    ((best_nx -. best_vx) ** 2.0)
-                    +. ((best_ny -. best_vy) ** 2.0)
-                  in
-                  (* Prefer SHORTER edge *)
-                  if curr_len_sq < best_len_sq then (
-                    best_edge_p := !curr;
-                    best_edge_n := n;
-                    best_vi_p := vi_curr;
-                    best_vi_n := vi_next)
-            end
-        | None -> ()
+            if is_v_curr then
+              if !best.is_vertex then check_swap !curr
+              else best := { !best with is_vertex = true; vertex_node = !curr }
+            else if is_v_next then
+              if !best.is_vertex then check_swap n
+              else best := { !best with is_vertex = true; vertex_node = n }
+            else if not !best.is_vertex then
+              (* Edge tie: Prefer shorter edge *)
+              let curr_len_sq = ((nx -. vx) ** 2.0) +. ((ny -. vy) ** 2.0) in
+              let bx, by = (get_x verts !best.vi_p, get_y verts !best.vi_p) in
+              let bnx, bny = (get_x verts !best.vi_n, get_y verts !best.vi_n) in
+              let best_len_sq = ((bnx -. bx) ** 2.0) +. ((bny -. by) ** 2.0) in
+
+              if curr_len_sq < best_len_sq then
+                best :=
+                  {
+                    !best with
+                    edge_p = !curr;
+                    edge_n = n;
+                    vi_p = vi_curr;
+                    vi_n = vi_next;
+                  }
+      | None -> ()
       end;
       if n = outer_node then loop := false else curr := n
     done;
 
-    if !best_t = infinity then None (* No intersection found *)
-    else if !intersection_is_vertex then begin
-      (* Step 3: I is vertex of outer polygon. Terminates. *)
-      (* Use the SPECIFIC node found by intersection logic *)
-      let p_node = !intersection_vertex_node in
+    if !best.t = infinity then None
+    else if !best.is_vertex then (
+      let p_node = !best.vertex_node in
       if !verbose then
         Printf.printf "  Eberly Step 3: Hit vertex %d (node %d). Visible!\n%!"
           vert_idx.(p_node) p_node;
-      Some p_node
-    end
+      Some p_node)
     else begin
       (* Step 4: I is an interior point. Select P = max X endpoint. *)
       let p_node =
-        let vx, nx = (get_x verts !best_vi_p, get_x verts !best_vi_n) in
-        (* Robust Vertical Edge Handling: Ambiguous Max X -> Force Start Node *)
-        if abs_float (vx -. nx) < epsilon then !best_edge_p
-        else if vx >= nx then !best_edge_p
-        else !best_edge_n
+        let vx = get_x verts !best.vi_p in
+        let nx = get_x verts !best.vi_n in
+        if abs_float (vx -. nx) < epsilon then !best.edge_p (* Vertical *)
+        else if vx >= nx then !best.edge_p
+        else !best.edge_n
       in
       let p_idx = vert_idx.(p_node) in
-      let p_x = get_x verts p_idx in
-      let p_y = get_y verts p_idx in
+      let p_x, p_y = (get_x verts p_idx, get_y verts p_idx) in
 
       if !verbose then
         Printf.printf "  Eberly Step 4: Hit edge, P is %d (node %d)\n%!" p_idx
           p_node;
 
-      (* Step 5-6: Search reflex vertices in triangle M-I-P *)
-      (* If all reflex vertices are outside the triangle, M and P are mutually visible *)
-      (* Otherwise, find reflex R that minimizes angle to ray M-I *)
+      (* Step 5-6: Search reflex vertices *)
       let reflex_candidates = ref [] in
       let search_curr = ref outer_node in
       let search_loop = ref true in
       while !search_loop do
         let search_node = !search_curr in
         let v_idx = vert_idx.(search_node) in
+        (if search_node <> p_node then
+           let prv = prev.(search_node) in
+           let nxt = next.(search_node) in
+           let vi_prv = vert_idx.(prv) in
+           let vi_rn = vert_idx.(nxt) in
 
-        (* Skip P itself *)
-        if search_node <> p_node then begin
-          let prv = prev.(search_node) in
-          let nxt = next.(search_node) in
-          let vi_prv = vert_idx.(prv) in
-          let vi_rn = vert_idx.(nxt) in
-
-          (* STRICTLY OUTSIDE check: Skip nodes co-located with P or M *)
-          (* A reflex vertex at P or M does not block visibility to P *)
-          if
-            (not (points_equal verts v_idx p_idx))
-            && not (points_equal verts v_idx vert_idx.(hole_start_node))
-          then
-            let cp = cross_product verts vi_prv v_idx vi_rn in
-            let is_reflex = cp < -.epsilon in
-
-            if is_reflex then begin
-              let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
-              if point_in_triangle_coords mx my !intersection_x my p_x p_y rx ry
-              then
-                let dx = rx -. mx in
-                let dy = abs_float (ry -. my) in
-                if dx > epsilon then
-                  reflex_candidates :=
-                    (dy /. dx, search_node) :: !reflex_candidates
-            end
-        end;
-
+           (* Strictly outside check *)
+           if
+             (not (points_equal verts v_idx p_idx))
+             && not (points_equal verts v_idx vert_idx.(hole_start_node))
+           then
+             let cp = cross_product verts vi_prv v_idx vi_rn in
+             if cp < -.epsilon then
+               let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
+               if
+                 point_in_triangle_coords mx my !best.intersection_x my p_x p_y
+                   rx ry
+               then
+                 let dx = rx -. mx in
+                 let dy = abs_float (ry -. my) in
+                 if dx > epsilon then
+                   reflex_candidates :=
+                     (dy /. dx, search_node) :: !reflex_candidates);
         let nxt = next.(!search_curr) in
         if nxt = outer_node then search_loop := false else search_curr := nxt
       done;
-      if !verbose then
-        Printf.printf "  Reflex candidates: %d\n%!"
-          (List.length !reflex_candidates);
 
-      (* Sort candidates by angle_tan (Step 6) *)
       let sorted_reflex =
         List.sort (fun (t1, _) (t2, _) -> compare t1 t2) !reflex_candidates
       in
 
-      (* Try each reflex vertex in order *)
       let rec try_reflex = function
         | [] -> None
         | (_, ref_node) :: rest ->
-            (* Trust the specific reflex node found *)
             if is_valid_bridge ref_node then Some ref_node else try_reflex rest
       in
 
-      let final_bridge = try_reflex sorted_reflex in
-
-      match final_bridge with
+      match try_reflex sorted_reflex with
       | Some node ->
           if !verbose then
-            Printf.printf
-              "  Eberly: selected bridge vertex %d (reflex=true)\n%!"
+            Printf.printf "  Eberly: selected bridge vertex %d\n%!"
               vert_idx.(node);
           Some node
       | None ->
-          (* Fallback to ray-intersection vertex P *)
           if !verbose then
-            Printf.printf
-              "  Eberly: No visible reflex vertex, trying ray vertex %d\n%!"
+            Printf.printf "  Eberly: No visible reflex vertex, trying P %d\n%!"
               p_idx;
           Some p_node
     end
@@ -999,7 +821,7 @@ module Triangulator = struct
           self_int_errors;
         Printf.printf "%!"));
 
-    (* Build Spatial Index for Ear Clipping *)
+    (* Build Static R-tree for Ear Clipping *)
     let items = Array.make !count 0 in
     let c = ref !curr in
     for i = 0 to !count - 1 do
@@ -1515,8 +1337,6 @@ module Triangulator = struct
           triangulate_dll verts !curr_outer_node poly_list active_count
             out_buffer start_offset
 
-  (* Use Geometry_types.validate_polygon *)
-
   (* Compute signed area of a triangle given 3 vertex indices *)
   let triangle_area verts i0 i1 i2 =
     let x0 = Geometry.get_x verts i0 in
@@ -1720,23 +1540,4 @@ module Triangulator = struct
 
     if !offset < Array.length out_buffer then Array.sub out_buffer 0 !offset
     else out_buffer
-
-  let triangulate (flat_verts : float array) hole_starts =
-    let total_len = Array.length flat_verts / 2 in
-    let num_holes = Array.length hole_starts in
-
-    let outer_len = if num_holes > 0 then hole_starts.(0) else total_len in
-    let outer_ring = { start = 0; len = outer_len } in
-
-    let hole_rings =
-      Array.init num_holes (fun i ->
-          let start = hole_starts.(i) in
-          let end_ =
-            if i + 1 < num_holes then hole_starts.(i + 1) else total_len
-          in
-          { start; len = end_ - start })
-    in
-
-    triangulate_multi flat_verts
-      [| { outer = outer_ring; holes = hole_rings } |]
 end

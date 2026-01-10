@@ -249,7 +249,7 @@ let validate_cheap (verts : float array) poly =
   let e3 =
     Array.to_list
       (Array.mapi
-         (fun i h ->
+         (fun _ h ->
            check_no_duplicates verts h.start h.len
            @ if true then [] else check_winding_order verts h.start h.len false)
          poly.holes)
