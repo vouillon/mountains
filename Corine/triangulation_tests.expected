@@ -1,395 +1,76 @@
-Running 1381 regression tests...
-AREA MISMATCH: expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112 (20 tris)
+Running 1051 regression tests...
+AREA MISMATCH: expected=1.0886e-08, actual=1.9828e-08, ratio=1.8214 (20 tris)
   QUALITY WARNING: Triangle count mismatch: got 20, expected 21
-FAIL: test_polygons/mismatch_N43E005_water_204.json (expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112)
-Triangulation quality warning for  clc (Area OK): 4945 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4945, expected 4954
-AREA MISMATCH: expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112 (20 tris)
+FAIL: test_polygons/mismatch_N43E005_water_001.json (expected=1.0886e-08, actual=1.9828e-08, ratio=1.8214)
+AREA MISMATCH: expected=1.0886e-08, actual=1.9828e-08, ratio=1.8214 (20 tris)
   QUALITY WARNING: Triangle count mismatch: got 20, expected 21
-FAIL: test_polygons/mismatch_N43E006_water_118.json (expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112)
+FAIL: test_polygons/mismatch_N43E006_water_001.json (expected=1.0886e-08, actual=1.9828e-08, ratio=1.8214)
 Triangulation quality warning for  clc (Area OK): 186 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 186, expected 189
 FAIL: test_polygons/mismatch_N44E005_clc_003.json (expected=0.000318413, actual=0.000317325, ratio=0.9966)
-Triangulation quality warning for  water (Area OK): 24 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.08 deg
-  QUALITY WARNING: Triangle count mismatch: got 24, expected 25
-FAIL: test_polygons/mismatch_N44E005_water_133.json (expected=4.5333e-08, actual=4.5383e-08, ratio=1.0011)
+AREA MISMATCH: expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128 (518 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
+  QUALITY WARNING: Triangle count mismatch: got 518, expected 570
+FAIL: test_polygons/mismatch_N44E007_water_001.json (expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128)
 Triangulation quality warning for  water (Area OK): 81 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.19 deg
   QUALITY WARNING: Triangle count mismatch: got 81, expected 96
-AREA MISMATCH: expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128 (514 tris)
+AREA MISMATCH: expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128 (518 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 514, expected 570
+  QUALITY WARNING: Triangle count mismatch: got 518, expected 570
 FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128)
+AREA MISMATCH: expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177 (3 tris)
+  QUALITY WARNING: Triangle count mismatch: got 3, expected 4
+FAIL: test_polygons/mismatch_N44E008_water_001.json (expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177)
 Triangulation quality warning for  water (Area OK): 2320 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2320, expected 2428
-AREA MISMATCH: expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177 (3 tris)
-  QUALITY WARNING: Triangle count mismatch: got 3, expected 4
-FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177)
-Triangulation quality warning for  clc (Area OK): 12899 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 12899, expected 12966
-Triangulation quality warning for  clc (Area OK): 14887 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 14887, expected 14938
+AREA MISMATCH: expected=0.000168139, actual=0.00016677, ratio=0.9919 (84 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
+  QUALITY WARNING: Triangle count mismatch: got 84, expected 87
+FAIL: test_polygons/mismatch_N45E005_clc_001.json (expected=0.000168139, actual=0.00016677, ratio=0.9919)
 AREA MISMATCH: expected=0.000168139, actual=0.00016677, ratio=0.9919 (84 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
   QUALITY WARNING: Triangle count mismatch: got 84, expected 87
 FAIL: test_polygons/mismatch_N45E005_clc_020.json (expected=0.000168139, actual=0.00016677, ratio=0.9919)
+AREA MISMATCH: expected=1.58443e-08, actual=1.63964e-08, ratio=1.0348 (30 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.85 deg
+  QUALITY WARNING: Triangle count mismatch: got 30, expected 31
+FAIL: test_polygons/mismatch_N45E005_water_001.json (expected=1.58443e-08, actual=1.63964e-08, ratio=1.0348)
 AREA MISMATCH: expected=0.000479838, actual=0.000571664, ratio=1.1914 (474 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 474, expected 490
 FAIL: test_polygons/mismatch_N45E005_water_117.json (expected=0.000479838, actual=0.000571664, ratio=1.1914)
-Triangulation quality warning for  water (Area OK): 24 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
-  QUALITY WARNING: Triangle count mismatch: got 24, expected 25
-FAIL: test_polygons/mismatch_N45E005_water_125.json (expected=1.44069e-08, actual=1.44519e-08, ratio=1.0031)
-AREA MISMATCH: expected=1.26217e-08, actual=2.74294e-08, ratio=2.1732 (20 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.39 deg
-  QUALITY WARNING: Triangle count mismatch: got 20, expected 23
-FAIL: test_polygons/mismatch_N45E005_water_130.json (expected=1.26217e-08, actual=2.74294e-08, ratio=2.1732)
-AREA MISMATCH: expected=4.97761e-08, actual=4.90691e-07, ratio=9.8580 (73 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 73, expected 77
-FAIL: test_polygons/mismatch_N45E005_water_148.json (expected=4.97761e-08, actual=4.90691e-07, ratio=9.8580)
-AREA MISMATCH: expected=8.9838e-08, actual=9.0998e-08, ratio=1.0129 (81 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.08 deg
-  QUALITY WARNING: Triangle count mismatch: got 81, expected 82
-FAIL: test_polygons/mismatch_N45E005_water_158.json (expected=8.9838e-08, actual=9.0998e-08, ratio=1.0129)
-AREA MISMATCH: expected=5.2595e-08, actual=5.3073e-08, ratio=1.0091 (43 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.56 deg
-  QUALITY WARNING: Triangle count mismatch: got 43, expected 44
-FAIL: test_polygons/mismatch_N45E005_water_163.json (expected=5.2595e-08, actual=5.3073e-08, ratio=1.0091)
-AREA MISMATCH: expected=1.09247e-08, actual=1.11188e-08, ratio=1.0178 (11 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.14 deg
-  QUALITY WARNING: Triangle count mismatch: got 11, expected 12
-FAIL: test_polygons/mismatch_N45E005_water_175.json (expected=1.09247e-08, actual=1.11188e-08, ratio=1.0178)
-AREA MISMATCH: expected=6.88704e-08, actual=9.7448e-08, ratio=1.4149 (93 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.10 deg
-  QUALITY WARNING: Triangle count mismatch: got 93, expected 97
-FAIL: test_polygons/mismatch_N45E005_water_182.json (expected=6.88704e-08, actual=9.7448e-08, ratio=1.4149)
-AREA MISMATCH: expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684 (12 tris)
-  QUALITY WARNING: Triangle count mismatch: got 12, expected 15
-FAIL: test_polygons/mismatch_N45E005_water_183.json (expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684)
-AREA MISMATCH: expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885 (21 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
-  QUALITY WARNING: Triangle count mismatch: got 21, expected 22
-FAIL: test_polygons/mismatch_N45E005_water_203.json (expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885)
-AREA MISMATCH: expected=1.59186e-08, actual=2.19034e-08, ratio=1.3760 (30 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 30, expected 31
-FAIL: test_polygons/mismatch_N45E005_water_228.json (expected=1.59186e-08, actual=2.19034e-08, ratio=1.3760)
-AREA MISMATCH: expected=2.86825e-08, actual=2.88595e-08, ratio=1.0062 (24 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.12 deg
-  QUALITY WARNING: Triangle count mismatch: got 24, expected 25
-FAIL: test_polygons/mismatch_N45E005_water_237.json (expected=2.86825e-08, actual=2.88595e-08, ratio=1.0062)
-AREA MISMATCH: expected=1.81182e-07, actual=1.84332e-07, ratio=1.0174 (66 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.15 deg
-  QUALITY WARNING: Triangle count mismatch: got 66, expected 67
-FAIL: test_polygons/mismatch_N45E005_water_239.json (expected=1.81182e-07, actual=1.84332e-07, ratio=1.0174)
-AREA MISMATCH: expected=2.79548e-08, actual=1.12039e-06, ratio=40.0786 (60 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.19 deg
-  QUALITY WARNING: Triangle count mismatch: got 60, expected 67
-FAIL: test_polygons/mismatch_N45E005_water_243.json (expected=2.79548e-08, actual=1.12039e-06, ratio=40.0786)
-AREA MISMATCH: expected=1.20456e-07, actual=1.2242e-07, ratio=1.0163 (94 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 94, expected 95
-FAIL: test_polygons/mismatch_N45E005_water_246.json (expected=1.20456e-07, actual=1.2242e-07, ratio=1.0163)
-AREA MISMATCH: expected=5.82005e-08, actual=5.86205e-08, ratio=1.0072 (19 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.11 deg
-  QUALITY WARNING: Triangle count mismatch: got 19, expected 20
-FAIL: test_polygons/mismatch_N45E005_water_264.json (expected=5.82005e-08, actual=5.86205e-08, ratio=1.0072)
-AREA MISMATCH: expected=1.67297e-08, actual=1.89457e-08, ratio=1.1325 (16 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.40 deg
-  QUALITY WARNING: Triangle count mismatch: got 16, expected 18
-FAIL: test_polygons/mismatch_N45E005_water_277.json (expected=1.67297e-08, actual=1.89457e-08, ratio=1.1325)
-AREA MISMATCH: expected=7.11522e-09, actual=8.92662e-09, ratio=1.2546 (10 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.46 deg
-  QUALITY WARNING: Triangle count mismatch: got 10, expected 11
-FAIL: test_polygons/mismatch_N45E005_water_299.json (expected=7.11522e-09, actual=8.92662e-09, ratio=1.2546)
-AREA MISMATCH: expected=5.54229e-09, actual=6.15322e-09, ratio=1.1102 (14 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
-  QUALITY WARNING: Triangle count mismatch: got 14, expected 15
-FAIL: test_polygons/mismatch_N45E005_water_300.json (expected=5.54229e-09, actual=6.15322e-09, ratio=1.1102)
-AREA MISMATCH: expected=4.6924e-09, actual=6.03716e-09, ratio=1.2866 (8 tris)
-  QUALITY WARNING: Triangle count mismatch: got 8, expected 9
-FAIL: test_polygons/mismatch_N45E005_water_304.json (expected=4.6924e-09, actual=6.03716e-09, ratio=1.2866)
-AREA MISMATCH: expected=1.78338e-08, actual=2.60411e-08, ratio=1.4602 (27 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.04 deg
-  QUALITY WARNING: Triangle count mismatch: got 27, expected 29
-FAIL: test_polygons/mismatch_N45E005_water_321.json (expected=1.78338e-08, actual=2.60411e-08, ratio=1.4602)
-AREA MISMATCH: expected=8.57145e-09, actual=8.88312e-09, ratio=1.0364 (15 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.92 deg
-  QUALITY WARNING: Triangle count mismatch: got 15, expected 16
-FAIL: test_polygons/mismatch_N45E005_water_324.json (expected=8.57145e-09, actual=8.88312e-09, ratio=1.0364)
-AREA MISMATCH: expected=1.80211e-07, actual=1.82972e-07, ratio=1.0153 (179 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 179, expected 180
-FAIL: test_polygons/mismatch_N45E005_water_329.json (expected=1.80211e-07, actual=1.82972e-07, ratio=1.0153)
-AREA MISMATCH: expected=3.47145e-08, actual=4.383e-08, ratio=1.2626 (34 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.12 deg
-  QUALITY WARNING: Triangle count mismatch: got 34, expected 36
-FAIL: test_polygons/mismatch_N45E005_water_341.json (expected=3.47145e-08, actual=4.383e-08, ratio=1.2626)
-AREA MISMATCH: expected=5.68425e-10, actual=2.48536e-09, ratio=4.3724 (2 tris)
-  QUALITY WARNING: Triangle count mismatch: got 2, expected 4
-FAIL: test_polygons/mismatch_N45E005_water_352.json (expected=5.68425e-10, actual=2.48536e-09, ratio=4.3724)
-AREA MISMATCH: expected=5.78135e-09, actual=5.95626e-09, ratio=1.0303 (9 tris)
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 10
-FAIL: test_polygons/mismatch_N45E005_water_356.json (expected=5.78135e-09, actual=5.95626e-09, ratio=1.0303)
-AREA MISMATCH: expected=6.44588e-09, actual=6.8895e-09, ratio=1.0688 (12 tris)
-  QUALITY WARNING: Triangle count mismatch: got 12, expected 13
-FAIL: test_polygons/mismatch_N45E005_water_366.json (expected=6.44588e-09, actual=6.8895e-09, ratio=1.0688)
-AREA MISMATCH: expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120 (9 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 10
-FAIL: test_polygons/mismatch_N45E005_water_382.json (expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120)
-AREA MISMATCH: expected=1.31323e-09, actual=1.43745e-09, ratio=1.0946 (5 tris)
-  QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N45E005_water_394.json (expected=1.31323e-09, actual=1.43745e-09, ratio=1.0946)
-AREA MISMATCH: expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740 (17 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.64 deg
-  QUALITY WARNING: Triangle count mismatch: got 17, expected 21
-FAIL: test_polygons/mismatch_N45E005_water_395.json (expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740)
-AREA MISMATCH: expected=2.22835e-08, actual=4.22308e-07, ratio=18.9516 (63 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
-  QUALITY WARNING: Triangle count mismatch: got 63, expected 69
-FAIL: test_polygons/mismatch_N45E005_water_414.json (expected=2.22835e-08, actual=4.22308e-07, ratio=18.9516)
-AREA MISMATCH: expected=5.06501e-08, actual=1.60227e-07, ratio=3.1634 (44 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 44, expected 49
-FAIL: test_polygons/mismatch_N45E005_water_454.json (expected=5.06501e-08, actual=1.60227e-07, ratio=3.1634)
-AREA MISMATCH: expected=5.05212e-08, actual=5.22832e-08, ratio=1.0349 (51 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.57 deg
-  QUALITY WARNING: Triangle count mismatch: got 51, expected 52
-FAIL: test_polygons/mismatch_N45E005_water_466.json (expected=5.05212e-08, actual=5.22832e-08, ratio=1.0349)
-AREA MISMATCH: expected=2.68629e-09, actual=2.82193e-09, ratio=1.0505 (5 tris)
-  QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N45E005_water_476.json (expected=2.68629e-09, actual=2.82193e-09, ratio=1.0505)
-AREA MISMATCH: expected=3.27166e-08, actual=3.50974e-07, ratio=10.7277 (58 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 58, expected 65
-FAIL: test_polygons/mismatch_N45E005_water_488.json (expected=3.27166e-08, actual=3.50974e-07, ratio=10.7277)
-AREA MISMATCH: expected=7.53973e-09, actual=7.8457e-09, ratio=1.0406 (11 tris)
-  QUALITY WARNING: Triangle count mismatch: got 11, expected 12
-FAIL: test_polygons/mismatch_N45E005_water_502.json (expected=7.53973e-09, actual=7.8457e-09, ratio=1.0406)
-AREA MISMATCH: expected=1.57054e-07, actual=1.58128e-07, ratio=1.0068 (71 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
-  QUALITY WARNING: Triangle count mismatch: got 71, expected 72
-FAIL: test_polygons/mismatch_N45E005_water_510.json (expected=1.57054e-07, actual=1.58128e-07, ratio=1.0068)
-AREA MISMATCH: expected=3.27649e-07, actual=1.23363e-06, ratio=3.7651 (259 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 259, expected 266
-FAIL: test_polygons/mismatch_N45E005_water_516.json (expected=3.27649e-07, actual=1.23363e-06, ratio=3.7651)
-AREA MISMATCH: expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389 (9 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.49 deg
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 11
-FAIL: test_polygons/mismatch_N45E005_water_530.json (expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389)
-AREA MISMATCH: expected=2.61225e-09, actual=5.20176e-09, ratio=1.9913 (2 tris)
-  QUALITY WARNING: Triangle count mismatch: got 2, expected 3
-FAIL: test_polygons/mismatch_N45E005_water_533.json (expected=2.61225e-09, actual=5.20176e-09, ratio=1.9913)
-AREA MISMATCH: expected=1.58443e-08, actual=1.60043e-08, ratio=1.0101 (30 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.85 deg
-  QUALITY WARNING: Triangle count mismatch: got 30, expected 31
-FAIL: test_polygons/mismatch_N45E005_water_542.json (expected=1.58443e-08, actual=1.60043e-08, ratio=1.0101)
-AREA MISMATCH: expected=7.19056e-08, actual=1.21346e-06, ratio=16.8757 (155 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 155, expected 167
-FAIL: test_polygons/mismatch_N45E006_water_109.json (expected=7.19056e-08, actual=1.21346e-06, ratio=16.8757)
-AREA MISMATCH: expected=2.52166e-07, actual=5.2144e-07, ratio=2.0678 (66 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.13 deg
-  QUALITY WARNING: Triangle count mismatch: got 66, expected 75
-FAIL: test_polygons/mismatch_N45E006_water_111.json (expected=2.52166e-07, actual=5.2144e-07, ratio=2.0678)
-Triangulation quality warning for  water (Area OK): 87 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.09 deg
-  QUALITY WARNING: Triangle count mismatch: got 87, expected 88
-FAIL: test_polygons/mismatch_N45E006_water_113.json (expected=6.8561e-08, actual=6.87395e-08, ratio=1.0026)
-AREA MISMATCH: expected=2.2632e-08, actual=2.34075e-08, ratio=1.0343 (30 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.11 deg
-  QUALITY WARNING: Triangle count mismatch: got 30, expected 31
-FAIL: test_polygons/mismatch_N45E006_water_114.json (expected=2.2632e-08, actual=2.34075e-08, ratio=1.0343)
-AREA MISMATCH: expected=1.66053e-08, actual=2.17511e-07, ratio=13.0989 (40 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.33 deg
-  QUALITY WARNING: Triangle count mismatch: got 40, expected 47
-FAIL: test_polygons/mismatch_N45E006_water_119.json (expected=1.66053e-08, actual=2.17511e-07, ratio=13.0989)
-AREA MISMATCH: expected=6.014e-09, actual=9.944e-09, ratio=1.6535 (6 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.26 deg
-  QUALITY WARNING: Triangle count mismatch: got 6, expected 8
-FAIL: test_polygons/mismatch_N45E006_water_120.json (expected=6.014e-09, actual=9.944e-09, ratio=1.6535)
-AREA MISMATCH: expected=4.4892e-08, actual=4.32458e-07, ratio=9.6333 (37 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.08 deg
-  QUALITY WARNING: Triangle count mismatch: got 37, expected 41
-FAIL: test_polygons/mismatch_N45E006_water_134.json (expected=4.4892e-08, actual=4.32458e-07, ratio=9.6333)
-AREA MISMATCH: expected=1.0913e-08, actual=1.105e-08, ratio=1.0126 (16 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 16, expected 17
-FAIL: test_polygons/mismatch_N45E006_water_140.json (expected=1.0913e-08, actual=1.105e-08, ratio=1.0126)
-AREA MISMATCH: expected=2.52899e-08, actual=3.17011e-08, ratio=1.2535 (36 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 36, expected 38
-FAIL: test_polygons/mismatch_N45E006_water_149.json (expected=2.52899e-08, actual=3.17011e-08, ratio=1.2535)
-AREA MISMATCH: expected=1.03677e-07, actual=1.08999e-07, ratio=1.0513 (57 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 57, expected 58
-FAIL: test_polygons/mismatch_N45E006_water_153.json (expected=1.03677e-07, actual=1.08999e-07, ratio=1.0513)
-Triangulation quality warning for  water (Area OK): 24 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.69 deg
-  QUALITY WARNING: Triangle count mismatch: got 24, expected 25
-FAIL: test_polygons/mismatch_N45E006_water_161.json (expected=2.85615e-08, actual=2.8593e-08, ratio=1.0011)
-AREA MISMATCH: expected=4.688e-09, actual=9.074e-09, ratio=1.9356 (4 tris)
-  QUALITY WARNING: Triangle count mismatch: got 4, expected 5
-FAIL: test_polygons/mismatch_N45E006_water_172.json (expected=4.688e-09, actual=9.074e-09, ratio=1.9356)
-AREA MISMATCH: expected=4.453e-09, actual=5.837e-09, ratio=1.3108 (7 tris)
-  QUALITY WARNING: Triangle count mismatch: got 7, expected 8
-FAIL: test_polygons/mismatch_N45E006_water_181.json (expected=4.453e-09, actual=5.837e-09, ratio=1.3108)
-AREA MISMATCH: expected=1.00323e-07, actual=2.57301e-06, ratio=25.6473 (154 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 154, expected 163
-FAIL: test_polygons/mismatch_N45E006_water_188.json (expected=1.00323e-07, actual=2.57301e-06, ratio=25.6473)
-AREA MISMATCH: expected=3.06295e-08, actual=9.38293e-07, ratio=30.6336 (65 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.10 deg
-  QUALITY WARNING: Triangle count mismatch: got 65, expected 71
-FAIL: test_polygons/mismatch_N45E006_water_190.json (expected=3.06295e-08, actual=9.38293e-07, ratio=30.6336)
-AREA MISMATCH: expected=6.74439e-08, actual=6.91524e-08, ratio=1.0253 (59 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.14 deg
-  QUALITY WARNING: Triangle count mismatch: got 59, expected 60
-FAIL: test_polygons/mismatch_N45E006_water_214.json (expected=6.74439e-08, actual=6.91524e-08, ratio=1.0253)
-Triangulation quality warning for  water (Area OK): 91 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.30 deg
-  QUALITY WARNING: Triangle count mismatch: got 91, expected 92
-FAIL: test_polygons/mismatch_N45E006_water_215.json (expected=1.16492e-07, actual=1.16661e-07, ratio=1.0015)
-Triangulation quality warning for  water (Area OK): 25 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.34 deg
-  QUALITY WARNING: Triangle count mismatch: got 25, expected 26
-AREA MISMATCH: expected=9.9085e-09, actual=2.296e-08, ratio=2.3172 (13 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.09 deg
-  QUALITY WARNING: Triangle count mismatch: got 13, expected 15
-FAIL: test_polygons/mismatch_N45E006_water_247.json (expected=9.9085e-09, actual=2.296e-08, ratio=2.3172)
-AREA MISMATCH: expected=8.75725e-08, actual=8.92495e-08, ratio=1.0191 (83 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 83, expected 84
-FAIL: test_polygons/mismatch_N45E006_water_252.json (expected=8.75725e-08, actual=8.92495e-08, ratio=1.0191)
-AREA MISMATCH: expected=4.1081e-08, actual=6.6132e-07, ratio=16.0980 (45 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.24 deg
-  QUALITY WARNING: Triangle count mismatch: got 45, expected 53
-FAIL: test_polygons/mismatch_N45E006_water_253.json (expected=4.1081e-08, actual=6.6132e-07, ratio=16.0980)
-AREA MISMATCH: expected=1.33055e-08, actual=5.2533e-08, ratio=3.9482 (10 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.77 deg
-  QUALITY WARNING: Triangle count mismatch: got 10, expected 14
-FAIL: test_polygons/mismatch_N45E006_water_258.json (expected=1.33055e-08, actual=5.2533e-08, ratio=3.9482)
-AREA MISMATCH: expected=4.34335e-09, actual=6.02885e-09, ratio=1.3881 (5 tris)
-  QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N45E006_water_273.json (expected=4.34335e-09, actual=6.02885e-09, ratio=1.3881)
-AREA MISMATCH: expected=2.77049e-08, actual=7.28169e-08, ratio=2.6283 (64 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 64, expected 68
-FAIL: test_polygons/mismatch_N45E006_water_277.json (expected=2.77049e-08, actual=7.28169e-08, ratio=2.6283)
-AREA MISMATCH: expected=5.8424e-08, actual=1.68246e-06, ratio=28.7974 (103 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.17 deg
-  QUALITY WARNING: Triangle count mismatch: got 103, expected 111
-FAIL: test_polygons/mismatch_N45E006_water_284.json (expected=5.8424e-08, actual=1.68246e-06, ratio=28.7974)
-AREA MISMATCH: expected=3.43995e-08, actual=3.67395e-08, ratio=1.0680 (43 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.10 deg
-  QUALITY WARNING: Triangle count mismatch: got 43, expected 44
-FAIL: test_polygons/mismatch_N45E006_water_302.json (expected=3.43995e-08, actual=3.67395e-08, ratio=1.0680)
-AREA MISMATCH: expected=7.769e-09, actual=1.34152e-07, ratio=17.2677 (14 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.36 deg
-  QUALITY WARNING: Triangle count mismatch: got 14, expected 17
-FAIL: test_polygons/mismatch_N45E006_water_308.json (expected=7.769e-09, actual=1.34152e-07, ratio=17.2677)
-AREA MISMATCH: expected=1.3893e-08, actual=1.6829e-08, ratio=1.2113 (12 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.92 deg
-  QUALITY WARNING: Triangle count mismatch: got 12, expected 13
-FAIL: test_polygons/mismatch_N45E006_water_314.json (expected=1.3893e-08, actual=1.6829e-08, ratio=1.2113)
-AREA MISMATCH: expected=1.0382e-08, actual=1.1878e-08, ratio=1.1441 (17 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.17 deg
-  QUALITY WARNING: Triangle count mismatch: got 17, expected 19
-FAIL: test_polygons/mismatch_N45E006_water_317.json (expected=1.0382e-08, actual=1.1878e-08, ratio=1.1441)
-AREA MISMATCH: expected=4.39715e-08, actual=6.36482e-07, ratio=14.4749 (48 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.13 deg
-  QUALITY WARNING: Triangle count mismatch: got 48, expected 52
-FAIL: test_polygons/mismatch_N45E006_water_333.json (expected=4.39715e-08, actual=6.36482e-07, ratio=14.4749)
-AREA MISMATCH: expected=9.36995e-08, actual=1.1012e-07, ratio=1.1752 (75 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 75, expected 77
-FAIL: test_polygons/mismatch_N45E006_water_336.json (expected=9.36995e-08, actual=1.1012e-07, ratio=1.1752)
-AREA MISMATCH: expected=1.08815e-08, actual=1.24765e-08, ratio=1.1466 (16 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 16, expected 17
-FAIL: test_polygons/mismatch_N45E006_water_350.json (expected=1.08815e-08, actual=1.24765e-08, ratio=1.1466)
-AREA MISMATCH: expected=9.202e-09, actual=1.3731e-07, ratio=14.9218 (29 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.25 deg
-  QUALITY WARNING: Triangle count mismatch: got 29, expected 32
-FAIL: test_polygons/mismatch_N45E006_water_355.json (expected=9.202e-09, actual=1.3731e-07, ratio=14.9218)
-AREA MISMATCH: expected=3.5991e-08, actual=2.8272e-07, ratio=7.8553 (38 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 38, expected 40
-FAIL: test_polygons/mismatch_N45E006_water_358.json (expected=3.5991e-08, actual=2.8272e-07, ratio=7.8553)
-AREA MISMATCH: expected=2.02125e-08, actual=2.03935e-08, ratio=1.0090 (26 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.62 deg
-  QUALITY WARNING: Triangle count mismatch: got 26, expected 27
-FAIL: test_polygons/mismatch_N45E006_water_364.json (expected=2.02125e-08, actual=2.03935e-08, ratio=1.0090)
-AREA MISMATCH: expected=6.15605e-08, actual=6.2633e-08, ratio=1.0174 (54 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.05 deg
-  QUALITY WARNING: Triangle count mismatch: got 54, expected 55
-FAIL: test_polygons/mismatch_N45E006_water_369.json (expected=6.15605e-08, actual=6.2633e-08, ratio=1.0174)
-AREA MISMATCH: expected=7.285e-09, actual=7.4725e-09, ratio=1.0257 (5 tris)
-  QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N45E006_water_387.json (expected=7.285e-09, actual=7.4725e-09, ratio=1.0257)
-Triangulation quality warning for  water (Area OK): 170 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.18 deg
-  QUALITY WARNING: Triangle count mismatch: got 170, expected 171
 AREA MISMATCH: expected=1.8623e-08, actual=1.90309e-08, ratio=1.0219 (51 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.09 deg
   QUALITY WARNING: Triangle count mismatch: got 51, expected 52
-FAIL: test_polygons/mismatch_N45E006_water_434.json (expected=1.8623e-08, actual=1.90309e-08, ratio=1.0219)
-Triangulation quality warning for  clc (Area OK): 1842 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1842, expected 1851
+FAIL: test_polygons/mismatch_N45E006_water_001.json (expected=1.8623e-08, actual=1.90309e-08, ratio=1.0219)
 Triangulation quality warning for  clc (Area OK): 2134 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2134, expected 2137
+AREA MISMATCH: expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069 (1 tris)
+  QUALITY WARNING: Triangle count mismatch: got 1, expected 6
+FAIL: test_polygons/mismatch_N45E007_water_001.json (expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069)
 AREA MISMATCH: expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069 (1 tris)
   QUALITY WARNING: Triangle count mismatch: got 1, expected 6
 FAIL: test_polygons/mismatch_N45E007_water_114.json (expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069)
 Triangulation quality warning for  clc (Area OK): 2167 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2167, expected 2170
-Triangulation quality warning for  clc (Area OK): 4567 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4567, expected 4590
-Triangulation quality warning for  clc (Area OK): 3309 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3309, expected 3320
-Triangulation quality warning for  water (Area OK): 265 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 265, expected 340
 AREA MISMATCH: expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027 (54 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.65 deg
   QUALITY WARNING: Triangle count mismatch: got 54, expected 56
-FAIL: test_polygons/mismatch_N45E008_water_099.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
+FAIL: test_polygons/mismatch_N45E008_water_001.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
+Triangulation quality warning for  water (Area OK): 265 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
+  QUALITY WARNING: Triangle count mismatch: got 265, expected 340
 Triangulation quality warning for  water (Area OK): 4372 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4372, expected 4529
 Triangulation quality warning for  water (Area OK): 1151 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1151, expected 1441
-Triangulation quality warning for  clc (Area OK): 2338 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 2338, expected 2353
-Triangulation quality warning for  clc (Area OK): 4044 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4044, expected 4069
-Triangulation quality warning for  clc (Area OK): 1419 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 1419, expected 1430
-Triangulation quality warning for  clc (Area OK): 4391 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4391, expected 4400
-Triangulation quality warning for  clc (Area OK): 4604 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4604, expected 4635
 Triangulation quality warning for  clc (Area OK): 3179 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3179, expected 3185
@@ -397,109 +78,20 @@ Triangulation quality warning for  clc (Area OK): 127 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.12 deg
   QUALITY WARNING: Triangle count mismatch: got 127, expected 130
 FAIL: test_polygons/mismatch_N45E009_clc_065.json (expected=0.000321401, actual=0.000321003, ratio=0.9988)
-Triangulation quality warning for  water (Area OK): 265 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
-  QUALITY WARNING: Triangle count mismatch: got 265, expected 340
 AREA MISMATCH: expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027 (54 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.65 deg
   QUALITY WARNING: Triangle count mismatch: got 54, expected 56
-FAIL: test_polygons/mismatch_N45E009_water_075.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
+FAIL: test_polygons/mismatch_N45E009_water_001.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
+Triangulation quality warning for  water (Area OK): 265 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
+  QUALITY WARNING: Triangle count mismatch: got 265, expected 340
 AREA MISMATCH: expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389 (9 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.49 deg
   QUALITY WARNING: Triangle count mismatch: got 9, expected 11
 FAIL: test_polygons/mismatch_N46E005_water_001.json (expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389)
-Triangulation quality warning for  water (Area OK): 24 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
-  QUALITY WARNING: Triangle count mismatch: got 24, expected 25
-FAIL: test_polygons/mismatch_N46E005_water_133.json (expected=1.44069e-08, actual=1.44519e-08, ratio=1.0031)
-AREA MISMATCH: expected=1.26217e-08, actual=2.74294e-08, ratio=2.1732 (20 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.39 deg
-  QUALITY WARNING: Triangle count mismatch: got 20, expected 23
-FAIL: test_polygons/mismatch_N46E005_water_139.json (expected=1.26217e-08, actual=2.74294e-08, ratio=2.1732)
-AREA MISMATCH: expected=2.143e-08, actual=6.48323e-08, ratio=3.0253 (39 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.23 deg
-  QUALITY WARNING: Triangle count mismatch: got 39, expected 44
-FAIL: test_polygons/mismatch_N46E005_water_146.json (expected=2.143e-08, actual=6.48323e-08, ratio=3.0253)
-AREA MISMATCH: expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684 (12 tris)
-  QUALITY WARNING: Triangle count mismatch: got 12, expected 15
-FAIL: test_polygons/mismatch_N46E005_water_250.json (expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684)
-AREA MISMATCH: expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885 (21 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
-  QUALITY WARNING: Triangle count mismatch: got 21, expected 22
-FAIL: test_polygons/mismatch_N46E005_water_304.json (expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885)
-AREA MISMATCH: expected=1.27055e-08, actual=1.2845e-08, ratio=1.0110 (18 tris)
-  QUALITY WARNING: Triangle count mismatch: got 18, expected 19
-FAIL: test_polygons/mismatch_N46E005_water_364.json (expected=1.27055e-08, actual=1.2845e-08, ratio=1.0110)
-AREA MISMATCH: expected=1.59186e-08, actual=2.19034e-08, ratio=1.3760 (30 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
-  QUALITY WARNING: Triangle count mismatch: got 30, expected 31
-FAIL: test_polygons/mismatch_N46E005_water_373.json (expected=1.59186e-08, actual=2.19034e-08, ratio=1.3760)
-AREA MISMATCH: expected=2.79548e-08, actual=1.12039e-06, ratio=40.0786 (60 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.19 deg
-  QUALITY WARNING: Triangle count mismatch: got 60, expected 67
-FAIL: test_polygons/mismatch_N46E005_water_402.json (expected=2.79548e-08, actual=1.12039e-06, ratio=40.0786)
-AREA MISMATCH: expected=7.11522e-09, actual=8.92662e-09, ratio=1.2546 (10 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.46 deg
-  QUALITY WARNING: Triangle count mismatch: got 10, expected 11
-FAIL: test_polygons/mismatch_N46E005_water_524.json (expected=7.11522e-09, actual=8.92662e-09, ratio=1.2546)
-AREA MISMATCH: expected=5.54229e-09, actual=6.15322e-09, ratio=1.1102 (14 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
-  QUALITY WARNING: Triangle count mismatch: got 14, expected 15
-FAIL: test_polygons/mismatch_N46E005_water_526.json (expected=5.54229e-09, actual=6.15322e-09, ratio=1.1102)
-AREA MISMATCH: expected=1.78338e-08, actual=2.60411e-08, ratio=1.4602 (27 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.04 deg
-  QUALITY WARNING: Triangle count mismatch: got 27, expected 29
-FAIL: test_polygons/mismatch_N46E005_water_563.json (expected=1.78338e-08, actual=2.60411e-08, ratio=1.4602)
-AREA MISMATCH: expected=1.80211e-07, actual=1.82972e-07, ratio=1.0153 (179 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
-  QUALITY WARNING: Triangle count mismatch: got 179, expected 180
-FAIL: test_polygons/mismatch_N46E005_water_582.json (expected=1.80211e-07, actual=1.82972e-07, ratio=1.0153)
-AREA MISMATCH: expected=8.27809e-06, actual=0.000117084, ratio=14.1439 (184 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 184, expected 189
-FAIL: test_polygons/mismatch_N46E005_water_599.json (expected=8.27809e-06, actual=0.000117084, ratio=14.1439)
-AREA MISMATCH: expected=7.03049e-09, actual=7.2446e-09, ratio=1.0305 (17 tris)
-  QUALITY WARNING: Triangle count mismatch: got 17, expected 18
-FAIL: test_polygons/mismatch_N46E005_water_607.json (expected=7.03049e-09, actual=7.2446e-09, ratio=1.0305)
-AREA MISMATCH: expected=5.68425e-10, actual=2.48536e-09, ratio=4.3724 (2 tris)
-  QUALITY WARNING: Triangle count mismatch: got 2, expected 4
-FAIL: test_polygons/mismatch_N46E005_water_616.json (expected=5.68425e-10, actual=2.48536e-09, ratio=4.3724)
-AREA MISMATCH: expected=5.78135e-09, actual=5.95626e-09, ratio=1.0303 (9 tris)
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 10
-FAIL: test_polygons/mismatch_N46E005_water_636.json (expected=5.78135e-09, actual=5.95626e-09, ratio=1.0303)
-AREA MISMATCH: expected=6.44588e-09, actual=6.8895e-09, ratio=1.0688 (12 tris)
-  QUALITY WARNING: Triangle count mismatch: got 12, expected 13
-FAIL: test_polygons/mismatch_N46E005_water_659.json (expected=6.44588e-09, actual=6.8895e-09, ratio=1.0688)
-AREA MISMATCH: expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120 (9 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 10
-FAIL: test_polygons/mismatch_N46E005_water_696.json (expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120)
-AREA MISMATCH: expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740 (17 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.64 deg
-  QUALITY WARNING: Triangle count mismatch: got 17, expected 21
-FAIL: test_polygons/mismatch_N46E005_water_724.json (expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740)
-AREA MISMATCH: expected=5.06501e-08, actual=1.60227e-07, ratio=3.1634 (44 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
-  QUALITY WARNING: Triangle count mismatch: got 44, expected 49
-FAIL: test_polygons/mismatch_N46E005_water_841.json (expected=5.06501e-08, actual=1.60227e-07, ratio=3.1634)
-AREA MISMATCH: expected=2.68629e-09, actual=2.82193e-09, ratio=1.0505 (5 tris)
-  QUALITY WARNING: Triangle count mismatch: got 5, expected 6
-FAIL: test_polygons/mismatch_N46E005_water_884.json (expected=2.68629e-09, actual=2.82193e-09, ratio=1.0505)
-AREA MISMATCH: expected=3.27166e-08, actual=3.50974e-07, ratio=10.7277 (58 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 58, expected 65
-FAIL: test_polygons/mismatch_N46E005_water_911.json (expected=3.27166e-08, actual=3.50974e-07, ratio=10.7277)
-AREA MISMATCH: expected=6.0278e-08, actual=9.07906e-07, ratio=15.0620 (89 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
-  QUALITY WARNING: Triangle count mismatch: got 89, expected 94
-FAIL: test_polygons/mismatch_N46E005_water_936.json (expected=6.0278e-08, actual=9.07906e-07, ratio=15.0620)
-AREA MISMATCH: expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389 (9 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.49 deg
-  QUALITY WARNING: Triangle count mismatch: got 9, expected 11
-FAIL: test_polygons/mismatch_N46E005_water_980.json (expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389)
 
 Test Results:
-Total: 1381
-Passed: 1267
-Failed: 114
+Total: 1051
+Passed: 1034
+Failed: 17
 Regression suite FAILED.
