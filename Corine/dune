@@ -16,7 +16,6 @@
   triangulate_test
   polygon_to_svg
   analyze_polygon
-  debug_triangles
   triangulation_tests)
  (modules
   (:standard \ static_r_tree))
@@ -32,7 +31,7 @@
   (with-stdout-to
    triangulation_tests.output
    (with-accepted-exit-codes
-    1
+    (or 0 1)
     (run ./triangulation_tests.exe)))))
 
 (rule

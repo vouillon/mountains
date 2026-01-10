@@ -1,5 +1,6 @@
 - Remove CLC tile margin
 - Improve loading (incremental / web worker)
+- DEM tiles
 - Take into account earth curvature
 - Check for off-by-one errors
 - Rendering improvements
