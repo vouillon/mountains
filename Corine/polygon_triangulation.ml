@@ -468,10 +468,7 @@ module Triangulator = struct
     try
       let curr = ref poly_start_node in
       let loop = ref true in
-      let loop_count = ref 0 in
       while !loop do
-        incr loop_count;
-        if !loop_count > 20000 then loop := false;
         let n = next.(!curr) in
 
         (* Skip edges incident to nodes we are connecting (M or P) *)
