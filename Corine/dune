@@ -7,7 +7,6 @@
 
 (executables
  (names
-  hilbert
   corine
   draw_clc
   render_clc

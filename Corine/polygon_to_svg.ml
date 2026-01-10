@@ -1,7 +1,7 @@
 (* polygon_to_svg.ml - Convert polygon JSON to SVG for debugging *)
 
 let generate_svg filename output_file use_normalized =
-  let tile, typ, expected, actual, outer, holes =
+  let tile, typ, _, _, outer, holes =
     Polygon_test_utils.load_polygon_json filename
   in
 

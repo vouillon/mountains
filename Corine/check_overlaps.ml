@@ -86,7 +86,6 @@ type overlap_detail = {
   small_area : float;
   inter_area : float;
   pct_small : float;
-  pct_large : float;
 }
 
 (* --- 1. Geometry Math --- *)
@@ -328,7 +327,7 @@ let () =
                    let pct_o = overlap /. other.area *. 100. in
 
                    if overlap > 1.0 && (pct_h >= 1.0 || pct_o >= 1.0) then
-                     let large, small, pct_l, pct_s =
+                     let large, small, _, pct_s =
                        if head.area >= other.area then
                          (head, other, pct_h, pct_o)
                        else (other, head, pct_o, pct_h)
@@ -343,7 +342,6 @@ let () =
                          small_area = small.area;
                          inter_area = overlap;
                          pct_small = pct_s;
-                         pct_large = pct_l;
                        }
                      in
 

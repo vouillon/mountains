@@ -155,14 +155,6 @@ let water_vs_src =
 
 (* --- 3. CLC Loading --- *)
 
-type tile_header = {
-  count : int;
-  min_lon : float;
-  min_lat : float;
-  scale_x : float;
-  scale_y : float;
-}
-
 (* Helper to read f64 bits as float *)
 let read_f64_as_float ic =
   let b0 = Int64.of_int (input_byte ic) in
@@ -191,7 +183,7 @@ let read_f64_as_float ic =
   Int64.float_of_bits bits
 
 type poi_type = Peak | Saddle
-type poi = { name : string; lon : float; lat : float; poi_type : poi_type }
+type poi = { lon : float; lat : float; poi_type : poi_type }
 
 let load_clc file =
   Printf.printf "Loading %s...\n%!" file;
@@ -518,7 +510,7 @@ let load_clc file =
         (* Read name (length-prefixed) *)
         let name_len = Char.code names_str.[!names_pos] in
         incr names_pos;
-        let name = String.sub names_str !names_pos name_len in
+        let _name = String.sub names_str !names_pos name_len in
         names_pos := !names_pos + name_len;
 
         (* Read 3-byte coords *)
@@ -546,7 +538,7 @@ let load_clc file =
         incr types_pos;
         let poi_type = if typ = 0 then Peak else Saddle in
 
-        pois := { name; lon; lat; poi_type } :: !pois
+        pois := { lon; lat; poi_type } :: !pois
       done;
       Printf.printf "Decoded %d POIs\n%!" poi_count;
       List.rev !pois
@@ -670,8 +662,8 @@ let () =
                 water_data_pos,
                 water_data_col,
                 water_data_ebo,
-                water_scale_x,
-                water_scale_y,
+                _,
+                _,
                 pois ) =
             load_clc file
           in
