@@ -368,33 +368,57 @@ module Triangulator = struct
     (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
     || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
 
-  (* Find if any vertex in the hole touches (has same coordinates as) any vertex
-     in the current outer ring. If found, returns Some (hole_node, outer_node). *)
-  let find_touching_point (verts : float array) hole_start_node outer_node
-      poly_list =
+  (* Hash table mapping (x, y) coordinates to outer ring node indices.
+     Used for O(1) lookup of touching points between holes and outer ring. *)
+  type outer_vertex_map = (float * float, int) Hashtbl.t
+
+  (* Build hash table from outer ring vertices *)
+  let build_outer_map (verts : float array) outer_node poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
-    (* Iterate through all hole vertices *)
+    let map = Hashtbl.create 64 in
+    let curr = ref outer_node in
+    let loop = ref true in
+    while !loop do
+      let vi = vert_idx.(!curr) in
+      let key = (get_x verts vi, get_y verts vi) in
+      Hashtbl.replace map key !curr;
+      curr := next.(!curr);
+      if !curr = outer_node then loop := false
+    done;
+    map
+
+  (* Find if any vertex in the hole touches (has same coordinates as) any vertex
+     in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
+     After checking, adds all hole vertices to outer_map for future lookups.
+     Two-pass approach handles holes with duplicate coordinates correctly. *)
+  let find_touching_point (verts : float array) hole_start_node
+      (outer_map : outer_vertex_map) poly_list =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let next = poly_list.next in
+    (* Pass 1: Find touching point *)
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
     let result = ref None in
     while !hole_loop && !result = None do
       let h_vi = vert_idx.(!hole_curr) in
-      let hx = get_x verts h_vi in
-      let hy = get_y verts h_vi in
-      (* Check against all outer ring vertices *)
-      let outer_curr = ref outer_node in
-      let outer_loop = ref true in
-      while !outer_loop && !result = None do
-        let o_vi = vert_idx.(!outer_curr) in
-        let ox = get_x verts o_vi in
-        let oy = get_y verts o_vi in
-        if abs_float (hx -. ox) < epsilon && abs_float (hy -. oy) < epsilon then
-          result := Some (!hole_curr, !outer_curr);
-        outer_curr := next.(!outer_curr);
-        if !outer_curr = outer_node then outer_loop := false
-      done;
+      let key = (get_x verts h_vi, get_y verts h_vi) in
+      (match Hashtbl.find_opt outer_map key with
+      | Some outer_node -> result := Some (!hole_curr, outer_node)
+      | None -> ());
+      hole_curr := next.(!hole_curr);
+      if !hole_curr = hole_start_node then hole_loop := false
+    done;
+    (* Pass 2: Add all hole vertices to outer_map *)
+    let hole_curr = ref hole_start_node in
+    let hole_loop = ref true in
+    while !hole_loop do
+      let h_vi = vert_idx.(!hole_curr) in
+      let key = (get_x verts h_vi, get_y verts h_vi) in
+      if not (Hashtbl.mem outer_map key) then
+        Hashtbl.add outer_map key !hole_curr;
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done;
@@ -502,7 +526,7 @@ module Triangulator = struct
     candidate_len_sq < best_len_sq
 
   let find_bridge_point (verts : float array) hole_start_node outer_node
-      poly_list _ _ =
+      poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
@@ -713,21 +737,15 @@ module Triangulator = struct
     end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
-      poly_list processed_holes pending_start_idx =
-    (* First check if the hole touches the outer ring at any vertex *)
-    match find_touching_point verts hole_start_node outer_node poly_list with
+      outer_map poly_list =
+    match find_touching_point verts hole_start_node outer_map poly_list with
     | Some (hole_touch, outer_touch) ->
         (* Hole touches outer ring - merge directly without bridge *)
-        let new_outer =
-          merge_touching_hole verts hole_touch outer_touch poly_list
-        in
-        Some new_outer
+        (* Note: find_touching_point already added hole vertices to outer_map *)
+        Some (merge_touching_hole verts hole_touch outer_touch poly_list)
     | None -> (
         (* No touching point - use standard bridge-based merge *)
-        match
-          find_bridge_point verts hole_start_node outer_node poly_list
-            processed_holes pending_start_idx
-        with
+        match find_bridge_point verts hole_start_node outer_node poly_list with
         | Some target ->
             let open PolygonList in
             (* Record the bridge for visualization *)
@@ -821,17 +839,34 @@ module Triangulator = struct
           self_int_errors;
         Printf.printf "%!"));
 
-    (* Build Static R-tree for Ear Clipping *)
-    let items = Array.make !count 0 in
-    let c = ref !curr in
-    for i = 0 to !count - 1 do
-      items.(i) <- !c;
-      c := next.(!c)
-    done;
+    (* Build Static R-tree with only REFLEX vertices for Ear Clipping.
+       In a simple polygon, only reflex vertices can intrude into an ear.
+       For small polygons, skip the R-tree and use brute-force iteration. *)
+    let reflex_items =
+      let acc = ref [] in
+      let c = ref !curr in
+      for _ = 0 to !count - 1 do
+        let node = !c in
+        let vi_p = vert_idx.(prev.(node)) in
+        let vi_c = vert_idx.(node) in
+        let vi_n = vert_idx.(next.(node)) in
+        (* Reflex if cross product is negative (clockwise turn in CCW polygon) *)
+        if cross_product verts vi_p vi_c vi_n < -.epsilon then
+          acc := node :: !acc;
+        c := next.(!c)
+      done;
+      Array.of_list !acc
+    in
+
+    let reflex_count = Array.length reflex_items in
+    let use_rtree = reflex_count >= 64 in
 
     let tree =
-      Static_r_tree.build ~verts ~vert_idx ~items ~min_x:(-1.0) ~min_y:(-1.0)
-        ~max_x:1.0 ~max_y:1.0
+      if use_rtree then
+        Some
+          (Static_r_tree.build ~verts ~vert_idx ~items:reflex_items
+             ~min_x:(-1.0) ~min_y:(-1.0) ~max_x:1.0 ~max_y:1.0)
+      else None
     in
 
     let is_ear i =
@@ -840,53 +875,50 @@ module Triangulator = struct
       let vi_prev = vert_idx.(node_prev) in
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
-
-      if cross_product verts vi_prev vi_curr vi_next < epsilon then false
+      (* Note: caller guarantees cross_product >= epsilon, so no need to check here *)
+      if reflex_count = 0 then true
+        (* No reflex vertices = any convex is an ear *)
       else
-        try
-          (* Triangle bounding box *)
-          let ax, ay =
-            (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
-          in
-          let bx, by =
-            (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
-          in
-          let cx, cy =
-            (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
-          in
-          let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
-          let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
-          let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
-          let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
+        let check_node r_node =
+          if active.(r_node) then
+            let vi_r = vert_idx.(r_node) in
+            (* Skip the ear's own vertices *)
+            if vi_r <> vi_prev && vi_r <> vi_curr && vi_r <> vi_next then
+              (* Check if this reflex vertex intrudes into the ear triangle *)
+              if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
+                raise Exit
+        in
+        match tree with
+        | Some tree -> (
+            try
+              (* Triangle bounding box *)
+              let ax, ay =
+                (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
+              in
+              let bx, by =
+                (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
+              in
+              let cx, cy =
+                (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
+              in
+              let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
+              let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
+              let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
+              let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
 
-          let check_node r_node =
-            if active.(r_node) then (
-              let vi_r = vert_idx.(r_node) in
-              if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
-              else
-                (* Check if reflex vertex intrudes into the ear triangle *)
-                let vi_rp = vert_idx.(prev.(r_node)) in
-                let vi_rn = vert_idx.(next.(r_node)) in
-                if cross_product verts vi_rp vi_r vi_rn < -.epsilon then
-                  if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
-                    raise Exit;
-
-                (* Check if edge from r_node crosses the ear's base diagonal *)
-                let r_next = next.(r_node) in
-                if active.(r_next) then
-                  let vi_rnext = vert_idx.(r_next) in
-                  if
-                    (r_node = node_prev && r_next = i)
-                    || (r_node = i && r_next = node_next)
-                  then ()
-                  else if
-                    Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
-                  then raise Exit)
-          in
-
-          Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
-          true
-        with Exit -> false
+              Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y
+                check_node;
+              true
+            with Exit -> false)
+        | None -> (
+            (* Brute-force for small reflex sets: iterate directly over reflex_items *)
+            try
+              for j = 0 to reflex_count - 1 do
+                let r_node = reflex_items.(j) in
+                check_node r_node
+              done;
+              true
+            with Exit -> false)
     in
 
     while !count > 2 && !iterations < max_iter do
@@ -1210,6 +1242,9 @@ module Triangulator = struct
             if cx <> 0 then cx else compare y2 y1)
           processed_holes;
 
+        (* Build hash table for O(1) outer ring vertex lookups *)
+        let outer_map = build_outer_map verts !curr_outer_node poly_list in
+
         if !verbose then
           Printf.printf "Merging %d holes...\n%!" (Array.length processed_holes);
         Array.iteri
@@ -1217,7 +1252,7 @@ module Triangulator = struct
             if bridge_node <> -1 then
               match
                 merge_hole_into_outer verts bridge_node !curr_outer_node
-                  poly_list processed_holes i
+                  outer_map poly_list
               with
               | Some new_node ->
                   curr_outer_node := new_node;

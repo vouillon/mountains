@@ -656,15 +656,7 @@ let process_tile db_path output_dir tile_name =
                                     valid_i_count,
                                     final_verts,
                                     final_indices )
-                                  :: !batch_acc;
-
-                                if !entry_count <= 10 then
-                                  Printf.printf
-                                    "Processed Feature %d: Code %d, Tris %d, \
-                                     Verts %d, Area %f\n\
-                                     %!"
-                                    !entry_count code tri_count_val v_count area;
-                                ()))
+                                  :: !batch_acc))
                             clipped_pieces)
                         float_polys
                 | None -> ()
