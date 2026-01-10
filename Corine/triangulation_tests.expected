@@ -201,10 +201,10 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-AREA MISMATCH: expected=1.20187e-05, actual=0.000113624, ratio=9.4539 (510 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 510, expected 570
-FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=0.000113624, ratio=9.4539)
+AREA MISMATCH: expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128 (514 tris)
+  QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
+  QUALITY WARNING: Triangle count mismatch: got 514, expected 570
+FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -378,10 +378,6 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Triangulation quality warning for  water (Area OK): 1225 tris
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 1225, expected 1254
-FAIL: test_polygons/mismatch_N45E005_water_114.json (expected=7.09477e-05, actual=7.12331e-05, ratio=1.0040)
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
   - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
@@ -833,10 +829,6 @@ Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 Cheap validation errors for tile  type water:
   - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-AREA MISMATCH: expected=0.0454781, actual=0.0486295, ratio=1.0693 (4419 tris)
-  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 4419, expected 4443
-FAIL: test_polygons/mismatch_N45E009_clc_004.json (expected=0.0454781, actual=0.0486295, ratio=1.0693)
 Triangulation quality warning for  clc (Area OK): 2338 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2338, expected 2353
@@ -1005,6 +997,6 @@ FAIL: test_polygons/mismatch_N46E005_water_980.json (expected=3.31686e-09, actua
 
 Test Results:
 Total: 1381
-Passed: 1265
-Failed: 116
+Passed: 1267
+Failed: 114
 Regression suite FAILED.
