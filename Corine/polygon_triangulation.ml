@@ -621,16 +621,7 @@ module Triangulator = struct
     (* Helper to validate a candidate bridge *)
     let is_valid_bridge p_node =
       let p_idx = vert_idx.(p_node) in
-      assert (
-        not
-          (crosses_pending_holes verts m_idx p_idx poly_list processed_holes
-             pending_start_idx));
       is_visible verts hole_start_node p_node outer_node poly_list
-      (*
-      && not
-           (crosses_pending_holes verts m_idx p_idx poly_list processed_holes
-              pending_start_idx)
-*)
     in
 
     (* Step 2: Intersect ray M + t(1,0) with all edges of outer polygon *)
@@ -829,15 +820,7 @@ module Triangulator = struct
       let reflex_candidates = ref [] in
       let search_curr = ref outer_node in
       let search_loop = ref true in
-      let search_count = ref 0 in
       while !search_loop do
-        incr search_count;
-        (*ZZZ
-        if !search_count > 20000 then (
-          if !verbose then
-            Printf.printf "Breaking infinite loop in Eberly reflex search\n%!";
-          search_loop := false);
-*)
         let search_node = !search_curr in
         let v_idx = vert_idx.(search_node) in
 
