@@ -1,234 +1,31 @@
 Running 1381 regression tests...
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 AREA MISMATCH: expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112 (20 tris)
   QUALITY WARNING: Triangle count mismatch: got 20, expected 21
 FAIL: test_polygons/mismatch_N43E005_water_204.json (expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 Triangulation quality warning for  clc (Area OK): 4945 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4945, expected 4954
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 AREA MISMATCH: expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112 (20 tris)
   QUALITY WARNING: Triangle count mismatch: got 20, expected 21
 FAIL: test_polygons/mismatch_N43E006_water_118.json (expected=1.0886e-08, actual=1.64505e-08, ratio=1.5112)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 Triangulation quality warning for  clc (Area OK): 186 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 186, expected 189
 FAIL: test_polygons/mismatch_N44E005_clc_003.json (expected=0.000318413, actual=0.000317325, ratio=0.9966)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 24 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.08 deg
   QUALITY WARNING: Triangle count mismatch: got 24, expected 25
 FAIL: test_polygons/mismatch_N44E005_water_133.json (expected=4.5333e-08, actual=4.5383e-08, ratio=1.0011)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 81 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.19 deg
   QUALITY WARNING: Triangle count mismatch: got 81, expected 96
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 AREA MISMATCH: expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128 (514 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
   QUALITY WARNING: Triangle count mismatch: got 514, expected 570
 FAIL: test_polygons/mismatch_N44E007_water_083.json (expected=1.20187e-05, actual=1.21729e-05, ratio=1.0128)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 2320 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2320, expected 2428
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177 (3 tris)
   QUALITY WARNING: Triangle count mismatch: got 3, expected 4
 FAIL: test_polygons/mismatch_N44E008_water_081.json (expected=2.37786e-09, actual=2.41991e-09, ratio=1.0177)
@@ -242,173 +39,10 @@ AREA MISMATCH: expected=0.000168139, actual=0.00016677, ratio=0.9919 (84 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
   QUALITY WARNING: Triangle count mismatch: got 84, expected 87
 FAIL: test_polygons/mismatch_N45E005_clc_020.json (expected=0.000168139, actual=0.00016677, ratio=0.9919)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 AREA MISMATCH: expected=0.000479838, actual=0.000571664, ratio=1.1914 (474 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 474, expected 490
 FAIL: test_polygons/mismatch_N45E005_water_117.json (expected=0.000479838, actual=0.000571664, ratio=1.1914)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 24 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
   QUALITY WARNING: Triangle count mismatch: got 24, expected 25
@@ -440,8 +74,6 @@ FAIL: test_polygons/mismatch_N45E005_water_182.json (expected=6.88704e-08, actua
 AREA MISMATCH: expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684 (12 tris)
   QUALITY WARNING: Triangle count mismatch: got 12, expected 15
 FAIL: test_polygons/mismatch_N45E005_water_183.json (expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885 (21 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
   QUALITY WARNING: Triangle count mismatch: got 21, expected 22
@@ -485,8 +117,6 @@ FAIL: test_polygons/mismatch_N45E005_water_300.json (expected=5.54229e-09, actua
 AREA MISMATCH: expected=4.6924e-09, actual=6.03716e-09, ratio=1.2866 (8 tris)
   QUALITY WARNING: Triangle count mismatch: got 8, expected 9
 FAIL: test_polygons/mismatch_N45E005_water_304.json (expected=4.6924e-09, actual=6.03716e-09, ratio=1.2866)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=1.78338e-08, actual=2.60411e-08, ratio=1.4602 (27 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.04 deg
   QUALITY WARNING: Triangle count mismatch: got 27, expected 29
@@ -516,8 +146,6 @@ AREA MISMATCH: expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120 (9 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.20 deg
   QUALITY WARNING: Triangle count mismatch: got 9, expected 10
 FAIL: test_polygons/mismatch_N45E005_water_382.json (expected=9.67884e-09, actual=9.79494e-09, ratio=1.0120)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=1.31323e-09, actual=1.43745e-09, ratio=1.0946 (5 tris)
   QUALITY WARNING: Triangle count mismatch: got 5, expected 6
 FAIL: test_polygons/mismatch_N45E005_water_394.json (expected=1.31323e-09, actual=1.43745e-09, ratio=1.0946)
@@ -525,8 +153,6 @@ AREA MISMATCH: expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740 (17 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.64 deg
   QUALITY WARNING: Triangle count mismatch: got 17, expected 21
 FAIL: test_polygons/mismatch_N45E005_water_395.json (expected=1.44514e-08, actual=3.86433e-08, ratio=2.6740)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=2.22835e-08, actual=4.22308e-07, ratio=18.9516 (63 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
   QUALITY WARNING: Triangle count mismatch: got 63, expected 69
@@ -549,8 +175,6 @@ FAIL: test_polygons/mismatch_N45E005_water_488.json (expected=3.27166e-08, actua
 AREA MISMATCH: expected=7.53973e-09, actual=7.8457e-09, ratio=1.0406 (11 tris)
   QUALITY WARNING: Triangle count mismatch: got 11, expected 12
 FAIL: test_polygons/mismatch_N45E005_water_502.json (expected=7.53973e-09, actual=7.8457e-09, ratio=1.0406)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=1.57054e-07, actual=1.58128e-07, ratio=1.0068 (71 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
   QUALITY WARNING: Triangle count mismatch: got 71, expected 72
@@ -662,8 +286,6 @@ AREA MISMATCH: expected=2.77049e-08, actual=7.28169e-08, ratio=2.6283 (64 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.02 deg
   QUALITY WARNING: Triangle count mismatch: got 64, expected 68
 FAIL: test_polygons/mismatch_N45E006_water_277.json (expected=2.77049e-08, actual=7.28169e-08, ratio=2.6283)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=5.8424e-08, actual=1.68246e-06, ratio=28.7974 (103 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.17 deg
   QUALITY WARNING: Triangle count mismatch: got 103, expected 111
@@ -728,18 +350,9 @@ Triangulation quality warning for  clc (Area OK): 1842 tris
 Triangulation quality warning for  clc (Area OK): 2134 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2134, expected 2137
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 AREA MISMATCH: expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069 (1 tris)
   QUALITY WARNING: Triangle count mismatch: got 1, expected 6
 FAIL: test_polygons/mismatch_N45E007_water_114.json (expected=4.25985e-09, actual=8.97507e-09, ratio=2.1069)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 Triangulation quality warning for  clc (Area OK): 2167 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2167, expected 2170
@@ -749,9 +362,6 @@ Triangulation quality warning for  clc (Area OK): 4567 tris
 Triangulation quality warning for  clc (Area OK): 3309 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3309, expected 3320
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 265 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 265, expected 340
@@ -759,76 +369,12 @@ AREA MISMATCH: expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027 (54 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.65 deg
   QUALITY WARNING: Triangle count mismatch: got 54, expected 56
 FAIL: test_polygons/mismatch_N45E008_water_099.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 4372 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 4372, expected 4529
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 1151 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1151, expected 1441
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 Triangulation quality warning for  clc (Area OK): 2338 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2338, expected 2353
@@ -851,9 +397,6 @@ Triangulation quality warning for  clc (Area OK): 127 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.12 deg
   QUALITY WARNING: Triangle count mismatch: got 127, expected 130
 FAIL: test_polygons/mismatch_N45E009_clc_065.json (expected=0.000321401, actual=0.000321003, ratio=0.9988)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 265 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 265, expected 340
@@ -861,48 +404,10 @@ AREA MISMATCH: expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027 (54 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.65 deg
   QUALITY WARNING: Triangle count mismatch: got 54, expected 56
 FAIL: test_polygons/mismatch_N45E009_water_075.json (expected=1.01554e-07, actual=1.11984e-07, ratio=1.1027)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389 (9 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.49 deg
   QUALITY WARNING: Triangle count mismatch: got 9, expected 11
 FAIL: test_polygons/mismatch_N46E005_water_001.json (expected=3.31686e-09, actual=1.43917e-08, ratio=4.3389)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
-  - Non-standard winding order (Hole ring is CCW) - triangulator will normalize this
 Triangulation quality warning for  water (Area OK): 24 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.06 deg
   QUALITY WARNING: Triangle count mismatch: got 24, expected 25
@@ -918,8 +423,6 @@ FAIL: test_polygons/mismatch_N46E005_water_146.json (expected=2.143e-08, actual=
 AREA MISMATCH: expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684 (12 tris)
   QUALITY WARNING: Triangle count mismatch: got 12, expected 15
 FAIL: test_polygons/mismatch_N46E005_water_250.json (expected=7.69765e-09, actual=1.28428e-08, ratio=1.6684)
-Cheap validation errors for tile  type water:
-  - Non-standard winding order (Outer ring is CW) - triangulator will normalize this
 AREA MISMATCH: expected=1.03871e-08, actual=1.44226e-08, ratio=1.3885 (21 tris)
   QUALITY WARNING: Degenerate triangles: min angle 0.53 deg
   QUALITY WARNING: Triangle count mismatch: got 21, expected 22
