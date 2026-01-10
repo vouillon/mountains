@@ -473,48 +473,49 @@ module Triangulator = struct
 
         (* Skip edges incident to nodes we are connecting (M or P) *)
         (* Note: we DO NOT skip other nodes at the same vertex, which is correct *)
-        if !curr = p_node || n = p_node || !curr = m_node || n = m_node then ()
-        else
-          let vi_a = vert_idx.(!curr) in
-          let vi_b = vert_idx.(n) in
-          (* Nuanced check: Block if Strict crossing OR vertex obstruction *)
-          (* ALLOW overlapping if P is on the edge (grazing/collinear) *)
-          let strict_cross =
-            Geometry.segments_cross verts vi_m vi_p vi_a vi_b
-          in
-          let vertex_on_ray =
-            (if vi_a <> vi_m && vi_a <> vi_p then
+        (if !curr = p_node || n = p_node || !curr = m_node || n = m_node then ()
+         else
+           let vi_a = vert_idx.(!curr) in
+           let vi_b = vert_idx.(n) in
+           (* Nuanced check: Block if Strict crossing OR vertex obstruction *)
+           (* ALLOW overlapping if P is on the edge (grazing/collinear) *)
+           let strict_cross =
+             Geometry.segments_cross verts vi_m vi_p vi_a vi_b
+           in
+           let vertex_on_ray =
+             (if vi_a <> vi_m && vi_a <> vi_p then
+                Geometry.dist_sq_point_segment
+                  (Geometry.get_x verts vi_a)
+                  (Geometry.get_y verts vi_a)
+                  (Geometry.get_x verts vi_m)
+                  (Geometry.get_y verts vi_m)
+                  (Geometry.get_x verts vi_p)
+                  (Geometry.get_y verts vi_p)
+                < Geometry.epsilon
+              else false)
+             ||
+             if vi_b <> vi_m && vi_b <> vi_p then
                Geometry.dist_sq_point_segment
-                 (Geometry.get_x verts vi_a)
-                 (Geometry.get_y verts vi_a)
+                 (Geometry.get_x verts vi_b)
+                 (Geometry.get_y verts vi_b)
                  (Geometry.get_x verts vi_m)
                  (Geometry.get_y verts vi_m)
                  (Geometry.get_x verts vi_p)
                  (Geometry.get_y verts vi_p)
                < Geometry.epsilon
-             else false)
-            ||
-            if vi_b <> vi_m && vi_b <> vi_p then
-              Geometry.dist_sq_point_segment
-                (Geometry.get_x verts vi_b)
-                (Geometry.get_y verts vi_b)
-                (Geometry.get_x verts vi_m)
-                (Geometry.get_y verts vi_m)
-                (Geometry.get_x verts vi_p)
-                (Geometry.get_y verts vi_p)
-              < Geometry.epsilon
-            else false
-          in
+             else false
+           in
 
-          if strict_cross || vertex_on_ray then (
-            if !verbose then
-              Printf.printf
-                "  Visibility: bridge %d->%d blocked by edge %d-%d (nodes %d-%d)\n\
-                 %!"
-                m_node p_node vert_idx.(!curr) vert_idx.(n) !curr n;
-            raise Exit);
+           if strict_cross || vertex_on_ray then (
+             if !verbose then
+               Printf.printf
+                 "  Visibility: bridge %d->%d blocked by edge %d-%d (nodes \
+                  %d-%d)\n\
+                  %!"
+                 m_node p_node vert_idx.(!curr) vert_idx.(n) !curr n;
+             raise Exit));
 
-          if n = poly_start_node then loop := false else curr := n
+        if n = poly_start_node then loop := false else curr := n
       done;
       true
     with Exit -> false
@@ -620,10 +621,16 @@ module Triangulator = struct
     (* Helper to validate a candidate bridge *)
     let is_valid_bridge p_node =
       let p_idx = vert_idx.(p_node) in
+      assert (
+        not
+          (crosses_pending_holes verts m_idx p_idx poly_list processed_holes
+             pending_start_idx));
       is_visible verts hole_start_node p_node outer_node poly_list
+      (*
       && not
            (crosses_pending_holes verts m_idx p_idx poly_list processed_holes
               pending_start_idx)
+*)
     in
 
     (* Step 2: Intersect ray M + t(1,0) with all edges of outer polygon *)
@@ -825,10 +832,12 @@ module Triangulator = struct
       let search_count = ref 0 in
       while !search_loop do
         incr search_count;
+        (*ZZZ
         if !search_count > 20000 then (
           if !verbose then
             Printf.printf "Breaking infinite loop in Eberly reflex search\n%!";
           search_loop := false);
+*)
         let search_node = !search_curr in
         let v_idx = vert_idx.(search_node) in
 
@@ -1026,7 +1035,7 @@ module Triangulator = struct
             let r_node = !check_node in
             if active.(r_node) then (
               let vi_r = vert_idx.(r_node) in
-              if r_node = node_prev || r_node = i || r_node = node_next then ()
+              if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
               else
                 (* Check if reflex vertex intrudes into the ear triangle *)
                 let vi_rp = vert_idx.(prev.(r_node)) in
