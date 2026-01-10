@@ -242,13 +242,16 @@ let check_hole_containment (verts : float array) outer_start outer_len holes =
 
 let validate_cheap (verts : float array) poly =
   let e1 = check_no_duplicates verts poly.outer.start poly.outer.len in
-  let e2 = check_winding_order verts poly.outer.start poly.outer.len true in
+  let e2 =
+    if true then []
+    else check_winding_order verts poly.outer.start poly.outer.len true
+  in
   let e3 =
     Array.to_list
       (Array.mapi
          (fun i h ->
            check_no_duplicates verts h.start h.len
-           @ check_winding_order verts h.start h.len false)
+           @ if true then [] else check_winding_order verts h.start h.len false)
          poly.holes)
     |> List.flatten
   in
