@@ -829,26 +829,9 @@ module Triangulator = struct
       c := next.(!c)
     done;
 
-    let min_x = ref infinity and min_y = ref infinity in
-    let max_x = ref neg_infinity and max_y = ref neg_infinity in
-    Array.iter
-      (fun idx ->
-        let v = vert_idx.(idx) in
-        let x = Geometry.get_x verts v in
-        let y = Geometry.get_y verts v in
-        if x < !min_x then min_x := x;
-        if y < !min_y then min_y := y;
-        if x > !max_x then max_x := x;
-        if y > !max_y then max_y := y)
-      items;
-
-    (* If degenerate bounds (point or line), expand slightly to avoid 0 size *)
-    if !max_x <= !min_x then max_x := !min_x +. Geometry.epsilon;
-    if !max_y <= !min_y then max_y := !min_y +. Geometry.epsilon;
-
     let tree =
-      Static_r_tree.build ~verts ~vert_idx ~items ~min_x:!min_x ~min_y:!min_y
-        ~max_x:!max_x ~max_y:!max_y
+      Static_r_tree.build ~verts ~vert_idx ~items ~min_x:(-1.0) ~min_y:(-1.0)
+        ~max_x:1.0 ~max_y:1.0
     in
 
     let is_ear i =
