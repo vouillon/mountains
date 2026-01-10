@@ -10,7 +10,7 @@ let () =
 
   List.iter
     (fun filename ->
-      let tile, typ, expected, _, outer, holes =
+      let _, typ, expected, _, outer, holes =
         Polygon_test_utils.load_polygon_json filename
       in
 
