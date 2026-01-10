@@ -523,50 +523,101 @@ let parse_overpass_elements json_str =
                                 used.(j) <- true;
                                 merged := true;
                                 found_match := true)
-                              else
+                              else if !best_common >= 2 then (
+                                (* Only merge if there's at least one shared EDGE (2+ consecutive nodes) *)
+                                (* Rotate both rings to shared_nid to find the contiguous shared segment *)
                                 let r1 = rotate_to_nid shared_nid r1_arr in
                                 let r2 = rotate_to_nid shared_nid other_norm in
-                                let common_len = !best_common in
-                                (* 
-                                   r1 and r2 both start at shared_nid.
-                                   r1_rev matches r2 for common_len nodes.
-                                   This means: r1[0] = r2[0], r1[len-1-1] = r2[1], r1[len-1-2] = r2[2], etc.
-                                   
-                                   To merge without the shared segment:
-                                   - Take r1 from index (common_len-1) going forward to (len-2)
-                                   - Take r2 from index common_len going forward to (len-2)
-                                   - This skips r2[0..common_len-1] which equals reverse of r1's tail
-                                *)
-                                let new_ring = ref [] in
+                                let len1 = Array.length r1 - 1 in
+                                let len2 = Array.length r2 - 1 in
 
-                                (* Path from R1: skip first node (shared), take from index common_len-1 to end-1 *)
-                                (* Actually, since r1_rev[0..common_len-1] = r2[0..common_len-1], 
-                                   r1[0] = r2[0] = shared_nid
-                                   r1[len-2] = r2[1]
-                                   r1[len-3] = r2[2]
-                                   ...
-                                   r1[len-1-common_len+1] = r2[common_len-1]
-                                   
-                                   So we want r1 from index 0 to index (len-1-common_len) inclusive *)
-                                for k = 0 to Array.length r1 - 1 - common_len do
-                                  new_ring := r1.(k) :: !new_ring
+                                (* Build shared_set from ONLY the contiguous match, not all shared nodes *)
+                                (* The match is: r1_rev[0..best_common-1] = r2[0..best_common-1] *)
+                                (* Which means: r1[len1-1], r1[len1-2], ..., r1[len1-best_common] = r2[0], r2[1], ..., r2[best_common-1] *)
+                                (* Only put INTERIOR shared nodes in shared_set, keeping first and last as splice endpoints *)
+                                let shared_set = Hashtbl.create 64 in
+                                if !best_common > 2 then
+                                  for k = 1 to !best_common - 2 do
+                                    Hashtbl.replace shared_set r2.(k) true
+                                  done;
+
+                                (* Splice endpoints are r2.(0) and r2.(best_common-1), NOT in shared_set *)
+
+                                (* Find where r1 exits shared region (first non-shared after shared) *)
+                                let r1_exit = ref (-1) in
+                                let r1_entry = ref (-1) in
+                                for i = 0 to len1 - 1 do
+                                  let curr_shared =
+                                    Hashtbl.mem shared_set r1.(i)
+                                  in
+                                  let next_shared =
+                                    Hashtbl.mem shared_set r1.((i + 1) mod len1)
+                                  in
+                                  if
+                                    curr_shared && (not next_shared)
+                                    && !r1_exit = -1
+                                  then r1_exit := (i + 1) mod len1;
+                                  if
+                                    (not curr_shared) && next_shared
+                                    && !r1_entry = -1
+                                  then r1_entry := (i + 1) mod len1
                                 done;
 
-                                (* Path from R2: skip shared segment, take from common_len to end-1 *)
-                                for k = common_len to Array.length r2 - 2 do
-                                  new_ring := r2.(k) :: !new_ring
+                                (* Find where r2 exits shared region *)
+                                let r2_exit = ref (-1) in
+                                let r2_all_shared = ref true in
+                                for i = 0 to len2 - 1 do
+                                  let curr_shared =
+                                    Hashtbl.mem shared_set r2.(i)
+                                  in
+                                  if not curr_shared then r2_all_shared := false;
+                                  let next_shared =
+                                    Hashtbl.mem shared_set r2.((i + 1) mod len2)
+                                  in
+                                  if
+                                    curr_shared && (not next_shared)
+                                    && !r2_exit = -1
+                                  then r2_exit := (i + 1) mod len2
                                 done;
 
-                                (* Close it *)
-                                let final = List.rev !new_ring in
-                                if List.length final >= 3 then (
-                                  current := final @ [ List.hd final ];
+                                (* Special case: r2 is entirely within r1 (all nodes shared) *)
+                                if !r2_all_shared then (
+                                  (* r2 is a subset of r1's boundary - absorb it *)
                                   used.(j) <- true;
                                   merged := true;
                                   found_match := true)
-                                else
-                                  (* Degenerate result, skip this merge *)
-                                  ()
+                                else if
+                                  !r1_exit >= 0 && !r1_entry >= 0
+                                  && !r2_exit >= 0
+                                then (
+                                  (* Splice: r1 from exit to entry + r2 from exit to end *)
+                                  let new_ring = ref [] in
+
+                                  (* Take r1 from exit point, going forward until entry point *)
+                                  let i = ref !r1_exit in
+                                  while !i <> !r1_entry do
+                                    new_ring := r1.(!i) :: !new_ring;
+                                    i := (!i + 1) mod len1
+                                  done;
+
+                                  (* Take r2 from exit point to the end (before closing) *)
+                                  let k2 = ref !r2_exit in
+                                  let r2_start = !r2_exit in
+                                  let first_iter = ref true in
+                                  while !first_iter || !k2 <> r2_start do
+                                    first_iter := false;
+                                    if not (Hashtbl.mem shared_set r2.(!k2))
+                                    then new_ring := r2.(!k2) :: !new_ring;
+                                    k2 := (!k2 + 1) mod len2
+                                  done;
+
+                                  let final = List.rev !new_ring in
+
+                                  if List.length final >= 3 then (
+                                    current := final @ [ List.hd final ];
+                                    used.(j) <- true;
+                                    merged := true;
+                                    found_match := true)))
                           | None -> ())
                       done
                     done;
