@@ -3100,30 +3100,29 @@ let setup_events canvas =
   ignore
     (Brr.Ev.listen deviceorientation
        (fun ev ->
-         if
-           !input_mode = Sensor
-           &&
-           (* Bogus event on Chrome desktop *)
-           not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha"))
-         then begin
-           let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-           let alpha = angle "alpha" in
-           let beta = angle "beta" in
-           let gamma = angle "gamma" in
-           (match !state with
-           | `Init -> ()
-           | `Starting ->
-               state := `Started;
-               if beta < 90. then display_temporary_message "Raise your phone!"
-           | `Started -> if beta >= 90. then remove_message ());
+         (* Bogus event on Chrome desktop *)
+         if not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha")) then
            let screen =
              Jv.to_float
                (Jv.get
                   (Jv.get (Jv.get Jv.global "screen") "orientation")
                   "angle")
            in
-           current_orientation := { alpha; beta; gamma; screen }
-         end)
+           if !input_mode = Sensor then begin
+             let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
+             let alpha = angle "alpha" in
+             let beta = angle "beta" in
+             let gamma = angle "gamma" in
+             (match !state with
+             | `Init -> ()
+             | `Starting ->
+                 state := `Started;
+                 if beta < 90. then
+                   display_temporary_message "Raise your phone!"
+             | `Started -> if beta >= 90. then remove_message ());
+             current_orientation := { alpha; beta; gamma; screen }
+           end
+           else current_orientation := { !current_orientation with screen })
        (Brr.Window.as_target Brr.G.window));
 
   (* Keyboard controls *)
