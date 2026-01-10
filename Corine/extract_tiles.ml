@@ -417,7 +417,7 @@ let process_tile db_path output_dir tile_name =
   (* 
      Recursive helper: clipped multipolygon handling.
   *)
-  let max_clipped_verts = 5000 in
+  let max_clipped_verts = 5000000 in
 
   let rec clip_with_split_fixed flat_verts proper_poly region depth =
     let clipped_verts, result_polys =
