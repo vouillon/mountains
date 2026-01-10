@@ -3,8 +3,6 @@
    ocamlfind ocamlopt -package sqlite3,str -linkpkg wkb_decode.ml draw_clc.ml -o draw_clc 
 *)
 
-type dataset = { code : string; geoms : Wkb_decode.geometry list }
-
 (* Reuse existing header parser just to strip it *)
 let get_wkb_from_gpkg_blob blob_str =
   let len = String.length blob_str in
