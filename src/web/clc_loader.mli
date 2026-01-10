@@ -35,8 +35,8 @@ type clc_tile = {
   positions : (int, int16_unsigned_elt, c_layout) Array1.t; (* x,y pairs U16 *)
   colors : (int, int8_unsigned_elt, c_layout) Array1.t; (* palette indices *)
   indices : (int32, int32_elt, c_layout) Array1.t;
-  (* Water layer (CLC4+ only) - stored as U16 like CLC after scaling *)
-  water_positions : (int, int16_unsigned_elt, c_layout) Array1.t;
+  (* Water layer (CLC4+ only) - stored as int32 for full 24-bit precision *)
+  water_positions : (int32, int32_elt, c_layout) Array1.t;
   water_colors : (int, int8_unsigned_elt, c_layout) Array1.t;
   water_indices : (int32, int32_elt, c_layout) Array1.t;
   (* POI data (CLC5 only) *)
