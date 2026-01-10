@@ -145,12 +145,12 @@ let water_vs_src =
    uniform vec2 u_view_offset;\n\
    flat out int v_idx;\n\
    void main() {\n\
-   \\    // Convert quantized int to normalized, then to world coords\n\
-   \\    vec2 norm_pos = vec2(in_pos) / u_water_scale;\n\
-   \\    vec2 world_pos = norm_pos * u_water_range + u_min;\n\
-   \\    vec2 screen_pos = (world_pos - u_view_offset) * u_view_scale * 2.0;\n\
-   \\    gl_Position = vec4(screen_pos, 0.1, 1.0); // slightly above CLC\n\
-   \\    v_idx = in_color_idx;\n\
+   // Convert quantized int to normalized, then to world coords\n\
+   vec2 norm_pos = vec2(in_pos) / u_water_scale;\n\
+   vec2 world_pos = norm_pos * u_water_range + u_min;\n\
+   vec2 screen_pos = (world_pos - u_view_offset) * u_view_scale * 2.0;\n\
+   gl_Position = vec4(screen_pos, 0.0, 1.0);\n\
+   v_idx = in_color_idx;\n\
    }\n"
 
 (* --- 3. CLC Loading --- *)
@@ -255,10 +255,8 @@ let load_clc file =
   let arr_col = Array1.create int8_unsigned c_layout n_verts in
   let arr_ebo = Array1.create int32 c_layout n_indices in
 
-  (* Pre-allocate for water - use int16_unsigned like CLC, rescale during decode *)
-  let water_arr_pos =
-    Array1.create int16_unsigned c_layout (water_verts_header * 2)
-  in
+  (* Pre-allocate for water - use int32 to preserve 24-bit precision *)
+  let water_arr_pos = Array1.create int32 c_layout (water_verts_header * 2) in
   let water_arr_col = Array1.create int8_unsigned c_layout water_verts_header in
   let water_arr_ebo = Array1.create int32 c_layout water_indices_header in
 
@@ -471,13 +469,10 @@ let load_clc file =
         let qy = (!prev_y + sdy) land 0xFFFFFF in
         prev_y := qy;
 
-        (* Scale from water range (0-220000) to u16 range (0-65535) *)
-        let scaled_x = qx * 65535 / 220000 in
-        let scaled_y = qy * 65535 / 220000 in
-
+        (* Store full 24-bit precision coords as int32 *)
         let out_idx = base_v + k in
-        Array1.set water_arr_pos (out_idx * 2) scaled_x;
-        Array1.set water_arr_pos ((out_idx * 2) + 1) scaled_y;
+        Array1.set water_arr_pos (out_idx * 2) (Int32.of_int qx);
+        Array1.set water_arr_pos ((out_idx * 2) + 1) (Int32.of_int qy);
         Array1.set water_arr_col out_idx code_idx
       done;
 
@@ -694,6 +689,9 @@ let () =
           let m_fs = compile_shader Gl.fragment_shader marker_fs_src in
           let m_prog = create_program m_vs m_fs in
 
+          let w_vs = compile_shader Gl.vertex_shader water_vs_src in
+          let w_prog = create_program w_vs fs in
+
           (* CLC Uniforms - also used for water since coords are scaled to same range *)
           Gl.use_program prog;
           let u_range = Gl.get_uniform_location prog "u_range" in
@@ -709,6 +707,17 @@ let () =
           let m_u_view_offset =
             Gl.get_uniform_location m_prog "u_view_offset"
           in
+
+          (* Water Uniforms *)
+          Gl.use_program w_prog;
+          let w_u_range = Gl.get_uniform_location w_prog "u_water_range" in
+          let w_u_scale = Gl.get_uniform_location w_prog "u_water_scale" in
+          let w_u_min = Gl.get_uniform_location w_prog "u_min" in
+          let w_u_view_scale = Gl.get_uniform_location w_prog "u_view_scale" in
+          let w_u_view_offset =
+            Gl.get_uniform_location w_prog "u_view_offset"
+          in
+          let w_u_palette = Gl.get_uniform_location w_prog "u_palette" in
 
           let palette_data = create_palette_texture () in
           let texs = Array1.create int32 c_layout 1 in
@@ -764,8 +773,8 @@ let () =
             (Gl.bigarray_byte_size water_data_pos)
             (Some water_data_pos) Gl.static_draw;
           Gl.enable_vertex_attrib_array 0;
-          (* Use unsigned_short like CLC - water coords are scaled to 16-bit *)
-          Gl.vertex_attrib_pointer 0 2 Gl.unsigned_short true 0 (`Offset 0);
+          (* Use int32 for full 24-bit water precision *)
+          Gl.vertex_attrib_ipointer 0 2 Gl.int 0 (`Offset 0);
           Gl.bind_buffer Gl.array_buffer w_vbo_col;
           Gl.buffer_data Gl.array_buffer
             (Gl.bigarray_byte_size water_data_col)
@@ -840,12 +849,23 @@ let () =
 
             (* Draw Water Layer FIRST (topmost - uses depth buffer for overdraw avoidance) *)
             if water_index_count > 0 then begin
+              Gl.use_program w_prog;
+              Gl.active_texture Gl.texture0;
+              Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
+              Gl.uniform1i w_u_palette 0;
+              Gl.uniform2f w_u_range range_x range_y;
+              Gl.uniform1f w_u_scale 220000.0;
+              Gl.uniform2f w_u_min t_min_x t_min_y;
+              Gl.uniform2f w_u_view_scale sx sy;
+              Gl.uniform2f w_u_view_offset !cx !cy;
+
               Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 1));
               Gl.draw_elements Gl.triangles water_index_count Gl.unsigned_int
                 (`Offset 0)
             end;
 
             (* Draw CLC Map (underneath water) *)
+            Gl.use_program prog;
             Gl.bind_vertex_array (Int32.to_int (Array1.get vaos 0));
             Gl.draw_elements Gl.triangles index_count Gl.unsigned_int
               (`Offset 0);

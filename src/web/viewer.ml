@@ -1194,6 +1194,42 @@ let clc_raster_program =
     attributes = [ "in_norm_pos"; "in_color_idx" ];
   }
 
+let water_raster_program =
+  {
+    vertex_shader =
+      {|#version 300 es
+        precision highp float;
+        layout(location = 0) in ivec2 in_pos;  // 24-bit quantized int32
+        layout(location = 1) in uint in_color_idx;  // u8 palette index
+        uniform vec2 u_tile_range;   // tile extent in degrees
+        uniform float u_water_scale; // quantization scale (220000.0)
+        uniform vec2 u_tile_min;     // tile origin
+        uniform vec2 u_tex_min;      // DEM min
+        uniform vec2 u_tex_range;    // DEM extent
+        flat out uint v_idx;
+        void main() {
+          // Un-quantize and scale to degrees
+          // in_pos is 0..220000 mapping to u_tile_range
+          vec2 norm = vec2(in_pos) / u_water_scale;
+          vec2 geo_pos = norm * u_tile_range + u_tile_min;
+          
+          vec2 ndc = ((geo_pos - u_tex_min) / u_tex_range) * 2.0 - 1.0;
+          gl_Position = vec4(ndc, 0.0, 1.0);
+          v_idx = in_color_idx;
+        }
+      |};
+    fragment_shader =
+      {|#version 300 es
+        precision mediump float;
+        flat in uint v_idx;
+        out uvec4 out_color;
+        void main() {
+          out_color = uvec4(v_idx, 0u, 0u, 1u);
+        }
+      |};
+    attributes = [ "in_pos"; "in_color_idx" ];
+  }
+
 let sky_program =
   {
     vertex_shader =
@@ -2645,6 +2681,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
 
   (* CLC GPU Rasterization setup *)
   let clc_raster_pid = create_program ctx clc_raster_program in
+  let water_raster_pid = create_program ctx water_raster_program in
   let cover_map_size = 1024 in
 
   (* Create FBO for CLC rasterization *)
@@ -2781,13 +2818,44 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
                   Bigarray.Array1.dim tile.Clc_loader.water_indices
                 in
                 if water_index_count > 0 then begin
+                  Gl.use_program ctx water_raster_pid;
+
+                  let w_u_tile_range =
+                    Gl.get_uniform_location ctx water_raster_pid
+                      (Jstr.v "u_tile_range")
+                  in
+                  let w_u_water_scale =
+                    Gl.get_uniform_location ctx water_raster_pid
+                      (Jstr.v "u_water_scale")
+                  in
+                  let w_u_tile_min =
+                    Gl.get_uniform_location ctx water_raster_pid
+                      (Jstr.v "u_tile_min")
+                  in
+                  let w_u_tex_min =
+                    Gl.get_uniform_location ctx water_raster_pid
+                      (Jstr.v "u_tex_min")
+                  in
+                  let w_u_tex_range =
+                    Gl.get_uniform_location ctx water_raster_pid
+                      (Jstr.v "u_tex_range")
+                  in
+
+                  Gl.uniform2f ctx w_u_tile_range tile_range_lon tile_range_lat;
+                  Gl.uniform1f ctx w_u_water_scale 220000.0;
+                  Gl.uniform2f ctx w_u_tile_min header.Clc_loader.min_lon
+                    header.Clc_loader.min_lat;
+                  Gl.uniform2f ctx w_u_tex_min min_lon min_lat;
+                  Gl.uniform2f ctx w_u_tex_range extent_lon extent_lat;
+
                   let w_vbo_pos = Gl.create_buffer ctx in
                   Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_pos);
                   Gl.buffer_data ctx Gl.array_buffer
                     (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
                     Gl.static_draw;
                   Gl.enable_vertex_attrib_array ctx 0;
-                  Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+                  (* Use int32 for position *)
+                  Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
 
                   let w_vbo_col = Gl.create_buffer ctx in
                   Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_col);
@@ -2808,7 +2876,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
 
                   Gl.delete_buffer ctx w_vbo_pos;
                   Gl.delete_buffer ctx w_vbo_col;
-                  Gl.delete_buffer ctx w_ebo
+                  Gl.delete_buffer ctx w_ebo;
+
+                  (* Switch back to CLC program for land cover *)
+                  Gl.use_program ctx clc_raster_pid
                 end;
 
                 (* Render CLC land cover (underneath water) *)
