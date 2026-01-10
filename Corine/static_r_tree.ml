@@ -9,29 +9,6 @@ type t = {
   vert_idx : int array;
 }
 
-(** {2 Hilbert Indexing: Standard Iterative Implementation} *)
-
-let hilbert_index_31 ix iy =
-  let x = ref ix and y = ref iy in
-  let d = ref 0 in
-  for i = 30 downto 0 do
-    let s = 1 lsl i in
-    let rx = if !x land s > 0 then 1 else 0 in
-    let ry = if !y land s > 0 then 1 else 0 in
-    d := (!d lsl 2) lor (3 * rx lxor ry);
-    if ry = 0 then (
-      if rx = 1 then (
-        x := s - 1 - (!x land lnot s);
-        y := s - 1 - (!y land lnot s));
-      let t = !x in
-      x := !y;
-      y := t)
-    else (
-      x := !x land lnot s;
-      y := !y land lnot s)
-  done;
-  !d
-
 (** {2 Construction} *)
 
 let get_level_info n m =
@@ -52,13 +29,12 @@ let get_level_info n m =
     counts;
   (counts, offsets)
 
-let get_x verts i = Array.unsafe_get verts (i * 2)
-let get_y verts i = Array.unsafe_get verts ((i * 2) + 1)
+let get_x (verts : float array) i = Array.unsafe_get verts (i * 2)
+let get_y (verts : float array) i = Array.unsafe_get verts ((i * 2) + 1)
 
 let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
-  let m = 32 in
+  let m = 8 in
   let n = Array.length items in
-  if n = 0 then failwith "Empty points array";
   let scale_x =
     if max_x > min_x then float ((1 lsl 31) - 1) /. (max_x -. min_x) else 0.
   in
@@ -74,7 +50,7 @@ let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
         let py = get_y verts v_idx in
         let ix = int_of_float ((px -. min_x) *. scale_x) in
         let iy = int_of_float ((py -. min_y) *. scale_y) in
-        hilbert_index_31 ix iy)
+        Hilbert.transform ix iy)
   in
 
   let keyed_items =
@@ -148,7 +124,8 @@ let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
 
 (** {2 Search} *)
 
-let intersects q_xmin q_ymin q_xmax q_ymax n_xmin n_ymin n_xmax n_ymax =
+let intersects (q_xmin : float) (q_ymin : float) (q_xmax : float)
+    (q_ymax : float) n_xmin n_ymin n_xmax n_ymax =
   not (q_xmin > n_xmax || q_xmax < n_xmin || q_ymin > n_ymax || q_ymax < n_ymin)
 
 let lookup t q_xmin q_ymin q_xmax q_ymax callback =
@@ -172,8 +149,7 @@ let lookup t q_xmin q_ymin q_xmax q_ymax callback =
         done
       else
         let prev_level_count =
-          if level = 0 then 0
-          else (t.level_offsets.(level) - t.level_offsets.(level - 1)) / 4
+          (t.level_offsets.(level) - t.level_offsets.(level - 1)) / 4
         in
         let start_child = index * t.m in
         let end_child = min (start_child + t.m) prev_level_count in
@@ -216,7 +192,7 @@ let%test_unit "hilbert_closeness" =
   let h_points = ref [] in
   for x = 0 to test_size - 1 do
     for y = 0 to test_size - 1 do
-      h_points := (hilbert_index_31 x y, x, y) :: !h_points
+      h_points := (Hilbert.transform x y, x, y) :: !h_points
     done
   done;
   let sorted =

@@ -36,6 +36,7 @@ let json_to_ring (json : Yojson.Safe.t) : float array =
       (fun c ->
         match to_list c with
         | [ `Float x; `Float y ] -> [ x; y ]
+        | [ `Int x; `Int y ] -> [ float x; float y ]
         | _ -> failwith "Invalid coordinate pair")
       coords
   in

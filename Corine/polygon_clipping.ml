@@ -201,7 +201,7 @@ module Clipper = struct
     clip_pass buf2.data 0 buf2.count buf1 region Bottom;
     clip_pass buf1.data 0 buf1.count buf2 region Top;
 
-    FloatBuffer.sanitize buf2;
+    (* Note: sanitize removed - triangulation handles duplicates/collinear vertices *)
     buf2
 
   (* Internal core: clips one polygon and appends valid rings to final_buf *)
