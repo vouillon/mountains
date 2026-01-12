@@ -391,22 +391,34 @@ module Triangulator = struct
 
   (* Find if any vertex in the hole touches (has same coordinates as) any vertex
      in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
-     Also adds all non-touching hole vertices to the outer_map for future lookups. *)
+     After checking, adds all hole vertices to outer_map for future lookups.
+     Two-pass approach handles holes with duplicate coordinates correctly. *)
   let find_touching_point (verts : float array) hole_start_node
       (outer_map : outer_vertex_map) poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
+    (* Pass 1: Find touching point *)
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
     let result = ref None in
-    while !hole_loop do
+    while !hole_loop && !result = None do
       let h_vi = vert_idx.(!hole_curr) in
       let key = (get_x verts h_vi, get_y verts h_vi) in
       (match Hashtbl.find_opt outer_map key with
-      | Some outer_node ->
-          if !result = None then result := Some (!hole_curr, outer_node)
-      | None -> Hashtbl.replace outer_map key !hole_curr);
+      | Some outer_node -> result := Some (!hole_curr, outer_node)
+      | None -> ());
+      hole_curr := next.(!hole_curr);
+      if !hole_curr = hole_start_node then hole_loop := false
+    done;
+    (* Pass 2: Add all hole vertices to outer_map *)
+    let hole_curr = ref hole_start_node in
+    let hole_loop = ref true in
+    while !hole_loop do
+      let h_vi = vert_idx.(!hole_curr) in
+      let key = (get_x verts h_vi, get_y verts h_vi) in
+      if not (Hashtbl.mem outer_map key) then
+        Hashtbl.add outer_map key !hole_curr;
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done;
@@ -726,15 +738,11 @@ module Triangulator = struct
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
       outer_map poly_list =
-    (* find_touching_point also updates outer_map with all hole vertices
-       (except the touching node, which would duplicate an outer vertex) *)
     match find_touching_point verts hole_start_node outer_map poly_list with
     | Some (hole_touch, outer_touch) ->
         (* Hole touches outer ring - merge directly without bridge *)
-        let new_outer =
-          merge_touching_hole verts hole_touch outer_touch poly_list
-        in
-        Some new_outer
+        (* Note: find_touching_point already added hole vertices to outer_map *)
+        Some (merge_touching_hole verts hole_touch outer_touch poly_list)
     | None -> (
         (* No touching point - use standard bridge-based merge *)
         match find_bridge_point verts hole_start_node outer_node poly_list with
