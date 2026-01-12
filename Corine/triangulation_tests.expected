@@ -1,4 +1,7 @@
-Running 1048 regression tests...
+Running 1053 regression tests...
+Triangulation quality warning for  clc (Area OK): 3466 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 3466, expected 3471
 Triangulation quality warning for  clc (Area OK): 186 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 186, expected 189
@@ -11,6 +14,12 @@ Triangulation quality warning for  water (Area OK): 2320 tris
 Triangulation quality warning for  clc (Area OK): 2134 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2134, expected 2137
+Triangulation quality warning for  water (Area OK): 4525 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 4525, expected 4556
+Triangulation quality warning for  water (Area OK): 1204 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 1204, expected 1277
 Triangulation quality warning for  clc (Area OK): 2167 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 2167, expected 2170
@@ -23,9 +32,9 @@ Triangulation quality warning for  water (Area OK): 4372 tris
 Triangulation quality warning for  water (Area OK): 1151 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 1151, expected 1441
-Triangulation quality warning for  clc (Area OK): 3310 tris
+Triangulation quality warning for  clc (Area OK): 3309 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
-  QUALITY WARNING: Triangle count mismatch: got 3310, expected 3316
+  QUALITY WARNING: Triangle count mismatch: got 3309, expected 3316
 Triangulation quality warning for  clc (Area OK): 3179 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
   QUALITY WARNING: Triangle count mismatch: got 3179, expected 3185
@@ -35,9 +44,12 @@ Triangulation quality warning for  clc (Area OK): 127 tris
 Triangulation quality warning for  water (Area OK): 265 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.01 deg
   QUALITY WARNING: Triangle count mismatch: got 265, expected 340
+Triangulation quality warning for  water (Area OK): 7625 tris
+  QUALITY WARNING: Degenerate triangles: min angle 0.00 deg
+  QUALITY WARNING: Triangle count mismatch: got 7625, expected 7657
 
 Test Results:
-Total: 1048
-Passed: 1048
+Total: 1053
+Passed: 1053
 Failed: 0
 Regression suite PASSED.
