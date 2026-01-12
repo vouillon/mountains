@@ -850,53 +850,51 @@ module Triangulator = struct
       let vi_prev = vert_idx.(node_prev) in
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
+      (* Note: caller guarantees cross_product >= epsilon, so no need to check here *)
+      try
+        (* Triangle bounding box *)
+        let ax, ay =
+          (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
+        in
+        let bx, by =
+          (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
+        in
+        let cx, cy =
+          (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
+        in
+        let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
+        let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
+        let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
+        let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
 
-      if cross_product verts vi_prev vi_curr vi_next < epsilon then false
-      else
-        try
-          (* Triangle bounding box *)
-          let ax, ay =
-            (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
-          in
-          let bx, by =
-            (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
-          in
-          let cx, cy =
-            (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
-          in
-          let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
-          let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
-          let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
-          let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
+        let check_node r_node =
+          if active.(r_node) then (
+            let vi_r = vert_idx.(r_node) in
+            if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
+            else
+              (* Check if reflex vertex intrudes into the ear triangle *)
+              let vi_rp = vert_idx.(prev.(r_node)) in
+              let vi_rn = vert_idx.(next.(r_node)) in
+              if cross_product verts vi_rp vi_r vi_rn < -.epsilon then
+                if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
+                  raise Exit;
 
-          let check_node r_node =
-            if active.(r_node) then (
-              let vi_r = vert_idx.(r_node) in
-              if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
-              else
-                (* Check if reflex vertex intrudes into the ear triangle *)
-                let vi_rp = vert_idx.(prev.(r_node)) in
-                let vi_rn = vert_idx.(next.(r_node)) in
-                if cross_product verts vi_rp vi_r vi_rn < -.epsilon then
-                  if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
-                    raise Exit;
+              (* Check if edge from r_node crosses the ear's base diagonal *)
+              let r_next = next.(r_node) in
+              if active.(r_next) then
+                let vi_rnext = vert_idx.(r_next) in
+                if
+                  (r_node = node_prev && r_next = i)
+                  || (r_node = i && r_next = node_next)
+                then ()
+                else if
+                  Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
+                then raise Exit)
+        in
 
-                (* Check if edge from r_node crosses the ear's base diagonal *)
-                let r_next = next.(r_node) in
-                if active.(r_next) then
-                  let vi_rnext = vert_idx.(r_next) in
-                  if
-                    (r_node = node_prev && r_next = i)
-                    || (r_node = i && r_next = node_next)
-                  then ()
-                  else if
-                    Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
-                  then raise Exit)
-          in
-
-          Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
-          true
-        with Exit -> false
+        Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
+        true
+      with Exit -> false
     in
 
     while !count > 2 && !iterations < max_iter do
