@@ -831,17 +831,30 @@ module Triangulator = struct
           self_int_errors;
         Printf.printf "%!"));
 
-    (* Build Static R-tree for Ear Clipping *)
-    let items = Array.make !count 0 in
-    let c = ref !curr in
-    for i = 0 to !count - 1 do
-      items.(i) <- !c;
-      c := next.(!c)
-    done;
+    (* Build Static R-tree with only REFLEX vertices for Ear Clipping.
+       In a simple polygon, only reflex vertices can intrude into an ear. *)
+    let reflex_items =
+      let acc = ref [] in
+      let c = ref !curr in
+      for _ = 0 to !count - 1 do
+        let node = !c in
+        let vi_p = vert_idx.(prev.(node)) in
+        let vi_c = vert_idx.(node) in
+        let vi_n = vert_idx.(next.(node)) in
+        (* Reflex if cross product is negative (clockwise turn in CCW polygon) *)
+        if cross_product verts vi_p vi_c vi_n < -.epsilon then
+          acc := node :: !acc;
+        c := next.(!c)
+      done;
+      Array.of_list !acc
+    in
 
     let tree =
-      Static_r_tree.build ~verts ~vert_idx ~items ~min_x:(-1.0) ~min_y:(-1.0)
-        ~max_x:1.0 ~max_y:1.0
+      if Array.length reflex_items > 0 then
+        Some
+          (Static_r_tree.build ~verts ~vert_idx ~items:reflex_items
+             ~min_x:(-1.0) ~min_y:(-1.0) ~max_x:1.0 ~max_y:1.0)
+      else None
     in
 
     let is_ear i =
@@ -851,50 +864,38 @@ module Triangulator = struct
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
       (* Note: caller guarantees cross_product >= epsilon, so no need to check here *)
-      try
-        (* Triangle bounding box *)
-        let ax, ay =
-          (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
-        in
-        let bx, by =
-          (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
-        in
-        let cx, cy =
-          (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
-        in
-        let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
-        let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
-        let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
-        let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
+      match tree with
+      | None -> true (* No reflex vertices means any convex vertex is an ear *)
+      | Some tree -> (
+          try
+            (* Triangle bounding box *)
+            let ax, ay =
+              (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
+            in
+            let bx, by =
+              (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
+            in
+            let cx, cy =
+              (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
+            in
+            let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
+            let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
+            let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
+            let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
 
-        let check_node r_node =
-          if active.(r_node) then (
-            let vi_r = vert_idx.(r_node) in
-            if vi_r = vi_prev || vi_r = vi_curr || vi_r = vi_next then ()
-            else
-              (* Check if reflex vertex intrudes into the ear triangle *)
-              let vi_rp = vert_idx.(prev.(r_node)) in
-              let vi_rn = vert_idx.(next.(r_node)) in
-              if cross_product verts vi_rp vi_r vi_rn < -.epsilon then
-                if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
-                  raise Exit;
+            let check_node r_node =
+              if active.(r_node) then
+                let vi_r = vert_idx.(r_node) in
+                (* Skip the ear's own vertices *)
+                if vi_r <> vi_prev && vi_r <> vi_curr && vi_r <> vi_next then
+                  (* Check if this reflex vertex intrudes into the ear triangle *)
+                  if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
+                    raise Exit
+            in
 
-              (* Check if edge from r_node crosses the ear's base diagonal *)
-              let r_next = next.(r_node) in
-              if active.(r_next) then
-                let vi_rnext = vert_idx.(r_next) in
-                if
-                  (r_node = node_prev && r_next = i)
-                  || (r_node = i && r_next = node_next)
-                then ()
-                else if
-                  Geometry.segments_cross verts vi_prev vi_next vi_r vi_rnext
-                then raise Exit)
-        in
-
-        Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
-        true
-      with Exit -> false
+            Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
+            true
+          with Exit -> false)
     in
 
     while !count > 2 && !iterations < max_iter do
