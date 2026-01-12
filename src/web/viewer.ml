@@ -79,7 +79,7 @@ let loading_message () =
         ];
     ]
 
-module Loader = Loader.Make (Reader)
+(* Dem_loader provides direct loading of compressed .dem tiles *)
 
 let pi = 4. *. atan 1.
 
@@ -3000,10 +3000,10 @@ let get_current_position ~size =
       let lat = Pos.latitude pos in
       let lon = Pos.longitude pos in
       if
-        Loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9 ~lat
-          ~lon
+        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
+          ~lat ~lon
       (*
-        || Loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
+        || Dem_loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
              ~lat ~lon
 *)
       then Some (lat, lon, 0.)
@@ -3435,8 +3435,9 @@ let main () =
   in
   let start = setup_events canvas in
   display_element (loading_message ());
-  let* tile = Loader.f ~size:tile_width ~lat ~lon in
-  if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
+  let* tile = Dem_loader.load ~size:tile_width ~lat ~lon in
+  if use_geoloc then
+    Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
   let y = (tile_height / 2) - 1 in
   let d = float x /. 3600. in
