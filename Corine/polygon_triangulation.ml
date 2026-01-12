@@ -368,33 +368,45 @@ module Triangulator = struct
     (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
     || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
 
-  (* Find if any vertex in the hole touches (has same coordinates as) any vertex
-     in the current outer ring. If found, returns Some (hole_node, outer_node). *)
-  let find_touching_point (verts : float array) hole_start_node outer_node
-      poly_list =
+  (* Hash table mapping (x, y) coordinates to outer ring node indices.
+     Used for O(1) lookup of touching points between holes and outer ring. *)
+  type outer_vertex_map = (float * float, int) Hashtbl.t
+
+  (* Build hash table from outer ring vertices *)
+  let build_outer_map (verts : float array) outer_node poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
-    (* Iterate through all hole vertices *)
+    let map = Hashtbl.create 64 in
+    let curr = ref outer_node in
+    let loop = ref true in
+    while !loop do
+      let vi = vert_idx.(!curr) in
+      let key = (get_x verts vi, get_y verts vi) in
+      Hashtbl.replace map key !curr;
+      curr := next.(!curr);
+      if !curr = outer_node then loop := false
+    done;
+    map
+
+  (* Find if any vertex in the hole touches (has same coordinates as) any vertex
+     in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
+     Also adds all non-touching hole vertices to the outer_map for future lookups. *)
+  let find_touching_point (verts : float array) hole_start_node
+      (outer_map : outer_vertex_map) poly_list =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let next = poly_list.next in
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
     let result = ref None in
-    while !hole_loop && !result = None do
+    while !hole_loop do
       let h_vi = vert_idx.(!hole_curr) in
-      let hx = get_x verts h_vi in
-      let hy = get_y verts h_vi in
-      (* Check against all outer ring vertices *)
-      let outer_curr = ref outer_node in
-      let outer_loop = ref true in
-      while !outer_loop && !result = None do
-        let o_vi = vert_idx.(!outer_curr) in
-        let ox = get_x verts o_vi in
-        let oy = get_y verts o_vi in
-        if abs_float (hx -. ox) < epsilon && abs_float (hy -. oy) < epsilon then
-          result := Some (!hole_curr, !outer_curr);
-        outer_curr := next.(!outer_curr);
-        if !outer_curr = outer_node then outer_loop := false
-      done;
+      let key = (get_x verts h_vi, get_y verts h_vi) in
+      (match Hashtbl.find_opt outer_map key with
+      | Some outer_node ->
+          if !result = None then result := Some (!hole_curr, outer_node)
+      | None -> Hashtbl.replace outer_map key !hole_curr);
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done;
@@ -713,9 +725,10 @@ module Triangulator = struct
     end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
-      poly_list =
-    (* First check if the hole touches the outer ring at any vertex *)
-    match find_touching_point verts hole_start_node outer_node poly_list with
+      outer_map poly_list =
+    (* find_touching_point also updates outer_map with all hole vertices
+       (except the touching node, which would duplicate an outer vertex) *)
+    match find_touching_point verts hole_start_node outer_map poly_list with
     | Some (hole_touch, outer_touch) ->
         (* Hole touches outer ring - merge directly without bridge *)
         let new_outer =
@@ -1207,6 +1220,9 @@ module Triangulator = struct
             if cx <> 0 then cx else compare y2 y1)
           processed_holes;
 
+        (* Build hash table for O(1) outer ring vertex lookups *)
+        let outer_map = build_outer_map verts !curr_outer_node poly_list in
+
         if !verbose then
           Printf.printf "Merging %d holes...\n%!" (Array.length processed_holes);
         Array.iteri
@@ -1214,7 +1230,7 @@ module Triangulator = struct
             if bridge_node <> -1 then
               match
                 merge_hole_into_outer verts bridge_node !curr_outer_node
-                  poly_list
+                  outer_map poly_list
               with
               | Some new_node ->
                   curr_outer_node := new_node;
