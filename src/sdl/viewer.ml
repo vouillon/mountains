@@ -1143,7 +1143,7 @@ let main () =
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
-        Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
+        Visibility.test (fun r c -> tile.{r, c}) ~src_x:x ~src_y:y ~dst_x ~dst_y)
       points
   in
   (* Bilinear interpolation for height *)

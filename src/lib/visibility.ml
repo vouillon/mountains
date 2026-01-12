@@ -16,12 +16,10 @@ let follow_line plot x0 y0 x1 y1 =
   in
   follow (dx + dy) x0 y0
 
-let test
-    (height :
-      (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array2.t) ~src_x
-    ~src_y ~dst_x ~dst_y =
-  let src_h = height.{src_y, src_x} +. 2. in
-  let dst_h = height.{dst_y, dst_x} in
+(* get_height: row -> col -> float *)
+let test (get_height : int -> int -> float) ~src_x ~src_y ~dst_x ~dst_y =
+  let src_h = get_height src_y src_x +. 2. in
+  let dst_h = get_height dst_y dst_x in
   let dx = dst_x - src_x in
   let dy = dst_y - src_y in
   let d = sqrt ((float dx ** 2.) +. (float dy ** 2.)) in
@@ -29,7 +27,7 @@ let test
     let dx' = x - src_x in
     let dy' = y - src_y in
     let d' = sqrt ((float dx' ** 2.) +. (float dy' ** 2.)) in
-    let h = height.{y, x} in
+    let h = get_height y x in
     let h' =
       ((dst_h -. src_h) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. src_h
     in

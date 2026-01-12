@@ -79,7 +79,7 @@ let loading_message () =
         ];
     ]
 
-module Loader = Loader.Make (Reader)
+(* Dem_loader provides direct loading of compressed .dem tiles *)
 
 let pi = 4. *. atan 1.
 
@@ -1331,11 +1331,15 @@ let compile_shader ctx src typ =
   let sid = Gl.create_shader ctx typ in
   Gl.shader_source ctx sid (Jstr.v src);
   Gl.compile_shader ctx sid;
+  sid
+(*
+;
   if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then sid
   else
     let log = Gl.get_shader_info_log ctx sid in
     Gl.delete_shader ctx sid;
     failwith (Jstr.to_string log)
+*)
 
 let create_program ctx p =
   let vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
@@ -1349,11 +1353,14 @@ let create_program ctx p =
     (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
     p.attributes;
   Gl.link_program ctx pid;
+  (*
   if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then pid
   else
     let log = Gl.get_program_info_log ctx pid in
     Gl.delete_program ctx pid;
     failwith (Jstr.to_string log)
+*)
+  pid
 
 (* Geometry *)
 
@@ -1423,11 +1430,12 @@ let build_indices w w' h =
 let make_tile_texture ctx tile =
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f
-    (Bigarray.Array2.dim1 tile)
-    (Bigarray.Array2.dim2 tile)
-    0 Gl.red Gl.float
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile))
+  (* Input is RG8 format: 2 bytes per pixel (high, low) *)
+  let height = Bigarray.Array2.dim1 tile.Dem_loader.data in
+  let width = Bigarray.Array2.dim2 tile.Dem_loader.data / 2 in
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 width height 0 Gl.rg
+    Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data))
     0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
@@ -1638,17 +1646,6 @@ let create_shadow_fbo ctx shadow_map =
   (* No Color Attachment *)
   Gl.draw_buffers ctx [ Gl.none ];
 
-  (* If Gl.none is not available in Brr/valid binding, just ensure no color attachment is bound *)
-  (* But wait, Gl.draw_buffers is needed if we want to be explicit about no color *)
-  (* If function is missing, skip it. Default is DRAW_BUFFER0 *)
-
-  (* We just won't bind any color texture. *)
-
-  (* Check status *)
-  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-  if status <> Gl.framebuffer_complete then
-    Format.eprintf "Shadow FBO Incomplete: %d@." status;
-
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
@@ -1696,7 +1693,9 @@ let calculate_shadow_matrices ~light_dir ~world_center =
 
   matrices
 
-let compute_ao ctx width height scale relief_texture =
+let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
+    (bake_u : Render_state.ao_bake_uniforms)
+    (blur_u : Render_state.ao_blur_uniforms) =
   (* Helper to create FBO and R8 Texture *)
   let create_r8_target w h =
     let tid = Gl.create_texture ctx in
@@ -1709,9 +1708,6 @@ let compute_ao ctx width height scale relief_texture =
     tid
   in
 
-  let bake_pid = create_program ctx ao_bake_program in
-  let blur_pid = create_program ctx ao_blur_program in
-
   let ao_bake_tex = create_r8_target width height in
   let ao_final_tex = create_r8_target width height in
 
@@ -1723,15 +1719,11 @@ let compute_ao ctx width height scale relief_texture =
     ao_bake_tex 0;
 
   Gl.viewport ctx 0 0 width height;
-  Gl.use_program ctx bake_pid;
+  Gl.use_program ctx ao_bake_pid;
 
-  let relief_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "relief") in
-  let width_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "width") in
-  let scale_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "scale") in
-
-  Gl.uniform1i ctx relief_loc 0;
-  Gl.uniform1i ctx width_loc width;
-  Gl.uniform1f ctx scale_loc scale;
+  Gl.uniform1i ctx bake_u.relief 0;
+  Gl.uniform1i ctx bake_u.width width;
+  Gl.uniform1f ctx bake_u.scale scale;
 
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
@@ -1744,17 +1736,11 @@ let compute_ao ctx width height scale relief_texture =
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
     ao_final_tex 0;
 
-  Gl.use_program ctx blur_pid;
+  Gl.use_program ctx ao_blur_pid;
 
-  let ao_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "ao_tex") in
-  let relief_blur_loc =
-    Gl.get_uniform_location ctx blur_pid (Jstr.v "relief")
-  in
-  let inv_res_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "inv_res") in
-
-  Gl.uniform1i ctx ao_loc 0;
-  Gl.uniform1i ctx relief_blur_loc 1;
-  Gl.uniform2f ctx inv_res_loc (1.0 /. float width) (1.0 /. float height);
+  Gl.uniform1i ctx blur_u.ao_tex 0;
+  Gl.uniform1i ctx blur_u.relief 1;
+  Gl.uniform2f ctx blur_u.inv_res (1.0 /. float width) (1.0 /. float height);
 
   (* Bind AO bake texture on unit 0 *)
   Gl.active_texture ctx Gl.texture0;
@@ -1769,8 +1755,6 @@ let compute_ao ctx width height scale relief_texture =
   (* Cleanup *)
   Gl.delete_framebuffer ctx fbo;
   Gl.delete_texture ctx ao_bake_tex;
-  Gl.delete_program ctx bake_pid;
-  Gl.delete_program ctx blur_pid;
 
   (* Restore State *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
@@ -1924,10 +1908,6 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 layer;
 
-    let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-    if status <> Gl.framebuffer_complete then
-      Format.eprintf "Shadow FBO Error (Layer %d): %d@." layer status;
-
     (* Clear full texture including 1-pixel border with depth=1.0 *)
     Gl.disable ctx Gl.scissor_test;
     Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
@@ -2021,7 +2001,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       (fun (pt, (x', y')) ->
         let px = deltax *. float (x' - x) in
         let py = deltay *. float (y - y') in
-        let z = tile.{y', x'} in
+        let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
         if r.z > 1. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
@@ -2323,7 +2303,12 @@ let gradient_program =
         out mediump vec4 color;
 
         float get_z(vec2 offset) {
-            return texture(tile, (tileCoord + offset) / (size + 2.)).r;
+            // Decode from RG8: R=low byte, G=high byte (little-endian)
+            // Samples are in [0, 1], need to multiply by 255 to get 0..255
+            vec2 rg = texture(tile, (tileCoord + offset) / (size + 2.)).rg * 255.0;
+            float h_val = rg.g * 256.0 + rg.r;
+            // Convert back to meters: u16 range maps to -500 to 9000
+            return h_val * (9500.0 / 65535.0) - 500.0;
         }
 
         void main() {
@@ -2361,10 +2346,12 @@ let gradient_program =
     attributes = [];
   }
 
-let compute_relief ctx width height triangle_geo tile_texture =
+let compute_relief ctx width height triangle_geo tile_texture relief_pid
+    mipmap_pid copy_pid (u : Render_state.relief_uniforms)
+    (mipmap_u : Render_state.mipmap_uniforms)
+    (copy_u : Render_state.copy_uniforms) =
   assert (width = height);
 
-  let relief_pid = create_program ctx gradient_program in
   (* Not used in shader explicitly yet, using pow directly *)
   let max_level =
     let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
@@ -2397,66 +2384,30 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
-  let size_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "size") in
-  Gl.uniform2f ctx size_loc (float width) (float height);
+  Gl.uniform2f ctx u.size (float width) (float height);
 
   (* Use default 44.0 latitude for gradient *)
   let deltax = deltay *. cos (44. *. pi /. 180.) in
-  let delta_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "delta") in
-  Gl.uniform2f ctx delta_loc deltax deltay;
+  Gl.uniform2f ctx u.delta deltax deltay;
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
-  (* Mipmap Generation Loop *)
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (* Mipmap Generation Loop *)
-  let mipmap_pid = create_program ctx mipmap_program in
-  let copy_pid = create_program ctx copy_program in
-  (* Locations for Mipmap Program *)
-  let source_level_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_level")
-  in
-  let base_k_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "base_k") in
-  let decay_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "decay") in
-  let source_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_texture")
-  in
-  let mipmap_size_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_size")
-  in
-
-  (* Locations for Copy Program *)
-  let copy_source_loc =
-    Gl.get_uniform_location ctx copy_pid (Jstr.v "source")
-  in
-  let copy_level_loc = Gl.get_uniform_location ctx copy_pid (Jstr.v "level") in
-  let copy_size_loc =
-    Gl.get_uniform_location ctx copy_pid (Jstr.v "source_size")
-  in
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
 
   (* Common Uniforms *)
   Gl.use_program ctx mipmap_pid;
-  Gl.uniform1i ctx source_loc 0;
-  Gl.uniform1f ctx base_k_loc 0.1;
-  Gl.uniform1f ctx decay_loc 0.5;
+  Gl.uniform1i ctx mipmap_u.source_texture 0;
+  Gl.uniform1f ctx mipmap_u.base_k 0.1;
+  Gl.uniform1f ctx mipmap_u.decay 0.5;
 
   Gl.use_program ctx copy_pid;
-  Gl.uniform1i ctx copy_source_loc 0;
+  Gl.uniform1i ctx copy_u.source 0;
 
   (* Not used in shader explicitly yet, using pow directly *)
 
   (* Start from level 1 *)
-
-  (* Generate *)
-  (* Ensure sampling from Level N-1 restricted? No, texturing samples from BaseLevel -> MaxLevel. *)
-  (* To sample specifically from Level N-1, we might need to set GL_TEXTURE_BASE_LEVEL temporarily. *)
-  (* Check error *)
-  let check_err () =
-    let err = Gl.get_error ctx in
-    if err <> Gl.no_error then Format.eprintf "GL ERROR %d@." err
-  in
 
   (* Temporary texture for ping-ponging to avoid feedback loop *)
   let temp_tid = Gl.create_texture ctx in
@@ -2484,10 +2435,10 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
       (* Use Copy Program *)
       Gl.use_program ctx copy_pid;
-      Gl.uniform1i ctx copy_source_loc 0;
-      Gl.uniform1i ctx copy_level_loc (level - 1);
+      Gl.uniform1i ctx copy_u.source 0;
+      Gl.uniform1i ctx copy_u.level (level - 1);
       (* Source size is previous level size *)
-      Gl.uniform2f ctx copy_size_loc (float (w * 2)) (float (h * 2));
+      Gl.uniform2f ctx copy_u.source_size (float (w * 2)) (float (h * 2));
 
       Gl.viewport ctx 0 0 (w * 2) (h * 2);
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
@@ -2503,18 +2454,17 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
       (* Use Mipmap Program *)
       Gl.use_program ctx mipmap_pid;
-      Gl.uniform1i ctx source_loc 0;
+      Gl.uniform1i ctx mipmap_u.source_texture 0;
 
       let source_w = float (w * 2) in
       let source_h = float (h * 2) in
-      Gl.uniform2f ctx mipmap_size_loc source_w source_h;
-      Gl.uniform1i ctx source_level_loc 0;
+      Gl.uniform2f ctx mipmap_u.source_size source_w source_h;
+      Gl.uniform1i ctx mipmap_u.source_level 0;
 
       (* Temp is Level 0 *)
       Gl.viewport ctx 0 0 w h;
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
-      check_err ();
       loop (level + 1) (w / 2) (h / 2))
   in
   loop 1 (width / 2) (height / 2);
@@ -2532,12 +2482,196 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   Gl.bind_vertex_array ctx None;
 
-  (tid, relief_pid)
+  tid
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
+    ~cover_map_size ~clc_raster_pid ~water_raster_pid
+    (clc_u : Render_state.clc_raster_uniforms)
+    (water_u : Render_state.water_raster_uniforms) =
+  (* Prepare FBO *)
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+  Gl.viewport ctx 0 0 cover_map_size cover_map_size;
+  Gl.use_program ctx clc_raster_pid;
+
+  (* Reusable VAO and Buffers *)
+  let vao = Gl.create_vertex_array ctx in
+  Gl.bind_vertex_array ctx (Some vao);
+
+  let vbo_pos = Gl.create_buffer ctx in
+  let vbo_col = Gl.create_buffer ctx in
+  let ebo = Gl.create_buffer ctx in
+
+  (* Conversion factors *)
+  let meters_per_deg_lat = 111132.0 in
+  let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
+
+  (* Render each level *)
+  for level = 0 to 6 do
+    let extent_meters = 2048.0 *. (2.0 ** float level) in
+
+    (* Calculate viewport in degrees centered on (lat, lon) *)
+    let extent_lat = extent_meters /. meters_per_deg_lat in
+    let extent_lon = extent_meters /. meters_per_deg_lon in
+    let min_lat = lat -. (extent_lat /. 2.) in
+    let min_lon = lon -. (extent_lon /. 2.) in
+
+    (* Attach specific layer *)
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+      cover_map_texture 0 level;
+
+    (* Clear depth *)
+    Gl.clear_depth ctx 1.0;
+    Gl.clear ctx Gl.depth_buffer_bit;
+
+    (* Set viewport uniforms *)
+    Gl.uniform2f ctx clc_u.u_tex_min min_lon min_lat;
+    Gl.uniform2f ctx clc_u.u_tex_range extent_lon extent_lat;
+
+    (* Enable depth test per level - ensure depth writes are enabled *)
+    Gl.depth_mask ctx true;
+    Gl.enable ctx Gl.depth_test;
+    Gl.depth_func ctx Gl.less;
+
+    (* Render tiles *)
+    List.iter
+      (fun (tile, tile_range_lon, tile_range_lat) ->
+        let header = tile.Clc_loader.header in
+        (* Optimization: could skip tiles outside view here *)
+
+        Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
+        Gl.uniform2f ctx clc_u.u_tile_min header.Clc_loader.min_lon
+          header.Clc_loader.min_lat;
+
+        (* Render water layer FIRST (wins depth test, appears on top) *)
+        let water_index_count =
+          Bigarray.Array1.dim tile.Clc_loader.water_indices
+        in
+        if water_index_count > 0 then begin
+          Gl.use_program ctx water_raster_pid;
+
+          Gl.uniform2f ctx water_u.u_tile_range tile_range_lon tile_range_lat;
+          Gl.uniform1f ctx water_u.u_water_scale 1.;
+          Gl.uniform2f ctx water_u.u_tile_min header.Clc_loader.min_lon
+            header.Clc_loader.min_lat;
+          Gl.uniform2f ctx water_u.u_tex_min min_lon min_lat;
+          Gl.uniform2f ctx water_u.u_tex_range extent_lon extent_lat;
+
+          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
+            Gl.stream_draw;
+          Gl.enable_vertex_attrib_array ctx 0;
+          (* Use int32 for position *)
+          Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
+
+          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
+            Gl.stream_draw;
+          Gl.enable_vertex_attrib_array ctx 1;
+          Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+          Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
+          Gl.buffer_data ctx Gl.element_array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
+            Gl.stream_draw;
+
+          Gl.draw_elements ctx Gl.triangles water_index_count Gl.unsigned_int 0;
+
+          (* Switch back to CLC program for land cover *)
+          Gl.use_program ctx clc_raster_pid
+        end;
+
+        if Bigarray.Array1.dim tile.Clc_loader.indices > 0 then begin
+          (* Render CLC land cover (underneath water) *)
+          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
+            Gl.stream_draw;
+          Gl.enable_vertex_attrib_array ctx 0;
+          Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
+            Gl.stream_draw;
+          Gl.enable_vertex_attrib_array ctx 1;
+          Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+          Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
+          Gl.buffer_data ctx Gl.element_array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
+            Gl.stream_draw;
+
+          let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+          Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
+        end)
+      clc_tiles
+  done;
+
+  (* Cleanup *)
+  Gl.delete_vertex_array ctx vao;
+  Gl.delete_buffer ctx vbo_pos;
+  Gl.delete_buffer ctx vbo_col;
+  Gl.delete_buffer ctx ebo;
+  Gl.disable ctx Gl.depth_test;
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Brr.Console.(
+    log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ])
+
+type graphics_resources = {
+  terrain_geo : Gl.vertex_array_object;
+  indices : (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t;
+  text_geo : Gl.vertex_array_object;
+  triangle_geo : Gl.vertex_array_object;
+  terrain_pid : Gl.program;
+  triangle_pid : Gl.program;
+  text_pid : Gl.program;
+  shadow_pid : Gl.program;
+  sky_uniforms : Render_state.sky_uniforms;
+  terrain_uniforms : Render_state.terrain_uniforms;
+  shadow_map : Gl.texture;
+  shadow_fbo : Gl.framebuffer;
+  sky_pid : Gl.program;
+  relief_pid : Gl.program;
+  mipmap_pid : Gl.program;
+  copy_pid : Gl.program;
+  ao_bake_pid : Gl.program;
+  ao_blur_pid : Gl.program;
+  relief_uniforms : Render_state.relief_uniforms;
+  mipmap_uniforms : Render_state.mipmap_uniforms;
+  copy_uniforms : Render_state.copy_uniforms;
+  ao_bake_uniforms : Render_state.ao_bake_uniforms;
+  ao_blur_uniforms : Render_state.ao_blur_uniforms;
+  clc_raster_pid : Gl.program;
+  water_raster_pid : Gl.program;
+  clc_raster_uniforms : Render_state.clc_raster_uniforms;
+  water_raster_uniforms : Render_state.water_raster_uniforms;
+}
+
+let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
   init_anisotropic_filtering ctx;
-  (* CLC mode toggle - used at shader compile time *)
+  let triangle_pid = create_program ctx triangle_program in
+  let text_pid = create_program ctx text_program in
+  let shadow_pid = create_program ctx shadow_program in
+  let sky_pid = create_program ctx sky_program in
+  let relief_pid = create_program ctx gradient_program in
+  let mipmap_pid = create_program ctx mipmap_program in
+  let copy_pid = create_program ctx copy_program in
+  let ao_bake_pid = create_program ctx ao_bake_program in
+  let ao_blur_pid = create_program ctx ao_blur_program in
+  let terrain_pid = create_program ctx terrain_program in
+
+  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_fbo = create_shadow_fbo ctx shadow_map in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
+
+  (* Initialize render state - cache uniform locations and pre-compute params *)
+  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
+  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
+
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
@@ -2572,12 +2706,99 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     in
     create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
-  (* Create two terrain program variants: CLC and fallback *)
-  let terrain_pid = create_program ctx terrain_program in
-  let triangle_pid = create_program ctx triangle_program in
-  let text_pid = create_program ctx text_program in
+
+  (* Upload static uniforms once at initialization *)
+  Gl.use_program ctx terrain_pid;
+
+  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
+  Render_state.upload_texture_units ctx terrain_uniforms;
+
+  Gl.use_program ctx shadow_pid;
+  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
+  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+
+  let relief_uniforms = Render_state.init_relief_uniforms ctx relief_pid in
+  let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
+  let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
+  let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
+  let ao_blur_uniforms = Render_state.init_ao_blur_uniforms ctx ao_blur_pid in
+  let clc_raster_pid = create_program ctx clc_raster_program in
+  let clc_raster_uniforms =
+    Render_state.init_clc_raster_uniforms ctx clc_raster_pid
+  in
+  let water_raster_pid = create_program ctx water_raster_program in
+  let water_raster_uniforms =
+    Render_state.init_water_raster_uniforms ctx water_raster_pid
+  in
+
+  {
+    terrain_geo;
+    indices;
+    text_geo;
+    triangle_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    shadow_map;
+    shadow_fbo;
+    relief_pid;
+    mipmap_pid;
+    copy_pid;
+    relief_uniforms;
+    mipmap_uniforms;
+    copy_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
+    clc_raster_pid;
+    water_raster_pid;
+    clc_raster_uniforms;
+    water_raster_uniforms;
+  }
+
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
+    ~clc_tiles ~graphics =
+  let {
+    terrain_geo;
+    indices;
+    text_geo;
+    triangle_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    shadow_map;
+    shadow_fbo;
+    relief_pid;
+    mipmap_pid;
+    copy_pid;
+    relief_uniforms;
+    mipmap_uniforms;
+    copy_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
+    clc_raster_pid;
+    water_raster_pid;
+    clc_raster_uniforms;
+    water_raster_uniforms;
+  } =
+    graphics
+  in
   let tile_texture = make_tile_texture ctx tile in
-  let relief_texture, _ = compute_relief ctx w h triangle_geo tile_texture in
+  let relief_texture =
+    compute_relief ctx w h triangle_geo tile_texture relief_pid mipmap_pid
+      copy_pid relief_uniforms mipmap_uniforms copy_uniforms
+  in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -2590,7 +2811,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
                 Printf.sprintf "%s (%dm)" name elevation)
         in
         let h =
-          let height' = tile.{y', x'} in
+          let height' = Dem_loader.get_height tile y' x' in
           let dist =
             sqrt
               ((float (x' - x) ** 2.)
@@ -2608,30 +2829,12 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
-  let detail_map = make_detail_map ctx in
-  let scale = deltay in
+
   (* Approx 30m per pixel *)
-  let ao_texture = compute_ao ctx w h scale relief_texture in
-  let shadow_map = create_shadow_map ctx 2048 2048 3 in
-  let shadow_fbo = create_shadow_fbo ctx shadow_map in
-
-  let shadow_pid = create_program ctx shadow_program in
-  let sky_pid = create_program ctx sky_program in
-  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
-
-  (* Initialize render state - cache uniform locations and pre-compute params *)
-  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
-  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
-  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
-
-  (* Upload static uniforms once at initialization *)
-  Gl.use_program ctx terrain_pid;
-  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
-  Render_state.upload_texture_units ctx terrain_uniforms;
-
-  Gl.use_program ctx shadow_pid;
-  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
-  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+  let ao_texture =
+    compute_ao ctx w h deltay relief_texture ao_bake_pid ao_blur_pid
+      ao_bake_uniforms ao_blur_uniforms
+  in
 
   (* Compute session-static values for terrain uniforms *)
   let light_dir_shader =
@@ -2680,8 +2883,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
-  let clc_raster_pid = create_program ctx clc_raster_program in
-  let water_raster_pid = create_program ctx water_raster_program in
   let cover_map_size = 1024 in
 
   (* Create FBO for CLC rasterization *)
@@ -2720,10 +2921,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
     Gl.renderbuffer clc_depth_rb;
 
-  (* Check FBO completeness *)
-  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-  (if status <> Gl.framebuffer_complete then
-     Brr.Console.(log [ Jstr.v "WARNING: CLC FBO incomplete!" ]));
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
 
@@ -2736,199 +2933,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
 
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
-  (* Load CLC tiles and GPU rasterize to FBO *)
-  Lwt.async (fun () ->
-      Lwt.catch
-        (fun () ->
-          let open Lwt.Syntax in
-          (* Load tiles covering the largest extent (Level 6) *)
-          let max_extent = 2048.0 *. (2.0 ** 6.0) in
-          (* 131km *)
-          let* _, _, _, _, tiles =
-            Clc_loader.load_tiles ~lat ~lon
-              ~size:(int_of_float (max_extent /. 30.0))
-          in
-
-          (* Prepare FBO *)
-          Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-          Gl.viewport ctx 0 0 cover_map_size cover_map_size;
-          Gl.use_program ctx clc_raster_pid;
-
-          (* Reusable VAO *)
-          let vao = Gl.create_vertex_array ctx in
-          Gl.bind_vertex_array ctx (Some vao);
-
-          (* Get uniforms *)
-          let u_tile_range =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_range")
-          in
-          let u_tile_min =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_min")
-          in
-          let u_tex_min =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_min")
-          in
-          let u_tex_range =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_range")
-          in
-
-          (* Conversion factors *)
-          let meters_per_deg_lat = 111132.0 in
-          let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
-
-          (* Render each level *)
-          for level = 0 to 6 do
-            let extent_meters = 2048.0 *. (2.0 ** float level) in
-
-            (* Calculate viewport in degrees centered on (lat, lon) *)
-            let extent_lat = extent_meters /. meters_per_deg_lat in
-            let extent_lon = extent_meters /. meters_per_deg_lon in
-            let min_lat = lat -. (extent_lat /. 2.) in
-            let min_lon = lon -. (extent_lon /. 2.) in
-
-            (* Attach specific layer *)
-            Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-              cover_map_texture 0 level;
-
-            (* Clear depth *)
-            Gl.clear_depth ctx 1.0;
-            Gl.clear ctx Gl.depth_buffer_bit;
-
-            (* Set viewport uniforms *)
-            Gl.uniform2f ctx u_tex_min min_lon min_lat;
-            Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
-
-            (* Enable depth test per level - ensure depth writes are enabled *)
-            Gl.depth_mask ctx true;
-            Gl.enable ctx Gl.depth_test;
-            Gl.depth_func ctx Gl.less;
-
-            (* Render tiles *)
-            List.iter
-              (fun (tile, tile_range_lon, tile_range_lat) ->
-                let header = tile.Clc_loader.header in
-                (* Optimization: could skip tiles outside view here *)
-
-                Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
-                Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
-                  header.Clc_loader.min_lat;
-
-                (* Render water layer FIRST (wins depth test, appears on top) *)
-                let water_index_count =
-                  Bigarray.Array1.dim tile.Clc_loader.water_indices
-                in
-                if water_index_count > 0 then begin
-                  Gl.use_program ctx water_raster_pid;
-
-                  let w_u_tile_range =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tile_range")
-                  in
-                  let w_u_water_scale =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_water_scale")
-                  in
-                  let w_u_tile_min =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tile_min")
-                  in
-                  let w_u_tex_min =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tex_min")
-                  in
-                  let w_u_tex_range =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tex_range")
-                  in
-
-                  Gl.uniform2f ctx w_u_tile_range tile_range_lon tile_range_lat;
-                  Gl.uniform1f ctx w_u_water_scale 220000.0;
-                  Gl.uniform2f ctx w_u_tile_min header.Clc_loader.min_lon
-                    header.Clc_loader.min_lat;
-                  Gl.uniform2f ctx w_u_tex_min min_lon min_lat;
-                  Gl.uniform2f ctx w_u_tex_range extent_lon extent_lat;
-
-                  let w_vbo_pos = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_pos);
-                  Gl.buffer_data ctx Gl.array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
-                    Gl.static_draw;
-                  Gl.enable_vertex_attrib_array ctx 0;
-                  (* Use int32 for position *)
-                  Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
-
-                  let w_vbo_col = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_col);
-                  Gl.buffer_data ctx Gl.array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
-                    Gl.static_draw;
-                  Gl.enable_vertex_attrib_array ctx 1;
-                  Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-                  let w_ebo = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.element_array_buffer (Some w_ebo);
-                  Gl.buffer_data ctx Gl.element_array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
-                    Gl.static_draw;
-
-                  Gl.draw_elements ctx Gl.triangles water_index_count
-                    Gl.unsigned_int 0;
-
-                  Gl.delete_buffer ctx w_vbo_pos;
-                  Gl.delete_buffer ctx w_vbo_col;
-                  Gl.delete_buffer ctx w_ebo;
-
-                  (* Switch back to CLC program for land cover *)
-                  Gl.use_program ctx clc_raster_pid
-                end;
-
-                (* Render CLC land cover (underneath water) *)
-                let vbo_pos = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
-                Gl.buffer_data ctx Gl.array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
-                  Gl.static_draw;
-                Gl.enable_vertex_attrib_array ctx 0;
-                Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
-
-                let vbo_col = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
-                Gl.buffer_data ctx Gl.array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
-                  Gl.static_draw;
-                Gl.enable_vertex_attrib_array ctx 1;
-                Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-                let ebo = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
-                Gl.buffer_data ctx Gl.element_array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
-                  Gl.static_draw;
-
-                let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
-                Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
-
-                Gl.delete_buffer ctx vbo_pos;
-                Gl.delete_buffer ctx vbo_col;
-                Gl.delete_buffer ctx ebo)
-              tiles
-          done;
-
-          (* Cleanup *)
-          Gl.delete_vertex_array ctx vao;
-          Gl.disable ctx Gl.depth_test;
-          Gl.bind_framebuffer ctx Gl.framebuffer None;
-
-          force_redraw := true;
-
-          Brr.Console.(
-            log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ]);
-          Lwt.return ())
-        (fun exn ->
-          Brr.Console.(
-            log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
-
-          Lwt.return ()));
+  (* GPU rasterize CLC tiles to FBO *)
+  rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
+    ~cover_map_size ~clc_raster_pid ~water_raster_pid clc_raster_uniforms
+    water_raster_uniforms;
 
   let triangle_uniforms =
     Render_state.init_triangle_uniforms ctx triangle_pid
@@ -3000,10 +3008,10 @@ let get_current_position ~size =
       let lat = Pos.latitude pos in
       let lon = Pos.longitude pos in
       if
-        Loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9 ~lat
-          ~lon
+        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
+          ~lat ~lon
       (*
-        || Loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
+        || Dem_loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
              ~lat ~lon
 *)
       then Some (lat, lon, 0.)
@@ -3426,17 +3434,39 @@ let main () =
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
+  let canvas =
+    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
+  in
+  let ctx =
+    Option.get
+      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
+         (Brr_canvas.Canvas.of_el canvas))
+  in
+  (* Initialize anisotropic filtering early for the detail map *)
+  init_anisotropic_filtering ctx;
+  (* Start loading detail map immediately *)
+  let detail_map = make_detail_map ctx in
+
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
-  let canvas =
-    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
-  in
+
   let start = setup_events canvas in
   display_element (loading_message ());
-  let* tile = Loader.f ~size:tile_width ~lat ~lon in
-  if use_geoloc then Lwt.async (fun () -> Loader.prefetch ~size:6144 ~lat ~lon);
+
+  (* Load DEM and CLC (for POIs) in parallel *)
+  (* Load DEM, CLC, and init graphics in parallel *)
+  let tile_loaders =
+    Lwt.both
+      (Dem_loader.load ~size:tile_width ~lat ~lon)
+      (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
+  in
+  let graphics = init_graphics ctx in
+  let* tile, (_, _, _, _, tiles) = tile_loaders in
+
+  if use_geoloc then
+    Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
   let y = (tile_height / 2) - 1 in
   let d = float x /. 3600. in
@@ -3445,8 +3475,6 @@ let main () =
   let* points =
     let width = 3600 in
     let height = 3600 in
-    (* Load CLC tile(s) covering this area to get POIs - HTTP cache avoids duplicate network requests *)
-    let* _, _, _, _, tiles = Clc_loader.load_tiles ~lat ~lon ~size:tile_width in
     (* Extract POIs from all loaded tiles and convert to Points.t format *)
     let pois =
       List.concat_map
@@ -3486,30 +3514,27 @@ let main () =
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
-        Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
+        Visibility.test
+          (Dem_loader.get_height tile)
+          ~src_x:x ~src_y:y ~dst_x ~dst_y)
       points
   in
   (* Bilinear interpolation for height *)
+  let get_h = Dem_loader.get_height tile in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let h00 = tile.{y, x} in
-  let h10 = tile.{y, x + 1} in
-  let h01 = tile.{y - 1, x} in
-  let h11 = tile.{y - 1, x + 1} in
+  let h00 = get_h y x in
+  let h10 = get_h y (x + 1) in
+  let h01 = get_h (y - 1) x in
+  let h11 = get_h (y - 1) (x + 1) in
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
 
-  (* canvas already defined above *)
-  let ctx =
-    Option.get
-      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
-         (Brr_canvas.Canvas.of_el canvas))
-  in
   remove_message ();
   start ();
   tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx
+    ~tile canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
 
 let () =
   let open Brr_webworkers.Service_worker in

@@ -88,6 +88,59 @@ type sky_uniforms = {
 }
 (** Cached uniform locations for the sky shader. *)
 
+type relief_uniforms = {
+  size : Gl.uniform_location;
+  delta : Gl.uniform_location;
+}
+(** Cached uniform locations for the relief shader. *)
+
+type mipmap_uniforms = {
+  source_level : Gl.uniform_location;
+  base_k : Gl.uniform_location;
+  decay : Gl.uniform_location;
+  source_texture : Gl.uniform_location;
+  source_size : Gl.uniform_location;
+}
+(** Cached uniform locations for the mipmap shader. *)
+
+type copy_uniforms = {
+  source : Gl.uniform_location;
+  level : Gl.uniform_location;
+  source_size : Gl.uniform_location;
+}
+(** Cached uniform locations for the copy shader. *)
+
+type ao_bake_uniforms = {
+  relief : Gl.uniform_location;
+  width : Gl.uniform_location;
+  scale : Gl.uniform_location;
+}
+(** Cached uniform locations for the AO bake shader. *)
+
+type ao_blur_uniforms = {
+  ao_tex : Gl.uniform_location;
+  relief : Gl.uniform_location;
+  inv_res : Gl.uniform_location;
+}
+(** Cached uniform locations for the AO blur shader. *)
+
+type clc_raster_uniforms = {
+  u_tile_range : Gl.uniform_location;
+  u_tile_min : Gl.uniform_location;
+  u_tex_min : Gl.uniform_location;
+  u_tex_range : Gl.uniform_location;
+}
+(** Cached uniform locations for the CLC raster shader. *)
+
+type water_raster_uniforms = {
+  u_tile_range : Gl.uniform_location;
+  u_water_scale : Gl.uniform_location;
+  u_tile_min : Gl.uniform_location;
+  u_tex_min : Gl.uniform_location;
+  u_tex_range : Gl.uniform_location;
+}
+(** Cached uniform locations for the Water raster shader. *)
+
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
   let rec next_power_of_two n p =
@@ -178,6 +231,60 @@ let init_sky_uniforms ctx pid =
     sky_params = u "sky_params";
     u_fogColor = u "u_fogColor";
     u_zenithColor = u "u_zenithColor";
+  }
+
+(** Initialize relief uniform locations. Call once after program creation. *)
+let init_relief_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { size = u "size"; delta = u "delta" }
+
+(** Initialize mipmap uniform locations. Call once after program creation. *)
+let init_mipmap_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    source_level = u "source_level";
+    base_k = u "base_k";
+    decay = u "decay";
+    source_texture = u "source_texture";
+    source_size = u "source_size";
+  }
+
+(** Initialize copy uniform locations. Call once after program creation. *)
+let init_copy_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { source = u "source"; level = u "level"; source_size = u "source_size" }
+
+(** Initialize AO bake uniform locations. Call once after program creation. *)
+let init_ao_bake_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { relief = u "relief"; width = u "width"; scale = u "scale" }
+
+(** Initialize AO blur uniform locations. Call once after program creation. *)
+let init_ao_blur_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { ao_tex = u "ao_tex"; relief = u "relief"; inv_res = u "inv_res" }
+
+(** Initialize CLC raster uniform locations. Call once after program creation.
+*)
+let init_clc_raster_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_tile_range = u "u_tile_range";
+    u_tile_min = u "u_tile_min";
+    u_tex_min = u "u_tex_min";
+    u_tex_range = u "u_tex_range";
+  }
+
+(** Initialize Water raster uniform locations. Call once after program creation.
+*)
+let init_water_raster_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_tile_range = u "u_tile_range";
+    u_water_scale = u "u_water_scale";
+    u_tile_min = u "u_tile_min";
+    u_tex_min = u "u_tex_min";
+    u_tex_range = u "u_tex_range";
   }
 
 (** Upload static radial grid uniforms. Call once at initialization. *)

@@ -2,8 +2,6 @@
 
 open Bigarray
 
-let ( >>= ) = Lwt.bind
-
 (* CLC tile header info *)
 type clc_header = {
   count : int;
@@ -50,87 +48,59 @@ type clc_tile = {
   pois : poi list;
 }
 
-(* Read big-endian 32-bit int from string at offset (OCaml's input_binary_int format) *)
-let read_i32_be s offset =
-  let b0 = Char.code s.[offset] in
-  let b1 = Char.code s.[offset + 1] in
-  let b2 = Char.code s.[offset + 2] in
-  let b3 = Char.code s.[offset + 3] in
-  (b0 lsl 24) lor (b1 lsl 16) lor (b2 lsl 8) lor b3
-
-(* Read little-endian 32-bit int from string at offset (for stream lengths) *)
-let read_i32_le s offset =
-  let b0 = Char.code s.[offset] in
-  let b1 = Char.code s.[offset + 1] in
-  let b2 = Char.code s.[offset + 2] in
-  let b3 = Char.code s.[offset + 3] in
-  b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24)
-
-(* Read little-endian 64-bit float from string *)
-let read_f64_le s offset =
-  let b0 = Int64.of_int (Char.code s.[offset]) in
-  let b1 = Int64.of_int (Char.code s.[offset + 1]) in
-  let b2 = Int64.of_int (Char.code s.[offset + 2]) in
-  let b3 = Int64.of_int (Char.code s.[offset + 3]) in
-  let b4 = Int64.of_int (Char.code s.[offset + 4]) in
-  let b5 = Int64.of_int (Char.code s.[offset + 5]) in
-  let b6 = Int64.of_int (Char.code s.[offset + 6]) in
-  let b7 = Int64.of_int (Char.code s.[offset + 7]) in
-  let bits =
-    Int64.logor b0
-      (Int64.logor (Int64.shift_left b1 8)
-         (Int64.logor (Int64.shift_left b2 16)
-            (Int64.logor (Int64.shift_left b3 24)
-               (Int64.logor (Int64.shift_left b4 32)
-                  (Int64.logor (Int64.shift_left b5 40)
-                     (Int64.logor (Int64.shift_left b6 48)
-                        (Int64.shift_left b7 56)))))))
+(* Helper to parse header from bigarray *)
+let parse_header_ba ba =
+  let get_s i len =
+    String.init len (fun j -> Char.chr (Array1.get ba (i + j)))
   in
-  Int64.float_of_bits bits
-
-(* ZigZag decode - for delta-encoded coordinates *)
-let zigzag_decode n = (n lsr 1) lxor -(n land 1)
-
-(* Parse CLC file header - supports CLC3, CLC4, and CLC5 formats *)
-let parse_header s =
-  let magic = String.sub s 0 4 in
+  let magic = get_s 0 4 in
   let is_clc4 = magic = "CLC4" in
   let is_clc5 = magic = "CLC5" in
-  if magic <> "CLC3" && magic <> "CLC4" && magic <> "CLC5" then
-    failwith ("Invalid CLC magic: " ^ magic);
 
-  let count = read_i32_be s 4 in
-  let total_verts = read_i32_be s 8 in
-  let total_indices = read_i32_be s 12 in
+  let read_i32_be i =
+    let b0 = Array1.get ba i in
+    let b1 = Array1.get ba (i + 1) in
+    let b2 = Array1.get ba (i + 2) in
+    let b3 = Array1.get ba (i + 3) in
+    (b0 lsl 24) lor (b1 lsl 16) lor (b2 lsl 8) lor b3
+  in
 
-  (* CLC4/5 has additional water counts, CLC5 also has POI count *)
+  let read_f64_le i =
+    let rec loop j acc =
+      if j < 0 then acc
+      else
+        loop (j - 1)
+          (Int64.logor (Int64.shift_left acc 8)
+             (Int64.of_int (Array1.get ba (i + j))))
+    in
+    Int64.float_of_bits (loop 7 0L)
+  in
+
+  let count = read_i32_be 4 in
+  let total_verts = read_i32_be 8 in
+  let total_indices = read_i32_be 12 in
+
   let water_count, water_verts, water_indices, poi_count, float_offset =
     if is_clc5 then
-      ( read_i32_be s 16,
-        read_i32_be s 20,
-        read_i32_be s 24,
-        read_i32_be s 28,
-        32 )
-    else if is_clc4 then
-      (read_i32_be s 16, read_i32_be s 20, read_i32_be s 24, 0, 28)
+      (read_i32_be 16, read_i32_be 20, read_i32_be 24, read_i32_be 28, 32)
+    else if is_clc4 then (read_i32_be 16, read_i32_be 20, read_i32_be 24, 0, 28)
     else (0, 0, 0, 0, 16)
   in
 
-  let min_lon = read_f64_le s float_offset in
-  let min_lat = read_f64_le s (float_offset + 8) in
-  let scale_x = read_f64_le s (float_offset + 16) in
-  let scale_y = read_f64_le s (float_offset + 24) in
+  let min_lon = read_f64_le float_offset in
+  let min_lat = read_f64_le (float_offset + 8) in
+  let scale_x = read_f64_le (float_offset + 16) in
+  let scale_y = read_f64_le (float_offset + 24) in
 
-  (* CLC4/5 has water scales, CLC5 also has POI scales *)
   let water_scale_x, water_scale_y, poi_scale_x, poi_scale_y =
     if is_clc5 then
-      ( read_f64_le s (float_offset + 32),
-        read_f64_le s (float_offset + 40),
-        read_f64_le s (float_offset + 48),
-        read_f64_le s (float_offset + 56) )
+      ( read_f64_le (float_offset + 32),
+        read_f64_le (float_offset + 40),
+        read_f64_le (float_offset + 48),
+        read_f64_le (float_offset + 56) )
     else if is_clc4 then
-      ( read_f64_le s (float_offset + 32),
-        read_f64_le s (float_offset + 40),
+      ( read_f64_le (float_offset + 32),
+        read_f64_le (float_offset + 40),
         0.0,
         0.0 )
     else (0.0, 0.0, 0.0, 0.0)
@@ -167,300 +137,380 @@ let tile_name lat lon =
 (* Tile path for fetching *)
 let tile_path lat lon = "data/clc/" ^ tile_name lat lon
 
-(* Read a compressed stream from data at offset, return (decompressed, new_offset) *)
-let read_stream data offset =
+(* Convert Lwt future to Lwt promise *)
+let to_lwt f =
+  let t, u = Lwt.task () in
+  ( Fut.await f @@ fun v ->
+    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
+  t
+
+(* WASM decoder integration *)
+module Wasm = struct
+  let instance = ref None
+  let m_meta = ref None
+  let m_hi_x = ref None
+  let m_mid_x = ref None
+  let m_lo_x = ref None
+  let m_hi_y = ref None
+  let m_mid_y = ref None
+  let m_lo_y = ref None
+  let m_hi_i = ref None
+  let m_lo_i = ref None
+  let m_out_pos = ref None
+  let m_out_col = ref None
+  let m_out_ebo = ref None
+  let m_out_wpos = ref None
+  let m_palette = ref None
+
+  let create_memory pages =
+    let props = Jv.obj [| ("initial", Jv.of_int pages) |] in
+    Jv.new' (Jv.get (Jv.get Jv.global "WebAssembly") "Memory") [| props |]
+
+  let load () =
+    let open Lwt.Syntax in
+    match !instance with
+    | Some inst -> Lwt.return inst
+    | None ->
+        let* resp = to_lwt @@ Brr_io.Fetch.url (Jstr.v "decode_clc.wasm") in
+        let* buf =
+          to_lwt
+            (Brr_io.Fetch.Body.array_buffer
+               (Brr_io.Fetch.Response.as_body resp))
+        in
+
+        (* Metadata and streams: 16-128 pages each (1MB - 8MB) *)
+        m_meta := Some (create_memory 16);
+        m_hi_x := Some (create_memory 32);
+        m_mid_x := Some (create_memory 32);
+        m_lo_x := Some (create_memory 32);
+        m_hi_y := Some (create_memory 32);
+        m_mid_y := Some (create_memory 32);
+        m_lo_y := Some (create_memory 32);
+        m_hi_i := Some (create_memory 64);
+        m_lo_i := Some (create_memory 64);
+        m_palette := Some (create_memory 1);
+
+        (* Output arrays: Up to 512 pages each (32MB) *)
+        m_out_pos := Some (create_memory 512);
+        m_out_col := Some (create_memory 128);
+        (* Only 1 byte per vertex *)
+        m_out_ebo := Some (create_memory 512);
+        m_out_wpos := Some (create_memory 512);
+
+        (* Prefill code mapping table in m_palette *)
+        let palette_ba =
+          Brr.Tarray.to_bigarray1
+            (Brr.Tarray.of_buffer Brr.Tarray.Uint8
+               (Brr.Tarray.Buffer.of_jv
+                  (Jv.get (Option.get !m_palette) "buffer")))
+        in
+        Bigarray.Array1.fill palette_ba 0;
+        Array.iteri
+          (fun idx m ->
+            if m.Clc_palette.code < 1024 then
+              Bigarray.Array1.set palette_ba m.Clc_palette.code idx)
+          Clc_palette.materials;
+
+        let imports =
+          Jv.obj
+            [|
+              ( "env",
+                Jv.obj
+                  [|
+                    ("m_meta", Option.get !m_meta);
+                    ("m_hi_x", Option.get !m_hi_x);
+                    ("m_mid_x", Option.get !m_mid_x);
+                    ("m_lo_x", Option.get !m_lo_x);
+                    ("m_hi_y", Option.get !m_hi_y);
+                    ("m_mid_y", Option.get !m_mid_y);
+                    ("m_lo_y", Option.get !m_lo_y);
+                    ("m_hi_i", Option.get !m_hi_i);
+                    ("m_lo_i", Option.get !m_lo_i);
+                    ("m_out_pos", Option.get !m_out_pos);
+                    ("m_out_col", Option.get !m_out_col);
+                    ("m_out_ebo", Option.get !m_out_ebo);
+                    ("m_out_wpos", Option.get !m_out_wpos);
+                    ("m_palette", Option.get !m_palette);
+                  |] );
+            |]
+        in
+
+        let* res =
+          to_lwt
+            (Fut.of_promise
+               ~ok:(fun x -> x)
+               (Jv.call
+                  (Jv.get Jv.global "WebAssembly")
+                  "instantiate"
+                  [| Brr.Tarray.Buffer.to_jv buf; imports |]))
+        in
+        let inst = Jv.get res "instance" in
+        instance := Some inst;
+        Lwt.return inst
+
+  let get_ta mem =
+    Brr.Tarray.of_buffer Brr.Tarray.Uint8
+      (Brr.Tarray.Buffer.of_jv (Jv.get mem "buffer"))
+end
+
+let decode_mutex = Lwt_mutex.create ()
+
+(* Read a compressed stream from data at offset, decompress into WASM memory *)
+let read_stream_to_wasm data_ta offset wasm_mem =
   let open Lwt.Syntax in
-  let comp_len = read_i32_le data offset in
-  let compressed = String.sub data (offset + 4) comp_len in
-  (* Convert string to uint8 array for pako *)
-  let tarray = Reader.uint8_of_string compressed in
-  (* Decompress and return string directly *)
-  let* decompressed = Reader.inflate_to_string tarray in
-  Lwt.return (decompressed, offset + 4 + comp_len)
-
-(* Decode CLC vertices and triangles from streams *)
-let decode_clc_streams header meta_str high_x low_x high_y low_y high_indices
-    low_indices =
-  let n_verts = header.total_verts in
-  let n_indices = header.total_indices in
-  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
-  let arr_col = Array1.create int8_unsigned c_layout n_verts in
-  let arr_ebo = Array1.create int32 c_layout n_indices in
-
-  let meta_pos = ref 0 in
-  let v_pos = ref 0 in
-  let i_pos = ref 0 in
-  let global_v_offset = ref 0 in
-  let global_i_offset = ref 0 in
-
-  let read_u16 str pos =
-    let b0 = Char.code str.[!pos] in
-    let b1 = Char.code str.[!pos + 1] in
-    pos := !pos + 2;
-    b0 lor (b1 lsl 8)
+  let data_ba = Brr.Tarray.to_bigarray1 data_ta in
+  let read_i32_le ba i =
+    let b0 = Array1.get ba i in
+    let b1 = Array1.get ba (i + 1) in
+    let b2 = Array1.get ba (i + 2) in
+    let b3 = Array1.get ba (i + 3) in
+    b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24)
   in
+  let comp_len = read_i32_le data_ba offset in
+  let compressed =
+    Brr.Tarray.sub data_ta ~start:(offset + 4) ~stop:(offset + 4 + comp_len)
+  in
+  let target_ta = Wasm.get_ta wasm_mem in
+  let* _ =
+    to_lwt
+      (Fut.of_promise
+         ~ok:(fun x -> x)
+         (Reader.inflate_into compressed target_ta))
+  in
+  Lwt.return (offset + 4 + comp_len)
 
-  for _ = 1 to header.count do
-    let code = read_u16 meta_str meta_pos in
-    let v_count = read_u16 meta_str meta_pos in
-    let t_count = read_u16 meta_str meta_pos in
-    let code_idx = Clc_palette.get_index code in
-    let base_v = !global_v_offset in
+let get_ba16 mem size =
+  let buf = Jv.get mem "buffer" in
+  let ta =
+    Brr.Tarray.of_buffer Brr.Tarray.Uint16 (Brr.Tarray.Buffer.of_jv buf)
+  in
+  let ba = Brr.Tarray.to_bigarray1 ta in
+  Bigarray.Array1.sub ba 0 size
 
-    (* Decode vertices *)
-    let prev_x = ref 0 in
-    let prev_y = ref 0 in
-    for k = 0 to v_count - 1 do
-      let idx = !v_pos + k in
-      let hx = Char.code high_x.[idx] in
-      let lx = Char.code low_x.[idx] in
-      let zx = lx lor (hx lsl 8) in
-      let sdx = zigzag_decode zx in
-      let qx = (!prev_x + sdx) land 0xFFFF in
-      prev_x := qx;
+let get_ba32 mem size =
+  let buf = Jv.get mem "buffer" in
+  let ta =
+    Brr.Tarray.of_buffer Brr.Tarray.Int32 (Brr.Tarray.Buffer.of_jv buf)
+  in
+  let ba = Brr.Tarray.to_bigarray1 ta in
+  Bigarray.Array1.sub ba 0 size
 
-      let hy = Char.code high_y.[idx] in
-      let ly = Char.code low_y.[idx] in
-      let zy = ly lor (hy lsl 8) in
-      let sdy = zigzag_decode zy in
-      let qy = (!prev_y + sdy) land 0xFFFF in
-      prev_y := qy;
-
-      let out_idx = base_v + k in
-      Array1.set arr_pos (out_idx * 2) qx;
-      Array1.set arr_pos ((out_idx * 2) + 1) qy;
-      Array1.set arr_col out_idx code_idx
-    done;
-    v_pos := !v_pos + v_count;
-    global_v_offset := !global_v_offset + v_count;
-
-    (* Decode indices *)
-    let prev_idx = ref 0 in
-    let num_indices = t_count * 3 in
-    for k = 0 to num_indices - 1 do
-      let idx = !i_pos + k in
-      let hi = Char.code high_indices.[idx] in
-      let li = Char.code low_indices.[idx] in
-      let zi = li lor (hi lsl 8) in
-      let sdi = zigzag_decode zi in
-      let qi = (!prev_idx + sdi) land 0xFFFF in
-      prev_idx := qi;
-      Array1.set arr_ebo (!global_i_offset + k) (Int32.of_int (base_v + qi))
-    done;
-    i_pos := !i_pos + num_indices;
-    global_i_offset := !global_i_offset + num_indices
-  done;
-  (arr_pos, arr_col, arr_ebo)
-
-(* Decode water vertices and triangles from CLC4 streams (3-byte coords) *)
-let decode_water_streams header meta_str high_x mid_x low_x high_y mid_y low_y
-    high_indices low_indices =
-  let n_verts = header.water_verts in
-  let n_indices = header.water_indices in
-  let arr_pos = Array1.create int32 c_layout (n_verts * 2) in
-  let arr_col = Array1.create int8_unsigned c_layout n_verts in
-  let arr_ebo = Array1.create int32 c_layout n_indices in
-
-  if n_verts = 0 then (arr_pos, arr_col, arr_ebo)
-  else begin
-    let meta_pos = ref 0 in
-    let v_pos = ref 0 in
-    let i_pos = ref 0 in
-    let global_v_offset = ref 0 in
-    let global_i_offset = ref 0 in
-
-    let read_u16 str pos =
-      let b0 = Char.code str.[!pos] in
-      let b1 = Char.code str.[!pos + 1] in
-      pos := !pos + 2;
-      b0 lor (b1 lsl 8)
-    in
-
-    for _ = 1 to header.water_count do
-      let code = read_u16 meta_str meta_pos in
-      let v_count = read_u16 meta_str meta_pos in
-      let t_count = read_u16 meta_str meta_pos in
-      let code_idx = Clc_palette.get_index code in
-      let base_v = !global_v_offset in
-
-      (* Decode 3-byte coordinates and scale to 16-bit *)
-      let prev_x = ref 0 in
-      let prev_y = ref 0 in
-      for k = 0 to v_count - 1 do
-        let idx = !v_pos + k in
-        let hx = Char.code high_x.[idx] in
-        let mx = Char.code mid_x.[idx] in
-        let lx = Char.code low_x.[idx] in
-        let zx = lx lor (mx lsl 8) lor (hx lsl 16) in
-        let sdx = zigzag_decode zx in
-        let qx = (!prev_x + sdx) land 0xFFFFFF in
-        prev_x := qx;
-
-        let hy = Char.code high_y.[idx] in
-        let my = Char.code mid_y.[idx] in
-        let ly = Char.code low_y.[idx] in
-        let zy = ly lor (my lsl 8) lor (hy lsl 16) in
-        let sdy = zigzag_decode zy in
-        let qy = (!prev_y + sdy) land 0xFFFFFF in
-        prev_y := qy;
-
-        (* Store full 24-bit precision coords as int32 *)
-        let out_idx = base_v + k in
-        Array1.set arr_pos (out_idx * 2) (Int32.of_int qx);
-        Array1.set arr_pos ((out_idx * 2) + 1) (Int32.of_int qy);
-        Array1.set arr_col out_idx code_idx
-      done;
-      v_pos := !v_pos + v_count;
-      global_v_offset := !global_v_offset + v_count;
-
-      (* Decode indices (same as CLC - 16-bit) *)
-      let prev_idx = ref 0 in
-      let num_indices = t_count * 3 in
-      for k = 0 to num_indices - 1 do
-        let idx = !i_pos + k in
-        let hi = Char.code high_indices.[idx] in
-        let li = Char.code low_indices.[idx] in
-        let zi = li lor (hi lsl 8) in
-        let sdi = zigzag_decode zi in
-        let qi = (!prev_idx + sdi) land 0xFFFF in
-        prev_idx := qi;
-        Array1.set arr_ebo (!global_i_offset + k) (Int32.of_int (base_v + qi))
-      done;
-      i_pos := !i_pos + num_indices;
-      global_i_offset := !global_i_offset + num_indices
-    done;
-    (arr_pos, arr_col, arr_ebo)
-  end
+let get_ba8 mem size =
+  let buf = Jv.get mem "buffer" in
+  let ta =
+    Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv buf)
+  in
+  let ba = Brr.Tarray.to_bigarray1 ta in
+  Bigarray.Array1.sub ba 0 size
 
 (* Full CLC tile loading: decompress all streams and decode geometry *)
-let load_full_clc_tile path =
+let load_full_clc_tile path_str =
   let open Lwt.Syntax in
-  let* data = Reader.read_file path in
-  let header = parse_header data in
-  (* Header size varies by format: CLC3=48, CLC4=76, CLC5=92 *)
+  let* resp = to_lwt (Brr_io.Fetch.url (Jstr.v path_str)) in
+  let* buf =
+    to_lwt (Brr_io.Fetch.Body.array_buffer (Brr_io.Fetch.Response.as_body resp))
+  in
+  let data = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf in
+  let data_ba = Brr.Tarray.to_bigarray1 data in
+  let header = parse_header_ba data_ba in
+
   let offset =
     if header.is_clc5 then 96 else if header.is_clc4 then 76 else 48
   in
 
-  (* Read CLC streams (7 for CLC3, same for CLC4/5) *)
-  let* meta_str, offset = read_stream data offset in
-  let* high_x, offset = read_stream data offset in
-  let* low_x, offset = read_stream data offset in
-  let* high_y, offset = read_stream data offset in
-  let* low_y, offset = read_stream data offset in
-  let* high_indices, offset = read_stream data offset in
-  let* low_indices, offset = read_stream data offset in
+  Lwt_mutex.with_lock decode_mutex (fun () ->
+      let* inst = Wasm.load () in
 
-  (* Decode CLC geometry *)
-  let clc_pos, clc_col, clc_ebo =
-    decode_clc_streams header meta_str high_x low_x high_y low_y high_indices
-      low_indices
-  in
+      (* Decompress CLC streams directly into WASM memory *)
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_meta) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_y) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_y) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_i) in
+      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_i) in
 
-  (* Read and decode water streams if CLC4/5 *)
-  let* water_pos, water_col, water_ebo, offset =
-    if (header.is_clc4 || header.is_clc5) && header.water_count > 0 then begin
-      let* w_meta, offset = read_stream data offset in
-      let* w_high_x, offset = read_stream data offset in
-      let* w_mid_x, offset = read_stream data offset in
-      let* w_low_x, offset = read_stream data offset in
-      let* w_high_y, offset = read_stream data offset in
-      let* w_mid_y, offset = read_stream data offset in
-      let* w_low_y, offset = read_stream data offset in
-      let* w_high_idx, offset = read_stream data offset in
-      let* w_low_idx, offset = read_stream data offset in
-      let wp, wc, we =
-        decode_water_streams header w_meta w_high_x w_mid_x w_low_x w_high_y
-          w_mid_y w_low_y w_high_idx w_low_idx
+      (* Decode CLC layers *)
+      let func = Jv.get (Jv.get inst "exports") "decode_clc" in
+      ignore
+        (Jv.apply func
+           [|
+             Jv.of_int header.count;
+             Jv.of_int header.total_verts;
+             Jv.of_int header.total_indices;
+           |]);
+
+      (* Copy results out of WASM memory *)
+      let positions =
+        Array1.create int16_unsigned c_layout (header.total_verts * 2)
       in
-      Lwt.return (wp, wc, we, offset)
-    end
-    else begin
-      (* Empty water arrays *)
+      Array1.blit
+        (get_ba16 (Option.get !Wasm.m_out_pos) (header.total_verts * 2))
+        positions;
+
+      let colors = Array1.create int8_unsigned c_layout header.total_verts in
+      Array1.blit
+        (get_ba8 (Option.get !Wasm.m_out_col) header.total_verts)
+        colors;
+
+      let indices = Array1.create int32 c_layout header.total_indices in
+      Array1.blit
+        (get_ba32 (Option.get !Wasm.m_out_ebo) header.total_indices)
+        indices;
+
+      (* Water layers *)
+      let* water_positions, water_colors, water_indices, pois =
+        if (header.is_clc4 || header.is_clc5) && header.water_count > 0 then begin
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_meta)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_mid_x)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_y)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_mid_y)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_y)
+          in
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_i)
+          in
+          (* Fix offset threading *)
+          let* offset =
+            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_i)
+          in
+
+          let func_w = Jv.get (Jv.get inst "exports") "decode_water" in
+          ignore
+            (Jv.apply func_w
+               [|
+                 Jv.of_int header.water_count;
+                 Jv.of_int header.water_verts;
+                 Jv.of_int header.water_indices;
+               |]);
+
+          let wp = Array1.create int32 c_layout (header.water_verts * 2) in
+          Array1.blit
+            (get_ba32 (Option.get !Wasm.m_out_wpos) (header.water_verts * 2))
+            wp;
+
+          let wc = Array1.create int8_unsigned c_layout header.water_verts in
+          Array1.blit
+            (get_ba8 (Option.get !Wasm.m_out_col) header.water_verts)
+            wc;
+
+          let we = Array1.create int32 c_layout header.water_indices in
+          Array1.blit
+            (get_ba32 (Option.get !Wasm.m_out_ebo) header.water_indices)
+            we;
+
+          (* Parse POIs from decompressed streams *)
+          let parse_pois count (min_lon, min_lat) (scale_x, scale_y) =
+            let ba_names = get_ba8 (Option.get !Wasm.m_meta) (count * 64) in
+            let ba_coords = get_ba8 (Option.get !Wasm.m_hi_x) (count * 6) in
+            let ba_elevs = get_ba16 (Option.get !Wasm.m_mid_x) count in
+            let ba_types = get_ba8 (Option.get !Wasm.m_lo_x) count in
+
+            let rec loop i name_sub_offset acc =
+              if i >= count then List.rev acc
+              else
+                (* Parse Name *)
+                let name_len = ba_names.{name_sub_offset} in
+                let name =
+                  String.init name_len (fun j ->
+                      Char.chr ba_names.{name_sub_offset + 1 + j})
+                in
+                let next_name_offset = name_sub_offset + 1 + name_len in
+
+                (* Parse Coords *)
+                let base_c = i * 6 in
+                let b0 = ba_coords.{base_c} in
+                let b1 = ba_coords.{base_c + 1} in
+                let b2 = ba_coords.{base_c + 2} in
+                let qx = b0 lor (b1 lsl 8) lor (b2 lsl 16) in
+
+                let b3 = ba_coords.{base_c + 3} in
+                let b4 = ba_coords.{base_c + 4} in
+                let b5 = ba_coords.{base_c + 5} in
+                let qy = b3 lor (b4 lsl 8) lor (b5 lsl 16) in
+
+                let lon = min_lon +. (float qx /. scale_x) in
+                let lat = min_lat +. (float qy /. scale_y) in
+
+                (* Parse Elevation *)
+                let e_raw = ba_elevs.{i} in
+                let elevation =
+                  if e_raw >= 32768 then e_raw - 65536 else e_raw
+                in
+
+                (* Parse Type *)
+                let t_raw = ba_types.{i} in
+                let poi_type = if t_raw = 0 then Peak else Saddle in
+
+                loop (i + 1) next_name_offset
+                  ({ name; lat; lon; elevation; poi_type } :: acc)
+            in
+            loop 0 0 []
+          in
+
+          let* pois =
+            if header.is_clc5 && header.poi_count > 0 then begin
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_meta)
+              in
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x)
+              in
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_mid_x)
+              in
+              let* _offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x)
+              in
+
+              Lwt.return
+                (parse_pois header.poi_count
+                   (header.min_lon, header.min_lat)
+                   (header.poi_scale_x, header.poi_scale_y))
+            end
+            else Lwt.return []
+          in
+
+          Lwt.return (wp, wc, we, pois)
+        end
+        else
+          Lwt.return
+            ( Array1.create int32 c_layout 0,
+              Array1.create int8_unsigned c_layout 0,
+              Array1.create int32 c_layout 0,
+              [] )
+      in
+
       Lwt.return
-        ( Array1.create int32 c_layout 0,
-          Array1.create int8_unsigned c_layout 0,
-          Array1.create int32 c_layout 0,
-          offset )
-    end
-  in
+        {
+          header;
+          positions;
+          colors;
+          indices;
+          water_positions;
+          water_colors;
+          water_indices;
+          pois;
+        })
 
-  (* Read and decode POI streams if CLC5 *)
-  let* pois =
-    if header.is_clc5 && header.poi_count > 0 then begin
-      let* names_str, offset = read_stream data offset in
-      let* coords_str, offset = read_stream data offset in
-      let* elevs_str, offset = read_stream data offset in
-      let* types_str, _ = read_stream data offset in
-
-      (* Decode POIs *)
-      let pois = ref [] in
-      let names_pos = ref 0 in
-      let coords_pos = ref 0 in
-      let elevs_pos = ref 0 in
-      let types_pos = ref 0 in
-
-      for _ = 1 to header.poi_count do
-        (* Read name (length-prefixed) *)
-        let name_len = Char.code names_str.[!names_pos] in
-        incr names_pos;
-        let name = String.sub names_str !names_pos name_len in
-        names_pos := !names_pos + name_len;
-
-        (* Read 3-byte coords (not delta-encoded for POIs, just raw quantized) *)
-        let lx = Char.code coords_str.[!coords_pos] in
-        let mx = Char.code coords_str.[!coords_pos + 1] in
-        let hx = Char.code coords_str.[!coords_pos + 2] in
-        let qx = lx lor (mx lsl 8) lor (hx lsl 16) in
-        coords_pos := !coords_pos + 3;
-
-        let ly = Char.code coords_str.[!coords_pos] in
-        let my = Char.code coords_str.[!coords_pos + 1] in
-        let hy = Char.code coords_str.[!coords_pos + 2] in
-        let qy = ly lor (my lsl 8) lor (hy lsl 16) in
-        coords_pos := !coords_pos + 3;
-
-        (* Convert back to degrees *)
-        let lon = header.min_lon +. (float qx /. header.poi_scale_x) in
-        let lat = header.min_lat +. (float qy /. header.poi_scale_y) in
-
-        (* Read signed 16-bit elevation *)
-        let el = Char.code elevs_str.[!elevs_pos] in
-        let eh = Char.code elevs_str.[!elevs_pos + 1] in
-        let elev = el lor (eh lsl 8) in
-        let elev = if elev >= 0x8000 then elev - 0x10000 else elev in
-        elevs_pos := !elevs_pos + 2;
-
-        (* Read type *)
-        let typ = Char.code types_str.[!types_pos] in
-        incr types_pos;
-        let poi_type = if typ = 0 then Peak else Saddle in
-
-        pois := { name; lat; lon; elevation = elev; poi_type } :: !pois
-      done;
-      Lwt.return (List.rev !pois)
-    end
-    else Lwt.return []
-  in
-
-  Lwt.return
-    {
-      header;
-      positions = clc_pos;
-      colors = clc_col;
-      indices = clc_ebo;
-      water_positions = water_pos;
-      water_colors = water_col;
-      water_indices = water_ebo;
-      pois;
-    }
-
-(* Load CLC tiles.
-   Returns: (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles list)
-   Each tile in the list has: (tile_data, tile_range_lon, tile_range_lat) *)
+(* Load CLC tiles in parallel *)
 let load_tiles ~lat ~lon ~size =
   let open Lwt.Syntax in
-  (* Calculate DEM geographic bounds in degrees *)
   let size_deg = float size /. 3600. in
   let dem_min_lat = lat -. (size_deg /. 2.) in
   let dem_max_lat = lat +. (size_deg /. 2.) in
@@ -469,35 +519,29 @@ let load_tiles ~lat ~lon ~size =
   let dem_range_lon = dem_max_lon -. dem_min_lon in
   let dem_range_lat = dem_max_lat -. dem_min_lat in
 
-  (* Determine which CLC tiles contribute *)
-  (* Tiles are named by lower-left corner: N45 covers [45,46), so use floor for all *)
   let min_tile_lat = int_of_float (floor dem_min_lat) in
   let max_tile_lat = int_of_float (floor dem_max_lat) in
   let min_tile_lon = int_of_float (floor dem_min_lon) in
   let max_tile_lon = int_of_float (floor dem_max_lon) in
 
-  (* Accumulate loaded tiles *)
-  let tiles = ref [] in
-
-  let rec load_tiles tile_lat tile_lon =
-    if tile_lat > max_tile_lat then Lwt.return ()
-    else if tile_lon > max_tile_lon then load_tiles (tile_lat + 1) min_tile_lon
-    else begin
+  let tasks = ref [] in
+  for tile_lat = min_tile_lat to max_tile_lat do
+    for tile_lon = min_tile_lon to max_tile_lon do
       let path = tile_path (float tile_lat +. 0.5) (float tile_lon +. 0.5) in
-      Lwt.catch
-        (fun () ->
-          let* tile = load_full_clc_tile path in
-          (* Calculate tile range in degrees (for shader uniforms) *)
-          let tile_range_lon = 65535. /. tile.header.scale_x in
-          let tile_range_lat = 65535. /. tile.header.scale_y in
-          tiles := (tile, tile_range_lon, tile_range_lat) :: !tiles;
-          Lwt.return ())
-        (fun _exn -> Lwt.return ())
-      >>= fun () -> load_tiles tile_lat (tile_lon + 1)
-    end
-  in
-  let* () = load_tiles min_tile_lat min_tile_lon in
+      let task =
+        Lwt.catch
+          (fun () ->
+            let* tile = load_full_clc_tile path in
+            let tile_range_lon = 65535. /. tile.header.scale_x in
+            let tile_range_lat = 65535. /. tile.header.scale_y in
+            Lwt.return (Some (tile, tile_range_lon, tile_range_lat)))
+          (fun _exn -> Lwt.return None)
+      in
+      tasks := task :: !tasks
+    done
+  done;
 
-  (* Reverse to get correct draw order (smaller features first) *)
-  Lwt.return
-    (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, List.rev !tiles)
+  let* results = Lwt.all !tasks in
+  let tiles = List.filter_map (fun x -> x) results in
+
+  Lwt.return (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles)
