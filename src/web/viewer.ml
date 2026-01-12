@@ -3169,7 +3169,7 @@ let setup_events canvas =
          Brr.Ev.prevent_default ev;
          let wheel = Brr.Ev.as_type ev in
          let delta_y = Brr.Ev.Wheel.delta_y wheel in
-         let factor = if delta_y > 0. then 0.9 else 1.1 in
+         let factor = (if delta_y > 0. then 0.9 else 1.1) ** 0.25 in
          zoom := max min_zoom (min max_zoom (!zoom *. factor)))
        target);
 
