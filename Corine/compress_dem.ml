@@ -200,32 +200,33 @@ let zigzag_encode n =
   let signed = if n >= 0x8000 then n - 0x10000 else n in
   (signed lsl 1) lxor (signed asr 15) land 0xFFFF
 
-(* Apply compression pipeline to the heightmap *)
-let compress heights width height =
+(* Apply compression pipeline to a sub-region of the heightmap *)
+let compress heights ~src_row ~src_col ~tile_width ~tile_height =
   Printf.eprintf "Converting to 16-bit...\n%!";
   (* Step 1: Convert to 16-bit *)
-  let u16_data = Array.make (width * height) 0 in
-  for row = 0 to height - 1 do
-    for col = 0 to width - 1 do
-      u16_data.((row * width) + col) <- float_to_u16 heights.{row, col}
+  let u16_data = Array.make (tile_width * tile_height) 0 in
+  for row = 0 to tile_height - 1 do
+    for col = 0 to tile_width - 1 do
+      u16_data.((row * tile_width) + col) <-
+        float_to_u16 heights.{src_row + row, src_col + col}
     done
   done;
   Printf.eprintf "Applying parallelogram predictor...\n%!";
   (* Step 2: Apply parallelogram predictor, producing signed residues *)
-  let residues = Array.make (width * height) 0 in
-  for row = 0 to height - 1 do
-    for col = 0 to width - 1 do
-      let idx = (row * width) + col in
+  let residues = Array.make (tile_width * tile_height) 0 in
+  for row = 0 to tile_height - 1 do
+    for col = 0 to tile_width - 1 do
+      let idx = (row * tile_width) + col in
       let val_ = u16_data.(idx) in
       let predicted =
         if row = 0 && col = 0 then 0
         else if row = 0 then u16_data.(idx - 1)
-        else if col = 0 then u16_data.(idx - width)
+        else if col = 0 then u16_data.(idx - tile_width)
         else
           predict
             u16_data.(idx - 1)
-            u16_data.(idx - width)
-            u16_data.(idx - width - 1)
+            u16_data.(idx - tile_width)
+            u16_data.(idx - tile_width - 1)
       in
       residues.(idx) <- val_ - predicted
     done
@@ -235,7 +236,7 @@ let compress heights width height =
   let zigzag = Array.map zigzag_encode residues in
   Printf.eprintf "Splitting bytes...\n%!";
   (* Step 4: Split into high and low bytes *)
-  let n = width * height in
+  let n = tile_width * tile_height in
   let high_bytes = Bytes.create n in
   let low_bytes = Bytes.create n in
   for i = 0 to n - 1 do
@@ -294,17 +295,14 @@ let write_output path width height high_compressed low_compressed =
   output_string oc low_compressed;
   close_out oc
 
-let () =
-  if Array.length Sys.argv < 3 then begin
-    Printf.eprintf "Usage: %s <input.tif> <output.dem>\n" Sys.argv.(0);
-    exit 1
-  end;
-  let input_path = Sys.argv.(1) in
-  let output_path = Sys.argv.(2) in
-  Printf.eprintf "Reading %s...\n%!" input_path;
-  let heights, width, height = read_dem input_path in
-  Printf.eprintf "Compressing...\n%!";
-  let high_bytes, low_bytes = compress heights width height in
+(* Compress and write a single tile *)
+let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
+    =
+  Printf.eprintf "Processing tile at (%d, %d) -> %s\n%!" src_row src_col
+    output_path;
+  let high_bytes, low_bytes =
+    compress heights ~src_row ~src_col ~tile_width ~tile_height
+  in
   Printf.eprintf "Gzip compressing high bytes (%d bytes)...\n%!"
     (Bytes.length high_bytes);
   let high_compressed = gzip_compress high_bytes in
@@ -313,17 +311,83 @@ let () =
     (Bytes.length low_bytes);
   let low_compressed = gzip_compress low_bytes in
   Printf.eprintf "  -> %d bytes\n%!" (String.length low_compressed);
-  Printf.eprintf "Writing %s...\n%!" output_path;
-  write_output output_path width height high_compressed low_compressed;
-  Printf.eprintf "Done!\n%!";
-  Printf.eprintf "Original: %d pixels (%d bytes as float32)\n%!" (width * height)
-    (width * height * 4);
-  Printf.eprintf "Compressed: %d + %d = %d bytes\n%!"
+  write_output output_path tile_width tile_height high_compressed low_compressed;
+  Printf.eprintf "Compressed: %d + %d = %d bytes (%.2f%%)\n%!"
     (String.length high_compressed)
     (String.length low_compressed)
-    (String.length high_compressed + String.length low_compressed);
-  Printf.eprintf "Ratio: %.2f%%\n%!"
+    (String.length high_compressed + String.length low_compressed)
     (100.0
     *. Float.of_int
          (String.length high_compressed + String.length low_compressed)
-    /. Float.of_int (width * height * 4))
+    /. Float.of_int (tile_width * tile_height * 4))
+
+(* Tile size: 3600 / 3 = 1200 *)
+let sub_tile_size = 1200
+
+(* Parse lat/lon from Copernicus DEM filename like:
+   Copernicus_DSM_COG_10_N45_00_E006_00_DEM.tif -> (45, 6) *)
+let parse_lat_lon filename =
+  let basename = Filename.basename filename in
+  (* Match pattern: N{lat}_00_E{lon}_00 or similar *)
+  try
+    let re = Str.regexp "N\\([0-9]+\\)_[0-9]+_E\\([0-9]+\\)_[0-9]+" in
+    let _ = Str.search_forward re basename 0 in
+    let lat = int_of_string (Str.matched_group 1 basename) in
+    let lon = int_of_string (Str.matched_group 2 basename) in
+    Some (lat, lon)
+  with Not_found -> None
+
+let () =
+  if Array.length Sys.argv < 3 then begin
+    Printf.eprintf "Usage: %s <input.tif> <output_dir>\n" Sys.argv.(0);
+    Printf.eprintf
+      "  Generates 9 tiles in output_dir: N{lat}_E{lon}_{row}_{col}.dem\n";
+    Printf.eprintf
+      "  Lat/lon are parsed from input filename (Copernicus format)\n";
+    Printf.eprintf "  Row 0 = bottom (south), Col 0 = left (west)\n";
+    exit 1
+  end;
+  let input_path = Sys.argv.(1) in
+  let output_dir = Sys.argv.(2) in
+
+  (* Parse lat/lon from input filename *)
+  let lat, lon =
+    match parse_lat_lon input_path with
+    | Some (lat, lon) -> (lat, lon)
+    | None ->
+        Printf.eprintf "Error: Could not parse lat/lon from filename: %s\n"
+          input_path;
+        Printf.eprintf
+          "Expected format like: Copernicus_DSM_COG_10_N45_00_E006_00_DEM.tif\n";
+        exit 1
+  in
+  Printf.eprintf "Parsed coordinates: N%02d E%03d\n%!" lat lon;
+
+  Printf.eprintf "Reading %s...\n%!" input_path;
+  let heights, width, height = read_dem input_path in
+  Printf.eprintf "DEM size: %dx%d\n%!" width height;
+  if width <> 3600 || height <> 3600 then begin
+    Printf.eprintf "Error: Expected 3600x3600 DEM, got %dx%d\n" width height;
+    exit 1
+  end;
+  Printf.eprintf "Splitting into 9 tiles of %dx%d...\n%!" sub_tile_size
+    sub_tile_size;
+  (* Iterate over 3x3 grid of tiles.
+     Row 0 = bottom (south) = rows 2400-3599 in the heightmap (since row 0 in
+     heightmap is north). Col 0 = left (west) = cols 0-1199 in the heightmap. *)
+  for tile_row = 0 to 2 do
+    for tile_col = 0 to 2 do
+      (* Map tile coordinates to heightmap coordinates.
+         tile_row 0 (south) -> src_row = 2400 (rows 2400-3599)
+         tile_row 2 (north) -> src_row = 0 (rows 0-1199) *)
+      let src_row = (2 - tile_row) * sub_tile_size in
+      let src_col = tile_col * sub_tile_size in
+      let output_path =
+        Printf.sprintf "%s/N%02d_E%03d_%d_%d.dem" output_dir lat lon tile_row
+          tile_col
+      in
+      process_tile heights ~src_row ~src_col ~tile_width:sub_tile_size
+        ~tile_height:sub_tile_size output_path
+    done
+  done;
+  Printf.eprintf "Done! Generated 9 tiles.\n%!"
