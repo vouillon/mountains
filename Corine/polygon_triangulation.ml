@@ -832,7 +832,8 @@ module Triangulator = struct
         Printf.printf "%!"));
 
     (* Build Static R-tree with only REFLEX vertices for Ear Clipping.
-       In a simple polygon, only reflex vertices can intrude into an ear. *)
+       In a simple polygon, only reflex vertices can intrude into an ear.
+       For small polygons, skip the R-tree and use brute-force iteration. *)
     let reflex_items =
       let acc = ref [] in
       let c = ref !curr in
@@ -849,8 +850,11 @@ module Triangulator = struct
       Array.of_list !acc
     in
 
+    let reflex_count = Array.length reflex_items in
+    let use_rtree = reflex_count >= 64 in
+
     let tree =
-      if Array.length reflex_items > 0 then
+      if use_rtree then
         Some
           (Static_r_tree.build ~verts ~vert_idx ~items:reflex_items
              ~min_x:(-1.0) ~min_y:(-1.0) ~max_x:1.0 ~max_y:1.0)
@@ -864,38 +868,49 @@ module Triangulator = struct
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
       (* Note: caller guarantees cross_product >= epsilon, so no need to check here *)
-      match tree with
-      | None -> true (* No reflex vertices means any convex vertex is an ear *)
-      | Some tree -> (
-          try
-            (* Triangle bounding box *)
-            let ax, ay =
-              (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
-            in
-            let bx, by =
-              (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
-            in
-            let cx, cy =
-              (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
-            in
-            let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
-            let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
-            let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
-            let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
+      if reflex_count = 0 then true
+        (* No reflex vertices = any convex is an ear *)
+      else
+        let check_node r_node =
+          if active.(r_node) then
+            let vi_r = vert_idx.(r_node) in
+            (* Skip the ear's own vertices *)
+            if vi_r <> vi_prev && vi_r <> vi_curr && vi_r <> vi_next then
+              (* Check if this reflex vertex intrudes into the ear triangle *)
+              if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
+                raise Exit
+        in
+        match tree with
+        | Some tree -> (
+            try
+              (* Triangle bounding box *)
+              let ax, ay =
+                (Geometry.get_x verts vi_prev, Geometry.get_y verts vi_prev)
+              in
+              let bx, by =
+                (Geometry.get_x verts vi_curr, Geometry.get_y verts vi_curr)
+              in
+              let cx, cy =
+                (Geometry.get_x verts vi_next, Geometry.get_y verts vi_next)
+              in
+              let q_min_x = Geometry.fmin ax (Geometry.fmin bx cx) in
+              let q_max_x = Geometry.fmax ax (Geometry.fmax bx cx) in
+              let q_min_y = Geometry.fmin ay (Geometry.fmin by cy) in
+              let q_max_y = Geometry.fmax ay (Geometry.fmax by cy) in
 
-            let check_node r_node =
-              if active.(r_node) then
-                let vi_r = vert_idx.(r_node) in
-                (* Skip the ear's own vertices *)
-                if vi_r <> vi_prev && vi_r <> vi_curr && vi_r <> vi_next then
-                  (* Check if this reflex vertex intrudes into the ear triangle *)
-                  if point_in_triangle verts vi_r vi_prev vi_curr vi_next then
-                    raise Exit
-            in
-
-            Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y check_node;
-            true
-          with Exit -> false)
+              Static_r_tree.lookup tree q_min_x q_min_y q_max_x q_max_y
+                check_node;
+              true
+            with Exit -> false)
+        | None -> (
+            (* Brute-force for small reflex sets: iterate directly over reflex_items *)
+            try
+              for j = 0 to reflex_count - 1 do
+                let r_node = reflex_items.(j) in
+                check_node r_node
+              done;
+              true
+            with Exit -> false)
     in
 
     while !count > 2 && !iterations < max_iter do
