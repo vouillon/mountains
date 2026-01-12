@@ -6,7 +6,7 @@ type rect = { min_x : float; min_y : float; max_x : float; max_y : float }
 
 (** Validates that polygon indices are within bounds of the vertex array. Raises
     Invalid_argument if checks fail. *)
-let validate_polygon verts poly =
+let validate_polygon (verts : float array) poly =
   let v_len = Array.length verts in
   if v_len mod 2 <> 0 then invalid_arg "Vertices array length must be even";
 

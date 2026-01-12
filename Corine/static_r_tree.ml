@@ -29,8 +29,8 @@ let get_level_info n m =
     counts;
   (counts, offsets)
 
-let get_x verts i = Array.unsafe_get verts (i * 2)
-let get_y verts i = Array.unsafe_get verts ((i * 2) + 1)
+let get_x (verts : float array) i = Array.unsafe_get verts (i * 2)
+let get_y (verts : float array) i = Array.unsafe_get verts ((i * 2) + 1)
 
 let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
   let m = 32 in
@@ -125,7 +125,8 @@ let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
 
 (** {2 Search} *)
 
-let intersects q_xmin q_ymin q_xmax q_ymax n_xmin n_ymin n_xmax n_ymax =
+let intersects (q_xmin : float) (q_ymin : float) (q_xmax : float)
+    (q_ymax : float) n_xmin n_ymin n_xmax n_ymax =
   not (q_xmin > n_xmax || q_xmax < n_xmin || q_ymin > n_ymax || q_ymax < n_ymin)
 
 let lookup t q_xmin q_ymin q_xmax q_ymax callback =

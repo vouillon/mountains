@@ -502,7 +502,7 @@ module Triangulator = struct
     candidate_len_sq < best_len_sq
 
   let find_bridge_point (verts : float array) hole_start_node outer_node
-      poly_list _ _ =
+      poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
@@ -713,7 +713,7 @@ module Triangulator = struct
     end
 
   let merge_hole_into_outer (verts : float array) hole_start_node outer_node
-      poly_list processed_holes pending_start_idx =
+      poly_list =
     (* First check if the hole touches the outer ring at any vertex *)
     match find_touching_point verts hole_start_node outer_node poly_list with
     | Some (hole_touch, outer_touch) ->
@@ -724,10 +724,7 @@ module Triangulator = struct
         Some new_outer
     | None -> (
         (* No touching point - use standard bridge-based merge *)
-        match
-          find_bridge_point verts hole_start_node outer_node poly_list
-            processed_holes pending_start_idx
-        with
+        match find_bridge_point verts hole_start_node outer_node poly_list with
         | Some target ->
             let open PolygonList in
             (* Record the bridge for visualization *)
@@ -1217,7 +1214,7 @@ module Triangulator = struct
             if bridge_node <> -1 then
               match
                 merge_hole_into_outer verts bridge_node !curr_outer_node
-                  poly_list processed_holes i
+                  poly_list
               with
               | Some new_node ->
                   curr_outer_node := new_node;
