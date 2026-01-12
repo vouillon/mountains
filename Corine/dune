@@ -1,6 +1,6 @@
 (library
  (name static_r_tree)
- (modules static_r_tree)
+ (modules static_r_tree hilbert)
  (preprocess
   (pps ppx_inline_test))
  (inline_tests))
@@ -18,7 +18,7 @@
   analyze_polygon
   triangulation_tests)
  (modules
-  (:standard \ static_r_tree))
+  (:standard \ static_r_tree hilbert))
  (libraries static_r_tree sqlite3 str tsdl tgls.tgles3 zip yojson unix)
  (ocamlopt_flags
   (-cclib -lGLESv2)))
