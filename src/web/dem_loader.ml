@@ -241,8 +241,6 @@ let load ~lat ~lon ~size =
   let heights =
     Bigarray.reshape_2 (Bigarray.genarray_of_array1 h_ba) size (size * 2)
   in
-  (* Clear memory (optional, but good for predictability) *)
-  Bigarray.Array1.fill h_ba 0;
 
   (* Determine which degree tiles we need *)
   let min_deg_lat = (min_lat_arcsec - 1) // 3600 in

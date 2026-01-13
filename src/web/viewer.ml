@@ -2447,15 +2447,6 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   (* Start from level 1 *)
 
-  (* Generate *)
-  (* Ensure sampling from Level N-1 restricted? No, texturing samples from BaseLevel -> MaxLevel. *)
-  (* To sample specifically from Level N-1, we might need to set GL_TEXTURE_BASE_LEVEL temporarily. *)
-  (* Check error *)
-  let check_err () =
-    let err = Gl.get_error ctx in
-    if err <> Gl.no_error then Format.eprintf "GL ERROR %d@." err
-  in
-
   (* Temporary texture for ping-ponging to avoid feedback loop *)
   let temp_tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
@@ -2512,7 +2503,6 @@ let compute_relief ctx width height triangle_geo tile_texture =
       Gl.viewport ctx 0 0 w h;
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
-      check_err ();
       loop (level + 1) (w / 2) (h / 2))
   in
   loop 1 (width / 2) (height / 2);
@@ -2707,8 +2697,23 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Brr.Console.(
     log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ])
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
-    ~clc_tiles =
+type graphics_resources = {
+  terrain_geo : Gl.vertex_array_object;
+  indices : (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t;
+  text_geo : Gl.vertex_array_object;
+  triangle_geo : Gl.vertex_array_object;
+  terrain_pid : Gl.program;
+  triangle_pid : Gl.program;
+  text_pid : Gl.program;
+  shadow_pid : Gl.program;
+  sky_pid : Gl.program;
+  sky_uniforms : Render_state.sky_uniforms;
+  terrain_uniforms : Render_state.terrain_uniforms;
+  shadow_map : Gl.texture;
+  shadow_fbo : Gl.framebuffer;
+}
+
+let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
   init_anisotropic_filtering ctx;
   (* CLC mode toggle - used at shader compile time *)
@@ -2750,6 +2755,63 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let terrain_pid = create_program ctx terrain_program in
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
+
+  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_fbo = create_shadow_fbo ctx shadow_map in
+
+  let shadow_pid = create_program ctx shadow_program in
+  let sky_pid = create_program ctx sky_program in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
+
+  (* Initialize render state - cache uniform locations and pre-compute params *)
+  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
+  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
+
+  (* Upload static uniforms once at initialization *)
+  Gl.use_program ctx terrain_pid;
+  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
+  Render_state.upload_texture_units ctx terrain_uniforms;
+
+  Gl.use_program ctx shadow_pid;
+  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
+  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+
+  {
+    terrain_geo;
+    indices;
+    text_geo;
+    triangle_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    shadow_map;
+    shadow_fbo;
+  }
+
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
+    ~clc_tiles ~graphics =
+  let {
+    terrain_geo;
+    indices;
+    text_geo;
+    triangle_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    shadow_map;
+    shadow_fbo;
+  } =
+    graphics
+  in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture, _ = compute_relief ctx w h triangle_geo tile_texture in
   let points =
@@ -2785,26 +2847,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let scale = deltay in
   (* Approx 30m per pixel *)
   let ao_texture = compute_ao ctx w h scale relief_texture in
-  let shadow_map = create_shadow_map ctx 2048 2048 3 in
-  let shadow_fbo = create_shadow_fbo ctx shadow_map in
-
-  let shadow_pid = create_program ctx shadow_program in
-  let sky_pid = create_program ctx sky_program in
-  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
-
-  (* Initialize render state - cache uniform locations and pre-compute params *)
-  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
-  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
-  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
-
-  (* Upload static uniforms once at initialization *)
-  Gl.use_program ctx terrain_pid;
-  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
-  Render_state.upload_texture_units ctx terrain_uniforms;
-
-  Gl.use_program ctx shadow_pid;
-  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
-  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
 
   (* Compute session-static values for terrain uniforms *)
   let light_dir_shader =
@@ -3425,11 +3467,14 @@ let main () =
   display_element (loading_message ());
 
   (* Load DEM and CLC (for POIs) in parallel *)
-  let* tile, (_, _, _, _, tiles) =
+  (* Load DEM, CLC, and init graphics in parallel *)
+  let tile_loaders =
     Lwt.both
       (Dem_loader.load ~size:tile_width ~lat ~lon)
       (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
   in
+  let graphics = init_graphics ctx in
+  let* tile, (_, _, _, _, tiles) = tile_loaders in
 
   if use_geoloc then
     Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
@@ -3500,7 +3545,7 @@ let main () =
   remove_message ();
   start ();
   tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx ~detail_map ~clc_tiles:tiles
+    ~tile canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
 
 let () =
   let open Brr_webworkers.Service_worker in
