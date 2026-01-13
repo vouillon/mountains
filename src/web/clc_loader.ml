@@ -385,7 +385,8 @@ let load_full_clc_tile path_str =
           let* offset =
             read_stream_to_wasm data offset (Option.get !Wasm.m_hi_i)
           in
-          let* _offset =
+          (* Fix offset threading *)
+          let* offset =
             read_stream_to_wasm data offset (Option.get !Wasm.m_lo_i)
           in
 
@@ -413,9 +414,79 @@ let load_full_clc_tile path_str =
             (get_ba32 (Option.get !Wasm.m_out_ebo) header.water_indices)
             we;
 
-          (* We still need to parse POIs if CLC5, but let's assume we skip them for now or 
-             implement a fast scalar parse since they are rare. *)
-          Lwt.return (wp, wc, we, [])
+          (* Parse POIs from decompressed streams *)
+          let parse_pois count (min_lon, min_lat) (scale_x, scale_y) =
+            let ba_names = get_ba8 (Option.get !Wasm.m_meta) (count * 64) in
+            let ba_coords = get_ba8 (Option.get !Wasm.m_hi_x) (count * 6) in
+            let ba_elevs = get_ba16 (Option.get !Wasm.m_mid_x) count in
+            let ba_types = get_ba8 (Option.get !Wasm.m_lo_x) count in
+
+            let rec loop i name_sub_offset acc =
+              if i >= count then List.rev acc
+              else
+                (* Parse Name *)
+                let name_len = ba_names.{name_sub_offset} in
+                let name =
+                  String.init name_len (fun j ->
+                      Char.chr ba_names.{name_sub_offset + 1 + j})
+                in
+                let next_name_offset = name_sub_offset + 1 + name_len in
+
+                (* Parse Coords *)
+                let base_c = i * 6 in
+                let b0 = ba_coords.{base_c} in
+                let b1 = ba_coords.{base_c + 1} in
+                let b2 = ba_coords.{base_c + 2} in
+                let qx = b0 lor (b1 lsl 8) lor (b2 lsl 16) in
+
+                let b3 = ba_coords.{base_c + 3} in
+                let b4 = ba_coords.{base_c + 4} in
+                let b5 = ba_coords.{base_c + 5} in
+                let qy = b3 lor (b4 lsl 8) lor (b5 lsl 16) in
+
+                let lon = min_lon +. (float qx /. scale_x) in
+                let lat = min_lat +. (float qy /. scale_y) in
+
+                (* Parse Elevation *)
+                let e_raw = ba_elevs.{i} in
+                let elevation =
+                  if e_raw >= 32768 then e_raw - 65536 else e_raw
+                in
+
+                (* Parse Type *)
+                let t_raw = ba_types.{i} in
+                let poi_type = if t_raw = 0 then Peak else Saddle in
+
+                loop (i + 1) next_name_offset
+                  ({ name; lat; lon; elevation; poi_type } :: acc)
+            in
+            loop 0 0 []
+          in
+
+          let* pois =
+            if header.is_clc5 && header.poi_count > 0 then begin
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_meta)
+              in
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x)
+              in
+              let* offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_mid_x)
+              in
+              let* _offset =
+                read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x)
+              in
+
+              Lwt.return
+                (parse_pois header.poi_count
+                   (header.min_lon, header.min_lat)
+                   (header.poi_scale_x, header.poi_scale_y))
+            end
+            else Lwt.return []
+          in
+
+          Lwt.return (wp, wc, we, pois)
         end
         else
           Lwt.return
