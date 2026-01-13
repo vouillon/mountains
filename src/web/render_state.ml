@@ -124,6 +124,23 @@ type ao_blur_uniforms = {
 }
 (** Cached uniform locations for the AO blur shader. *)
 
+type clc_raster_uniforms = {
+  u_tile_range : Gl.uniform_location;
+  u_tile_min : Gl.uniform_location;
+  u_tex_min : Gl.uniform_location;
+  u_tex_range : Gl.uniform_location;
+}
+(** Cached uniform locations for the CLC raster shader. *)
+
+type water_raster_uniforms = {
+  u_tile_range : Gl.uniform_location;
+  u_water_scale : Gl.uniform_location;
+  u_tile_min : Gl.uniform_location;
+  u_tex_min : Gl.uniform_location;
+  u_tex_range : Gl.uniform_location;
+}
+(** Cached uniform locations for the Water raster shader. *)
+
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
   let rec next_power_of_two n p =
@@ -246,6 +263,29 @@ let init_ao_bake_uniforms ctx pid =
 let init_ao_blur_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   { ao_tex = u "ao_tex"; relief = u "relief"; inv_res = u "inv_res" }
+
+(** Initialize CLC raster uniform locations. Call once after program creation.
+*)
+let init_clc_raster_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_tile_range = u "u_tile_range";
+    u_tile_min = u "u_tile_min";
+    u_tex_min = u "u_tex_min";
+    u_tex_range = u "u_tex_range";
+  }
+
+(** Initialize Water raster uniform locations. Call once after program creation.
+*)
+let init_water_raster_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_tile_range = u "u_tile_range";
+    u_water_scale = u "u_water_scale";
+    u_tile_min = u "u_tile_min";
+    u_tex_min = u "u_tex_min";
+    u_tex_range = u "u_tex_range";
+  }
 
 (** Upload static radial grid uniforms. Call once at initialization. *)
 let upload_radial_static ctx (u : terrain_uniforms) (p : radial_params) =
