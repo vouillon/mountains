@@ -15,6 +15,13 @@
   (javascript_files inflate.js)
   (wasm_files inflate.wat)))
 
+(executables
+ (names worker)
+ (libraries mountains yojson brr lwt)
+ (modes js)
+ (js_of_ocaml
+  (javascript_files inflate.js)))
+
 (rule
  (target
   (dir data))
@@ -61,7 +68,8 @@
   icon192.png
   icon512.png
   compute.wasm
-  decompress_tile.wasm))
+  decompress_tile.wasm
+  worker.bc.js))
 
 (rule
  (target compute.wasm)
