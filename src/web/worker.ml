@@ -101,15 +101,16 @@ let get_uint32_le_ba
 
 let decode_dataset msg =
   let open Lwt.Syntax in
-  let data = Jv.get msg "data" in
+  let dem_url = Jv.get msg "url" |> Jv.to_string in
   let _dataset_id = Jv.get msg "id" in
   let target_size = Jv.get msg "size" |> Jv.to_int in
 
-  (* Convert Jv to Tarray via buffer *)
-  let data_ta =
-    let buf = Jv.get data "buffer" in
-    let buf = Brr.Tarray.Buffer.of_jv buf in
-    Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf
+  (* Fetch the data *)
+  let* data_ta =
+    let open Brr_io.Fetch in
+    let* resp = to_lwt @@ url (Jstr.v dem_url) in
+    let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
+    Lwt.return (Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf)
   in
   let data_ba = to_ba data_ta in
 
