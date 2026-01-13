@@ -2525,7 +2525,183 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   (tid, relief_pid)
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map =
+let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
+    ~cover_map_size =
+  let clc_raster_pid = create_program ctx clc_raster_program in
+  let water_raster_pid = create_program ctx water_raster_program in
+
+  (* Prepare FBO *)
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+  Gl.viewport ctx 0 0 cover_map_size cover_map_size;
+  Gl.use_program ctx clc_raster_pid;
+
+  (* Reusable VAO *)
+  let vao = Gl.create_vertex_array ctx in
+  Gl.bind_vertex_array ctx (Some vao);
+
+  (* Get uniforms *)
+  let u_tile_range =
+    Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_range")
+  in
+  let u_tile_min =
+    Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_min")
+  in
+  let u_tex_min =
+    Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_min")
+  in
+  let u_tex_range =
+    Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_range")
+  in
+
+  (* Conversion factors *)
+  let meters_per_deg_lat = 111132.0 in
+  let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
+
+  (* Render each level *)
+  for level = 0 to 6 do
+    let extent_meters = 2048.0 *. (2.0 ** float level) in
+
+    (* Calculate viewport in degrees centered on (lat, lon) *)
+    let extent_lat = extent_meters /. meters_per_deg_lat in
+    let extent_lon = extent_meters /. meters_per_deg_lon in
+    let min_lat = lat -. (extent_lat /. 2.) in
+    let min_lon = lon -. (extent_lon /. 2.) in
+
+    (* Attach specific layer *)
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+      cover_map_texture 0 level;
+
+    (* Clear depth *)
+    Gl.clear_depth ctx 1.0;
+    Gl.clear ctx Gl.depth_buffer_bit;
+
+    (* Set viewport uniforms *)
+    Gl.uniform2f ctx u_tex_min min_lon min_lat;
+    Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
+
+    (* Enable depth test per level - ensure depth writes are enabled *)
+    Gl.depth_mask ctx true;
+    Gl.enable ctx Gl.depth_test;
+    Gl.depth_func ctx Gl.less;
+
+    (* Render tiles *)
+    List.iter
+      (fun (tile, tile_range_lon, tile_range_lat) ->
+        let header = tile.Clc_loader.header in
+        (* Optimization: could skip tiles outside view here *)
+
+        Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
+        Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
+          header.Clc_loader.min_lat;
+
+        (* Render water layer FIRST (wins depth test, appears on top) *)
+        let water_index_count =
+          Bigarray.Array1.dim tile.Clc_loader.water_indices
+        in
+        if water_index_count > 0 then begin
+          Gl.use_program ctx water_raster_pid;
+
+          let w_u_tile_range =
+            Gl.get_uniform_location ctx water_raster_pid (Jstr.v "u_tile_range")
+          in
+          let w_u_water_scale =
+            Gl.get_uniform_location ctx water_raster_pid
+              (Jstr.v "u_water_scale")
+          in
+          let w_u_tile_min =
+            Gl.get_uniform_location ctx water_raster_pid (Jstr.v "u_tile_min")
+          in
+          let w_u_tex_min =
+            Gl.get_uniform_location ctx water_raster_pid (Jstr.v "u_tex_min")
+          in
+          let w_u_tex_range =
+            Gl.get_uniform_location ctx water_raster_pid (Jstr.v "u_tex_range")
+          in
+
+          Gl.uniform2f ctx w_u_tile_range tile_range_lon tile_range_lat;
+          Gl.uniform1f ctx w_u_water_scale 220000.0;
+          Gl.uniform2f ctx w_u_tile_min header.Clc_loader.min_lon
+            header.Clc_loader.min_lat;
+          Gl.uniform2f ctx w_u_tex_min min_lon min_lat;
+          Gl.uniform2f ctx w_u_tex_range extent_lon extent_lat;
+
+          let w_vbo_pos = Gl.create_buffer ctx in
+          Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_pos);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
+            Gl.static_draw;
+          Gl.enable_vertex_attrib_array ctx 0;
+          (* Use int32 for position *)
+          Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
+
+          let w_vbo_col = Gl.create_buffer ctx in
+          Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_col);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
+            Gl.static_draw;
+          Gl.enable_vertex_attrib_array ctx 1;
+          Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+          let w_ebo = Gl.create_buffer ctx in
+          Gl.bind_buffer ctx Gl.element_array_buffer (Some w_ebo);
+          Gl.buffer_data ctx Gl.element_array_buffer
+            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
+            Gl.static_draw;
+
+          Gl.draw_elements ctx Gl.triangles water_index_count Gl.unsigned_int 0;
+
+          Gl.delete_buffer ctx w_vbo_pos;
+          Gl.delete_buffer ctx w_vbo_col;
+          Gl.delete_buffer ctx w_ebo;
+
+          (* Switch back to CLC program for land cover *)
+          Gl.use_program ctx clc_raster_pid
+        end;
+
+        (* Render CLC land cover (underneath water) *)
+        let vbo_pos = Gl.create_buffer ctx in
+        Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
+        Gl.buffer_data ctx Gl.array_buffer
+          (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
+          Gl.static_draw;
+        Gl.enable_vertex_attrib_array ctx 0;
+        Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+        let vbo_col = Gl.create_buffer ctx in
+        Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
+        Gl.buffer_data ctx Gl.array_buffer
+          (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
+          Gl.static_draw;
+        Gl.enable_vertex_attrib_array ctx 1;
+        Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+        let ebo = Gl.create_buffer ctx in
+        Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
+        Gl.buffer_data ctx Gl.element_array_buffer
+          (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
+          Gl.static_draw;
+
+        let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+        Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
+
+        Gl.delete_buffer ctx vbo_pos;
+        Gl.delete_buffer ctx vbo_col;
+        Gl.delete_buffer ctx ebo)
+      clc_tiles
+  done;
+
+  (* Cleanup *)
+  Gl.delete_vertex_array ctx vao;
+  Gl.disable ctx Gl.depth_test;
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.delete_program ctx clc_raster_pid;
+  Gl.delete_program ctx water_raster_pid;
+
+  Brr.Console.(
+    log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ])
+
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
+    ~clc_tiles =
   (* Initialize anisotropic filtering extension *)
   init_anisotropic_filtering ctx;
   (* CLC mode toggle - used at shader compile time *)
@@ -2670,8 +2846,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map =
     ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
-  let clc_raster_pid = create_program ctx clc_raster_program in
-  let water_raster_pid = create_program ctx water_raster_program in
   let cover_map_size = 1024 in
 
   (* Create FBO for CLC rasterization *)
@@ -2722,199 +2896,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map =
 
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
-  (* Load CLC tiles and GPU rasterize to FBO *)
-  Lwt.async (fun () ->
-      Lwt.catch
-        (fun () ->
-          let open Lwt.Syntax in
-          (* Load tiles covering the largest extent (Level 6) *)
-          let max_extent = 2048.0 *. (2.0 ** 6.0) in
-          (* 131km *)
-          let* _, _, _, _, tiles =
-            Clc_loader.load_tiles ~lat ~lon
-              ~size:(int_of_float (max_extent /. 30.0))
-          in
-
-          (* Prepare FBO *)
-          Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-          Gl.viewport ctx 0 0 cover_map_size cover_map_size;
-          Gl.use_program ctx clc_raster_pid;
-
-          (* Reusable VAO *)
-          let vao = Gl.create_vertex_array ctx in
-          Gl.bind_vertex_array ctx (Some vao);
-
-          (* Get uniforms *)
-          let u_tile_range =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_range")
-          in
-          let u_tile_min =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tile_min")
-          in
-          let u_tex_min =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_min")
-          in
-          let u_tex_range =
-            Gl.get_uniform_location ctx clc_raster_pid (Jstr.v "u_tex_range")
-          in
-
-          (* Conversion factors *)
-          let meters_per_deg_lat = 111132.0 in
-          let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
-
-          (* Render each level *)
-          for level = 0 to 6 do
-            let extent_meters = 2048.0 *. (2.0 ** float level) in
-
-            (* Calculate viewport in degrees centered on (lat, lon) *)
-            let extent_lat = extent_meters /. meters_per_deg_lat in
-            let extent_lon = extent_meters /. meters_per_deg_lon in
-            let min_lat = lat -. (extent_lat /. 2.) in
-            let min_lon = lon -. (extent_lon /. 2.) in
-
-            (* Attach specific layer *)
-            Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-              cover_map_texture 0 level;
-
-            (* Clear depth *)
-            Gl.clear_depth ctx 1.0;
-            Gl.clear ctx Gl.depth_buffer_bit;
-
-            (* Set viewport uniforms *)
-            Gl.uniform2f ctx u_tex_min min_lon min_lat;
-            Gl.uniform2f ctx u_tex_range extent_lon extent_lat;
-
-            (* Enable depth test per level - ensure depth writes are enabled *)
-            Gl.depth_mask ctx true;
-            Gl.enable ctx Gl.depth_test;
-            Gl.depth_func ctx Gl.less;
-
-            (* Render tiles *)
-            List.iter
-              (fun (tile, tile_range_lon, tile_range_lat) ->
-                let header = tile.Clc_loader.header in
-                (* Optimization: could skip tiles outside view here *)
-
-                Gl.uniform2f ctx u_tile_range tile_range_lon tile_range_lat;
-                Gl.uniform2f ctx u_tile_min header.Clc_loader.min_lon
-                  header.Clc_loader.min_lat;
-
-                (* Render water layer FIRST (wins depth test, appears on top) *)
-                let water_index_count =
-                  Bigarray.Array1.dim tile.Clc_loader.water_indices
-                in
-                if water_index_count > 0 then begin
-                  Gl.use_program ctx water_raster_pid;
-
-                  let w_u_tile_range =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tile_range")
-                  in
-                  let w_u_water_scale =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_water_scale")
-                  in
-                  let w_u_tile_min =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tile_min")
-                  in
-                  let w_u_tex_min =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tex_min")
-                  in
-                  let w_u_tex_range =
-                    Gl.get_uniform_location ctx water_raster_pid
-                      (Jstr.v "u_tex_range")
-                  in
-
-                  Gl.uniform2f ctx w_u_tile_range tile_range_lon tile_range_lat;
-                  Gl.uniform1f ctx w_u_water_scale 220000.0;
-                  Gl.uniform2f ctx w_u_tile_min header.Clc_loader.min_lon
-                    header.Clc_loader.min_lat;
-                  Gl.uniform2f ctx w_u_tex_min min_lon min_lat;
-                  Gl.uniform2f ctx w_u_tex_range extent_lon extent_lat;
-
-                  let w_vbo_pos = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_pos);
-                  Gl.buffer_data ctx Gl.array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
-                    Gl.static_draw;
-                  Gl.enable_vertex_attrib_array ctx 0;
-                  (* Use int32 for position *)
-                  Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
-
-                  let w_vbo_col = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.array_buffer (Some w_vbo_col);
-                  Gl.buffer_data ctx Gl.array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
-                    Gl.static_draw;
-                  Gl.enable_vertex_attrib_array ctx 1;
-                  Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-                  let w_ebo = Gl.create_buffer ctx in
-                  Gl.bind_buffer ctx Gl.element_array_buffer (Some w_ebo);
-                  Gl.buffer_data ctx Gl.element_array_buffer
-                    (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
-                    Gl.static_draw;
-
-                  Gl.draw_elements ctx Gl.triangles water_index_count
-                    Gl.unsigned_int 0;
-
-                  Gl.delete_buffer ctx w_vbo_pos;
-                  Gl.delete_buffer ctx w_vbo_col;
-                  Gl.delete_buffer ctx w_ebo;
-
-                  (* Switch back to CLC program for land cover *)
-                  Gl.use_program ctx clc_raster_pid
-                end;
-
-                (* Render CLC land cover (underneath water) *)
-                let vbo_pos = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
-                Gl.buffer_data ctx Gl.array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
-                  Gl.static_draw;
-                Gl.enable_vertex_attrib_array ctx 0;
-                Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
-
-                let vbo_col = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
-                Gl.buffer_data ctx Gl.array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
-                  Gl.static_draw;
-                Gl.enable_vertex_attrib_array ctx 1;
-                Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-                let ebo = Gl.create_buffer ctx in
-                Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
-                Gl.buffer_data ctx Gl.element_array_buffer
-                  (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
-                  Gl.static_draw;
-
-                let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
-                Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0;
-
-                Gl.delete_buffer ctx vbo_pos;
-                Gl.delete_buffer ctx vbo_col;
-                Gl.delete_buffer ctx ebo)
-              tiles
-          done;
-
-          (* Cleanup *)
-          Gl.delete_vertex_array ctx vao;
-          Gl.disable ctx Gl.depth_test;
-          Gl.bind_framebuffer ctx Gl.framebuffer None;
-
-          force_redraw := true;
-
-          Brr.Console.(
-            log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ]);
-          Lwt.return ())
-        (fun exn ->
-          Brr.Console.(
-            log [ Jstr.v ("CLC GPU load failed: " ^ Printexc.to_string exn) ]);
-
-          Lwt.return ()));
+  (* GPU rasterize CLC tiles to FBO *)
+  rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
+    ~cover_map_size;
 
   let triangle_uniforms =
     Render_state.init_triangle_uniforms ctx triangle_pid
@@ -3509,7 +3493,7 @@ let main () =
   remove_message ();
   start ();
   tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx ~detail_map
+    ~tile canvas ctx ~detail_map ~clc_tiles:tiles
 
 let () =
   let open Brr_webworkers.Service_worker in

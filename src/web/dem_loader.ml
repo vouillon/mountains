@@ -58,14 +58,13 @@ type ba_uint8 =
   (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 
 module Wasm = struct
-  let instance = ref None
-  let high_mem = ref None
-  let low_mem = ref None
-  let target_mem = ref None
-
   let create_memory pages =
     let opts = Jv.obj [| ("initial", Jv.of_int pages) |] in
     Jv.new' (Jv.get (Jv.get Jv.global "WebAssembly") "Memory") [| opts |]
+
+  let high_mem = create_memory 25
+  let low_mem = create_memory 25
+  let target_mem = create_memory 526
 
   let get_ba mem =
     let buf = Jv.get mem "buffer" in
@@ -73,51 +72,36 @@ module Wasm = struct
       (Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv buf))
 
   let load () =
-    match !instance with
-    | Some inst -> Lwt.return inst
-    | None ->
-        let* resp =
-          to_lwt @@ Brr_io.Fetch.url (Jstr.v "decompress_tile.wasm")
-        in
-        let* buf =
-          to_lwt
-            (Brr_io.Fetch.Body.array_buffer
-               (Brr_io.Fetch.Response.as_body resp))
-        in
+    let* resp = to_lwt @@ Brr_io.Fetch.url (Jstr.v "decompress_tile.wasm") in
+    let* buf =
+      to_lwt
+        (Brr_io.Fetch.Body.array_buffer (Brr_io.Fetch.Response.as_body resp))
+    in
 
-        let h_mem = create_memory 25 in
-        let l_mem = create_memory 25 in
-        let t_mem = create_memory 526 in
+    let imports =
+      Jv.obj
+        [|
+          ( "env",
+            Jv.obj
+              [|
+                ("high_mem", high_mem);
+                ("low_mem", low_mem);
+                ("target_mem", target_mem);
+              |] );
+        |]
+    in
 
-        high_mem := Some h_mem;
-        low_mem := Some l_mem;
-        target_mem := Some t_mem;
-
-        let imports =
-          Jv.obj
-            [|
-              ( "env",
-                Jv.obj
-                  [|
-                    ("high_mem", h_mem);
-                    ("low_mem", l_mem);
-                    ("target_mem", t_mem);
-                  |] );
-            |]
-        in
-
-        let* res =
-          to_lwt
-            (Fut.of_promise
-               ~ok:(fun x -> x)
-               (Jv.call
-                  (Jv.get Jv.global "WebAssembly")
-                  "instantiate"
-                  [| Brr.Tarray.Buffer.to_jv buf; imports |]))
-        in
-        let inst = Jv.get res "instance" in
-        instance := Some inst;
-        Lwt.return inst
+    let* res =
+      to_lwt
+        (Fut.of_promise
+           ~ok:(fun x -> x)
+           (Jv.call
+              (Jv.get Jv.global "WebAssembly")
+              "instantiate"
+              [| Brr.Tarray.Buffer.to_jv buf; imports |]))
+    in
+    let inst = Jv.get res "instance" in
+    Lwt.return inst
 end
 
 let decode_mutex = Lwt_mutex.create ()
@@ -166,7 +150,7 @@ let fetch_dem ~lat ~lon ~row ~col =
 (* Decode a .dem tile and write directly into target heightmap.
    dst_row/dst_col specify where in the target to write (tile origin).
    target_size is the size of the target heightmap (assumed square). *)
-let decode_tile ~data ~dst_row ~dst_col ~target_size =
+let decode_tile ~inst ~data ~dst_row ~dst_col ~target_size =
   (* Convert typed array to bigarray for efficient access *)
   let data_ba = to_ba data in
 
@@ -193,9 +177,9 @@ let decode_tile ~data ~dst_row ~dst_col ~target_size =
   in
 
   (* Decompress *)
-  let* inst = Wasm.load () in
-  let h_mem = Option.get !Wasm.high_mem in
-  let l_mem = Option.get !Wasm.low_mem in
+  let* inst = inst in
+  let h_mem = Wasm.high_mem in
+  let l_mem = Wasm.low_mem in
 
   (* Decompress and Decode - Protected by mutex as we use shared WASM memories *)
   Lwt_mutex.with_lock decode_mutex (fun () ->
@@ -250,8 +234,8 @@ let load ~lat ~lon ~size =
   Format.eprintf "  Bounds: lat %d-%d, lon %d-%d arcsec@." min_lat_arcsec
     max_lat_arcsec min_lon_arcsec max_lon_arcsec;
 
-  let* _inst = Wasm.load () in
-  let heights_ba = Wasm.get_ba (Option.get !Wasm.target_mem) in
+  let inst = Wasm.load () in
+  let heights_ba = Wasm.get_ba Wasm.target_mem in
   let h_ba = Bigarray.Array1.sub heights_ba 0 (size * size * 2) in
   (* Reshape 1D WASM memory to 2D heightmap *)
   let heights =
@@ -321,7 +305,7 @@ let load ~lat ~lon ~size =
               in
               let dst_row = subtile_min_lat_arcsec - min_lat_arcsec in
               let dst_col = subtile_min_lon_arcsec - min_lon_arcsec in
-              decode_tile ~data ~dst_row ~dst_col ~target_size:size
+              decode_tile ~inst ~data ~dst_row ~dst_col ~target_size:size
             in
             tasks := task :: !tasks
         done
