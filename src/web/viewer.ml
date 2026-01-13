@@ -1801,7 +1801,8 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
 (* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
 
-let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
+let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
+    (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
     ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
@@ -1831,57 +1832,36 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
   let grid_scale = 70000. /. (height_term -. 1.) in
   let avg_delta = (deltax +. deltay) *. 0.5 in
 
-  (* Set all uniforms once *)
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_mask"))
-    w_mask_radial;
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w_shift"))
-    w_shift_radial;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_sectors_div"))
+  (* Set all uniforms using cached locations *)
+  Gl.uniform1i ctx shadow_uniforms.w_mask w_mask_radial;
+  Gl.uniform1i ctx shadow_uniforms.w_shift w_shift_radial;
+  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div
     (1. /. (float n_sectors /. 2.));
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_k"))
-    grid_k;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_base"))
-    grid_base;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "grid_scale"))
-    grid_scale;
-  Gl.uniform2f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_delta"))
-    (1. /. deltax) (1. /. deltay);
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_avg_delta"))
-    (1. /. avg_delta);
-  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "w")) w;
-  Gl.uniform1f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "inv_w"))
-    (1. /. float w);
+  Gl.uniform1f ctx shadow_uniforms.grid_k grid_k;
+  Gl.uniform1f ctx shadow_uniforms.grid_base grid_base;
+  Gl.uniform1f ctx shadow_uniforms.grid_scale grid_scale;
+  Gl.uniform2f ctx shadow_uniforms.inv_delta (1. /. deltax) (1. /. deltay);
+  Gl.uniform1f ctx shadow_uniforms.inv_avg_delta (1. /. avg_delta);
+  Gl.uniform1i ctx shadow_uniforms.w w;
+  Gl.uniform1f ctx shadow_uniforms.inv_w (1. /. float w);
 
   let max_lod =
     let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
     log2 w
   in
-  Gl.uniform1i ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "max_lod"))
-    max_lod;
+  Gl.uniform1i ctx shadow_uniforms.max_lod max_lod;
 
   (* Center Offset *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
   let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
-  Gl.uniform2f ctx
-    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "center_offset"))
-    center_offset_x center_offset_y;
+  Gl.uniform2f ctx shadow_uniforms.center_offset center_offset_x center_offset_y;
 
   (* Bind Relief Texture *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.uniform1i ctx (Gl.get_uniform_location ctx shadow_pid (Jstr.v "relief")) 0;
+  Gl.uniform1i ctx shadow_uniforms.relief 0;
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
@@ -1897,12 +1877,6 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
 
   (* Render shadow map with 4 rotations to cover full 360° terrain *)
   let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
-  let snapped_alpha_loc =
-    Gl.get_uniform_location ctx shadow_pid (Jstr.v "snapped_alpha")
-  in
-  let svp_loc =
-    Gl.get_uniform_location ctx shadow_pid (Jstr.v "shadow_view_proj")
-  in
 
   for layer = 0 to 2 do
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
@@ -1916,12 +1890,12 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
     Gl.enable ctx Gl.scissor_test;
     Gl.scissor ctx 1 1 2046 2046;
 
-    Gl.uniform_matrix4fv ctx svp_loc false
+    Gl.uniform_matrix4fv ctx shadow_uniforms.shadow_view_proj false
       (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
 
     (* Render 4 rotations to cover full terrain *)
     for rotation = 0 to 3 do
-      Gl.uniform1f ctx snapped_alpha_loc rotation_angles.(rotation);
+      Gl.uniform1f ctx shadow_uniforms.snapped_alpha rotation_angles.(rotation);
       Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
     done;
 
@@ -1966,7 +1940,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
     ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~shadow_matrices ~w ~x ~y
     ~height ~lat ~lon ~orientation ~points ~tile ~index_count ~ao_texture
-    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map ~palette_texture
+    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
+    ~(shadow_uniforms : Render_state.shadow_uniforms) ~palette_texture
     ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
   let canvas_width = truncate (Brr.El.inner_w canvas) in
@@ -2035,8 +2010,9 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   (* Render shadows once on first frame *)
   if not !shadow_rendered then begin
     shadow_rendered := true;
-    draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices:shadow_matrices
-      ~terrain_geo ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx;
+    draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x ~y
+      ~lat ~lon ~w ctx;
     (* Rebind terrain textures after draw_shadows disturbed them *)
     bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
       ~shadow_map ~cover_map_texture ~palette_texture
@@ -2706,8 +2682,11 @@ type graphics_resources = {
   shadow_pid : Gl.program;
   sky_uniforms : Render_state.sky_uniforms;
   terrain_uniforms : Render_state.terrain_uniforms;
+  triangle_uniforms : Render_state.triangle_uniforms;
+  text_uniforms : Render_state.text_uniforms;
   shadow_map : Gl.texture;
   shadow_fbo : Gl.framebuffer;
+  shadow_uniforms : Render_state.shadow_uniforms;
   sky_pid : Gl.program;
   relief_pid : Gl.program;
   mipmap_pid : Gl.program;
@@ -2724,6 +2703,15 @@ type graphics_resources = {
   clc_raster_uniforms : Render_state.clc_raster_uniforms;
   water_raster_uniforms : Render_state.water_raster_uniforms;
 }
+
+let resize_canvas canvas =
+  let canvas_width = truncate (Brr.El.inner_w canvas) in
+  let canvas_height = truncate (Brr.El.inner_h canvas) in
+  let canvas = Brr_canvas.Canvas.of_el canvas in
+  if Brr_canvas.Canvas.w canvas <> canvas_width then
+    Brr_canvas.Canvas.set_w canvas canvas_width;
+  if Brr_canvas.Canvas.h canvas <> canvas_height then
+    Brr_canvas.Canvas.set_h canvas canvas_height
 
 let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
@@ -2746,6 +2734,10 @@ let init_graphics ctx =
   (* Initialize render state - cache uniform locations and pre-compute params *)
   let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
   let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let triangle_uniforms =
+    Render_state.init_triangle_uniforms ctx triangle_pid
+  in
+  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
   let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
 
   let terrain_geo, indices =
@@ -2819,8 +2811,11 @@ let init_graphics ctx =
     sky_pid;
     sky_uniforms;
     terrain_uniforms;
+    triangle_uniforms;
+    text_uniforms;
     shadow_map;
     shadow_fbo;
+    shadow_uniforms;
     relief_pid;
     mipmap_pid;
     copy_pid;
@@ -2851,8 +2846,11 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     sky_pid;
     sky_uniforms;
     terrain_uniforms;
+    triangle_uniforms;
+    text_uniforms;
     shadow_map;
     shadow_fbo;
+    shadow_uniforms;
     relief_pid;
     mipmap_pid;
     copy_pid;
@@ -3019,9 +3017,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~cover_map_size ~clc_depth_rbs ~clc_raster_pid ~water_raster_pid
     clc_raster_uniforms water_raster_uniforms;
 
-  let triangle_uniforms =
-    Render_state.init_triangle_uniforms ctx triangle_pid
-  in
   let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
   let transform_ba =
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
@@ -3032,7 +3027,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
   in
   let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
-  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
 
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
@@ -3040,7 +3034,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
         ~shadow_matrices ~w ~x ~y ~lat ~lon ~orientation ~height ~tile ~points
         ~index_count ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
-        ~palette_texture ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx)
+        ~shadow_uniforms ~palette_texture ~cover_map_texture ~sky_pid
+        ~sky_uniforms canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -3544,6 +3539,7 @@ let main () =
       (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
   in
   let graphics = init_graphics ctx in
+  resize_canvas canvas;
   let* tile, (_, _, _, _, tiles) = tile_loaders in
 
   if use_geoloc then
