@@ -88,6 +88,42 @@ type sky_uniforms = {
 }
 (** Cached uniform locations for the sky shader. *)
 
+type relief_uniforms = {
+  size : Gl.uniform_location;
+  delta : Gl.uniform_location;
+}
+(** Cached uniform locations for the relief shader. *)
+
+type mipmap_uniforms = {
+  source_level : Gl.uniform_location;
+  base_k : Gl.uniform_location;
+  decay : Gl.uniform_location;
+  source_texture : Gl.uniform_location;
+  source_size : Gl.uniform_location;
+}
+(** Cached uniform locations for the mipmap shader. *)
+
+type copy_uniforms = {
+  source : Gl.uniform_location;
+  level : Gl.uniform_location;
+  source_size : Gl.uniform_location;
+}
+(** Cached uniform locations for the copy shader. *)
+
+type ao_bake_uniforms = {
+  relief : Gl.uniform_location;
+  width : Gl.uniform_location;
+  scale : Gl.uniform_location;
+}
+(** Cached uniform locations for the AO bake shader. *)
+
+type ao_blur_uniforms = {
+  ao_tex : Gl.uniform_location;
+  relief : Gl.uniform_location;
+  inv_res : Gl.uniform_location;
+}
+(** Cached uniform locations for the AO blur shader. *)
+
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
   let rec next_power_of_two n p =
@@ -179,6 +215,37 @@ let init_sky_uniforms ctx pid =
     u_fogColor = u "u_fogColor";
     u_zenithColor = u "u_zenithColor";
   }
+
+(** Initialize relief uniform locations. Call once after program creation. *)
+let init_relief_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { size = u "size"; delta = u "delta" }
+
+(** Initialize mipmap uniform locations. Call once after program creation. *)
+let init_mipmap_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    source_level = u "source_level";
+    base_k = u "base_k";
+    decay = u "decay";
+    source_texture = u "source_texture";
+    source_size = u "source_size";
+  }
+
+(** Initialize copy uniform locations. Call once after program creation. *)
+let init_copy_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { source = u "source"; level = u "level"; source_size = u "source_size" }
+
+(** Initialize AO bake uniform locations. Call once after program creation. *)
+let init_ao_bake_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { relief = u "relief"; width = u "width"; scale = u "scale" }
+
+(** Initialize AO blur uniform locations. Call once after program creation. *)
+let init_ao_blur_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  { ao_tex = u "ao_tex"; relief = u "relief"; inv_res = u "inv_res" }
 
 (** Upload static radial grid uniforms. Call once at initialization. *)
 let upload_radial_static ctx (u : terrain_uniforms) (p : radial_params) =

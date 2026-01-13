@@ -1693,7 +1693,9 @@ let calculate_shadow_matrices ~light_dir ~world_center =
 
   matrices
 
-let compute_ao ctx width height scale relief_texture =
+let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
+    (bake_u : Render_state.ao_bake_uniforms)
+    (blur_u : Render_state.ao_blur_uniforms) =
   (* Helper to create FBO and R8 Texture *)
   let create_r8_target w h =
     let tid = Gl.create_texture ctx in
@@ -1706,9 +1708,6 @@ let compute_ao ctx width height scale relief_texture =
     tid
   in
 
-  let bake_pid = create_program ctx ao_bake_program in
-  let blur_pid = create_program ctx ao_blur_program in
-
   let ao_bake_tex = create_r8_target width height in
   let ao_final_tex = create_r8_target width height in
 
@@ -1720,15 +1719,11 @@ let compute_ao ctx width height scale relief_texture =
     ao_bake_tex 0;
 
   Gl.viewport ctx 0 0 width height;
-  Gl.use_program ctx bake_pid;
+  Gl.use_program ctx ao_bake_pid;
 
-  let relief_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "relief") in
-  let width_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "width") in
-  let scale_loc = Gl.get_uniform_location ctx bake_pid (Jstr.v "scale") in
-
-  Gl.uniform1i ctx relief_loc 0;
-  Gl.uniform1i ctx width_loc width;
-  Gl.uniform1f ctx scale_loc scale;
+  Gl.uniform1i ctx bake_u.relief 0;
+  Gl.uniform1i ctx bake_u.width width;
+  Gl.uniform1f ctx bake_u.scale scale;
 
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
@@ -1741,17 +1736,11 @@ let compute_ao ctx width height scale relief_texture =
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
     ao_final_tex 0;
 
-  Gl.use_program ctx blur_pid;
+  Gl.use_program ctx ao_blur_pid;
 
-  let ao_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "ao_tex") in
-  let relief_blur_loc =
-    Gl.get_uniform_location ctx blur_pid (Jstr.v "relief")
-  in
-  let inv_res_loc = Gl.get_uniform_location ctx blur_pid (Jstr.v "inv_res") in
-
-  Gl.uniform1i ctx ao_loc 0;
-  Gl.uniform1i ctx relief_blur_loc 1;
-  Gl.uniform2f ctx inv_res_loc (1.0 /. float width) (1.0 /. float height);
+  Gl.uniform1i ctx blur_u.ao_tex 0;
+  Gl.uniform1i ctx blur_u.relief 1;
+  Gl.uniform2f ctx blur_u.inv_res (1.0 /. float width) (1.0 /. float height);
 
   (* Bind AO bake texture on unit 0 *)
   Gl.active_texture ctx Gl.texture0;
@@ -1766,8 +1755,6 @@ let compute_ao ctx width height scale relief_texture =
   (* Cleanup *)
   Gl.delete_framebuffer ctx fbo;
   Gl.delete_texture ctx ao_bake_tex;
-  Gl.delete_program ctx bake_pid;
-  Gl.delete_program ctx blur_pid;
 
   (* Restore State *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
@@ -2359,10 +2346,12 @@ let gradient_program =
     attributes = [];
   }
 
-let compute_relief ctx width height triangle_geo tile_texture =
+let compute_relief ctx width height triangle_geo tile_texture relief_pid
+    mipmap_pid copy_pid (u : Render_state.relief_uniforms)
+    (mipmap_u : Render_state.mipmap_uniforms)
+    (copy_u : Render_state.copy_uniforms) =
   assert (width = height);
 
-  let relief_pid = create_program ctx gradient_program in
   (* Not used in shader explicitly yet, using pow directly *)
   let max_level =
     let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
@@ -2395,53 +2384,26 @@ let compute_relief ctx width height triangle_geo tile_texture =
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
-  let size_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "size") in
-  Gl.uniform2f ctx size_loc (float width) (float height);
+  Gl.uniform2f ctx u.size (float width) (float height);
 
   (* Use default 44.0 latitude for gradient *)
   let deltax = deltay *. cos (44. *. pi /. 180.) in
-  let delta_loc = Gl.get_uniform_location ctx relief_pid (Jstr.v "delta") in
-  Gl.uniform2f ctx delta_loc deltax deltay;
+  Gl.uniform2f ctx u.delta deltax deltay;
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
-  (* Mipmap Generation Loop *)
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (* Mipmap Generation Loop *)
-  let mipmap_pid = create_program ctx mipmap_program in
-  let copy_pid = create_program ctx copy_program in
-  (* Locations for Mipmap Program *)
-  let source_level_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_level")
-  in
-  let base_k_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "base_k") in
-  let decay_loc = Gl.get_uniform_location ctx mipmap_pid (Jstr.v "decay") in
-  let source_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_texture")
-  in
-  let mipmap_size_loc =
-    Gl.get_uniform_location ctx mipmap_pid (Jstr.v "source_size")
-  in
-
-  (* Locations for Copy Program *)
-  let copy_source_loc =
-    Gl.get_uniform_location ctx copy_pid (Jstr.v "source")
-  in
-  let copy_level_loc = Gl.get_uniform_location ctx copy_pid (Jstr.v "level") in
-  let copy_size_loc =
-    Gl.get_uniform_location ctx copy_pid (Jstr.v "source_size")
-  in
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
 
   (* Common Uniforms *)
   Gl.use_program ctx mipmap_pid;
-  Gl.uniform1i ctx source_loc 0;
-  Gl.uniform1f ctx base_k_loc 0.1;
-  Gl.uniform1f ctx decay_loc 0.5;
+  Gl.uniform1i ctx mipmap_u.source_texture 0;
+  Gl.uniform1f ctx mipmap_u.base_k 0.1;
+  Gl.uniform1f ctx mipmap_u.decay 0.5;
 
   Gl.use_program ctx copy_pid;
-  Gl.uniform1i ctx copy_source_loc 0;
+  Gl.uniform1i ctx copy_u.source 0;
 
   (* Not used in shader explicitly yet, using pow directly *)
 
@@ -2473,10 +2435,10 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
       (* Use Copy Program *)
       Gl.use_program ctx copy_pid;
-      Gl.uniform1i ctx copy_source_loc 0;
-      Gl.uniform1i ctx copy_level_loc (level - 1);
+      Gl.uniform1i ctx copy_u.source 0;
+      Gl.uniform1i ctx copy_u.level (level - 1);
       (* Source size is previous level size *)
-      Gl.uniform2f ctx copy_size_loc (float (w * 2)) (float (h * 2));
+      Gl.uniform2f ctx copy_u.source_size (float (w * 2)) (float (h * 2));
 
       Gl.viewport ctx 0 0 (w * 2) (h * 2);
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
@@ -2492,12 +2454,12 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
       (* Use Mipmap Program *)
       Gl.use_program ctx mipmap_pid;
-      Gl.uniform1i ctx source_loc 0;
+      Gl.uniform1i ctx mipmap_u.source_texture 0;
 
       let source_w = float (w * 2) in
       let source_h = float (h * 2) in
-      Gl.uniform2f ctx mipmap_size_loc source_w source_h;
-      Gl.uniform1i ctx source_level_loc 0;
+      Gl.uniform2f ctx mipmap_u.source_size source_w source_h;
+      Gl.uniform1i ctx mipmap_u.source_level 0;
 
       (* Temp is Level 0 *)
       Gl.viewport ctx 0 0 w h;
@@ -2520,7 +2482,7 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   Gl.bind_vertex_array ctx None;
 
-  (tid, relief_pid)
+  tid
 
 let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
     ~cover_map_size =
@@ -2706,17 +2668,46 @@ type graphics_resources = {
   triangle_pid : Gl.program;
   text_pid : Gl.program;
   shadow_pid : Gl.program;
-  sky_pid : Gl.program;
   sky_uniforms : Render_state.sky_uniforms;
   terrain_uniforms : Render_state.terrain_uniforms;
   shadow_map : Gl.texture;
   shadow_fbo : Gl.framebuffer;
+  sky_pid : Gl.program;
+  relief_pid : Gl.program;
+  mipmap_pid : Gl.program;
+  copy_pid : Gl.program;
+  ao_bake_pid : Gl.program;
+  ao_blur_pid : Gl.program;
+  relief_uniforms : Render_state.relief_uniforms;
+  mipmap_uniforms : Render_state.mipmap_uniforms;
+  copy_uniforms : Render_state.copy_uniforms;
+  ao_bake_uniforms : Render_state.ao_bake_uniforms;
+  ao_blur_uniforms : Render_state.ao_blur_uniforms;
 }
 
 let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
   init_anisotropic_filtering ctx;
-  (* CLC mode toggle - used at shader compile time *)
+  let triangle_pid = create_program ctx triangle_program in
+  let text_pid = create_program ctx text_program in
+  let shadow_pid = create_program ctx shadow_program in
+  let sky_pid = create_program ctx sky_program in
+  let relief_pid = create_program ctx gradient_program in
+  let mipmap_pid = create_program ctx mipmap_program in
+  let copy_pid = create_program ctx copy_program in
+  let ao_bake_pid = create_program ctx ao_bake_program in
+  let ao_blur_pid = create_program ctx ao_blur_program in
+  let terrain_pid = create_program ctx terrain_program in
+
+  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_fbo = create_shadow_fbo ctx shadow_map in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
+
+  (* Initialize render state - cache uniform locations and pre-compute params *)
+  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
+  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
+
   let terrain_geo, indices =
     let sectors = n_sectors + 1 in
     let rings = n_rings in
@@ -2751,31 +2742,22 @@ let init_graphics ctx =
     in
     create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
-  (* Create two terrain program variants: CLC and fallback *)
-  let terrain_pid = create_program ctx terrain_program in
-  let triangle_pid = create_program ctx triangle_program in
-  let text_pid = create_program ctx text_program in
-
-  let shadow_map = create_shadow_map ctx 2048 2048 3 in
-  let shadow_fbo = create_shadow_fbo ctx shadow_map in
-
-  let shadow_pid = create_program ctx shadow_program in
-  let sky_pid = create_program ctx sky_program in
-  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
-
-  (* Initialize render state - cache uniform locations and pre-compute params *)
-  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
-  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
-  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
 
   (* Upload static uniforms once at initialization *)
   Gl.use_program ctx terrain_pid;
+
   Render_state.upload_radial_static ctx terrain_uniforms radial_params;
   Render_state.upload_texture_units ctx terrain_uniforms;
 
   Gl.use_program ctx shadow_pid;
   Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
   Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+
+  let relief_uniforms = Render_state.init_relief_uniforms ctx relief_pid in
+  let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
+  let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
+  let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
+  let ao_blur_uniforms = Render_state.init_ao_blur_uniforms ctx ao_blur_pid in
 
   {
     terrain_geo;
@@ -2791,6 +2773,16 @@ let init_graphics ctx =
     terrain_uniforms;
     shadow_map;
     shadow_fbo;
+    relief_pid;
+    mipmap_pid;
+    copy_pid;
+    relief_uniforms;
+    mipmap_uniforms;
+    copy_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
   }
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
@@ -2809,11 +2801,24 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     terrain_uniforms;
     shadow_map;
     shadow_fbo;
+    relief_pid;
+    mipmap_pid;
+    copy_pid;
+    relief_uniforms;
+    mipmap_uniforms;
+    copy_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
   } =
     graphics
   in
   let tile_texture = make_tile_texture ctx tile in
-  let relief_texture, _ = compute_relief ctx w h triangle_geo tile_texture in
+  let relief_texture =
+    compute_relief ctx w h triangle_geo tile_texture relief_pid mipmap_pid
+      copy_pid relief_uniforms mipmap_uniforms copy_uniforms
+  in
   let points =
     List.map
       (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
@@ -2844,9 +2849,12 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
-  let scale = deltay in
+
   (* Approx 30m per pixel *)
-  let ao_texture = compute_ao ctx w h scale relief_texture in
+  let ao_texture =
+    compute_ao ctx w h deltay relief_texture ao_bake_pid ao_blur_pid
+      ao_bake_uniforms ao_blur_uniforms
+  in
 
   (* Compute session-static values for terrain uniforms *)
   let light_dir_shader =
