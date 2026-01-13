@@ -21,15 +21,16 @@ let remove_message () =
       message := None
   | None -> ()
 
-let display_element el =
+let display_message msg =
   remove_message ();
-  let container =
-    Brr.El.(v (Jstr.v "div") ~at:[ Brr.At.class' (Jstr.v "message") ] [ el ])
+  let msg =
+    Brr.El.(
+      v (Jstr.v "div")
+        ~at:[ Brr.At.class' (Jstr.v "message") ]
+        [ txt (Jstr.v msg) ])
   in
-  Brr.El.append_children (Brr.Document.body Brr.G.document) [ container ];
-  message := Some container
-
-let display_message msg = display_element Brr.El.(txt (Jstr.v msg))
+  Brr.El.append_children (Brr.Document.body Brr.G.document) [ msg ];
+  message := Some msg
 
 let display_temporary_message msg =
   display_message msg;
@@ -38,46 +39,6 @@ let display_temporary_message msg =
 (* Sky colors *)
 let fog_linear = (0.17, 0.38, 0.79)
 let zenith_linear = (0.02, 0.12, 0.55)
-
-let loading_message () =
-  let open Brr.El in
-  let small_style = Brr.At.style (Jstr.v "font-size: 11px; color: #666;") in
-  v (Jstr.v "div")
-    [
-      v (Jstr.v "div")
-        ~at:[ Brr.At.style (Jstr.v "font-size: 20px; margin-bottom: 12px;") ]
-        [ txt (Jstr.v "Loading...") ];
-      v (Jstr.v "div") ~at:[ small_style ]
-        [
-          v (Jstr.v "div")
-            ~at:
-              [ Brr.At.style (Jstr.v "font-weight: bold; margin-bottom: 4px;") ]
-            [ txt (Jstr.v "Map Data & Terrain Sources:") ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Elevation: Produced using Copernicus WorldDEM-30 © DLR \
-                    e.V. 2010-2014 and © Airbus Defence and Space GmbH \
-                    2014-2018 provided under COPERNICUS by the European Union \
-                    and ESA; all rights reserved.");
-            ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Land Use: © European Union, Copernicus Land Monitoring \
-                    Service 2025, European Environment Agency (EEA)");
-            ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Water Bodies: © OpenStreetMap contributors (Open Database \
-                    License)");
-            ];
-        ];
-    ]
 
 (* Dem_loader provides direct loading of compressed .dem tiles *)
 
@@ -129,7 +90,6 @@ let compute_azimuth m =
 
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
 let terrain_program =
-  let use_clc_define = "#define USE_CLC 1" in
   {
     vertex_shader =
       {|#version 300 es
@@ -225,9 +185,7 @@ let terrain_program =
         }
       |};
     fragment_shader =
-      Printf.sprintf
-        {|#version 300 es
-        %s
+      {|#version 300 es
         precision mediump float;  // Default mediump for mobile performance
         precision highp sampler2DArray;
 
@@ -235,16 +193,14 @@ let terrain_program =
         uniform mediump sampler2D ao;
         uniform mediump sampler2D u_detailMap;  // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
         uniform highp sampler2DArrayShadow shadow_map;  // Hardware shadow comparison
-        
-        // CLC Material System Uniforms (only needed when USE_CLC is 1)
-#if USE_CLC
+
+        // CLC Material System Uniforms
         uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
         uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
         uniform highp float u_baseExtent;       // Extent of level 0 in meters (highp for coord math)
         uniform int u_numLevels;                 // Number of clipmap levels
-#endif
-        
+
         uniform highp mat4 shadow_matrices[3];   // Must be highp for projection
         uniform mediump float shadow_splits[3];
         uniform vec3 u_lightDir;                 // Pre-normalized on CPU
@@ -257,16 +213,15 @@ let terrain_program =
 
         out lowp vec4 color;
 
-#if USE_CLC
         // ========== CLC Material System ==========
-        
+
         struct Surface {
           vec3 albedo;
           float roughness;
           vec4 detailWeights;  // RGBA = Rock, Grass, Forest, Ice
           float waterFactor;
         };
-        
+
         // Lookup surface properties from palette by material ID
         Surface getSurfaceFromID(float id) {
           Surface s;
@@ -274,104 +229,104 @@ let terrain_program =
           ivec2 coord = ivec2(int(id) * 2, 0);
           vec4 pixelA = texelFetch(u_paletteTex, coord, 0);
           vec4 pixelB = texelFetch(u_paletteTex, coord + ivec2(1, 0), 0);
-          
+
           // sRGB to linear approximation (palette stored as sRGB)
           s.albedo = pixelA.rgb * pixelA.rgb;  // Simplified gamma decode
           s.roughness = pixelA.a;
           s.detailWeights = vec4(pixelB.rgb, 0.0);  // RGB weights, ice computed below
           s.waterFactor = pixelB.a;
-          
+
           // ICE LOGIC: If RGB weights are ~0 and not water, force ice (alpha channel)
           float weightSum = dot(pixelB.rgb, vec3(1.0));
           if (weightSum < 0.05 && s.waterFactor < 0.5) {
             s.detailWeights.a = 1.0;  // Force ice/snow weight
           }
-          
+
           return s;
         }
-        
+
         // Manual bilinear filtering of CLC IDs (blend Surface properties)
         Surface sampleCLCBilinear(highp vec2 worldPos) {
           // Calculate distance from center (camera) for LOD selection
           highp vec2 relPos = worldPos - u_cameraOffset;
-          
+
           // Select clipmap level based on distance
           // Level L covers extent = u_baseExtent * 2^L
           // We want the finest level that covers this point
           highp float desiredLevel = max(0.0, 1.0 + log2(v_dist / u_baseExtent));
           int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
-          
+
           // Calculate texture coordinates for this level
           highp float levelExtent = u_baseExtent * pow(2.0, float(level));
           highp vec2 texCoord = (relPos / levelExtent) + 0.5;
-          
+
           vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
           highp vec2 texelPos = texCoord * texSize - 0.5;
-          
+
           ivec2 p00 = ivec2(floor(texelPos));
           vec2 frac = fract(texelPos);
-          
+
           // Clamp to valid range
           ivec2 maxCoord = ivec2(texSize) - 1;
           p00 = clamp(p00, ivec2(0), maxCoord);
           ivec2 p10 = clamp(p00 + ivec2(1,0), ivec2(0), maxCoord);
           ivec2 p01 = clamp(p00 + ivec2(0,1), ivec2(0), maxCoord);
           ivec2 p11 = clamp(p00 + ivec2(1,1), ivec2(0), maxCoord);
-          
+
           // Sample 4 neighbors from selected array layer
           // usampler2DArray fetch returns uvec4, we take .r component
           float id00 = float(texelFetch(u_coverMap, ivec3(p00, level), 0).r);
           float id10 = float(texelFetch(u_coverMap, ivec3(p10, level), 0).r);
           float id01 = float(texelFetch(u_coverMap, ivec3(p01, level), 0).r);
           float id11 = float(texelFetch(u_coverMap, ivec3(p11, level), 0).r);
-          
+
           // Get surfaces for each neighbor
           Surface s00 = getSurfaceFromID(id00);
           Surface s10 = getSurfaceFromID(id10);
           Surface s01 = getSurfaceFromID(id01);
           Surface s11 = getSurfaceFromID(id11);
-          
+
           // Bilinear blend of surface properties
           Surface result;
           vec3 a0 = mix(s00.albedo, s10.albedo, frac.x);
           vec3 a1 = mix(s01.albedo, s11.albedo, frac.x);
           result.albedo = mix(a0, a1, frac.y);
-          
+
           float r0 = mix(s00.roughness, s10.roughness, frac.x);
           float r1 = mix(s01.roughness, s11.roughness, frac.x);
           result.roughness = mix(r0, r1, frac.y);
-          
+
           vec4 w0 = mix(s00.detailWeights, s10.detailWeights, frac.x);
           vec4 w1 = mix(s01.detailWeights, s11.detailWeights, frac.x);
           result.detailWeights = mix(w0, w1, frac.y);
-          
+
           float wf0 = mix(s00.waterFactor, s10.waterFactor, frac.x);
           float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
           result.waterFactor = mix(wf0, wf1, frac.y);
-          
+
           return result;
         }
-        
+
         // Modify detail weights based on slope (steep = more rock)
         void applySlopeModification(inout Surface s, float slope) {
           // Steep slopes increase rock weight, decrease others
           float rockForce = smoothstep(0.15, 0.5, slope);
-          
+
           // Scale down non-rock weights
           s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
           s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
           s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
-          
+
           // Increase rock weight
           s.detailWeights.r += rockForce;
-          
+
           // Normalize weights
           float total = dot(s.detailWeights, vec4(1.0));
           if (total > 0.01) {
             s.detailWeights /= total;
           }
         }
-        
+
         // Triplanar sampling for packed RGBA detail map
         // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
@@ -380,22 +335,22 @@ let terrain_program =
           highp vec2 uv_xz = worldPos.xz * scale;
           highp vec2 uv_xy = worldPos.xy * scale;
           highp vec2 uv_yz = worldPos.yz * scale;
-          
+
           vec3 blend = abs(normal);
           blend /= (blend.x + blend.y + blend.z + 0.0001);
-          
+
           // Sample packed RGBA detail map from each projection plane
           vec4 d_xz = texture(u_detailMap, uv_xz);
           vec4 d_xy = texture(u_detailMap, uv_xy);
           vec4 d_yz = texture(u_detailMap, uv_yz);
-          
+
           // Blend based on surface orientation (Corrected for Z-up)
           // Top/Bottom (blend.z) -> XY projection
           // Side-Y (blend.y)     -> XZ projection
           // Side-X (blend.x)     -> YZ projection
           return d_xy * blend.z + d_xz * blend.y + d_yz * blend.x;
         }
-        
+
         // Procedural normal perturbation based on detail noise
         // Uses screen-space derivatives for directional bump mapping
         vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness, vec4 detailWeights) {
@@ -403,8 +358,8 @@ let terrain_program =
             // We subtract 0.5 to center the noise [-0.5 to +0.5]
 
             // ROCK (Red): Strong, sharp cracks
-//            float rockBump = (texNoise.r - 0.5) * 1.5; 
-            float rockBump = (texNoise.r - 0.5) * 0.5; 
+//            float rockBump = (texNoise.r - 0.5) * 1.5;
+            float rockBump = (texNoise.r - 0.5) * 0.5;
 
             // GRASS (Green): Soft, rolling mounds (Multiplied by 0.4 to be gentle)
             float grassBump = (texNoise.g - 0.5) * 0.4;
@@ -416,18 +371,18 @@ let terrain_program =
             float iceBump = (texNoise.a - 0.5) * 1.2;
 
             // 2. Mix them based on the current material weights
-            float compositeBump = rockBump * detailWeights.r + 
-                                  grassBump * detailWeights.g + 
-                                  forestBump * detailWeights.b + 
+            float compositeBump = rockBump * detailWeights.r +
+                                  grassBump * detailWeights.g +
+                                  forestBump * detailWeights.b +
                                   iceBump * detailWeights.a;
 
             // 3. Scale by Roughness
             // Very smooth surfaces (mud/puddles) fill in cracks -> Less Bump.
             // However, Ice (shiny) is an exception; it needs to stay sharp.
-            float intensity = 1.5 * roughness; 
-            
+            float intensity = 1.5 * roughness;
+
             // Hack: If it's mostly Ice or Water, force high sharpness despite low roughness
-            if (detailWeights.a > 0.5) intensity = 1.0; 
+            if (detailWeights.a > 0.5) intensity = 1.0;
 
             // 4. Apply the Perturbation
             // We modify the X and Y components of the normal (assuming Z is up).
@@ -438,7 +393,7 @@ let terrain_program =
             // 5. Re-normalize to ensure lighting remains correct
             return normalize(pNormal);
         }
-        
+
         // Procedural water with organic shoreline
         float getWaterMask(highp vec2 worldPos, float waterFactor) {
           if (waterFactor >= 0.01 && waterFactor < 0.99) {
@@ -451,29 +406,28 @@ let terrain_program =
           }
           return waterFactor;
         }
-        
+
         vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
           if (waterMask < 0.01) return baseColor;
 
           // Deep water color (linear space)
           vec3 waterColor = vec3(0.01, 0.04, 0.12);
-          
+
           // Shoreline foam zone
           float shoreZone = smoothstep(0.2, 0.6, waterMask) * (1.0 - smoothstep(0.6, 1.0, waterMask));
           vec3 foamColor = vec3(0.35, 0.40, 0.45);
-          
+
           // Simple ripple pattern
           float ripples = sin(worldPos.x * 0.3) * sin(worldPos.y * 0.3) * 0.5 + 0.5;
-          
+
           vec3 result = mix(baseColor, waterColor, waterMask);
           result = mix(result, foamColor, shoreZone * ripples * 0.4);
-          
+
           return result;
         }
-#endif
 
         // ========== Shadow Functions ==========
-        
+
         float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
             float result = 0.0;
             for(int x = -1; x <= 1; ++x) {
@@ -485,7 +439,7 @@ let terrain_program =
         }
 
         // ========== Main ==========
-        
+
         uniform vec3 u_fogColor;
         uniform vec3 u_zenithColor;
 
@@ -525,26 +479,25 @@ let terrain_program =
           float slope = 1.0 - normal.z;
           vec3 terrain_color;
           vec3 final_normal = normal;
-          
-#if USE_CLC
+
             // === CLC-Based Material ===
             Surface surface = sampleCLCBilinear(v_world_pos.xy);
-            
+
             applySlopeModification(surface, slope);
-            
+
             // Sample packed detail map via triplanar projection
             vec4 texNoise = sampleTriplanarCombined(v_world_pos, normal);
-            
+
             // -----------------------------------------------------------------------
             // STEP A: HEIGHT-BASED BLENDING ("Clumping")
             // -----------------------------------------------------------------------
             // Solves "Ghosting" in sparse areas (e.g. 50%% Rock / 50%% Grass).
             // Boosts the channel that matches the texture noise (High noise = Top layer).
-            
-            float heightSharpness = 4.0; 
-            vec4 heightWeights = surface.detailWeights * (texNoise + 0.2); 
+
+            float heightSharpness = 4.0;
+            vec4 heightWeights = surface.detailWeights * (texNoise + 0.2);
             heightWeights = pow(heightWeights, vec4(heightSharpness));
-            
+
             // Re-normalize
             float weightSum = dot(heightWeights, vec4(1.0));
             vec4 finalWeights = (weightSum > 0.001) ? (heightWeights / weightSum) : surface.detailWeights;
@@ -552,11 +505,11 @@ let terrain_program =
             // -----------------------------------------------------------------------
             // STEP B: BIO-VARIATION (Color & Texture)
             // -----------------------------------------------------------------------
-            
+
             // Calculate Procedural Macro Noise (Cheap Math, No Texture Lookup)
             // Creates large-scale patches (healthy vs dry, sediment vs clean)
-            vec2 macroPos = v_world_pos.xy * 0.005; 
-            float macroNoise = sin(macroPos.x) * cos(macroPos.y * 0.8) + 
+            vec2 macroPos = v_world_pos.xy * 0.005;
+            float macroNoise = sin(macroPos.x) * cos(macroPos.y * 0.8) +
                                sin(macroPos.x * 0.5 + macroPos.y * 1.5) * 0.5;
             float patchFactor = macroNoise * 0.3 + 0.5; // 0.0 to 1.0
 
@@ -566,11 +519,11 @@ let terrain_program =
             // --- ROCK (Red Channel) ---
             if (finalWeights.r > 0.001) {
                 float rockNoise = texNoise.r;
-                
+
                 // Sedimentation: Cracks (Low) = Dark Dirt, Tips (High) = Bleached Stone
-                vec3 dirtColor = baseAlbedo * vec3(0.6, 0.55, 0.5); 
+                vec3 dirtColor = baseAlbedo * vec3(0.6, 0.55, 0.5);
                 vec3 stoneColor = baseAlbedo * vec3(1.1, 1.1, 1.15);
-                
+
                 // Use raw texture value for more visible detail
                 vec3 rockCol = mix(dirtColor, stoneColor, rockNoise);
                 accumulatedColor += rockCol * finalWeights.r;
@@ -579,44 +532,44 @@ let terrain_program =
             // --- GRASS (Green Channel) ---
             if (finalWeights.g > 0.001) {
                 float grassNoise = texNoise.g;
-                
+
                 // Micro: Roots (Low) = Dry/Brown, Tips (High) = Lush
-                vec3 rootColor = baseAlbedo * vec3(0.8, 0.7, 0.5); 
+                vec3 rootColor = baseAlbedo * vec3(0.8, 0.7, 0.5);
                 vec3 tipColor = baseAlbedo * vec3(1.15, 1.25, 1.0);
                 vec3 microCol = mix(rootColor, tipColor, grassNoise);
-                
+
                 // Macro: Patches of dying grass (yellowish) vs healthy grass (blue-green)
                 vec3 dyingPatch = vec3(1.05, 1.0, 0.8);
                 vec3 healthyPatch = vec3(0.95, 1.0, 1.05);
                 vec3 macroMod = mix(dyingPatch, healthyPatch, patchFactor);
-                
+
                 accumulatedColor += (microCol * macroMod) * finalWeights.g;
             }
 
             // --- FOREST (Blue Channel) ---
             if (finalWeights.b > 0.001) {
                 float forestNoise = texNoise.b;
-                
+
                 // Volume: Deep Shadow (Low) vs Sunlit Canopy (High)
                 vec3 deepShadow = baseAlbedo * vec3(0.2, 0.25, 0.3); // Very dark/cool
                 vec3 sunlitTop = baseAlbedo * vec3(1.2, 1.25, 1.0);
-                
+
                 vec3 forestCol = mix(deepShadow, sunlitTop, forestNoise);
                 accumulatedColor += forestCol * finalWeights.b;
             }
-            
+
             // --- ICE (Alpha Channel) ---
             if (finalWeights.a > 0.001) {
                 vec3 iceCol = mix(baseAlbedo, vec3(0.95), texNoise.a * 0.8);
                 accumulatedColor += iceCol * finalWeights.a;
             }
-            
+
             terrain_color = accumulatedColor;
-            
+
             // Water handling
             float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
             terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
-            
+
             // Procedural normal perturbation (replaces rock_normal_map)
             final_normal = perturbNormal(normal, texNoise, surface.roughness, finalWeights);
 
@@ -624,103 +577,103 @@ let terrain_program =
             if (waterMask > 0.01) {
                // 1. Low frequency waves (Swell) - Isotropic Interference Pattern
                // Using 3 waves at 120-degree offsets to eliminate directional banding
-               highp vec2 waveCoord = v_world_pos.xy * 0.05; 
-               
+               highp vec2 waveCoord = v_world_pos.xy * 0.05;
+
                // Wave 1: 0 degrees, Freq 1.0
                float w1 = sin(waveCoord.x);
                // Wave 2: 120 degrees, Freq 1.1 (Detuned)
-               highp float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1; 
+               highp float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1;
                float w2 = sin(input2);
                // Wave 3: 240 degrees, Freq 1.2 (Detuned)
                highp float input3 = (waveCoord.x * -0.5 - waveCoord.y * 0.866) * 1.2;
                float w3 = sin(input3);
-               
+
                float waveHeight = w1 + w2 + w3;
-               
+
                // Analytical Derivatives
                float dw1_dx = cos(waveCoord.x);
                float dw1_dy = 0.0;
-               
+
                float dw2_base = cos(input2) * 1.1;
                float dw2_dx = dw2_base * -0.5;
                float dw2_dy = dw2_base * 0.866;
-               
+
                float dw3_base = cos(input3) * 1.2;
                float dw3_dx = dw3_base * -0.5;
                float dw3_dy = dw3_base * -0.866;
-               
+
                vec3 waveNormal = normalize(vec3(
-                   -(dw1_dx + dw2_dx + dw3_dx), 
+                   -(dw1_dx + dw2_dx + dw3_dx),
                    -(dw1_dy + dw2_dy + dw3_dy),
                    20.0 // Higher divisor = flatter waves (Previously 5.0)
                ));
-               
-               // No extra flatten mix needed, controlled by z-component above 
+
+               // No extra flatten mix needed, controlled by z-component above
 
                // 2. High frequency ripples - Texture based (Rotated & Layered)
                // Use Green/Blue channels as X/Y vector components
                // Sample 1: Base Scale (Green=X, Blue=Y) - Soft Noise
                vec2 r1 = texture(u_detailMap, v_world_pos.xy * 0.15).gb * 2.0 - 1.0;
-               
+
                // Sample 2: Rotated & Scaled (Green=X, Blue=Y)
                // Rotation breaks grid alignment
                // Matrix math must be highp to preserve precision during rotation
                float c = 0.8; // cos(37 deg)
                float s = 0.6; // sin(37 deg)
                highp mat2 rot = mat2(c, -s, s, c);
-               highp vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3); 
+               highp vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3);
                vec2 r2 = texture(u_detailMap, uv2).gb * 2.0 - 1.0;
-               
+
                // Combine vectors
                vec2 rippleXY = r1 + r2;
-               
+
                // Construct Normal
                // Z-component controls flatness (Higher = Flatter)
                // 8.0 gives subtle but visible ripples (balance between 5.0 and 20.0)
                vec3 rippleNormal = normalize(vec3(rippleXY, 8.0));
-        
+
                // Combine: Swell provides structure, Ripples provide detail
                vec3 waterNormal = normalize(waveNormal + rippleNormal);
-               
+
                // Blend terrain normal with water normal
                final_normal = normalize(mix(final_normal, waterNormal, waterMask));
             }
-            
+
             // Store roughness and reflection properties for lighting
             float material_roughness = surface.roughness;
             float reflectivity = (1.0 - material_roughness) * 0.6;  // Smooth = reflective
-            
+
             // Ice and water get extra reflection
             float iceAmount = surface.detailWeights.a;
             if (iceAmount > 0.1 || waterMask > 0.1) {
               reflectivity = max(reflectivity, 0.4);
             }
-            
+
             // === Specular & Environment Reflection ===
             vec3 viewDir = normalize(-v_world_pos);  // Approximate view direction
             vec3 halfVec = normalize(lightDir + viewDir);
-            
+
             // GGX-inspired specular (simplified)
             float NdotH = max(0.0, dot(final_normal, halfVec));
             float roughSq = material_roughness * material_roughness;
             float denom = NdotH * NdotH * (roughSq - 1.0) + 1.0;
             float D = roughSq / (3.14159 * denom * denom + 0.0001);
             float specular = D * max(0.0, dot(final_normal, lightDir));
-            
+
             // Environment reflection (sky color for glossy surfaces)
             vec3 reflectDir = reflect(-viewDir, final_normal);
-            float skyReflect = max(0.0, reflectDir.z); 
+            float skyReflect = max(0.0, reflectDir.z);
             // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
             // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
             // We use the exact same mixing factor for consistency
             float sky_mix = smoothstep(0.0, 0.35, skyReflect);
             vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
-            
+
 
             // Apply specular and reflection to terrain color
             vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
             terrain_color += specColor * 0.3;
-            
+
             // Fresnel for water
             if (waterMask > 0.01) {
                float n_dot_v = max(0.0, dot(final_normal, viewDir));
@@ -728,73 +681,23 @@ let terrain_program =
                float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
                reflectivity = mix(reflectivity, fresnel, waterMask);
                // Removed explicit fog mixing here; let distance fog handle it
-               // envColor = mix(envColor, fog_color, waterMask); 
+               // envColor = mix(envColor, fog_color, waterMask);
             }
-            
+
             // Apply reflection (remove damping for water)
             float reflectDamp = (waterMask > 0.01) ? 1.0 : 0.3;
             terrain_color = mix(terrain_color, envColor, reflectivity * reflectDamp);
-            
-#else
-            // === FALLBACK: Original slope-based biome logic ===
-            vec3 c_water = vec3(0.05, 0.25, 0.45);
-            vec3 c_grass = vec3(0.1, 0.4, 0.15);
-            vec3 c_rock  = vec3(0.3, 0.28, 0.25);
 
-            if (v_h < 0.0) {
-               terrain_color = c_water;
-            } else {
-               float tex_scale = 0.01;
-               vec2 uv_xz = v_world_pos.xz * tex_scale;
-               vec2 uv_xy = v_world_pos.xy * tex_scale;
-               vec2 uv_yz = v_world_pos.yz * tex_scale;
-               
-               vec3 blend = abs(normal);
-               blend = blend / (blend.x + blend.y + blend.z + 0.0001);
-               
-               float rock_mixin = smoothstep(0.15, 0.5, slope);
-               
-               vec4 tex_xz = texture(u_detailMap, uv_xz);
-               vec4 tex_xy = texture(u_detailMap, uv_xy);
-               vec4 tex_yz = texture(u_detailMap, uv_yz);
-               vec4 detail_tex = tex_xz * blend.z + tex_xy * blend.y + tex_yz * blend.x;
-               
-               // Use rock channel for rock texture, grass channel for fine detail
-               float rock_lum = detail_tex.r;
-               
-               // Procedural normal perturbation using noise
-               float noise_val = rock_lum * rock_mixin + detail_tex.g * (1.0 - rock_mixin);
-               vec3 perturbed = normal;
-               perturbed.xy += (noise_val - 0.5) * (1.0 + rock_mixin * 2.0);
-               final_normal = normalize(perturbed);
-               
-               float geometric_ao = 0.8 + 0.2 * rock_lum;
-               float micro_ao = 0.5 + 0.5 * rock_lum;
-               float rock_ao = mix(1.0, geometric_ao * micro_ao, rock_mixin);
-               
-               float height_factor = smoothstep(800.0, 2000.0, v_h);
-               vec3 c_grass_lush = vec3(0.08, 0.42, 0.12);
-               vec3 c_grass_dry = vec3(0.30, 0.35, 0.12);
-               vec3 c_grass_height = mix(c_grass_lush, c_grass_dry, height_factor);
-               
-               vec3 grass_noise = texture(noise, reliefCoord * 40.0).rgb;
-               vec3 grass_color = c_grass_height * (0.85 + 0.3 * grass_noise);
-               
-               vec3 rock_color = c_rock * (-1.0 + 5.0 * rock_lum) * rock_ao;
-               
-               terrain_color = mix(grass_color, rock_color, rock_mixin);
-            }
-#endif
-          
+
           // === Lighting ===
           float final_l = max(0.0, dot(final_normal, lightDir));
-          
+
           // Matched to Sky Shader: Horizon -> Zenith
-          vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2; 
+          vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
           vec3 ground_color = vec3(0.1, 0.08, 0.05); // Slightly darker ground bounce
           float sky_factor = final_normal.z * 0.5 + 0.5;
           vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5; // Tuned intensity
-          
+
           vec3 sun_color = vec3(1.0, 0.95, 0.9);
           vec3 direct = sun_color * final_l * shadow_val * 0.5; // Reduced direct intensity slightly to balance
           vec3 lighting = ambient + direct;
@@ -808,7 +711,7 @@ let terrain_program =
           float fog_coeff = exp(v_dist * -2e-5);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
-          
+
           // DEBUG: Visualize normal-map mip level
           // Blue(0) -> Cyan(1) -> Green(2) -> Yellow(3) -> Orange(4) -> Red(5) -> Magenta(6) -> White(7+)
           vec2 dxCoord = dFdx(reliefCoord);
@@ -828,12 +731,11 @@ let terrain_program =
           );
           // Uncomment below to enable mipmap visualization:
           // final_color = mipColors[min(mipLevel, 7)];
-          
+
           // Gamma correction
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
         }
-      |}
-        use_clc_define;
+      |};
     attributes = [];
   }
 
@@ -930,68 +832,68 @@ let ao_bake_program =
         }
 
         void main() {
-          float dist_step = 1.0 / float(width); 
-          
+          float dist_step = 1.0 / float(width);
+
           // Center Height
           float h_center = decode_height(texture(relief, uv).rg);
-          
+
           float AO = 0.0;
           float R_uv = 150.0 * dist_step; // ~150 pixels radius in UV space
-          
-          // Precompute world distance for one step 
-          // R_pixels = 150.0. 
+
+          // Precompute world distance for one step
+          // R_pixels = 150.0.
           // R_world = 150.0 * scale.
           // step_len_uv = R_uv / 16.0
           // step_len_world = (150.0 * scale) / 16.0
           float step_dist_world = (150.0 * scale) / 16.0;
-          
+
           // Jitter
           float random_val = rand(gl_FragCoord.xy);
           float random_angle = random_val * 2.0 * PI;
-          
+
           float directions = 8.0;
-          float steps = 16.0; 
-          
+          float steps = 16.0;
+
           for (float d = 0.0; d < 8.0; d++) {
              float angle = random_angle + (d / 8.0) * 2.0 * PI;
              vec2 dir = vec2(cos(angle), sin(angle));
-             
+
              // Maximize Tangent (Height Diff / Dist) instead of Angle
              // Initialize to small value (tan(-89deg))
              float max_tan = -100.0;
              float max_obj_s = 0.0;
-             
+
              for (float s = 1.0; s <= 16.0; s++) {
                 vec2 sample_uv = uv + dir * (s / 16.0) * R_uv;
-                
+
                 // Boundary check
                 if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
-                
+
                 float h_sample = decode_height(texture(relief, sample_uv).rg);
                 float h_diff = h_sample - h_center;
                 float dist = s * step_dist_world;
-                
+
                 float tan_s = h_diff / dist;
-                
+
                 if (tan_s > max_tan) {
                    max_tan = tan_s;
                    max_obj_s = s;
                 }
              }
-             
+
              // Convert max_tan back to sin(horizon_angle)
              float sin_horizon = max_tan / sqrt(1.0 + max_tan * max_tan);
-             
+
              // Distance Attenuation
              // 1.0 - (dist / max_dist)^2
              float dist_ratio = max_obj_s / 16.0;
              float attenuation = 1.0 - dist_ratio * dist_ratio;
-             
+
              AO += max(0.0, sin_horizon) * max(0.0, attenuation);
           }
-          
-          AO = AO / 8.0; 
-          
+
+          AO = AO / 8.0;
+
           occlusion = 1.0 - AO; // Output visibility
         }
       |};
@@ -1027,32 +929,32 @@ let ao_blur_program =
         void main() {
           float result = 0.0;
           float weight_sum = 0.0;
-          
+
           // Center height for bilateral comparison
           float h_center = decode_height(texture(relief, uv).rg);
-          
+
           // Bilateral blur: Gaussian spatial + height similarity
           // Height sigma: ~50m (samples with >50m difference get low weight)
           float h_sigma = 50.0;
           float h_sigma_sq2 = 2.0 * h_sigma * h_sigma;
-          
+
           // 3x3 Gaussian spatial weights
           float k[9];
           k[0]=1.; k[1]=2.; k[2]=1.;
           k[3]=2.; k[4]=4.; k[5]=2.;
           k[6]=1.; k[7]=2.; k[8]=1.;
-          
+
           int idx = 0;
           for (int y=-1; y<=1; y++) {
              for (int x=-1; x<=1; x++) {
                 vec2 sample_uv = uv + vec2(float(x), float(y)) * inv_res;
                 float ao_sample = texture(ao_tex, sample_uv).r;
                 float h_sample = decode_height(texture(relief, sample_uv).rg);
-                
+
                 // Height difference weight (bilateral term)
                 float h_diff = h_sample - h_center;
                 float h_weight = exp(-(h_diff * h_diff) / h_sigma_sq2);
-                
+
                 // Combined weight: spatial * height similarity
                 float w = k[idx] * h_weight;
                 result += ao_sample * w;
@@ -1090,7 +992,7 @@ let shadow_program =
         uniform highp float inv_avg_delta;
         uniform int max_lod;
         uniform mediump sampler2D relief;
-        
+
         void main()
         {
           const float PI = 3.14159265359;
@@ -1100,38 +1002,38 @@ let shadow_program =
           float angle = theta + snapped_alpha + (PI / 2.0);
           // Use exp(k*ring) instead of pow for consistent cross-platform behavior
           float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
-          
+
           float x = r * cos(angle);
           float y = r * sin(angle);
-          
+
           vec2 world_pos = vec2(x, y) + center_offset;
-          
+
           // Compute relief coordinate
           vec2 coord = world_pos * inv_delta;
 
           // Calculate approximate grid spacing in meters
           float grid_spacing = grid_k * (r + grid_scale);
-          
+
           // LOD level
           float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
           int lod = min(int(lod_f), max_lod);
-          
+
           // Texture Size at this LOD
           ivec2 tex_size = textureSize(relief, lod);
 
           // Manual bilinear interpolation for 2-byte height
           highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
           norm_coord = clamp(norm_coord, 0.0, 1.0);
-          
+
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
-          
+
           // Manual Bilinear Interpolation
           highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
           highp vec2 base_f = floor(lod_tex_pos - 0.5);
           highp ivec2 base = ivec2(base_f);
           highp vec2 f = fract(lod_tex_pos - 0.5);
           highp ivec2 w_max = tex_size - 1;
-          
+
           // Vectorized Fetch & Decode
           highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
           highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
@@ -1140,13 +1042,13 @@ let shadow_program =
 
           highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
           highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
-          
+
           highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
 
           float h0 = mix(H.x, H.y, f.x);
           float h1 = mix(H.z, H.w, f.x);
           float h = mix(h0, h1, f.y);
-          
+
           gl_Position = shadow_view_proj * vec4(world_pos.x, world_pos.y, h, 1.0);
         }
       |};
@@ -1212,7 +1114,7 @@ let water_raster_program =
           // in_pos is 0..220000 mapping to u_tile_range
           vec2 norm = vec2(in_pos) / u_water_scale;
           vec2 geo_pos = norm * u_tile_range + u_tile_min;
-          
+
           vec2 ndc = ((geo_pos - u_tex_min) / u_tex_range) * 2.0 - 1.0;
           gl_Position = vec4(ndc, 0.0, 1.0);
           v_idx = in_color_idx;
@@ -1258,11 +1160,11 @@ let sky_program =
           // Reconstruct View Ray in View Space
           // Clip space: (x, y, -1.0) for forward direction (RH)
           // View Ray = (clip.x / x_scale, clip.y / y_scale, -1.0)
-          
+
           float x = (v_uv.x * 2.0 - 1.0) / sky_params.x;
           float y = (v_uv.y * 2.0 - 1.0) / sky_params.y;
           vec3 view_ray = normalize(vec3(x, y, -1.0));
-          
+
           // Transform to World Space (Rotation only)
           highp vec3 view_dir = mat3(inv_view) * view_ray;
           view_dir = normalize(view_dir);
@@ -1279,7 +1181,7 @@ let sky_program =
 
           float mie = pow(max(0.0, cos_gamma), 400.0) * 0.8;
           float halo = pow(max(0.0, cos_gamma), 20.0) * 0.2;
-          
+
           vec3 sun_color = vec3(1.0, 0.9, 0.7);
           vec3 sky = sky_base + sun_color * (mie + halo);
 
@@ -1765,7 +1667,12 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
-let prepare_text ctx text =
+type lazy_text = {
+  text : string;
+  mutable texture : (Gl.texture * int * int) option;
+}
+
+let prepare_text_immediate ctx text =
   let open Brr_canvas in
   let text = Jstr.v text in
   C2d.set_font text_ctx (Jstr.v "48px sans");
@@ -1776,6 +1683,9 @@ let prepare_text ctx text =
   let right = C2d.Text_metrics.actual_bounding_box_right m in
   let w = truncate (left +. right +. 0.5) in
   let h = truncate (ascent +. descent +. 0.5) in
+  (* Avoid 0x0 canvas which causes GL errors *)
+  let w = max 1 w in
+  let h = max 1 h in
   Brr_canvas.Canvas.set_w text_canvas w;
   Brr_canvas.Canvas.set_h text_canvas h;
   C2d.set_font text_ctx (Jstr.v "48px sans");
@@ -1791,8 +1701,19 @@ let prepare_text ctx text =
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
+let prepare_text _ctx text = { text; texture = None }
+let uploaded_count = ref 0
+
 let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
-    (tid, w, h) =
+    (lazy_text : lazy_text) =
+  let tid, w, h =
+    match lazy_text.texture with
+    | Some t -> t
+    | None ->
+        let t = prepare_text_immediate ctx lazy_text.text in
+        lazy_text.texture <- Some t;
+        t
+  in
   let open Brr_canvas in
   let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
@@ -1944,6 +1865,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     ~(shadow_uniforms : Render_state.shadow_uniforms) ~palette_texture
     ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
+  uploaded_count := 0;
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -2187,42 +2109,42 @@ let mipmap_program =
           // Map UV to Source Pixel Coordinates
           // v_uv points to center of the 2x2 block in source
           ivec2 p = ivec2(v_uv * size);
-          
+
           // Force alignment to even coordinates (top-left of 2x2 block)
           ivec2 p00 = (p / 2) * 2;
-          
+
           ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
           ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
           ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
           ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
-          
+
           // Source is main texture at source_level
           vec4 h00_v = texelFetch(source_texture, c00, source_level);
           vec4 h10_v = texelFetch(source_texture, c10, source_level);
           vec4 h01_v = texelFetch(source_texture, c01, source_level);
           vec4 h11_v = texelFetch(source_texture, c11, source_level);
-          
+
           float h00 = h00_v.r + h00_v.g / 256.0;
           float h10 = h10_v.r + h10_v.g / 256.0;
           float h01 = h01_v.r + h01_v.g / 256.0;
           float h11 = h11_v.r + h11_v.g / 256.0;
-          
+
           float k = base_k;
           float max_h = max(max(h00, h10), max(h01, h11));
           float h_scale = 10000.0;
-          
+
           float w00 = exp(k * (h00 - max_h) * h_scale);
           float w10 = exp(k * (h10 - max_h) * h_scale);
           float w01 = exp(k * (h01 - max_h) * h_scale);
           float w11 = exp(k * (h11 - max_h) * h_scale);
-          
+
           float sum_w = w00 + w10 + w01 + w11;
           float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
           vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
-          
+
           float r = floor(h_avg * 255.0) / 255.0;
           float g = (h_avg - r) * 256.0;
-          
+
           frag_color = vec4(r, g, n_avg);
         }|};
     attributes = [ "position" ];
@@ -2521,7 +2443,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
 
   (* Set water-specific static uniforms *)
-  Gl.uniform1f ctx water_u.u_water_scale 1.;
+  Gl.uniform1f ctx water_u.u_water_scale 220000.0;
 
   List.iter
     (fun (tile, tile_range_lon, tile_range_lat) ->
@@ -2715,7 +2637,6 @@ let resize_canvas canvas =
 
 let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
-  init_anisotropic_filtering ctx;
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let shadow_pid = create_program ctx shadow_program in
@@ -2887,10 +2808,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         let h =
           let height' = Dem_loader.get_height tile y' x' in
           let dist =
-            sqrt
-              ((float (x' - x) ** 2.)
-              +. (float (y' - y) ** 2.)
-              +. ((height' -. height) ** 2.))
+            let dx = float (x' - x) in
+            let dy = float (y' - y) in
+            let dz = height' -. height in
+            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
           in
           (height' -. height) /. dist
         in
@@ -3271,22 +3192,6 @@ let setup_events canvas =
          mouse_start_x := x;
          mouse_start_y := y;
          mouse_last_x := x;
-         mouse_last_y := y;
-         if !input_mode = Sensor then begin
-           input_mode := Manual;
-           display_temporary_message "Manual mode";
-           let alpha =
-             compute_azimuth (rotation_matrix !current_orientation)
-             *. 180. /. pi
-           in
-           current_orientation :=
-             { !current_orientation with alpha; gamma = 0. }
-         end;
-         let x = Brr.Ev.Mouse.client_x mouse in
-         let y = Brr.Ev.Mouse.client_y mouse in
-         mouse_start_x := x;
-         mouse_start_y := y;
-         mouse_last_x := x;
          mouse_last_y := y)
        target);
 
@@ -3522,6 +3427,9 @@ let main () =
   init_anisotropic_filtering ctx;
   (* Start loading detail map immediately *)
   let detail_map = make_detail_map ctx in
+  Worker_pool.init ();
+  let graphics = init_graphics ctx in
+  resize_canvas canvas;
 
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
@@ -3529,7 +3437,7 @@ let main () =
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
 
   let start = setup_events canvas in
-  display_element (loading_message ());
+  display_message "Loading...";
 
   (* Load DEM and CLC (for POIs) in parallel *)
   (* Load DEM, CLC, and init graphics in parallel *)
@@ -3538,12 +3446,11 @@ let main () =
       (Dem_loader.load ~size:tile_width ~lat ~lon)
       (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
   in
-  let graphics = init_graphics ctx in
-  resize_canvas canvas;
   let* tile, (_, _, _, _, tiles) = tile_loaders in
 
-  if use_geoloc then
-    Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
+  if use_geoloc then (
+    Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
+    Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
   let y = (tile_height / 2) - 1 in
   let d = float x /. 3600. in

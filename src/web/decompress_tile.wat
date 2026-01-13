@@ -1,13 +1,8 @@
 (module
   ;; --------------------------------------------------------------------------
-  ;; Imports: Three distinct memories + 1 Internal
+  ;; Imports: Single Shared Memory
   ;; --------------------------------------------------------------------------
-  (import "env" "high_mem" (memory $m_high 1))
-  (import "env" "low_mem" (memory $m_low 1))
-  (import "env" "target_mem" (memory $m_target 1))
-
-  ;; Internal Scratch Memory (Line Buffer)
-  (memory $m_scratch 1)
+  (import "env" "memory" (memory 1))
 
   ;; --------------------------------------------------------------------------
   ;; Exported Function: decompress_simd
@@ -16,6 +11,7 @@
     (param $high_ptr i32)
     (param $low_ptr i32)
     (param $target_base i32)
+    (param $scratch_ptr i32)
     (param $start_col i32)
     (param $start_row i32)
     (param $target_w i32)
@@ -54,12 +50,12 @@
     (local.set $zero (v128.const i16x8 0 0 0 0 0 0 0 0))
     (local.set $one (v128.const i16x8 1 1 1 1 1 1 1 1))
 
-    (i32.const 0) ;; offset
+    (local.get $scratch_ptr) ;; offset
     (i32.const 0) ;; value
     (local.get $block_w)
     (i32.const 1)
     (i32.shl)     ;; count (bytes)
-    (memory.fill $m_scratch)
+    (memory.fill)
 
     ;; ------------------------------------------------------------------------
     ;; Optimization: Pre-calculate Intersection [start_col, start_col+block]
@@ -109,10 +105,10 @@
       (local.set $x (i32.const 0))
       (loop $loop_x
         ;; Load & Merge Streams
-        (local.set $v_lo (v128.load8x8_u $m_low (local.get $low_ptr)))
+        (local.set $v_lo (v128.load8x8_u (local.get $low_ptr)))
         (local.set $low_ptr (i32.add (local.get $low_ptr) (i32.const 8)))
 
-        (local.set $v_hi (v128.load8x8_u $m_high (local.get $high_ptr)))
+        (local.set $v_hi (v128.load8x8_u (local.get $high_ptr)))
         (local.set $v_hi (i16x8.shl (local.get $v_hi) (i32.const 8)))
         (local.set $high_ptr (i32.add (local.get $high_ptr) (i32.const 8)))
 
@@ -143,11 +139,11 @@
         (local.set $run_vec (i16x8.splat (local.get $run_scalar)))
 
         ;; Vertical Predict
-        (local.set $v_prev (v128.load $m_scratch (i32.shl (local.get $x) (i32.const 1))))
+        (local.set $v_prev (v128.load (i32.add (local.get $scratch_ptr) (i32.shl (local.get $x) (i32.const 1)))))
         (local.set $v_res (i16x8.add (local.get $v_res) (local.get $v_prev)))
 
         ;; Update Scratch
-        (v128.store $m_scratch (i32.shl (local.get $x) (i32.const 1)) (local.get $v_res))
+        (v128.store (i32.add (local.get $scratch_ptr) (i32.shl (local.get $x) (i32.const 1))) (local.get $v_res))
 
         (local.set $x (i32.add (local.get $x) (i32.const 8)))
         (br_if $loop_x (i32.lt_u (local.get $x) (local.get $block_w)))
@@ -169,9 +165,9 @@
            (local.set $dst_off (i32.add (local.get $dst_off) (local.get $target_base)))
 
            ;; Copy using pre-calculated length and src_off
-           (memory.copy $m_target $m_scratch
+           (memory.copy
               (local.get $dst_off)
-              (local.get $src_off)
+              (i32.add (local.get $scratch_ptr) (local.get $src_off))
               (i32.shl (local.get $c_len) (i32.const 1)) ;; Bytes
            )
         )

@@ -54,8 +54,12 @@ let () =
          Brr_io.Fetch.Ev.respond_with ev
            (let open Fut.Syntax in
             let* response =
-              if String.ends_with ~suffix:".tif" (Jstr.to_string url) then
-                use_cache_first request
+              let url = Jstr.to_string url in
+              if
+                String.ends_with ~suffix:".tif" url
+                || String.ends_with ~suffix:"worker.bc.js" url
+                || String.ends_with ~suffix:"decompress_tile.wasm" url
+              then use_cache_first request
               else use_cache_on_error ev request
             in
             match response with
@@ -87,7 +91,14 @@ let () =
             Brr_io.Fetch.Cache.add_all cache
               (List.map
                  (fun url -> Brr_io.Fetch.Request.v (Jstr.v url))
-                 [ "."; "viewer.bc.wasm.js"; "viewer.bc.js" ])))
+                 [
+                   ".";
+                   "viewer.bc.wasm.js";
+                   "viewer.bc.js";
+                   "worker.bc.js";
+                   "decompress_tile.wasm";
+                   "decode_clc.wasm";
+                 ])))
        Brr.G.target)
 
 (*

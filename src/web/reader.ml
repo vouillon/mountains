@@ -33,8 +33,8 @@ let read_chunk b n =
 
 external inflate_impl : Brr.Tarray.uint8 -> Jv.Promise.t = "inflate"
 
-external inflate_into : Brr.Tarray.uint8 -> Brr.Tarray.uint8 -> Jv.Promise.t
-  = "inflate_into"
+external inflate_into :
+  Brr.Tarray.uint8 -> Brr.Tarray.uint8 -> int -> Jv.Promise.t = "inflate_into"
 
 let inflate s b =
   let* s' =

@@ -1,13 +1,10 @@
 - Remove CLC tile margin
-- Improve loading (incremental / web worker)
-- DEM tiles
 - Take into account earth curvature
 - Check for off-by-one errors
 - Rendering improvements
-- Use a clipmap for Copernicus DEM data?
 - Maybe combine with more fine-grained elevation data when available
-- Use RGE Alti
+  RGE Alti
   https://medium.com/@gui.attard/pre-processing-the-dem-of-france-rge-alti-5m-for-implementation-into-earth-engine-de9a0778e0d9
-- Copyright notices
 - Rock geological data?
 - Render a path on the terrain
+- Open a given location / choice of locations

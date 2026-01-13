@@ -33,7 +33,7 @@ jobs:
           opam install brr lwt yojson wasm_of_ocaml-compiler
 
       - name: Build
-        run: cd src/web && opam exec -- dune build @all
+        run: cd src/web && opam exec -- dune build --profile release @all
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
