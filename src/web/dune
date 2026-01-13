@@ -95,3 +95,18 @@
    %{deps}
    -o
    %{target})))
+
+(rule
+ (target decode_clc.wasm)
+ (deps decode_clc.wat)
+ (mode promote)
+ (action
+  (run
+   wasm-opt
+   -O4
+   --enable-simd
+   --enable-bulk-memory
+   --enable-multimemory
+   %{deps}
+   -o
+   %{target})))
