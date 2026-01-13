@@ -1765,7 +1765,12 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
-let prepare_text ctx text =
+type lazy_text = {
+  text : string;
+  mutable texture : (Gl.texture * int * int) option;
+}
+
+let prepare_text_immediate ctx text =
   let open Brr_canvas in
   let text = Jstr.v text in
   C2d.set_font text_ctx (Jstr.v "48px sans");
@@ -1776,6 +1781,9 @@ let prepare_text ctx text =
   let right = C2d.Text_metrics.actual_bounding_box_right m in
   let w = truncate (left +. right +. 0.5) in
   let h = truncate (ascent +. descent +. 0.5) in
+  (* Avoid 0x0 canvas which causes GL errors *)
+  let w = max 1 w in
+  let h = max 1 h in
   Brr_canvas.Canvas.set_w text_canvas w;
   Brr_canvas.Canvas.set_h text_canvas h;
   C2d.set_font text_ctx (Jstr.v "48px sans");
@@ -1791,8 +1799,19 @@ let prepare_text ctx text =
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
+let prepare_text _ctx text = { text; texture = None }
+let uploaded_count = ref 0
+
 let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
-    (tid, w, h) =
+    (lazy_text : lazy_text) =
+  let tid, w, h =
+    match lazy_text.texture with
+    | Some t -> t
+    | None ->
+        let t = prepare_text_immediate ctx lazy_text.text in
+        lazy_text.texture <- Some t;
+        t
+  in
   let open Brr_canvas in
   let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
@@ -1944,6 +1963,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
     ~(shadow_uniforms : Render_state.shadow_uniforms) ~palette_texture
     ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
   (* TODO: use in draw_shadows refactoring *)
+  uploaded_count := 0;
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -2521,7 +2541,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
 
   (* Set water-specific static uniforms *)
-  Gl.uniform1f ctx water_u.u_water_scale 1.;
+  Gl.uniform1f ctx water_u.u_water_scale 220000.0;
 
   List.iter
     (fun (tile, tile_range_lon, tile_range_lat) ->
