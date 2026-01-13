@@ -269,95 +269,67 @@ let load ~lat ~lon ~size =
   Format.eprintf "  Degree tiles: lat %d-%d, lon %d-%d@." min_deg_lat
     max_deg_lat min_deg_lon max_deg_lon;
 
-  (* Iterate over degree tiles and sub-tiles *)
-  let rec iter_deg_lat deg_lat =
-    if deg_lat > max_deg_lat then Lwt.return ()
-    else
-      let* () = iter_deg_lon deg_lat min_deg_lon in
-      iter_deg_lat (deg_lat + 1)
-  and iter_deg_lon deg_lat deg_lon =
-    if deg_lon > max_deg_lon then Lwt.return ()
-    else
-      let* () = iter_subtiles deg_lat deg_lon in
-      iter_deg_lon deg_lat (deg_lon + 1)
-  and iter_subtiles deg_lat deg_lon =
-    (* For each degree tile, determine which sub-tiles overlap our region.
-       Note: The original 3601x3601 tiles had the bottom row (at the degree boundary)
-       removed to make 3600x3600. So N45 covers lat 45+1/3600 to 46, not exactly 45 to 46.
-       We add 1 arcsec offset to account for this. *)
+  (* Identify all sub-tiles that need to be loaded *)
+  let tasks = ref [] in
+
+  for deg_lat = min_deg_lat to max_deg_lat do
     let tile_base_lat_arcsec = (deg_lat * 3600) + 1 in
-    let tile_base_lon_arcsec = deg_lon * 3600 in
+    for deg_lon = min_deg_lon to max_deg_lon do
+      let tile_base_lon_arcsec = deg_lon * 3600 in
 
-    (* Sub-tile bounds within the degree tile (in arcseconds from tile origin) *)
-    let min_sub_row =
-      max 0 ((min_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
-    in
-    let max_sub_row =
-      min 2 ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
-    in
-    let min_sub_col =
-      max 0 ((min_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
-    in
-    let max_sub_col =
-      min 2 ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
-    in
-
-    let rec iter_sub_row sub_row =
-      if sub_row > max_sub_row then Lwt.return ()
-      else
-        let* () = iter_sub_col sub_row min_sub_col in
-        iter_sub_row (sub_row + 1)
-    and iter_sub_col sub_row sub_col =
-      if sub_col > max_sub_col then Lwt.return ()
-      else
-        let* () = load_subtile deg_lat deg_lon sub_row sub_col in
-        iter_sub_col sub_row (sub_col + 1)
-    and load_subtile deg_lat deg_lon sub_row sub_col =
-      (* Calculate the geographic bounds of this sub-tile *)
-      let subtile_min_lat_arcsec =
-        tile_base_lat_arcsec + (sub_row * sub_tile_size)
+      (* Sub-tile bounds within the degree tile *)
+      let min_sub_row =
+        max 0 ((min_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
-      let subtile_min_lon_arcsec =
-        tile_base_lon_arcsec + (sub_col * sub_tile_size)
+      let max_sub_row =
+        min 2 ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
-      let subtile_max_lat_arcsec = subtile_min_lat_arcsec + sub_tile_size - 1 in
-      let subtile_max_lon_arcsec = subtile_min_lon_arcsec + sub_tile_size - 1 in
+      let min_sub_col =
+        max 0 ((min_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
+      in
+      let max_sub_col =
+        min 2 ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
+      in
 
-      (* Calculate overlap with our requested region *)
-      let overlap_min_lat = max min_lat_arcsec subtile_min_lat_arcsec in
-      let overlap_max_lat = min max_lat_arcsec subtile_max_lat_arcsec in
-      let overlap_min_lon = max min_lon_arcsec subtile_min_lon_arcsec in
-      let overlap_max_lon = min max_lon_arcsec subtile_max_lon_arcsec in
+      for sub_row = min_sub_row to max_sub_row do
+        for sub_col = min_sub_col to max_sub_col do
+          let subtile_min_lat_arcsec =
+            tile_base_lat_arcsec + (sub_row * sub_tile_size)
+          in
+          let subtile_min_lon_arcsec =
+            tile_base_lon_arcsec + (sub_col * sub_tile_size)
+          in
+          let subtile_max_lat_arcsec =
+            subtile_min_lat_arcsec + sub_tile_size - 1
+          in
+          let subtile_max_lon_arcsec =
+            subtile_min_lon_arcsec + sub_tile_size - 1
+          in
 
-      if overlap_min_lat > overlap_max_lat || overlap_min_lon > overlap_max_lon
-      then Lwt.return () (* No overlap *)
-      else begin
-        Format.eprintf "  Loading sub-tile N%02d_E%03d_%d_%d@." deg_lat deg_lon
-          sub_row sub_col;
-        Format.eprintf "    subtile lat: %d-%d, lon: %d-%d@."
-          subtile_min_lat_arcsec subtile_max_lat_arcsec subtile_min_lon_arcsec
-          subtile_max_lon_arcsec;
+          let overlap_min_lat = max min_lat_arcsec subtile_min_lat_arcsec in
+          let overlap_max_lat = min max_lat_arcsec subtile_max_lat_arcsec in
+          let overlap_min_lon = max min_lon_arcsec subtile_min_lon_arcsec in
+          let overlap_max_lon = min max_lon_arcsec subtile_max_lon_arcsec in
 
-        (* Fetch and decode the tile *)
-        let* data =
-          fetch_dem ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col
-        in
+          if
+            overlap_min_lat <= overlap_max_lat
+            && overlap_min_lon <= overlap_max_lon
+          then
+            let task =
+              let* data =
+                fetch_dem ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col
+              in
+              let dst_row = subtile_min_lat_arcsec - min_lat_arcsec in
+              let dst_col = subtile_min_lon_arcsec - min_lon_arcsec in
+              decode_tile ~data ~dst_row ~dst_col ~target_size:size
+            in
+            tasks := task :: !tasks
+        done
+      done
+    done
+  done;
 
-        (* Calculate destination position in target heightmap *)
-        let dst_row = subtile_min_lat_arcsec - min_lat_arcsec in
-        let dst_col = subtile_min_lon_arcsec - min_lon_arcsec in
-
-        Format.eprintf "    dst_row=%d, dst_col=%d (target_size=%d)@." dst_row
-          dst_col size;
-
-        decode_tile ~data ~dst_row ~dst_col ~target_size:size
-      end
-    in
-    iter_sub_row min_sub_row
-  in
-
-  let* () = iter_deg_lat min_deg_lat in
-
+  let* () = Lwt.join !tasks in
   Lwt.return { data = heights; size }
 
 (* Prefetch tiles for a given region *)
