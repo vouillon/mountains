@@ -2485,7 +2485,7 @@ let compute_relief ctx width height triangle_geo tile_texture relief_pid
   tid
 
 let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
-    ~cover_map_size ~clc_raster_pid ~water_raster_pid
+    ~cover_map_size ~clc_depth_rbs ~clc_raster_pid ~water_raster_pid
     (clc_u : Render_state.clc_raster_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
   (* Prepare FBO *)
@@ -2505,63 +2505,77 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   let meters_per_deg_lat = 111132.0 in
   let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
 
-  (* Render each level *)
+  (* Pre-calculate view bounds for each level *)
+  let level_bounds =
+    Array.init 7 (fun level ->
+        let extent_meters = 2048.0 *. (2.0 ** float level) in
+        let extent_lat = extent_meters /. meters_per_deg_lat in
+        let extent_lon = extent_meters /. meters_per_deg_lon in
+        let min_lat = lat -. (extent_lat /. 2.) in
+        let min_lon = lon -. (extent_lon /. 2.) in
+        let max_lat = min_lat +. extent_lat in
+        let max_lon = min_lon +. extent_lon in
+        (min_lon, min_lat, extent_lon, extent_lat, max_lon, max_lat))
+  in
+
+  (* Helper: Simple AABB intersection *)
+  let intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+      (v_min_lon, v_min_lat, _, _, v_max_lon, v_max_lat) =
+    not
+      (t_min_lon > v_max_lon || t_max_lon < v_min_lon || t_min_lat > v_max_lat
+     || t_max_lat < v_min_lat)
+  in
+
+  (* PASS 1: Clear all levels *)
   for level = 0 to 6 do
-    let extent_meters = 2048.0 *. (2.0 ** float level) in
-
-    (* Calculate viewport in degrees centered on (lat, lon) *)
-    let extent_lat = extent_meters /. meters_per_deg_lat in
-    let extent_lon = extent_meters /. meters_per_deg_lon in
-    let min_lat = lat -. (extent_lat /. 2.) in
-    let min_lon = lon -. (extent_lon /. 2.) in
-
-    (* Attach specific layer *)
+    Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
       cover_map_texture 0 level;
-
-    (* Clear depth *)
+    Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
+      Gl.renderbuffer clc_depth_rbs.(level);
     Gl.clear_depth ctx 1.0;
     Gl.clear ctx Gl.depth_buffer_bit;
-
-    (* Set viewport uniforms *)
-    Gl.uniform2f ctx clc_u.u_tex_min min_lon min_lat;
-    Gl.uniform2f ctx clc_u.u_tex_range extent_lon extent_lat;
-
-    (* Enable depth test per level - ensure depth writes are enabled *)
     Gl.depth_mask ctx true;
     Gl.enable ctx Gl.depth_test;
-    Gl.depth_func ctx Gl.less;
+    Gl.depth_func ctx Gl.less
+  done;
 
-    (* Render tiles *)
-    List.iter
-      (fun (tile, tile_range_lon, tile_range_lat) ->
+  (* PASS 2: Water Layer (Render all visible water tiles to all levels) *)
+  Gl.use_program ctx water_raster_pid;
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+
+  (* Set water-specific static uniforms *)
+  Gl.uniform1f ctx water_u.u_water_scale 1.;
+
+  List.iter
+    (fun (tile, tile_range_lon, tile_range_lat) ->
+      let water_index_count =
+        Bigarray.Array1.dim tile.Clc_loader.water_indices
+      in
+      if water_index_count > 0 then begin
         let header = tile.Clc_loader.header in
-        (* Optimization: could skip tiles outside view here *)
+        let t_min_lon = header.Clc_loader.min_lon in
+        let t_min_lat = header.Clc_loader.min_lat in
+        let t_max_lon = t_min_lon +. tile_range_lon in
+        let t_max_lat = t_min_lat +. tile_range_lat in
 
-        Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
-        Gl.uniform2f ctx clc_u.u_tile_min header.Clc_loader.min_lon
-          header.Clc_loader.min_lat;
-
-        (* Render water layer FIRST (wins depth test, appears on top) *)
-        let water_index_count =
-          Bigarray.Array1.dim tile.Clc_loader.water_indices
+        (* Check if tile intersects ANY level before uploading *)
+        let visible_any =
+          Array.exists
+            (fun level_params ->
+              intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                level_params)
+            level_bounds
         in
-        if water_index_count > 0 then begin
-          Gl.use_program ctx water_raster_pid;
 
-          Gl.uniform2f ctx water_u.u_tile_range tile_range_lon tile_range_lat;
-          Gl.uniform1f ctx water_u.u_water_scale 1.;
-          Gl.uniform2f ctx water_u.u_tile_min header.Clc_loader.min_lon
-            header.Clc_loader.min_lat;
-          Gl.uniform2f ctx water_u.u_tex_min min_lon min_lat;
-          Gl.uniform2f ctx water_u.u_tex_range extent_lon extent_lat;
-
+        if visible_any then begin
+          (* Upload Geometry ONCE per tile *)
           Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
           Gl.buffer_data ctx Gl.array_buffer
             (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
             Gl.stream_draw;
           Gl.enable_vertex_attrib_array ctx 0;
-          (* Use int32 for position *)
           Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
 
           Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
@@ -2576,19 +2590,63 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
             (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
             Gl.stream_draw;
 
-          Gl.draw_elements ctx Gl.triangles water_index_count Gl.unsigned_int 0;
+          (* Set Tile Uniforms ONCE *)
+          Gl.uniform2f ctx water_u.u_tile_range tile_range_lon tile_range_lat;
+          Gl.uniform2f ctx water_u.u_tile_min t_min_lon t_min_lat;
 
-          (* Switch back to CLC program for land cover *)
-          Gl.use_program ctx clc_raster_pid
-        end;
+          (* Render to all intersecting levels *)
+          Array.iteri
+            (fun level params ->
+              let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
+              if intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat) params
+              then begin
+                Gl.framebuffer_texture_layer ctx Gl.framebuffer
+                  Gl.color_attachment0 cover_map_texture 0 level;
+                Gl.framebuffer_renderbuffer ctx Gl.framebuffer
+                  Gl.depth_attachment Gl.renderbuffer clc_depth_rbs.(level);
+                Gl.uniform2f ctx water_u.u_tex_min v_min_lon v_min_lat;
+                Gl.uniform2f ctx water_u.u_tex_range v_ext_lon v_ext_lat;
 
-        if Bigarray.Array1.dim tile.Clc_loader.indices > 0 then begin
-          (* Render CLC land cover (underneath water) *)
+                Gl.draw_elements ctx Gl.triangles water_index_count
+                  Gl.unsigned_int 0
+              end)
+            level_bounds
+        end
+      end)
+    clc_tiles;
+
+  (* PASS 3: Land Layer (Render all visible land tiles to all levels) *)
+  Gl.use_program ctx clc_raster_pid;
+
+  (* Re-bind attributes for land format *)
+  List.iter
+    (fun (tile, tile_range_lon, tile_range_lat) ->
+      let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+      if index_count > 0 then begin
+        let header = tile.Clc_loader.header in
+        let t_min_lon = header.Clc_loader.min_lon in
+        let t_min_lat = header.Clc_loader.min_lat in
+        let t_max_lon = t_min_lon +. tile_range_lon in
+        let t_max_lat = t_min_lat +. tile_range_lat in
+
+        (* Check if tile intersects ANY level before uploading *)
+        let visible_any =
+          Array.exists
+            (fun level_params ->
+              intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                level_params)
+            level_bounds
+        in
+
+        if visible_any then begin
+          (* Upload Geometry ONCE per tile *)
           Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
           Gl.buffer_data ctx Gl.array_buffer
             (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
             Gl.stream_draw;
           Gl.enable_vertex_attrib_array ctx 0;
+          (* Land uses ushort normalized *)
           Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
 
           Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
@@ -2603,11 +2661,29 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
             (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
             Gl.stream_draw;
 
-          let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
-          Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
-        end)
-      clc_tiles
-  done;
+          (* Set Tile Uniforms ONCE *)
+          Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
+          Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
+
+          (* Render to all intersecting levels *)
+          Array.iteri
+            (fun level params ->
+              let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
+              if intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat) params
+              then begin
+                Gl.framebuffer_texture_layer ctx Gl.framebuffer
+                  Gl.color_attachment0 cover_map_texture 0 level;
+                Gl.framebuffer_renderbuffer ctx Gl.framebuffer
+                  Gl.depth_attachment Gl.renderbuffer clc_depth_rbs.(level);
+                Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
+                Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
+
+                Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
+              end)
+            level_bounds
+        end
+      end)
+    clc_tiles;
 
   (* Cleanup *)
   Gl.delete_vertex_array ctx vao;
@@ -2909,17 +2985,22 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     0;
 
   (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
-  let clc_depth_rb = Gl.create_renderbuffer ctx in
-  Gl.bind_renderbuffer ctx Gl.renderbuffer (Some clc_depth_rb);
-  Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
-    cover_map_size cover_map_size;
+  (* Separate depth buffer for each level to prevent conflicts when batching tiles *)
+  let clc_depth_rbs =
+    Array.init 7 (fun _ ->
+        let rb = Gl.create_renderbuffer ctx in
+        Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
+        Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
+          cover_map_size cover_map_size;
+        rb)
+  in
 
   (* Attach to FBO (attach layer 0 initially) *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
   Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
     cover_map_texture 0 0;
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
-    Gl.renderbuffer clc_depth_rb;
+    Gl.renderbuffer clc_depth_rbs.(0);
 
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -2935,8 +3016,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* GPU rasterize CLC tiles to FBO *)
   rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
-    ~cover_map_size ~clc_raster_pid ~water_raster_pid clc_raster_uniforms
-    water_raster_uniforms;
+    ~cover_map_size ~clc_depth_rbs ~clc_raster_pid ~water_raster_pid
+    clc_raster_uniforms water_raster_uniforms;
 
   let triangle_uniforms =
     Render_state.init_triangle_uniforms ctx triangle_pid
