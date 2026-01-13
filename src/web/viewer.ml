@@ -1331,11 +1331,15 @@ let compile_shader ctx src typ =
   let sid = Gl.create_shader ctx typ in
   Gl.shader_source ctx sid (Jstr.v src);
   Gl.compile_shader ctx sid;
+  sid
+(*
+;
   if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then sid
   else
     let log = Gl.get_shader_info_log ctx sid in
     Gl.delete_shader ctx sid;
     failwith (Jstr.to_string log)
+*)
 
 let create_program ctx p =
   let vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
@@ -1349,11 +1353,14 @@ let create_program ctx p =
     (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
     p.attributes;
   Gl.link_program ctx pid;
+  (*
   if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then pid
   else
     let log = Gl.get_program_info_log ctx pid in
     Gl.delete_program ctx pid;
     failwith (Jstr.to_string log)
+*)
+  pid
 
 (* Geometry *)
 
