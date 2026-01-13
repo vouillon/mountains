@@ -88,7 +88,7 @@ let fetch_overpass_data ?(max_retries = 10) query =
 (* --- Parsing with Node ID-based Chaining --- *)
 
 (* Types for intermediate representation *)
-type way_info = { way_id : int; node_ids : int array; tags : Yojson.Safe.t }
+type way_info = { node_ids : int array; tags : Yojson.Safe.t }
 type relation_member = { member_type : string; member_ref : int; role : string }
 
 type relation_info = {
@@ -124,7 +124,7 @@ let parse_overpass_elements json_str =
             |> Array.of_list
           in
           let tags = elem |> member "tags" in
-          Hashtbl.add ways elem_id { way_id = elem_id; node_ids; tags }
+          Hashtbl.add ways elem_id { node_ids; tags }
       | "relation" ->
           let members =
             elem |> member "members" |> to_list

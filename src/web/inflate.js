@@ -1,5 +1,5 @@
 //Provides: inflate_into
-async function inflate_into(compressed, target) {
+async function inflate_into(compressed, target, offset = 0) {
     const ds = new globalThis.DecompressionStream('deflate');
     const stream = new globalThis.ReadableStream({
         start(controller) {
@@ -9,12 +9,12 @@ async function inflate_into(compressed, target) {
     }).pipeThrough(ds);
 
     const reader = stream.getReader();
-    let offset = 0;
+    let current_offset = offset;
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        target.set(value, offset);
-        offset += value.length;
+        target.set(value, current_offset);
+        current_offset += value.length;
     }
 }
 

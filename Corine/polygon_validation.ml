@@ -2,7 +2,7 @@
 
 open Geometry_types
 
-type validation_error =
+type error =
   | DuplicatePoint of int * (float * float)
   | DegenerateEdge of int * (float * float)
   | WrongWindingOrder of bool (* is_outer *)

@@ -2,6 +2,7 @@
 <html>
 
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
   <meta name="theme-color" content="#5f8fd9">
   <link rel="manifest" href="manifest.json" />
@@ -29,6 +30,8 @@
     }
 
     canvas {
+      position:relative;
+      z-index:1;
       width: 100%;
       height: 100%;
       display: block;
@@ -37,15 +40,39 @@
 
     .message {
       position: absolute;
+      z-index:2;
       top: 25%;
       left: 50%;
       transform: translate(-50%, -50%);
-      padding: 16px 20px;
+      padding: 10px;
       border-radius: 12px;
       background: white;
-      max-width: 420px;
+      font-size: 20px;
+    }
+
+    .notice {
+      position: absolute;
+      bottom:0;
+      padding: 16px 20px;
+      background: white;
+      right:0;
+      left:0;
     }
   </style>
 
 <body>
+  <div class ="notice">
+    <strong> Map Data & Terrain Sources:</strong>
+    <ul>
+    <li>
+      Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V.
+      2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+      under COPERNICUS by the European Union and ESA; all rights
+      reserved.
+    <li>
+      Land Use: © European Union, Copernicus Land Monitoring Service
+      2025, European Environment Agency (EEA)
+    <li>
+      Water Bodies: © OpenStreetMap contributors (Open Database License)
+  </div>
   <canvas id="canvas" width=640 height=480>
