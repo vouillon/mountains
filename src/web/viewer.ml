@@ -1639,17 +1639,6 @@ let create_shadow_fbo ctx shadow_map =
   (* No Color Attachment *)
   Gl.draw_buffers ctx [ Gl.none ];
 
-  (* If Gl.none is not available in Brr/valid binding, just ensure no color attachment is bound *)
-  (* But wait, Gl.draw_buffers is needed if we want to be explicit about no color *)
-  (* If function is missing, skip it. Default is DRAW_BUFFER0 *)
-
-  (* We just won't bind any color texture. *)
-
-  (* Check status *)
-  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-  if status <> Gl.framebuffer_complete then
-    Format.eprintf "Shadow FBO Incomplete: %d@." status;
-
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
@@ -1924,10 +1913,6 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map ~matrices ~terrain_geo
   for layer = 0 to 2 do
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 layer;
-
-    let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-    if status <> Gl.framebuffer_complete then
-      Format.eprintf "Shadow FBO Error (Layer %d): %d@." layer status;
 
     (* Clear full texture including 1-pixel border with depth=1.0 *)
     Gl.disable ctx Gl.scissor_test;
@@ -2726,10 +2711,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
     Gl.renderbuffer clc_depth_rb;
 
-  (* Check FBO completeness *)
-  let status = Gl.check_framebuffer_status ctx Gl.framebuffer in
-  (if status <> Gl.framebuffer_complete then
-     Brr.Console.(log [ Jstr.v "WARNING: CLC FBO incomplete!" ]));
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_texture ctx Gl.texture_2d None;
 
