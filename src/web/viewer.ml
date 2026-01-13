@@ -2525,7 +2525,7 @@ let compute_relief ctx width height triangle_geo tile_texture =
 
   (tid, relief_pid)
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
+let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map =
   (* Initialize anisotropic filtering extension *)
   init_anisotropic_filtering ctx;
   (* CLC mode toggle - used at shader compile time *)
@@ -2599,7 +2599,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
     |> List.map fst
   in
   let index_count = Bigarray.Array1.dim indices in
-  let detail_map = make_detail_map ctx in
   let scale = deltay in
   (* Approx 30m per pixel *)
   let ao_texture = compute_ao ctx w h scale relief_texture in
@@ -3413,16 +3412,34 @@ let main () =
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
+  let canvas =
+    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
+  in
+  let ctx =
+    Option.get
+      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
+         (Brr_canvas.Canvas.of_el canvas))
+  in
+  (* Initialize anisotropic filtering early for the detail map *)
+  init_anisotropic_filtering ctx;
+  (* Start loading detail map immediately *)
+  let detail_map = make_detail_map ctx in
+
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
   let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
-  let canvas =
-    Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
-  in
+
   let start = setup_events canvas in
   display_element (loading_message ());
-  let* tile = Dem_loader.load ~size:tile_width ~lat ~lon in
+
+  (* Load DEM and CLC (for POIs) in parallel *)
+  let* tile, (_, _, _, _, tiles) =
+    Lwt.both
+      (Dem_loader.load ~size:tile_width ~lat ~lon)
+      (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
+  in
+
   if use_geoloc then
     Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
   let x = tile_width / 2 in
@@ -3433,8 +3450,6 @@ let main () =
   let* points =
     let width = 3600 in
     let height = 3600 in
-    (* Load CLC tile(s) covering this area to get POIs - HTTP cache avoids duplicate network requests *)
-    let* _, _, _, _, tiles = Clc_loader.load_tiles ~lat ~lon ~size:tile_width in
     (* Extract POIs from all loaded tiles and convert to Points.t format *)
     let pois =
       List.concat_map
@@ -3491,16 +3506,10 @@ let main () =
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
 
-  (* canvas already defined above *)
-  let ctx =
-    Option.get
-      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
-         (Brr_canvas.Canvas.of_el canvas))
-  in
   remove_message ();
   start ();
   tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx
+    ~tile canvas ctx ~detail_map
 
 let () =
   let open Brr_webworkers.Service_worker in
