@@ -50,16 +50,77 @@ let to_lwt f =
 (* External inflate function from inflate.js *)
 external inflate_impl : Brr.Tarray.uint8 -> Jv.Promise.t = "inflate"
 
-(* Inflate compressed data, returning uint8 typed array directly *)
-let inflate_to_uint8 data =
-  to_lwt
-    (Fut.of_promise
-       ~ok:(Obj.magic : Jv.t -> Brr.Tarray.uint8)
-       (inflate_impl data))
+external inflate_into : Brr.Tarray.uint8 -> Brr.Tarray.uint8 -> Jv.Promise.t
+  = "inflate_into"
 
 (* Type alias for uint8 bigarray *)
 type ba_uint8 =
   (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+module Wasm = struct
+  let instance = ref None
+  let high_mem = ref None
+  let low_mem = ref None
+  let target_mem = ref None
+
+  let create_memory pages =
+    let opts = Jv.obj [| ("initial", Jv.of_int pages) |] in
+    Jv.new' (Jv.get (Jv.get Jv.global "WebAssembly") "Memory") [| opts |]
+
+  let get_ba mem =
+    let buf = Jv.get mem "buffer" in
+    Brr.Tarray.to_bigarray1
+      (Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv buf))
+
+  let load () =
+    match !instance with
+    | Some inst -> Lwt.return inst
+    | None ->
+        let* resp =
+          to_lwt @@ Brr_io.Fetch.url (Jstr.v "decompress_tile.wasm")
+        in
+        let* buf =
+          to_lwt
+            (Brr_io.Fetch.Body.array_buffer
+               (Brr_io.Fetch.Response.as_body resp))
+        in
+
+        let h_mem = create_memory 25 in
+        let l_mem = create_memory 25 in
+        let t_mem = create_memory 526 in
+
+        high_mem := Some h_mem;
+        low_mem := Some l_mem;
+        target_mem := Some t_mem;
+
+        let imports =
+          Jv.obj
+            [|
+              ( "env",
+                Jv.obj
+                  [|
+                    ("high_mem", h_mem);
+                    ("low_mem", l_mem);
+                    ("target_mem", t_mem);
+                  |] );
+            |]
+        in
+
+        let* res =
+          to_lwt
+            (Fut.of_promise
+               ~ok:(fun x -> x)
+               (Jv.call
+                  (Jv.get Jv.global "WebAssembly")
+                  "instantiate"
+                  [| Brr.Tarray.Buffer.to_jv buf; imports |]))
+        in
+        let inst = Jv.get res "instance" in
+        instance := Some inst;
+        Lwt.return inst
+end
+
+let decode_mutex = Lwt_mutex.create ()
 
 (* Convert typed array to bigarray for efficient access *)
 let to_ba (arr : Brr.Tarray.uint8) : ba_uint8 = Brr.Tarray.to_bigarray1 arr
@@ -105,7 +166,7 @@ let fetch_dem ~lat ~lon ~row ~col =
 (* Decode a .dem tile and write directly into target heightmap.
    dst_row/dst_col specify where in the target to write (tile origin).
    target_size is the size of the target heightmap (assumed square). *)
-let decode_tile ~data ~target ~dst_row ~dst_col ~target_size =
+let decode_tile ~data ~dst_row ~dst_col ~target_size =
   (* Convert typed array to bigarray for efficient access *)
   let data_ba = to_ba data in
 
@@ -132,63 +193,46 @@ let decode_tile ~data ~target ~dst_row ~dst_col ~target_size =
   in
 
   (* Decompress *)
-  let* high_bytes = inflate_to_uint8 high_compressed in
-  let* low_bytes = inflate_to_uint8 low_compressed in
+  let* inst = Wasm.load () in
+  let h_mem = Option.get !Wasm.high_mem in
+  let l_mem = Option.get !Wasm.low_mem in
 
-  (* Convert to bigarrays for efficient access *)
-  let high_ba = to_ba high_bytes in
-  let low_ba = to_ba low_bytes in
+  (* Decompress and Decode - Protected by mutex as we use shared WASM memories *)
+  Lwt_mutex.with_lock decode_mutex (fun () ->
+      let l_ta =
+        Brr.Tarray.of_buffer Brr.Tarray.Uint8
+          (Brr.Tarray.Buffer.of_jv (Jv.get l_mem "buffer"))
+      in
+      let h_ta =
+        Brr.Tarray.of_buffer Brr.Tarray.Uint8
+          (Brr.Tarray.Buffer.of_jv (Jv.get h_mem "buffer"))
+      in
 
-  (* Reconstruct 16-bit values and decode *)
-  let n = width * height in
+      let* _ =
+        to_lwt
+          (Fut.of_promise ~ok:(fun x -> x) (inflate_into high_compressed h_ta))
+      in
+      let* _ =
+        to_lwt
+          (Fut.of_promise ~ok:(fun x -> x) (inflate_into low_compressed l_ta))
+      in
 
-  (* Preallocate arrays for the decode pipeline *)
-  let u16_data = Array.make n 0 in
-
-  (* Combine high and low bytes, zigzag decode, then apply inverse prediction *)
-  for i = 0 to n - 1 do
-    let high = Bigarray.Array1.get high_ba i in
-    let low = Bigarray.Array1.get low_ba i in
-    let zigzag_val = (high lsl 8) lor low in
-    let residue = zigzag_decode zigzag_val in
-
-    (* Apply inverse parallelogram prediction *)
-    let row = i / width in
-    let col = i mod width in
-    let predicted =
-      if row = 0 && col = 0 then 0
-      else if row = 0 then u16_data.(i - 1)
-      else if col = 0 then u16_data.(i - width)
-      else u16_data.(i - 1) + u16_data.(i - width) - u16_data.(i - width - 1)
-    in
-    u16_data.(i) <- (predicted + residue) land 0xFFFF
-  done;
-
-  (* Write u16 values as high/low bytes to target (RG8 format).
-     In the original loader, heights.{size-1, *} = south and heights.{0, *} = north.
-     In .dem files, row 0 = north edge of sub-tile, row (height-1) = south edge.
-     Target is a 2D array with 2 bytes per pixel (high byte, low byte). *)
-  for row = 0 to height - 1 do
-    for col = 0 to width - 1 do
-      (* Calculate target position *)
-      let target_row = target_size - 1 - dst_row - (height - 1 - row) in
-      let target_col = dst_col + col in
-      (* Bounds check *)
-      if
-        target_row >= 0 && target_row < target_size && target_col >= 0
-        && target_col < target_size
-      then begin
-        let u16_val = u16_data.((row * width) + col) in
-        let high_byte = (u16_val lsr 8) land 0xFF in
-        let low_byte = u16_val land 0xFF in
-        (* Target has 2 bytes per pixel: [low, high] (little-endian) *)
-        target.{target_row, target_col * 2} <- low_byte;
-        target.{target_row, (target_col * 2) + 1} <- high_byte
-      end
-    done
-  done;
-
-  Lwt.return ()
+      let func = Jv.get (Jv.get inst "exports") "decompress_simd" in
+      ignore
+        (Jv.apply func
+           [|
+             Jv.of_int 0;
+             Jv.of_int 0;
+             Jv.of_int 0;
+             Jv.of_int dst_col;
+             Jv.of_int (target_size - dst_row - height);
+             Jv.of_int target_size;
+             Jv.of_int target_size;
+             Jv.of_int target_size;
+             Jv.of_int width;
+             Jv.of_int height;
+           |]);
+      Lwt.return_unit)
 
 (* Load heightmap for a given center position and size.
    lat/lon are in degrees, size is in arcseconds (pixels). *)
@@ -206,10 +250,15 @@ let load ~lat ~lon ~size =
   Format.eprintf "  Bounds: lat %d-%d, lon %d-%d arcsec@." min_lat_arcsec
     max_lat_arcsec min_lon_arcsec max_lon_arcsec;
 
-  (* Allocate output heightmap as RG8 format (2 bytes per pixel: high, low) *)
+  let* _inst = Wasm.load () in
+  let heights_ba = Wasm.get_ba (Option.get !Wasm.target_mem) in
+  let h_ba = Bigarray.Array1.sub heights_ba 0 (size * size * 2) in
+  (* Reshape 1D WASM memory to 2D heightmap *)
   let heights =
-    Bigarray.(Array2.create int8_unsigned C_layout) size (size * 2)
+    Bigarray.reshape_2 (Bigarray.genarray_of_array1 h_ba) size (size * 2)
   in
+  (* Clear memory (optional, but good for predictability) *)
+  Bigarray.Array1.fill h_ba 0;
 
   (* Determine which degree tiles we need *)
   let min_deg_lat = (min_lat_arcsec - 1) // 3600 in
@@ -301,7 +350,7 @@ let load ~lat ~lon ~size =
         Format.eprintf "    dst_row=%d, dst_col=%d (target_size=%d)@." dst_row
           dst_col size;
 
-        decode_tile ~data ~target:heights ~dst_row ~dst_col ~target_size:size
+        decode_tile ~data ~dst_row ~dst_col ~target_size:size
       end
     in
     iter_sub_row min_sub_row

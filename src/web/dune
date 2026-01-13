@@ -60,7 +60,8 @@
   manifest.json
   icon192.png
   icon512.png
-  compute.wasm))
+  compute.wasm
+  decompress_tile.wasm))
 
 (rule
  (target compute.wasm)
@@ -79,3 +80,18 @@
    -o
    %{target}
    %{deps})))
+
+(rule
+ (target decompress_tile.wasm)
+ (deps decompress_tile.wat)
+ (mode promote)
+ (action
+  (run
+   wasm-opt
+   -O4
+   --enable-simd
+   --enable-bulk-memory
+   --enable-multimemory
+   %{deps}
+   -o
+   %{target})))
