@@ -23,6 +23,23 @@ let ( // ) x y =
 (* Sub-tile size: each 1° DEM is split into 3x3 = 9 tiles of 1200x1200 *)
 let sub_tile_size = 1200
 
+(* RG8 heightmap type: stores u16 heights as high/low bytes *)
+type heightmap = {
+  data : (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array2.t;
+  size : int;
+}
+
+(* Get height at (row, col) from RG8 heightmap as float meters *)
+let get_height h row col =
+  let low = h.data.{row, col * 2} in
+  let high = h.data.{row, (col * 2) + 1} in
+  let u16_val = (high lsl 8) lor low in
+  (Float.of_int u16_val *. (9500.0 /. 65535.0)) -. 500.0
+
+(* Get raw u16 bigarray for GPU texture upload.
+   The texture should be created with RG8 format, width = size, height = size. *)
+let get_texture_data h = h.data
+
 (* Convert Lwt future to Lwt promise *)
 let to_lwt f =
   let t, u = Lwt.task () in
@@ -147,23 +164,13 @@ let decode_tile ~data ~target ~dst_row ~dst_col ~target_size =
     u16_data.(i) <- (predicted + residue) land 0xFFFF
   done;
 
-  (* Convert to float32 and write to target.
-     Note: The .dem tiles store data in row-major order where row 0 is the NORTH
-     edge of the tile. We need to flip vertically when writing to the target.
-     Also apply bounds checking to handle partial tiles at edges. *)
-  let min_elevation = -500.0 in
-  let max_elevation = 9000.0 in
-  let scale = (max_elevation -. min_elevation) /. 65535.0 in
-
+  (* Write u16 values as high/low bytes to target (RG8 format).
+     In the original loader, heights.{size-1, *} = south and heights.{0, *} = north.
+     In .dem files, row 0 = north edge of sub-tile, row (height-1) = south edge.
+     Target is a 2D array with 2 bytes per pixel (high byte, low byte). *)
   for row = 0 to height - 1 do
     for col = 0 to width - 1 do
-      (* Calculate target position.
-         In the original loader, heights.{size-1, *} = south and heights.{0, *} = north.
-         In .dem files, row 0 = north edge of sub-tile, row (height-1) = south edge.
-         dst_row is the offset from min_lat to subtile_min_lat (south edge of sub-tile).
-         For matching the original loader orientation:
-         - South edge of sub-tile (.dem row height-1) -> target row (size-1 - dst_row)
-         - North edge of sub-tile (.dem row 0) -> target row (size-1 - dst_row - (height-1)) *)
+      (* Calculate target position *)
       let target_row = target_size - 1 - dst_row - (height - 1 - row) in
       let target_col = dst_col + col in
       (* Bounds check *)
@@ -172,8 +179,11 @@ let decode_tile ~data ~target ~dst_row ~dst_col ~target_size =
         && target_col < target_size
       then begin
         let u16_val = u16_data.((row * width) + col) in
-        let elevation = (Float.of_int u16_val *. scale) +. min_elevation in
-        target.{target_row, target_col} <- elevation
+        let high_byte = (u16_val lsr 8) land 0xFF in
+        let low_byte = u16_val land 0xFF in
+        (* Target has 2 bytes per pixel: [low, high] (little-endian) *)
+        target.{target_row, target_col * 2} <- low_byte;
+        target.{target_row, (target_col * 2) + 1} <- high_byte
       end
     done
   done;
@@ -196,8 +206,10 @@ let load ~lat ~lon ~size =
   Format.eprintf "  Bounds: lat %d-%d, lon %d-%d arcsec@." min_lat_arcsec
     max_lat_arcsec min_lon_arcsec max_lon_arcsec;
 
-  (* Allocate output heightmap *)
-  let heights = Bigarray.(Array2.create Float32 C_layout) size size in
+  (* Allocate output heightmap as RG8 format (2 bytes per pixel: high, low) *)
+  let heights =
+    Bigarray.(Array2.create int8_unsigned C_layout) size (size * 2)
+  in
 
   (* Determine which degree tiles we need *)
   let min_deg_lat = (min_lat_arcsec - 1) // 3600 in
@@ -296,7 +308,8 @@ let load ~lat ~lon ~size =
   in
 
   let* () = iter_deg_lat min_deg_lat in
-  Lwt.return heights
+
+  Lwt.return { data = heights; size }
 
 (* Prefetch tiles for a given region *)
 let prefetch ~lat ~lon ~size =

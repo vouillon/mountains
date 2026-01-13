@@ -1423,11 +1423,12 @@ let build_indices w w' h =
 let make_tile_texture ctx tile =
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f
-    (Bigarray.Array2.dim1 tile)
-    (Bigarray.Array2.dim2 tile)
-    0 Gl.red Gl.float
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile))
+  (* Input is RG8 format: 2 bytes per pixel (high, low) *)
+  let height = Bigarray.Array2.dim1 tile.Dem_loader.data in
+  let width = Bigarray.Array2.dim2 tile.Dem_loader.data / 2 in
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 width height 0 Gl.rg
+    Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data))
     0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
@@ -2021,7 +2022,7 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
       (fun (pt, (x', y')) ->
         let px = deltax *. float (x' - x) in
         let py = deltay *. float (y - y') in
-        let z = tile.{y', x'} in
+        let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
         if r.z > 1. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
@@ -2323,7 +2324,12 @@ let gradient_program =
         out mediump vec4 color;
 
         float get_z(vec2 offset) {
-            return texture(tile, (tileCoord + offset) / (size + 2.)).r;
+            // Decode from RG8: R=low byte, G=high byte (little-endian)
+            // Samples are in [0, 1], need to multiply by 255 to get 0..255
+            vec2 rg = texture(tile, (tileCoord + offset) / (size + 2.)).rg * 255.0;
+            float h_val = rg.g * 256.0 + rg.r;
+            // Convert back to meters: u16 range maps to -500 to 9000
+            return h_val * (9500.0 / 65535.0) - 500.0;
         }
 
         void main() {
@@ -2590,7 +2596,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx =
                 Printf.sprintf "%s (%dm)" name elevation)
         in
         let h =
-          let height' = tile.{y', x'} in
+          let height' = Dem_loader.get_height tile y' x' in
           let dist =
             sqrt
               ((float (x' - x) ** 2.)
@@ -3487,16 +3493,19 @@ let main () =
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
-        Visibility.test tile ~src_x:x ~src_y:y ~dst_x ~dst_y)
+        Visibility.test
+          (Dem_loader.get_height tile)
+          ~src_x:x ~src_y:y ~dst_x ~dst_y)
       points
   in
   (* Bilinear interpolation for height *)
+  let get_h = Dem_loader.get_height tile in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let h00 = tile.{y, x} in
-  let h10 = tile.{y, x + 1} in
-  let h01 = tile.{y - 1, x} in
-  let h11 = tile.{y - 1, x + 1} in
+  let h00 = get_h y x in
+  let h10 = get_h y (x + 1) in
+  let h01 = get_h (y - 1) x in
+  let h11 = get_h (y - 1) (x + 1) in
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
