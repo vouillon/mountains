@@ -1,17 +1,15 @@
-(** Polygon Clipping to Rectangle in OCaml
-    Algorithm: Sutherland-Hodgman
-    
+(** Polygon Clipping to Rectangle in OCaml Algorithm: Sutherland-Hodgman
+
     Optimizations:
     - Zero-Allocation Intersection (No heap tuples)
     - Branch Prediction Optimization via Loop Unswitching
     - Unsafe Array Access
-    - @inline always to prevent float boxing
+    - `[@@inline always]` to prevent float boxing
     - Manual Pre-allocation (No checks in add)
     - Unified Logic (clip_polygon calls clip_multipolygon)
     - Bulk Copying with Array.blit
     - Direct array processing in clip passes (No initial copy)
-    - Shared Clipping Logic (Explicit Loop Unswitching)
-*)
+    - Shared Clipping Logic (Explicit Loop Unswitching) *)
 
 open Geometry_types
 
@@ -53,55 +51,6 @@ module FloatBuffer = struct
 
   let clear t = t.count <- 0
   let to_array t = Array.sub t.data 0 (t.count * 2)
-
-  (* In-place sanitization to remove duplicates and collinear vertices. *)
-  let sanitize t =
-    if t.count > 0 then begin
-      let data = t.data in
-      let get_x (arr : float array) i =
-        Array.unsafe_get arr (i * 2)
-          [@@inline always]
-      in
-      let get_y (arr : float array) i =
-        Array.unsafe_get arr ((i * 2) + 1)
-          [@@inline always]
-      in
-      let set_pt (arr : float array) i x y =
-        Array.unsafe_set arr (i * 2) x;
-        Array.unsafe_set arr ((i * 2) + 1) y
-          [@@inline always]
-      in
-
-      (* Pass 1: Deduplication *)
-      let epsilon_sq = 1e-12 in
-      let write_idx = ref 1 in
-      let prev_x = ref (get_x data 0) in
-      let prev_y = ref (get_y data 0) in
-
-      for i = 1 to t.count - 1 do
-        let x = get_x data i in
-        let y = get_y data i in
-        let dx = x -. !prev_x in
-        let dy = y -. !prev_y in
-        if (dx *. dx) +. (dy *. dy) > epsilon_sq then begin
-          if !write_idx <> i then set_pt data !write_idx x y;
-          prev_x := x;
-          prev_y := y;
-          incr write_idx
-        end
-      done;
-
-      (* Check wrap-around *)
-      if !write_idx > 1 then begin
-        let first_x = get_x data 0 in
-        let first_y = get_y data 0 in
-        let dx = !prev_x -. first_x in
-        let dy = !prev_y -. first_y in
-        if (dx *. dx) +. (dy *. dy) <= epsilon_sq then decr write_idx
-      end;
-
-      t.count <- !write_idx
-    end
 end
 
 module Clipper = struct

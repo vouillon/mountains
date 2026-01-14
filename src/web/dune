@@ -76,24 +76,10 @@
  (target decompress_tile.wasm)
  (deps decompress_tile.wat)
  (action
-  (run
-   wasm-opt
-   -O4
-   --enable-simd
-   --enable-bulk-memory
-   %{deps}
-   -o
-   %{target})))
+  (run wasm-opt -O4 --enable-simd --enable-bulk-memory %{deps} -o %{target})))
 
 (rule
  (target decode_clc.wasm)
  (deps decode_clc.wat)
  (action
-  (run
-   wasm-opt
-   -O4
-   --enable-simd
-   --enable-bulk-memory
-   %{deps}
-   -o
-   %{target})))
+  (run wasm-opt -O4 --enable-simd --enable-bulk-memory %{deps} -o %{target})))

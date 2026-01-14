@@ -2,7 +2,7 @@
 
 **Deployed Application**: [https://vouillon.github.io/mountains/](https://vouillon.github.io/mountains/)
 
-This project is a Web-based terrain rendering application capable of visualizing landscapes from Digital Elevation Models (DEMs). It features a primary WebGL client using `Brr` and a comprehensive data pipeline for processing CORINE Land Cover (CLC) data.
+A Web-based terrain rendering application capable of visualizing landscapes from Digital Elevation Models (DEMs), currently covering the French Alps. It features a primary WebGL client using `Brr` and a comprehensive data pipeline for processing CORINE Land Cover (CLC) data.
 
 ![Col Girardin](assets/col%20Girardin.jpg)
 

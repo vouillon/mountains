@@ -18,10 +18,7 @@ let ( // ) x y =
 
 let sub_tile_size = 1200
 
-type heightmap = {
-  data : (int, int8_unsigned_elt, c_layout) Array2.t;
-  size : int;
-}
+type t = { data : (int, int8_unsigned_elt, c_layout) Array2.t; size : int }
 
 let get_height h row col =
   let low = h.data.{row, col * 2} in
