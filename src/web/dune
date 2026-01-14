@@ -67,7 +67,6 @@
   manifest.json
   icon192.png
   icon512.png
-  compute.wasm
   decode_clc.wasm
   decompress_tile.wasm
   worker.bc.js))

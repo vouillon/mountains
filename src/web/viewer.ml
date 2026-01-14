@@ -2974,26 +2974,109 @@ let wait_for_service_worker =
              (as_target r));
         fut
 
+let featured_locations =
+  [
+    ("Col Girardin", 44.6078064, 6.8210935, 220.);
+    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 170.);
+    ("Col du Blainon", 44.209067, 6.9423065, 0.);
+    ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40.);
+    ("Vallon de la Braïssa", 44.280097, 6.793942, 0.);
+    ("Lacs de Morgon", 44.336025, 6.907772, 0.);
+    ("Roc Diolon (Orcières)", 44.73365, 6.3630684, 0.);
+    ("Col Fromage", 44.6896583, 6.8061028, 180.);
+    ("Embrun", 44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.);
+    ("La Mortice Sud", 44.573885, 6.7694, 0.);
+    ("Le Sommet Rouge", 44.5740068, 6.7954285, 0.);
+    ("Col de la Braïssa", 44.278358, 6.790589, 0.);
+    ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0.);
+  ]
+
 let get_preset_position () =
-  if false then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
-  else if true then (44.6078064, 6.8210935, 0.)
-  else if false then
-    (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
-  else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)
-  else if true then (44.536194, 6.804142, 0.)
-  else if true then (44.527946, 6.802877, 0.)
-  else if true then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
-  else if true then (48.849418, 2.3674101, 0.) (* Paris *)
-  else if true then (44.607649, 6.8204019, 220.) (* Col Girardin *)
-  else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
-  else if true then (44.207447, 6.906400, 40.)
-    (* Auron vers est vallée de la Tinée *)
-  else if true then (44.278358, 6.790589, 0.)
-  else if true then (44.280097, 6.793942, 0.) (* Vallon de la Braïssa *)
-  else if true then (44.336025, 6.907772, 0.) (* Lacs de Morgon *)
-  else if true then (44.73365, 6.3630684, 0.) (* Roc Diolon (Orcières) *)
-  else if true then (44.6896583, 6.8061028, 180.) (* Col Fromage *)
-  else (44.789628, 6.670200, 66.)
+  match featured_locations with
+  | (_, lat, lon, alpha) :: _ -> (lat, lon, alpha)
+  | [] -> (44.3950846, 6.7669714, 170.)
+
+let parse_float_safe s = try Some (float_of_string s) with _ -> None
+
+let parse_input_coordinates input =
+  let input = String.trim input in
+  let input =
+    match Jstr.to_string (Jstr.lowercased (Jstr.v input)) with
+    | "my location" -> ""
+    | _ -> input
+  in
+  if input = "" then None
+  else
+    (* 1. Check for Geo URI: geo:lat,lon *)
+    let input =
+      if Jstr.starts_with ~prefix:(Jstr.v "geo:") (Jstr.v input) then
+        String.sub input 4 (String.length input - 4)
+      else input
+    in
+    let coords_str =
+      try
+        if String.contains input '/' || String.contains input '?' then
+          let uri = Brr.Uri.v (Jstr.v input) in
+          let params = Brr.Uri.query_params uri in
+          let get_param k =
+            match Brr.Uri.Params.find (Jstr.v k) params with
+            | Some v -> Some (Jstr.to_string v)
+            | None -> None
+          in
+          match (get_param "lat", get_param "lon") with
+          | Some lat, Some lon -> lat ^ "," ^ lon
+          | _ -> (
+              match get_param "ll" with
+              | Some ll -> ll
+              | None -> (
+                  match get_param "q" with
+                  | Some q -> q
+                  | None -> (
+                      let path = Jstr.to_string (Brr.Uri.path uri) in
+                      try
+                        let start = String.index path '@' + 1 in
+                        let rest =
+                          String.sub path start (String.length path - start)
+                        in
+                        match String.index_opt rest 'z' with
+                        | Some i -> String.sub rest 0 i
+                        | None -> rest
+                      with Not_found -> input)))
+        else input
+      with _ -> input
+    in
+    (* 3. Parse "lat,lon" or "lat lon" *)
+    let parts =
+      Array.of_list
+        (List.filter
+           (fun s -> s <> "")
+           (String.split_on_char ' '
+              (String.map (fun c -> if c = ',' then ' ' else c) coords_str)))
+    in
+    if Array.length parts >= 2 then
+      match (parse_float_safe parts.(0), parse_float_safe parts.(1)) with
+      | Some lat, Some lon -> Some (lat, lon)
+      | _ -> None
+    else None
+
+let get_url_position ~size =
+  let uri = Brr.Window.location Brr.G.window in
+  let params = Brr.Uri.query_params uri in
+  let get_float k =
+    match Brr.Uri.Params.find (Jstr.v k) params with
+    | Some v -> parse_float_safe (Jstr.to_string v)
+    | None -> None
+  in
+  match (get_float "lat", get_float "lon") with
+  | Some lat, Some lon ->
+      if
+        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
+          ~lat ~lon
+      then
+        let alpha = Option.value (get_float "alpha") ~default:0. in
+        Some (lat, lon, alpha)
+      else None
+  | _ -> None
 
 let get_current_position ~size =
   let open Fut.Syntax in
@@ -3007,20 +3090,21 @@ let get_current_position ~size =
       if
         Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
           ~lat ~lon
-      (*
-        || Dem_loader.in_range ~size ~min_lat:48 ~max_lat:49 ~min_lon:2 ~max_lon:2
-             ~lat ~lon
-*)
       then Some (lat, lon, 0.)
       else None
   | Error _ -> None
 
+type location_source = Url | Geolocation | Preset
+
 let get_position ~size =
   let open Fut.Syntax in
-  let+ loc = get_current_position ~size in
-  match loc with
-  | Some loc -> Ok (true, loc)
-  | None -> Ok (false, get_preset_position ())
+  match get_url_position ~size with
+  | Some loc -> Fut.return (Ok (Url, loc))
+  | None -> (
+      let+ loc = get_current_position ~size in
+      match loc with
+      | Some loc -> Ok (Geolocation, loc)
+      | None -> Ok (Preset, get_preset_position ()))
 
 let setup_events canvas =
   let deviceorientation =
@@ -3077,7 +3161,7 @@ let setup_events canvas =
              ~opts:
                (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
                   ())
-             canvas)
+             (Brr.Document.body Brr.G.document))
     | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
   in
 
@@ -3410,8 +3494,177 @@ let setup_events canvas =
 
   fun () -> state := `Starting
 
+let create_location_ui ~size =
+  let body = Brr.Document.body Brr.G.document in
+  let fab =
+    let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab") ] [] in
+    Jv.set (Brr.El.to_jv el) "innerHTML"
+      (Jv.of_string
+         {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>|});
+    el
+  in
+  let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
+  let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
+
+  Brr.El.append_children menu
+    [
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "menu-title") ]
+        [ Brr.El.txt (Jstr.v "Select Location") ];
+    ];
+  Brr.El.append_children overlay [ menu ];
+  Brr.El.append_children body [ fab; overlay ];
+
+  let toggle_menu () =
+    let visible = Jstr.v "visible" in
+    if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
+    else Brr.El.set_class visible true overlay
+  in
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ -> toggle_menu ())
+       (Brr.El.as_target fab));
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun e ->
+         if Jv.equal (Jv.get (Obj.magic e) "target") (Brr.El.to_jv overlay) then
+           toggle_menu ())
+       (Brr.El.as_target overlay));
+
+  (* Input Section *)
+  let input =
+    Brr.El.input
+      ~at:
+        Brr.At.
+          [
+            class' (Jstr.v "input-coord");
+            type' (Jstr.v "text");
+            placeholder (Jstr.v "Lat, Lon or Map Link");
+          ]
+      ()
+  in
+  let btn_go =
+    Brr.El.button
+      ~at:Brr.At.[ class' (Jstr.v "btn-go") ]
+      [ Brr.El.txt (Jstr.v "GO") ]
+  in
+  let input_group =
+    Brr.El.div ~at:Brr.At.[ class' (Jstr.v "input-group") ] [ input; btn_go ]
+  in
+
+  let go () =
+    let text = Jv.to_string (Jv.get (Brr.El.to_jv input) "value") in
+    match parse_input_coordinates text with
+    | Some (lat, lon) ->
+        if
+          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5
+            ~max_lon:9 ~lat ~lon
+        then
+          let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
+          let uri =
+            Brr.Uri.with_query_params
+              (Brr.Window.location Brr.G.window)
+              (Brr.Uri.Params.of_jstr search)
+          in
+          Brr.Window.set_location Brr.G.window uri
+        else
+          Jv.set (Brr.El.to_jv input) "value"
+            (Jv.of_string "Location out of range")
+    | None ->
+        Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
+  in
+
+  ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
+
+  (* Current Location *)
+  let current_loc_btn =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "location-item") ]
+      [
+        Brr.El.span
+          ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+          [ Brr.El.txt (Jstr.v "📍") ];
+        Brr.El.txt (Jstr.v "Use My Location");
+      ]
+  in
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ ->
+         let _ =
+           let open Fut.Syntax in
+           let* res = get_current_position ~size in
+           match res with
+           | Some (lat, lon, _) ->
+               let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
+               let uri =
+                 Brr.Uri.with_query_params
+                   (Brr.Window.location Brr.G.window)
+                   (Brr.Uri.Params.of_jstr search)
+               in
+               Brr.Window.set_location Brr.G.window uri;
+               Fut.return ()
+           | None ->
+               Jv.set (Brr.El.to_jv input) "value"
+                 (Jv.of_string "Location out of range or unavailable");
+               Fut.return ()
+         in
+         ())
+       (Brr.El.as_target current_loc_btn));
+
+  (* Featured Locations *)
+  let location_list =
+    Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
+  in
+  List.iter
+    (fun (name, lat, lon, alpha) ->
+      let item =
+        Brr.El.li
+          ~at:Brr.At.[ class' (Jstr.v "location-item") ]
+          [
+            Brr.El.span
+              ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+              [ Brr.El.txt (Jstr.v "🏔️") ];
+            Brr.El.txt (Jstr.v name);
+          ]
+      in
+      ignore
+        (Brr.Ev.listen Brr.Ev.click
+           (fun _ ->
+             let search =
+               Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+             in
+             let uri =
+               Brr.Uri.with_query_params
+                 (Brr.Window.location Brr.G.window)
+                 (Brr.Uri.Params.of_jstr search)
+             in
+             Brr.Window.set_location Brr.G.window uri)
+           (Brr.El.as_target item));
+      Brr.El.append_children location_list [ item ])
+    featured_locations;
+
+  Brr.El.append_children menu
+    [
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+        [ Brr.El.txt (Jstr.v "Coordinates") ];
+      input_group;
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+        [ Brr.El.txt (Jstr.v "Quick Select") ];
+      current_loc_btn;
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+        [ Brr.El.txt (Jstr.v "Featured") ];
+      location_list;
+    ];
+  ()
+
 let main () =
   let tile_width = 4098 in
+  create_location_ui ~size:tile_width;
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
@@ -3433,7 +3686,23 @@ let main () =
 
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
-  let* use_geoloc, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
+  let* source, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
+  (* If URL parameters were provided but we fell back to another source (e.g. out of range),
+     redirect to the resolved location. *)
+  (match source with
+  | Url -> ()
+  | _ ->
+      let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
+      if Brr.Uri.Params.mem (Jstr.v "lat") params then
+        let search =
+          Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon angle)
+        in
+        let uri =
+          Brr.Uri.with_query_params
+            (Brr.Window.location Brr.G.window)
+            (Brr.Uri.Params.of_jstr search)
+        in
+        Brr.Window.set_location Brr.G.window uri);
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
 
   let start = setup_events canvas in
@@ -3448,7 +3717,7 @@ let main () =
   in
   let* tile, (_, _, _, _, tiles) = tile_loaders in
 
-  if use_geoloc then (
+  if source = Geolocation then (
     Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
     Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
