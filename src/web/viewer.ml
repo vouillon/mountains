@@ -2735,7 +2735,6 @@ let resize_canvas canvas =
 
 let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
-  init_anisotropic_filtering ctx;
   let triangle_pid = create_program ctx triangle_program in
   let text_pid = create_program ctx text_program in
   let shadow_pid = create_program ctx shadow_program in
@@ -3542,6 +3541,7 @@ let main () =
   init_anisotropic_filtering ctx;
   (* Start loading detail map immediately *)
   let detail_map = make_detail_map ctx in
+  Dem_loader.Worker_pool.init ();
 
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in

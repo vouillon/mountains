@@ -178,24 +178,24 @@ module Wasm = struct
                (Brr_io.Fetch.Response.as_body resp))
         in
 
-        (* Metadata and streams: 16-128 pages each (1MB - 8MB) *)
-        m_meta := Some (create_memory 16);
-        m_hi_x := Some (create_memory 32);
-        m_mid_x := Some (create_memory 32);
-        m_lo_x := Some (create_memory 32);
-        m_hi_y := Some (create_memory 32);
-        m_mid_y := Some (create_memory 32);
-        m_lo_y := Some (create_memory 32);
-        m_hi_i := Some (create_memory 64);
-        m_lo_i := Some (create_memory 64);
+        (* Metadata and streams: Reduced to reasonable sizes *)
+        m_meta := Some (create_memory 4);
+        m_hi_x := Some (create_memory 12);
+        m_mid_x := Some (create_memory 12);
+        m_lo_x := Some (create_memory 12);
+        m_hi_y := Some (create_memory 12);
+        m_mid_y := Some (create_memory 12);
+        m_lo_y := Some (create_memory 12);
+        m_hi_i := Some (create_memory 36);
+        m_lo_i := Some (create_memory 36);
         m_palette := Some (create_memory 1);
 
-        (* Output arrays: Up to 512 pages each (32MB) *)
-        m_out_pos := Some (create_memory 512);
-        m_out_col := Some (create_memory 128);
+        (* Output arrays: Reduced to ~3.2MB (50 pages) *)
+        m_out_pos := Some (create_memory 50);
+        m_out_col := Some (create_memory 25);
         (* Only 1 byte per vertex *)
-        m_out_ebo := Some (create_memory 512);
-        m_out_wpos := Some (create_memory 512);
+        m_out_ebo := Some (create_memory 150);
+        m_out_wpos := Some (create_memory 60);
 
         (* Prefill code mapping table in m_palette *)
         let palette_ba =
