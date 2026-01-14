@@ -17,8 +17,13 @@ let follow_line plot x0 y0 x1 y1 =
   follow (dx + dy) x0 y0
 
 (* get_height: row -> col -> float *)
-let test (get_height : int -> int -> float) ~src_x ~src_y ~dst_x ~dst_y =
-  let src_h = get_height src_y src_x +. 2. in
+let test (get_height : int -> int -> float) ?src_h ~src_x ~src_y ~dst_x ~dst_y
+    () =
+  let src_h =
+    max
+      (get_height src_y src_x +. 2.)
+      (Option.value ~default:(get_height src_y src_x +. 2.) src_h)
+  in
   let dst_h = get_height dst_y dst_x in
   let dx = dst_x - src_x in
   let dy = dst_y - src_y in
@@ -31,10 +36,10 @@ let test (get_height : int -> int -> float) ~src_x ~src_y ~dst_x ~dst_y =
     let h' =
       ((dst_h -. src_h) *. float ((dx * dx') + (dy * dy')) /. d /. d) +. src_h
     in
-    let res = d' > 0.94 *. d || (h -. h') /. d' < 0.2 in
     (*
-    let res = d' > 0.94 *. d || (h -. h' < min 100. (d' /. 10.) in
+    let res = d' > 0.94 *. d || (h -. h') /. d' < 0.2 in
 *)
+    let res = d' <= 30. || d' > 0.94 *. d || h -. h' < min 100. (d' *. 0.1) in
     (*    Format.eprintf "%g - %g %g - %b@." (d' /. d) h h' res;*)
     res
   in
