@@ -337,49 +337,81 @@ let parse_lat_lon filename =
     Some (lat, lon)
   with Not_found -> None
 
+(* Fetch TIFF from AWS using curl *)
+let fetch_from_aws lat lon dest =
+  let url =
+    Printf.sprintf
+      "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif"
+      lat lon lat lon
+  in
+  Printf.eprintf "Fetching %s...\n%!" url;
+  let cmd =
+    Printf.sprintf "curl -f -s -L -o %s %s" (Filename.quote dest)
+      (Filename.quote url)
+  in
+  if Sys.command cmd <> 0 then (
+    Printf.eprintf "Error: Failed to fetch %s\n" url;
+    false)
+  else true
+
 let () =
   if Array.length Sys.argv < 3 then begin
-    Printf.eprintf "Usage: %s <input.tif> <output_dir>\n" Sys.argv.(0);
+    Printf.eprintf "Usage: %s <input.tif | lat lon> <output_dir>\n" Sys.argv.(0);
+    Printf.eprintf "  Examples:\n";
+    Printf.eprintf "    %s input.tif data/dem\n" Sys.argv.(0);
+    Printf.eprintf "    %s 45 6 data/dem\n" Sys.argv.(0);
     Printf.eprintf
-      "  Generates 9 tiles in output_dir: N{lat}_E{lon}_{row}_{col}.dem\n";
+      "  Generates 9 tiles in output_dir/dem: N{lat}_E{lon}_{row}_{col}.dem\n";
     Printf.eprintf
-      "  Lat/lon are parsed from input filename (Copernicus format)\n";
+      "  Lat/lon are parsed from input filename (Copernicus format) or \
+       provided directly.\n";
     Printf.eprintf "  Row 0 = bottom (south), Col 0 = left (west)\n";
     exit 1
   end;
-  let input_path = Sys.argv.(1) in
-  let output_dir = Sys.argv.(2) in
 
-  (* Parse lat/lon from input filename *)
-  let lat, lon =
-    match parse_lat_lon input_path with
-    | Some (lat, lon) -> (lat, lon)
-    | None ->
-        Printf.eprintf "Error: Could not parse lat/lon from filename: %s\n"
-          input_path;
-        Printf.eprintf
-          "Expected format like: Copernicus_DSM_COG_10_N45_00_E006_00_DEM.tif\n";
-        exit 1
+  let input_path, output_dir, lat, lon =
+    if Array.length Sys.argv = 4 then
+      let lat = int_of_string Sys.argv.(1) in
+      let lon = int_of_string Sys.argv.(2) in
+      let output_dir = Sys.argv.(3) in
+      let path =
+        Printf.sprintf "Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif" lat lon
+      in
+      (path, output_dir, lat, lon)
+    else
+      let path = Sys.argv.(1) in
+      let out = Sys.argv.(2) in
+      match parse_lat_lon path with
+      | Some (lat, lon) -> (path, out, lat, lon)
+      | None ->
+          Printf.eprintf "Error: Could not parse lat/lon from filename: %s\n"
+            path;
+          exit 1
   in
-  Printf.eprintf "Parsed coordinates: N%02d E%03d\n%!" lat lon;
 
-  Printf.eprintf "Reading %s...\n%!" input_path;
+  let is_temp = ref false in
+  if not (Sys.file_exists input_path) then
+    if fetch_from_aws lat lon input_path then is_temp := true else exit 1;
+
+  Printf.eprintf "Processing %s (Coordinates: N%02d E%03d)...\n%!" input_path
+    lat lon;
   let heights, width, height = read_dem input_path in
-  Printf.eprintf "DEM size: %dx%d\n%!" width height;
+
+  if !is_temp then Sys.remove input_path;
+
   if width <> 3600 || height <> 3600 then begin
     Printf.eprintf "Error: Expected 3600x3600 DEM, got %dx%d\n" width height;
     exit 1
   end;
+
+  (* Ensure dem/ subdir exists *)
+  let dem_dir = Filename.concat output_dir "dem" in
+  if not (Sys.file_exists dem_dir) then Unix.mkdir dem_dir 0o775;
+
   Printf.eprintf "Splitting into 9 tiles of %dx%d...\n%!" sub_tile_size
     sub_tile_size;
-  (* Iterate over 3x3 grid of tiles.
-     Row 0 = bottom (south) = rows 2400-3599 in the heightmap (since row 0 in
-     heightmap is north). Col 0 = left (west) = cols 0-1199 in the heightmap. *)
   for tile_row = 0 to 2 do
     for tile_col = 0 to 2 do
-      (* Map tile coordinates to heightmap coordinates.
-         tile_row 0 (south) -> src_row = 2400 (rows 2400-3599)
-         tile_row 2 (north) -> src_row = 0 (rows 0-1199) *)
       let src_row = (2 - tile_row) * sub_tile_size in
       let src_col = tile_col * sub_tile_size in
       let output_path =
