@@ -2906,10 +2906,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         let h =
           let height' = Dem_loader.get_height tile y' x' in
           let dist =
-            sqrt
-              ((float (x' - x) ** 2.)
-              +. (float (y' - y) ** 2.)
-              +. ((height' -. height) ** 2.))
+            let dx = float (x' - x) in
+            let dy = float (y' - y) in
+            let dz = height' -. height in
+            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
           in
           (height' -. height) /. dist
         in
@@ -3542,6 +3542,8 @@ let main () =
   (* Start loading detail map immediately *)
   let detail_map = make_detail_map ctx in
   Worker_pool.init ();
+  let graphics = init_graphics ctx in
+  resize_canvas canvas;
 
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in
@@ -3558,8 +3560,6 @@ let main () =
       (Dem_loader.load ~size:tile_width ~lat ~lon)
       (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
   in
-  let graphics = init_graphics ctx in
-  resize_canvas canvas;
   let* tile, (_, _, _, _, tiles) = tile_loaders in
 
   if use_geoloc then

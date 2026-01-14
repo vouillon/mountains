@@ -10,7 +10,7 @@ module Wasm = struct
 
   let memory =
     let opts =
-      Jv.obj [| ("initial", Jv.of_int 256); ("maximum", Jv.of_int 4096) |]
+      Jv.obj [| ("initial", Jv.of_int 300); ("maximum", Jv.of_int 4096) |]
     in
     Jv.new' (Jv.get (Jv.get Jv.global "WebAssembly") "Memory") [| opts |]
 
@@ -277,13 +277,13 @@ let decode_clc_dataset ~inst msg =
     Lwt.return ()
   in
 
-  let* _ = read_stream data_ta offset m_meta in
-  let* _ = read_stream data_ta offset m_hi_x in
-  let* _ = read_stream data_ta offset m_lo_x in
-  let* _ = read_stream data_ta offset m_hi_y in
-  let* _ = read_stream data_ta offset m_lo_y in
-  let* _ = read_stream data_ta offset m_hi_i in
-  let* _ = read_stream data_ta offset m_lo_i in
+  let* () = read_stream data_ta offset m_meta in
+  let* () = read_stream data_ta offset m_hi_x in
+  let* () = read_stream data_ta offset m_lo_x in
+  let* () = read_stream data_ta offset m_hi_y in
+  let* () = read_stream data_ta offset m_lo_y in
+  let* () = read_stream data_ta offset m_hi_i in
+  let* () = read_stream data_ta offset m_lo_i in
 
   let func_main = Jv.get (Jv.get inst "exports") "decode_clc" in
   ignore
@@ -320,15 +320,15 @@ let decode_clc_dataset ~inst msg =
 
   let* water_pos_buf, water_col_buf, water_idx_buf =
     if water_count > 0 then (
-      let* _ = read_stream data_ta offset m_meta in
-      let* _ = read_stream data_ta offset m_hi_x in
-      let* _ = read_stream data_ta offset m_mid_x in
-      let* _ = read_stream data_ta offset m_lo_x in
-      let* _ = read_stream data_ta offset m_hi_y in
-      let* _ = read_stream data_ta offset m_mid_y in
-      let* _ = read_stream data_ta offset m_lo_y in
-      let* _ = read_stream data_ta offset m_hi_i in
-      let* _ = read_stream data_ta offset m_lo_i in
+      let* () = read_stream data_ta offset m_meta in
+      let* () = read_stream data_ta offset m_hi_x in
+      let* () = read_stream data_ta offset m_mid_x in
+      let* () = read_stream data_ta offset m_lo_x in
+      let* () = read_stream data_ta offset m_hi_y in
+      let* () = read_stream data_ta offset m_mid_y in
+      let* () = read_stream data_ta offset m_lo_y in
+      let* () = read_stream data_ta offset m_hi_i in
+      let* () = read_stream data_ta offset m_lo_i in
       let func_w = Jv.get (Jv.get inst "exports") "decode_water" in
       ignore
         (Jv.apply func_w
@@ -411,7 +411,7 @@ let decode_clc_dataset ~inst msg =
     ~opts:(Brr_io.Message.opts ~transfer:(Obj.magic !transfer_list) ());
   Lwt.return ()
 
-let on_message e =
+let on_message ~dem_inst ~clc_inst e =
   let open Lwt.Syntax in
   let data = Brr.Ev.as_type e |> Brr_io.Message.Ev.data in
   let type_ = Jv.get data "type" |> Jv.to_string in
@@ -419,11 +419,11 @@ let on_message e =
     (fun () ->
       match type_ with
       | "decode_dem" ->
-          let* inst = Wasm.load_dem () in
+          let* inst = dem_inst in
           let* _ = decode_dataset ~inst data in
           Lwt.return ()
       | "decode_clc" ->
-          let* inst = Wasm.load_clc () in
+          let* inst = clc_inst in
           let* _ = decode_clc_dataset ~inst data in
           Lwt.return ()
       | _ -> Lwt.return ())
@@ -440,7 +440,9 @@ let on_message e =
       Lwt.return ())
 
 let () =
+  let dem_inst = Wasm.load_dem () in
+  let clc_inst = Wasm.load_clc () in
   ignore
     (Brr.Ev.listen Brr_io.Message.Ev.message
-       (fun e -> Lwt.async (fun () -> on_message e))
+       (fun e -> Lwt.async (fun () -> on_message ~dem_inst ~clc_inst e))
        (Brr.Ev.target_of_jv (Jv.get Jv.global "self")))
