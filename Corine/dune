@@ -13,6 +13,7 @@
   check_overlaps
   extract_tiles
   compress_dem
+  render_dem
   triangulate_test
   polygon_to_svg
   analyze_polygon
