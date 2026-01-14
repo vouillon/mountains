@@ -17,7 +17,7 @@
 
 (executables
  (names worker)
- (libraries mountains yojson brr lwt)
+ (libraries mountains brr)
  (modes js)
  (js_of_ocaml
   (javascript_files inflate.js)))
@@ -68,26 +68,9 @@
   icon192.png
   icon512.png
   compute.wasm
+  decode_clc.wasm
   decompress_tile.wasm
   worker.bc.js))
-
-(rule
- (target compute.wasm)
- (deps compute.c)
- (mode promote)
- (action
-  (run
-   clang
-   -Ofast
-   -msimd128
-   --no-standard-libraries
-   --target=wasm32
-   -Wl,--no-entry
-   -Wl,--import-memory
-   -Wa,--no-type-check
-   -o
-   %{target}
-   %{deps})))
 
 (rule
  (target decompress_tile.wasm)
@@ -98,7 +81,6 @@
    -O4
    --enable-simd
    --enable-bulk-memory
-   --enable-multimemory
    %{deps}
    -o
    %{target})))
@@ -112,7 +94,6 @@
    -O4
    --enable-simd
    --enable-bulk-memory
-   --enable-multimemory
    %{deps}
    -o
    %{target})))
