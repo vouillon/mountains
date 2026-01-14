@@ -30,8 +30,8 @@
     }
 
     canvas {
-      position:relative;
-      z-index:1;
+      position: relative;
+      z-index: 1;
       width: 100%;
       height: 100%;
       display: block;
@@ -40,7 +40,7 @@
 
     .message {
       position: absolute;
-      z-index:2;
+      z-index: 2;
       top: 25%;
       left: 50%;
       transform: translate(-50%, -50%);
@@ -52,27 +52,177 @@
 
     .notice {
       position: absolute;
-      bottom:0;
+      bottom: 0;
       padding: 16px 20px;
+      padding-right: 80px;
+      /* Make space for FAB */
       background: white;
-      right:0;
-      left:0;
+      right: 0;
+      left: 0;
+    }
+
+    .fab {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      border: none;
+      z-index: 100;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .fab:active {
+      transform: scale(0.9);
+    }
+
+    .fab svg {
+      width: 28px;
+      height: 28px;
+      stroke: #333;
+    }
+
+    .menu-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(4px);
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .menu-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .menu {
+      background: rgba(255, 255, 255, 0.95);
+      width: 90%;
+      max-width: 400px;
+      max-height: 80vh;
+      border-radius: 20px;
+      padding: 24px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      transform: scale(0.9);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    .menu-overlay.visible .menu {
+      transform: scale(1);
+    }
+
+    .input-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    .input-coord {
+      flex: 1;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.5);
+      font-size: 16px;
+      outline: none;
+    }
+
+    .input-coord:focus {
+      border-color: #5f8fd9;
+      background: white;
+    }
+
+    .btn-go {
+      padding: 0 20px;
+      border: none;
+      background: #5f8fd9;
+      color: white;
+      border-radius: 12px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .section-title {
+      font-weight: bold;
+      color: #666;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-top: 8px;
+    }
+
+    .location-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .location-item {
+      padding: 12px;
+      margin: 4px 0;
+      background: rgba(0, 0, 0, 0.03);
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: background 0.2s;
+    }
+
+    .location-item:hover {
+      background: rgba(0, 0, 0, 0.08);
+    }
+
+    .location-icon {
+      font-size: 20px;
+    }
+
+    /* Hide scrollbar */
+    .menu::-webkit-scrollbar {
+      display: none;
+    }
+
+    .menu {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
     }
   </style>
 
 <body>
-  <div class ="notice">
+  <div class="notice">
     <strong> Map Data & Terrain Sources:</strong>
     <ul>
-    <li>
-      Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V.
-      2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
-      under COPERNICUS by the European Union and ESA; all rights
-      reserved.
-    <li>
-      Land Use: © European Union, Copernicus Land Monitoring Service
-      2025, European Environment Agency (EEA)
-    <li>
-      Water Bodies: © OpenStreetMap contributors (Open Database License)
+      <li>
+        Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V.
+        2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+        under COPERNICUS by the European Union and ESA; all rights
+        reserved.
+      <li>
+        Land Use: © European Union, Copernicus Land Monitoring Service
+        2025, European Environment Agency (EEA)
+      <li>
+        Water Bodies: © OpenStreetMap contributors (Open Database License)
   </div>
   <canvas id="canvas" width=640 height=480>
