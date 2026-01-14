@@ -204,7 +204,7 @@ let prefetch ~lat ~lon ~size =
   let min_deg_lon = min_lon_arcsec // 3600 in
   let max_deg_lon = max_lon_arcsec // 3600 in
 
-  let urls = ref [] in
+  let prefetch_tasks = ref [] in
   for deg_lat = min_deg_lat to max_deg_lat do
     let tile_base_lat_arcsec = (deg_lat * 3600) + 1 in
     for deg_lon = min_deg_lon to max_deg_lon do
@@ -243,31 +243,38 @@ let prefetch ~lat ~lon ~size =
             && overlap_min_lon <= overlap_max_lon
           then begin
             let p = path ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col in
-            urls := p :: !urls
+            let task =
+              let to_lwt f =
+                let t, u = Lwt.task () in
+                ( Fut.await f @@ fun v ->
+                  match v with
+                  | Ok v -> Lwt.wakeup u v
+                  | Error err -> raise (Jv.Error err) );
+                t
+              in
+              to_lwt
+              @@
+              let open Fut.Result_syntax in
+              let request = Brr_io.Fetch.Request.v (Jstr.v p) in
+              let* cache =
+                Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
+                  (Jstr.v "v1")
+              in
+              let* response = Brr_io.Fetch.Cache.match' cache request in
+              match response with
+              | Some response when Brr_io.Fetch.Response.ok response ->
+                  Fut.return (Ok ())
+              | _ ->
+                  Format.eprintf "  Prefetching %s@." p;
+                  Brr_io.Fetch.Cache.add cache request
+            in
+            prefetch_tasks := task :: !prefetch_tasks
           end
         done
       done
     done
   done;
-
-  (* Helper to convert Future to Lwt *)
-  let to_lwt f =
-    let t, u = Lwt.task () in
-    (Fut.await f @@ fun v -> Lwt.wakeup u v);
-    t
-  in
-
-  let rec fetch_all = function
-    | [] -> Lwt.return ()
-    | path_url :: rest ->
-        let* _ =
-          let open Brr_io.Fetch in
-          let* _ = to_lwt (url (Jstr.v path_url)) in
-          Lwt.return ()
-        in
-        fetch_all rest
-  in
-  fetch_all !urls
+  Lwt.join !prefetch_tasks
 
 (* Check if position is within available data range *)
 let in_range ~size:_ ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =

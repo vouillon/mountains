@@ -51,3 +51,6 @@ val load_tiles :
 (** Load CLC tiles. Returns: (dem_min_lon, dem_min_lat, dem_range_lon,
     dem_range_lat, tiles list) Each tile in the list has: (tile_data,
     tile_range_lon, tile_range_lat) *)
+
+val prefetch : size:int -> lat:float -> lon:float -> unit Lwt.t
+(** Prefetch CLC tiles for the given range. *)

@@ -2,6 +2,15 @@
 
 open Bigarray
 
+let ( let* ) = Lwt.bind
+
+(* Convert Lwt future to Lwt promise *)
+let to_lwt f =
+  let t, u = Lwt.task () in
+  ( Fut.await f @@ fun v ->
+    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
+  t
+
 (* CLC tile header info *)
 type clc_header = {
   count : int;
@@ -137,12 +146,41 @@ let tile_name lat lon =
 (* Tile path for fetching *)
 let tile_path lat lon = "data/clc/" ^ tile_name lat lon
 
-(* Convert Lwt future to Lwt promise *)
-let to_lwt f =
-  let t, u = Lwt.task () in
-  ( Fut.await f @@ fun v ->
-    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
-  t
+let ( // ) x y =
+  let q = x / y in
+  let r = x mod y in
+  if r >= 0 then q else q - 1
+
+let rec parallel_iter min max f =
+  if min > max then Lwt.return ()
+  else Lwt.join [ f min; parallel_iter (min + 1) max f ]
+
+let prefetch_tile ~lat ~lon =
+  let open Lwt.Syntax in
+  let f = tile_path (float lat +. 0.5) (float lon +. 0.5) in
+  let request = Brr_io.Fetch.Request.v (Jstr.v f) in
+  let* cache =
+    to_lwt
+      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) (Jstr.v "v1"))
+  in
+  let* response = to_lwt (Brr_io.Fetch.Cache.match' cache request) in
+  match response with
+  | Some response when Brr_io.Fetch.Response.ok response -> Lwt.return ()
+  | _ ->
+      Format.eprintf "Prefetching CLC %s@." f;
+      to_lwt (Brr_io.Fetch.Cache.add cache request)
+
+let prefetch ~size ~lat ~lon =
+  let min_lat = truncate (lat *. 3600.) - (size / 2) in
+  let min_lon = truncate (lon *. 3600.) - (size / 2) in
+  let max_lat = min_lat + size - 1 in
+  let max_lon = min_lon + size - 1 in
+  let* () =
+    parallel_iter ((min_lat - 1) // 3600) ((max_lat - 1) // 3600) @@ fun lat ->
+    parallel_iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
+    prefetch_tile ~lat ~lon
+  in
+  Lwt.return ()
 
 (* Converters *)
 let to_u8 jv =

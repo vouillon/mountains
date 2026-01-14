@@ -40,15 +40,6 @@ let display_temporary_message msg =
 let fog_linear = (0.17, 0.38, 0.79)
 let zenith_linear = (0.02, 0.12, 0.55)
 
-let loading_message () =
-  let open Brr.El in
-  v (Jstr.v "div")
-    [
-      v (Jstr.v "div")
-        ~at:[ Brr.At.style (Jstr.v "font-size: 20px; margin-bottom: 12px;") ]
-        [ txt (Jstr.v "Loading...") ];
-    ]
-
 (* Dem_loader provides direct loading of compressed .dem tiles *)
 
 let pi = 4. *. atan 1.
@@ -3516,8 +3507,9 @@ let main () =
   in
   let* tile, (_, _, _, _, tiles) = tile_loaders in
 
-  if use_geoloc then
-    Lwt.async (fun () -> Dem_loader.prefetch ~size:6144 ~lat ~lon);
+  if use_geoloc then (
+    Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
+    Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
   let y = (tile_height / 2) - 1 in
   let d = float x /. 3600. in
