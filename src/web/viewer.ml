@@ -3541,7 +3541,7 @@ let main () =
   init_anisotropic_filtering ctx;
   (* Start loading detail map immediately *)
   let detail_map = make_detail_map ctx in
-  Dem_loader.Worker_pool.init ();
+  Worker_pool.init ();
 
   display_message "Getting current location...";
   let* () = to_lwt wait_for_service_worker in

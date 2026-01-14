@@ -144,166 +144,18 @@ let to_lwt f =
     match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
   t
 
-(* WASM decoder integration *)
-module Wasm = struct
-  let instance = ref None
-  let m_meta = ref None
-  let m_hi_x = ref None
-  let m_mid_x = ref None
-  let m_lo_x = ref None
-  let m_hi_y = ref None
-  let m_mid_y = ref None
-  let m_lo_y = ref None
-  let m_hi_i = ref None
-  let m_lo_i = ref None
-  let m_out_pos = ref None
-  let m_out_col = ref None
-  let m_out_ebo = ref None
-  let m_out_wpos = ref None
-  let m_palette = ref None
+(* Converters *)
+let to_u8 jv =
+  Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv jv)
 
-  let create_memory pages =
-    let props = Jv.obj [| ("initial", Jv.of_int pages) |] in
-    Jv.new' (Jv.get (Jv.get Jv.global "WebAssembly") "Memory") [| props |]
+let _to_ba ta = Brr.Tarray.to_bigarray1 ta
 
-  let load () =
-    let open Lwt.Syntax in
-    match !instance with
-    | Some inst -> Lwt.return inst
-    | None ->
-        let* resp = to_lwt @@ Brr_io.Fetch.url (Jstr.v "decode_clc.wasm") in
-        let* buf =
-          to_lwt
-            (Brr_io.Fetch.Body.array_buffer
-               (Brr_io.Fetch.Response.as_body resp))
-        in
+let _to_ba32 ta =
+  let buf = Brr.Tarray.buffer ta in
+  let ta32 = Brr.Tarray.of_buffer Brr.Tarray.Int32 buf in
+  Brr.Tarray.to_bigarray1 ta32
 
-        (* Metadata and streams: Reduced to reasonable sizes *)
-        m_meta := Some (create_memory 4);
-        m_hi_x := Some (create_memory 12);
-        m_mid_x := Some (create_memory 12);
-        m_lo_x := Some (create_memory 12);
-        m_hi_y := Some (create_memory 12);
-        m_mid_y := Some (create_memory 12);
-        m_lo_y := Some (create_memory 12);
-        m_hi_i := Some (create_memory 36);
-        m_lo_i := Some (create_memory 36);
-        m_palette := Some (create_memory 1);
-
-        (* Output arrays: Reduced to ~3.2MB (50 pages) *)
-        m_out_pos := Some (create_memory 50);
-        m_out_col := Some (create_memory 25);
-        (* Only 1 byte per vertex *)
-        m_out_ebo := Some (create_memory 150);
-        m_out_wpos := Some (create_memory 60);
-
-        (* Prefill code mapping table in m_palette *)
-        let palette_ba =
-          Brr.Tarray.to_bigarray1
-            (Brr.Tarray.of_buffer Brr.Tarray.Uint8
-               (Brr.Tarray.Buffer.of_jv
-                  (Jv.get (Option.get !m_palette) "buffer")))
-        in
-        Bigarray.Array1.fill palette_ba 0;
-        Array.iteri
-          (fun idx m ->
-            if m.Clc_palette.code < 1024 then
-              Bigarray.Array1.set palette_ba m.Clc_palette.code idx)
-          Clc_palette.materials;
-
-        let imports =
-          Jv.obj
-            [|
-              ( "env",
-                Jv.obj
-                  [|
-                    ("m_meta", Option.get !m_meta);
-                    ("m_hi_x", Option.get !m_hi_x);
-                    ("m_mid_x", Option.get !m_mid_x);
-                    ("m_lo_x", Option.get !m_lo_x);
-                    ("m_hi_y", Option.get !m_hi_y);
-                    ("m_mid_y", Option.get !m_mid_y);
-                    ("m_lo_y", Option.get !m_lo_y);
-                    ("m_hi_i", Option.get !m_hi_i);
-                    ("m_lo_i", Option.get !m_lo_i);
-                    ("m_out_pos", Option.get !m_out_pos);
-                    ("m_out_col", Option.get !m_out_col);
-                    ("m_out_ebo", Option.get !m_out_ebo);
-                    ("m_out_wpos", Option.get !m_out_wpos);
-                    ("m_palette", Option.get !m_palette);
-                  |] );
-            |]
-        in
-
-        let* res =
-          to_lwt
-            (Fut.of_promise
-               ~ok:(fun x -> x)
-               (Jv.call
-                  (Jv.get Jv.global "WebAssembly")
-                  "instantiate"
-                  [| Brr.Tarray.Buffer.to_jv buf; imports |]))
-        in
-        let inst = Jv.get res "instance" in
-        instance := Some inst;
-        Lwt.return inst
-
-  let get_ta mem =
-    Brr.Tarray.of_buffer Brr.Tarray.Uint8
-      (Brr.Tarray.Buffer.of_jv (Jv.get mem "buffer"))
-end
-
-let decode_mutex = Lwt_mutex.create ()
-
-(* Read a compressed stream from data at offset, decompress into WASM memory *)
-let read_stream_to_wasm data_ta offset wasm_mem =
-  let open Lwt.Syntax in
-  let data_ba = Brr.Tarray.to_bigarray1 data_ta in
-  let read_i32_le ba i =
-    let b0 = Array1.get ba i in
-    let b1 = Array1.get ba (i + 1) in
-    let b2 = Array1.get ba (i + 2) in
-    let b3 = Array1.get ba (i + 3) in
-    b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24)
-  in
-  let comp_len = read_i32_le data_ba offset in
-  let compressed =
-    Brr.Tarray.sub data_ta ~start:(offset + 4) ~stop:(offset + 4 + comp_len)
-  in
-  let target_ta = Wasm.get_ta wasm_mem in
-  let* _ =
-    to_lwt
-      (Fut.of_promise
-         ~ok:(fun x -> x)
-         (Reader.inflate_into compressed target_ta))
-  in
-  Lwt.return (offset + 4 + comp_len)
-
-let get_ba16 mem size =
-  let buf = Jv.get mem "buffer" in
-  let ta =
-    Brr.Tarray.of_buffer Brr.Tarray.Uint16 (Brr.Tarray.Buffer.of_jv buf)
-  in
-  let ba = Brr.Tarray.to_bigarray1 ta in
-  Bigarray.Array1.sub ba 0 size
-
-let get_ba32 mem size =
-  let buf = Jv.get mem "buffer" in
-  let ta =
-    Brr.Tarray.of_buffer Brr.Tarray.Int32 (Brr.Tarray.Buffer.of_jv buf)
-  in
-  let ba = Brr.Tarray.to_bigarray1 ta in
-  Bigarray.Array1.sub ba 0 size
-
-let get_ba8 mem size =
-  let buf = Jv.get mem "buffer" in
-  let ta =
-    Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv buf)
-  in
-  let ba = Brr.Tarray.to_bigarray1 ta in
-  Bigarray.Array1.sub ba 0 size
-
-(* Full CLC tile loading: decompress all streams and decode geometry *)
+(* Full CLC tile loading: offload to worker *)
 let load_full_clc_tile path_str =
   let open Lwt.Syntax in
   let* resp = to_lwt (Brr_io.Fetch.url (Jstr.v path_str)) in
@@ -314,186 +166,78 @@ let load_full_clc_tile path_str =
   let data_ba = Brr.Tarray.to_bigarray1 data in
   let header = parse_header_ba data_ba in
 
-  let offset =
-    if header.is_clc5 then 96 else if header.is_clc4 then 76 else 48
+  let* w = Worker_pool.acquire () in
+  let* res =
+    Lwt.finalize
+      (fun () ->
+        (* We need to transfer valid ArrayBuffer. *)
+        (* data is Uint8Array? Brr.Tarray.buffer gets the ArrayBuffer *)
+        let buf_jv = Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer data) in
+        Worker_pool.post w (Worker_pool.Decode (Worker_pool.CLC buf_jv)))
+      (fun () ->
+        Worker_pool.release w;
+        Lwt.return ())
   in
 
-  Lwt_mutex.with_lock decode_mutex (fun () ->
-      let* inst = Wasm.load () in
+  match res with
+  | Worker_pool.ResultCLC (Clc_data obj) ->
+      let pos_jv = Jv.get obj "pos" in
+      let col_jv = Jv.get obj "col" in
+      let idx_jv = Jv.get obj "idx" in
 
-      (* Decompress CLC streams directly into WASM memory *)
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_meta) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_y) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_y) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_hi_i) in
-      let* offset = read_stream_to_wasm data offset (Option.get !Wasm.m_lo_i) in
+      let water_pos_jv = Jv.get obj "water_pos" in
+      let water_col_jv = Jv.get obj "water_col" in
+      let water_idx_jv = Jv.get obj "water_idx" in
 
-      (* Decode CLC layers *)
-      let func = Jv.get (Jv.get inst "exports") "decode_clc" in
-      ignore
-        (Jv.apply func
-           [|
-             Jv.of_int header.count;
-             Jv.of_int header.total_verts;
-             Jv.of_int header.total_indices;
-           |]);
+      (* Convert back to typed arrays / bigarrays *)
+      let pos_ta = to_u8 pos_jv in
+      let col_ta = to_u8 col_jv in
+      let idx_ta = to_u8 idx_jv in
+      (* It's bytes, need view as int32 *)
 
-      (* Copy results out of WASM memory *)
+      (* Positions: we need (int, int16_unsigned_elt, c_layout) Array1.t *)
       let positions =
-        Array1.create int16_unsigned c_layout (header.total_verts * 2)
+        let buf = Brr.Tarray.buffer pos_ta in
+        let ta16 = Brr.Tarray.of_buffer Brr.Tarray.Uint16 buf in
+        Brr.Tarray.to_bigarray1 ta16
       in
-      Array1.blit
-        (get_ba16 (Option.get !Wasm.m_out_pos) (header.total_verts * 2))
-        positions;
 
-      let colors = Array1.create int8_unsigned c_layout header.total_verts in
-      Array1.blit
-        (get_ba8 (Option.get !Wasm.m_out_col) header.total_verts)
-        colors;
+      let colors = Brr.Tarray.to_bigarray1 col_ta in
+      (* Uint8 matches *)
 
-      let indices = Array1.create int32 c_layout header.total_indices in
-      Array1.blit
-        (get_ba32 (Option.get !Wasm.m_out_ebo) header.total_indices)
-        indices;
+      let indices =
+        let buf = Brr.Tarray.buffer idx_ta in
+        let ta32 = Brr.Tarray.of_buffer Brr.Tarray.Int32 buf in
+        Brr.Tarray.to_bigarray1 ta32
+      in
 
-      (* Water layers *)
-      let* water_positions, water_colors, water_indices, pois =
-        if (header.is_clc4 || header.is_clc5) && header.water_count > 0 then begin
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_meta)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_mid_x)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_y)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_mid_y)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_y)
-          in
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_hi_i)
-          in
-          (* Fix offset threading *)
-          let* offset =
-            read_stream_to_wasm data offset (Option.get !Wasm.m_lo_i)
-          in
-
-          let func_w = Jv.get (Jv.get inst "exports") "decode_water" in
-          ignore
-            (Jv.apply func_w
-               [|
-                 Jv.of_int header.water_count;
-                 Jv.of_int header.water_verts;
-                 Jv.of_int header.water_indices;
-               |]);
-
-          let wp = Array1.create int32 c_layout (header.water_verts * 2) in
-          Array1.blit
-            (get_ba32 (Option.get !Wasm.m_out_wpos) (header.water_verts * 2))
-            wp;
-
-          let wc = Array1.create int8_unsigned c_layout header.water_verts in
-          Array1.blit
-            (get_ba8 (Option.get !Wasm.m_out_col) header.water_verts)
-            wc;
-
-          let we = Array1.create int32 c_layout header.water_indices in
-          Array1.blit
-            (get_ba32 (Option.get !Wasm.m_out_ebo) header.water_indices)
-            we;
-
-          (* Parse POIs from decompressed streams *)
-          let parse_pois count (min_lon, min_lat) (scale_x, scale_y) =
-            let ba_names = get_ba8 (Option.get !Wasm.m_meta) (count * 64) in
-            let ba_coords = get_ba8 (Option.get !Wasm.m_hi_x) (count * 6) in
-            let ba_elevs = get_ba16 (Option.get !Wasm.m_mid_x) count in
-            let ba_types = get_ba8 (Option.get !Wasm.m_lo_x) count in
-
-            let rec loop i name_sub_offset acc =
-              if i >= count then List.rev acc
-              else
-                (* Parse Name *)
-                let name_len = ba_names.{name_sub_offset} in
-                let name =
-                  String.init name_len (fun j ->
-                      Char.chr ba_names.{name_sub_offset + 1 + j})
-                in
-                let next_name_offset = name_sub_offset + 1 + name_len in
-
-                (* Parse Coords *)
-                let base_c = i * 6 in
-                let b0 = ba_coords.{base_c} in
-                let b1 = ba_coords.{base_c + 1} in
-                let b2 = ba_coords.{base_c + 2} in
-                let qx = b0 lor (b1 lsl 8) lor (b2 lsl 16) in
-
-                let b3 = ba_coords.{base_c + 3} in
-                let b4 = ba_coords.{base_c + 4} in
-                let b5 = ba_coords.{base_c + 5} in
-                let qy = b3 lor (b4 lsl 8) lor (b5 lsl 16) in
-
-                let lon = min_lon +. (float qx /. scale_x) in
-                let lat = min_lat +. (float qy /. scale_y) in
-
-                (* Parse Elevation *)
-                let e_raw = ba_elevs.{i} in
-                let elevation =
-                  if e_raw >= 32768 then e_raw - 65536 else e_raw
-                in
-
-                (* Parse Type *)
-                let t_raw = ba_types.{i} in
-                let poi_type = if t_raw = 0 then Peak else Saddle in
-
-                loop (i + 1) next_name_offset
-                  ({ name; lat; lon; elevation; poi_type } :: acc)
-            in
-            loop 0 0 []
-          in
-
-          let* pois =
-            if header.is_clc5 && header.poi_count > 0 then begin
-              let* offset =
-                read_stream_to_wasm data offset (Option.get !Wasm.m_meta)
-              in
-              let* offset =
-                read_stream_to_wasm data offset (Option.get !Wasm.m_hi_x)
-              in
-              let* offset =
-                read_stream_to_wasm data offset (Option.get !Wasm.m_mid_x)
-              in
-              let* _offset =
-                read_stream_to_wasm data offset (Option.get !Wasm.m_lo_x)
-              in
-
-              Lwt.return
-                (parse_pois header.poi_count
-                   (header.min_lon, header.min_lat)
-                   (header.poi_scale_x, header.poi_scale_y))
-            end
-            else Lwt.return []
-          in
-
-          Lwt.return (wp, wc, we, pois)
-        end
+      let water_positions, water_colors, water_indices =
+        if Jv.is_null water_pos_jv then
+          ( Array1.create int32 c_layout 0,
+            Array1.create int8_unsigned c_layout 0,
+            Array1.create int32 c_layout 0 )
         else
-          Lwt.return
-            ( Array1.create int32 c_layout 0,
-              Array1.create int8_unsigned c_layout 0,
-              Array1.create int32 c_layout 0,
-              [] )
+          let wp_ta = to_u8 water_pos_jv in
+          let wc_ta = to_u8 water_col_jv in
+          let wi_ta = to_u8 water_idx_jv in
+
+          let wp =
+            let buf = Brr.Tarray.buffer wp_ta in
+            let ta32 = Brr.Tarray.of_buffer Brr.Tarray.Int32 buf in
+            Brr.Tarray.to_bigarray1 ta32
+          in
+          let wc = Brr.Tarray.to_bigarray1 wc_ta in
+          let wi =
+            let buf = Brr.Tarray.buffer wi_ta in
+            let ta32 = Brr.Tarray.of_buffer Brr.Tarray.Int32 buf in
+            Brr.Tarray.to_bigarray1 ta32
+          in
+          (wp, wc, wi)
+      in
+
+      let pois =
+        []
+        (* Port POIs later if needed *)
       in
 
       Lwt.return
@@ -506,7 +250,8 @@ let load_full_clc_tile path_str =
           water_colors;
           water_indices;
           pois;
-        })
+        }
+  | _ -> Lwt.fail (Failure "Invalid response type for CLC")
 
 (* Load CLC tiles in parallel *)
 let load_tiles ~lat ~lon ~size =

@@ -39,92 +39,6 @@ let to_lwt f =
 
 (* Worker Manager *)
 (* Worker Pool Manager *)
-module Worker_pool = struct
-  type request = Decode of { data : Jv.t }
-  type response = Result of (int, int8_unsigned_elt, c_layout) Array1.t
-
-  type worker_handle = {
-    worker : Brr_webworkers.Worker.t;
-    pending : response Lwt.u Queue.t;
-    mutable in_use : bool;
-  }
-
-  let pool_size = 4
-  let pool = ref [||]
-  let waiting_queue = Queue.create ()
-
-  let create_worker () =
-    let worker = Brr_webworkers.Worker.create (Jstr.v "worker.bc.js") in
-    let pending = Queue.create () in
-
-    (* Listener *)
-    let on_msg e =
-      if Queue.is_empty pending then ()
-      else
-        let resolver = Queue.pop pending in
-        let data = Brr.Ev.as_type e |> Brr_io.Message.Ev.data in
-        let type_ = Jv.get data "type" |> Jv.to_string in
-        match type_ with
-        | "result" ->
-            let buffer_jv = Jv.get data "data" in
-            let ta =
-              Brr.Tarray.of_buffer Brr.Tarray.Uint8
-                (Brr.Tarray.Buffer.of_jv buffer_jv)
-            in
-            let ba = Brr.Tarray.to_bigarray1 ta in
-            Lwt.wakeup resolver (Result ba)
-        | _ -> ()
-    in
-    ignore
-      (Brr.Ev.listen Brr_io.Message.Ev.message on_msg
-         (Brr_webworkers.Worker.as_target worker));
-    { worker; pending; in_use = false }
-
-  let init () =
-    if Array.length !pool = 0 then
-      pool := Array.init pool_size (fun _ -> create_worker ())
-
-  let acquire () =
-    let open Lwt.Syntax in
-    (* Find available worker *)
-    let available = Array.find_opt (fun w -> not w.in_use) !pool in
-    match available with
-    | Some w ->
-        w.in_use <- true;
-        Lwt.return w
-    | None ->
-        (* Wait for a worker *)
-        let t, u = Lwt.task () in
-        Queue.push u waiting_queue;
-        let* w = t in
-        (* Check validation? Or just assume it is ours now *)
-        (* When we are woken up, the worker is already marked/reserved for us?
-           Or we just retry? 
-           Let's say `release` passes the worker to us.
-        *)
-        Lwt.return w
-
-  let release w =
-    if not (Queue.is_empty waiting_queue) then
-      (* Pass worker directly to next waiter *)
-      let u = Queue.pop waiting_queue in
-      Lwt.wakeup u w
-    else w.in_use <- false
-
-  let post w req =
-    let t, u = Lwt.task () in
-    Queue.push u w.pending;
-    let msg, transfer =
-      let open Jv in
-      match req with
-      | Decode { data } ->
-          ( obj [| ("type", of_string "decode"); ("data", data) |],
-            [ Obj.magic data ] )
-    in
-    Brr_webworkers.Worker.post w.worker msg
-      ~opts:(Brr_io.Message.opts ~transfer ());
-    t
-end
 
 (* Path to a sub-tile file *)
 let path ~lat ~lon ~row ~col =
@@ -218,13 +132,13 @@ let load ~lat ~lon ~size =
               let* res =
                 Lwt.finalize
                   (fun () ->
-                    Worker_pool.post w (Worker_pool.Decode { data = data_jv }))
+                    Worker_pool.post w (Worker_pool.Decode (DEM data_jv)))
                   (fun () ->
                     Worker_pool.release w;
                     Lwt.return ())
               in
               match res with
-              | Worker_pool.Result ba ->
+              | Worker_pool.ResultDEM { heights = ba } ->
                   (* Blit sub-tile into full buffer. *)
                   let sub_width = 1200 in
 
@@ -260,6 +174,7 @@ let load ~lat ~lon ~size =
                         (Array1.sub full_ba dst_idx len)
                   done;
                   Lwt.return ()
+              | _ -> Lwt.fail (Failure "Unexpected worker response for DEM")
             in
             tasks := task () :: !tasks
           end

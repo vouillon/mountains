@@ -92,7 +92,6 @@
 (rule
  (target decompress_tile.wasm)
  (deps decompress_tile.wat)
- (mode promote)
  (action
   (run
    wasm-opt
@@ -107,7 +106,6 @@
 (rule
  (target decode_clc.wasm)
  (deps decode_clc.wat)
- (mode promote)
  (action
   (run
    wasm-opt
