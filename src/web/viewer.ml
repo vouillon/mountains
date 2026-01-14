@@ -3575,6 +3575,17 @@ let create_location_ui ~size =
         Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
   in
 
+  ignore
+    (Brr.Ev.listen Brr.Ev.keydown
+       (fun e ->
+         let key = Jstr.to_string (Brr.Ev.Keyboard.key (Brr.Ev.as_type e)) in
+         if key = "Enter" then go ()
+         else if
+           key = "ArrowUp" || key = "ArrowDown" || key = "ArrowLeft"
+           || key = "ArrowRight"
+         then Brr.Ev.stop_propagation e)
+       (Brr.El.as_target input));
+
   ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
 
   (* Current Location *)
@@ -3660,11 +3671,15 @@ let create_location_ui ~size =
         [ Brr.El.txt (Jstr.v "Featured") ];
       location_list;
     ];
-  ()
+
+  fun visible ->
+    Brr.El.set_inline_style (Jstr.v "display")
+      (Jstr.v (if visible then "flex" else "none"))
+      current_loc_btn
 
 let main () =
   let tile_width = 4098 in
-  create_location_ui ~size:tile_width;
+  let set_loc_visible = create_location_ui ~size:tile_width in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
@@ -3690,6 +3705,7 @@ let main () =
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with
+  | Preset -> set_loc_visible false
   | Url -> ()
   | _ ->
       let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
