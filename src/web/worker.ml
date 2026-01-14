@@ -240,16 +240,22 @@ let decode_clc_dataset ~inst msg =
     p
   in
 
-  let m_meta = alloc (count * 6) in
-  let m_hi_x = alloc total_verts in
-  let m_lo_x = alloc total_verts in
-  let m_hi_y = alloc total_verts in
-  let m_lo_y = alloc total_verts in
-  let m_hi_i = alloc total_indices in
-  let m_lo_i = alloc total_indices in
+  (* Allocate buffers large enough for either CLC or Water decoders *)
+  let max_count = max count water_count in
+  let max_verts = max total_verts water_verts in
+  let max_indices = max total_indices water_indices in
+
+  let m_meta = alloc (max_count * 6) in
+  let m_hi_x = alloc max_verts in
+  let m_lo_x = alloc max_verts in
+  let m_hi_y = alloc max_verts in
+  let m_lo_y = alloc max_verts in
+  let m_hi_i = alloc max_indices in
+  let m_lo_i = alloc max_indices in
   let m_out_pos = alloc (total_verts * 4) in
-  let m_out_col = alloc total_verts in
-  let m_out_ebo = alloc (total_indices * 4) in
+
+  let m_out_col = alloc max_verts in
+  let m_out_ebo = alloc (max_indices * 4) in
   let m_palette = alloc 1024 in
 
   let m_mid_x, m_mid_y, m_out_wpos =

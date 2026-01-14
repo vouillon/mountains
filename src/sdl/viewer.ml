@@ -378,7 +378,7 @@ let relief_program =
         void main() {
           float x = float(gl_VertexID & 1);
           float y = float(gl_VertexID >> 1);
-          tileCoord = vec2(x, y) * (size - 1.) + vec2(1.5, 1.5);
+          tileCoord = vec2(x, y) * (size - 1.) + vec2(0.5, 0.5);
           gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
         }
       |};
@@ -392,7 +392,7 @@ let relief_program =
         out mediump vec4 color;
 
         float get_z(vec2 offset) {
-            return texture(tile, (tileCoord + offset) / (size + 2.)).r;
+            return texture(tile, (tileCoord + offset) / size).r;
         }
 
         void main() {
@@ -1112,12 +1112,12 @@ let main () =
   Format.eprintf "ZZZZ %d %d %d %f@." tile_index x y tile.{y, x};
 *)
   let tile_width =
-    4098
+    4096
     (*2050*)
   in
   let tile_height = tile_width in
   (* Check that it is a power of two *)
-  assert ((tile_width - 2) land (tile_width - 3) = 0);
+  assert (tile_width land (tile_width - 1) = 0);
   let** tile = Loader.f ~size:tile_width ~lat ~lon in
   let x = tile_width / 2 in
   let y = (tile_height / 2) - 1 in
@@ -1161,8 +1161,8 @@ let main () =
     height;
 
   match
-    tri ~gl:(3, 0) ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~lat ~lon
-      ~angle ~height ~points ~tile
+    tri ~gl:(3, 0) ~w:tile_width ~h:tile_height ~x ~y ~lat ~lon ~angle ~height
+      ~points ~tile
   with
   | Ok () -> exit 0
   | Error (`Msg msg) ->

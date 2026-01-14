@@ -146,32 +146,33 @@ let terrain_program =
 
           // Manual bilinear interpolation for 2-byte height
           // Normalized Coordinate (0..1)
-          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
-          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
+          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
 
           // Coordinate in LOD texels
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
 
           // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
-          highp vec2 base_f = floor(lod_tex_pos - 0.5);
-          highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(lod_tex_pos - 0.5);
-          highp ivec2 w_max = tex_size - 1;
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+          highp ivec2 base = ivec2(lod_tex_pos);
+          highp vec2 f = fract(lod_tex_pos);
 
-          // Vectorized Fetch & Decode
-          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
-          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+          // Fetch 4 samples and decode height
+          highp vec2 s00 = texelFetch(relief, base, lod).rg;
+          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
+          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
+          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
 
-          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
-          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
-          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
+          // Decode heights: high*256 + low, scaled to [-500, 9000]
+          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+          highp vec4 H = vec4(
+            dot(s00, vec2(256.0, 1.0)),
+            dot(s10, vec2(256.0, 1.0)),
+            dot(s01, vec2(256.0, 1.0)),
+            dot(s11, vec2(256.0, 1.0))
+          ) * HEIGHT_SCALE - 500.0;
 
-          highp float h0 = mix(H.x, H.y, f.x);
-          highp float h1 = mix(H.z, H.w, f.x);
-          highp float z = mix(h0, h1, f.y);
+          highp float z = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 
           reliefCoord = norm_coord + (0.5 * inv_w);
 
@@ -1022,32 +1023,32 @@ let shadow_program =
           ivec2 tex_size = textureSize(relief, lod);
 
           // Manual bilinear interpolation for 2-byte height
-          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
-          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
+          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
 
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
 
           // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
-          highp vec2 base_f = floor(lod_tex_pos - 0.5);
-          highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(lod_tex_pos - 0.5);
-          highp ivec2 w_max = tex_size - 1;
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+          highp ivec2 base = ivec2(lod_tex_pos);
+          highp vec2 f = fract(lod_tex_pos);
 
-          // Vectorized Fetch & Decode
-          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
-          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+          // Fetch 4 samples and decode height
+          highp vec2 s00 = texelFetch(relief, base, lod).rg;
+          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
+          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
+          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
 
-          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
-          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
+          // Decode heights: high*256 + low, scaled to [-500, 9000]
+          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+          highp vec4 H = vec4(
+            dot(s00, vec2(256.0, 1.0)),
+            dot(s10, vec2(256.0, 1.0)),
+            dot(s01, vec2(256.0, 1.0)),
+            dot(s11, vec2(256.0, 1.0))
+          ) * HEIGHT_SCALE - 500.0;
 
-          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
-
-          float h0 = mix(H.x, H.y, f.x);
-          float h1 = mix(H.z, H.w, f.x);
-          float h = mix(h0, h1, f.y);
+          float h = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 
           gl_Position = shadow_view_proj * vec4(world_pos.x, world_pos.y, h, 1.0);
         }
@@ -1756,8 +1757,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   (* Set all uniforms using cached locations *)
   Gl.uniform1i ctx shadow_uniforms.w_mask w_mask_radial;
   Gl.uniform1i ctx shadow_uniforms.w_shift w_shift_radial;
-  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div
-    (1. /. (float n_sectors /. 2.));
+  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div (1. /. float n_sectors);
   Gl.uniform1f ctx shadow_uniforms.grid_k grid_k;
   Gl.uniform1f ctx shadow_uniforms.grid_base grid_base;
   Gl.uniform1f ctx shadow_uniforms.grid_scale grid_scale;
@@ -1775,8 +1775,8 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   (* Center Offset *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float y +. off_y) in
   Gl.uniform2f ctx shadow_uniforms.center_offset center_offset_x center_offset_y;
 
   (* Bind Relief Texture *)
@@ -1896,8 +1896,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let px = deltax *. float (x' - x) in
-        let py = deltay *. float (y - y') in
+        let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+        let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+        let px = deltax *. (float (x' - x) -. off_x) in
+        let py = deltay *. (float (y - y') -. off_y) in
         let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
@@ -1933,8 +1935,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   if not !shadow_rendered then begin
     shadow_rendered := true;
     draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x ~y
-      ~lat ~lon ~w ctx;
+      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x
+      ~y:(w - y) ~lat ~lon ~w ctx;
     (* Rebind terrain textures after draw_shadows disturbed them *)
     bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
       ~shadow_map ~cover_map_texture ~palette_texture
@@ -2078,8 +2080,6 @@ let event_loop ctx draw =
 
 (* Main *)
 
-(* compute_gradient_cpu removed *)
-
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let mipmap_program =
@@ -2178,7 +2178,7 @@ let copy_program =
     attributes = [ "position" ];
   }
 
-let gradient_program =
+let normal_program =
   {
     vertex_shader =
       {|#version 300 es
@@ -2187,7 +2187,7 @@ let gradient_program =
         void main() {
           float x = float(gl_VertexID & 1);
           float y = float(gl_VertexID >> 1);
-          tileCoord = vec2(x, y) * (size - 1.) + vec2(1.5, 1.5);
+          tileCoord = vec2(x, y) * (size - 1.) + vec2(0.5, 0.5);
           gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
         }
       |};
@@ -2203,7 +2203,7 @@ let gradient_program =
         float get_z(vec2 offset) {
             // Decode from RG8: R=low byte, G=high byte (little-endian)
             // Samples are in [0, 1], need to multiply by 255 to get 0..255
-            vec2 rg = texture(tile, (tileCoord + offset) / (size + 2.)).rg * 255.0;
+            vec2 rg = texture(tile, (tileCoord + offset) / size).rg * 255.0;
             float h_val = rg.g * 256.0 + rg.r;
             // Convert back to meters: u16 range maps to -500 to 9000
             return h_val * (9500.0 / 65535.0) - 500.0;
@@ -2244,7 +2244,7 @@ let gradient_program =
     attributes = [];
   }
 
-let compute_relief ctx width height triangle_geo tile_texture relief_pid
+let compute_relief ctx width height triangle_geo tile_texture normal_pid
     mipmap_pid copy_pid (u : Render_state.relief_uniforms)
     (mipmap_u : Render_state.mipmap_uniforms)
     (copy_u : Render_state.copy_uniforms) =
@@ -2276,15 +2276,15 @@ let compute_relief ctx width height triangle_geo tile_texture relief_pid
   Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
     0;
   Gl.viewport ctx 0 0 width height;
-  Gl.use_program ctx relief_pid;
-  (* Draw Gradient (Level 0) *)
+  Gl.use_program ctx normal_pid;
+  (* Draw normals (Level 0) *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
   Gl.uniform2f ctx u.size (float width) (float height);
 
-  (* Use default 44.0 latitude for gradient *)
+  (* Use default 44.0 latitude for normals *)
   let deltax = deltay *. cos (44. *. pi /. 180.) in
   Gl.uniform2f ctx u.delta deltax deltay;
 
@@ -2400,8 +2400,8 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   let ebo = Gl.create_buffer ctx in
 
   (* Conversion factors *)
-  let meters_per_deg_lat = 111132.0 in
-  let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
+  let meters_per_deg_lat = 40_000_000. /. 360. in
+  let meters_per_deg_lon = meters_per_deg_lat *. cos (lat *. pi /. 180.) in
 
   (* Pre-calculate view bounds for each level *)
   let level_bounds =
@@ -2443,8 +2443,6 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
 
   (* Set water-specific static uniforms *)
-  Gl.uniform1f ctx water_u.u_water_scale 220000.0;
-
   List.iter
     (fun (tile, tile_range_lon, tile_range_lat) ->
       let water_index_count =
@@ -2456,6 +2454,10 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
         let t_min_lat = header.Clc_loader.min_lat in
         let t_max_lon = t_min_lon +. tile_range_lon in
         let t_max_lat = t_min_lat +. tile_range_lat in
+
+        (* Set varying water scale from header to normalize 0..1 *)
+        Gl.uniform1f ctx water_u.u_water_scale
+          (tile_range_lon *. header.Clc_loader.water_scale_x);
 
         (* Check if tile intersects ANY level before uploading *)
         let visible_any =
@@ -2610,7 +2612,7 @@ type graphics_resources = {
   shadow_fbo : Gl.framebuffer;
   shadow_uniforms : Render_state.shadow_uniforms;
   sky_pid : Gl.program;
-  relief_pid : Gl.program;
+  normal_pid : Gl.program;
   mipmap_pid : Gl.program;
   copy_pid : Gl.program;
   ao_bake_pid : Gl.program;
@@ -2641,7 +2643,7 @@ let init_graphics ctx =
   let text_pid = create_program ctx text_program in
   let shadow_pid = create_program ctx shadow_program in
   let sky_pid = create_program ctx sky_program in
-  let relief_pid = create_program ctx gradient_program in
+  let normal_pid = create_program ctx normal_program in
   let mipmap_pid = create_program ctx mipmap_program in
   let copy_pid = create_program ctx copy_program in
   let ao_bake_pid = create_program ctx ao_bake_program in
@@ -2706,7 +2708,7 @@ let init_graphics ctx =
   Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
   Render_state.upload_texture_units_shadow ctx shadow_uniforms;
 
-  let relief_uniforms = Render_state.init_relief_uniforms ctx relief_pid in
+  let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
   let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
   let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
   let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
@@ -2737,7 +2739,7 @@ let init_graphics ctx =
     shadow_map;
     shadow_fbo;
     shadow_uniforms;
-    relief_pid;
+    normal_pid;
     mipmap_pid;
     copy_pid;
     relief_uniforms;
@@ -2772,7 +2774,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     shadow_map;
     shadow_fbo;
     shadow_uniforms;
-    relief_pid;
+    normal_pid;
     mipmap_pid;
     copy_pid;
     relief_uniforms;
@@ -2791,7 +2793,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
-    compute_relief ctx w h triangle_geo tile_texture relief_pid mipmap_pid
+    compute_relief ctx w h triangle_geo tile_texture normal_pid mipmap_pid
       copy_pid relief_uniforms mipmap_uniforms copy_uniforms
   in
   let points =
@@ -2862,8 +2864,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float (h - y) +. off_y) in
   let world_center =
     Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
   in
@@ -2874,8 +2876,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Upload all session-static uniforms *)
   Render_state.upload_session_static ctx terrain_pid sky_pid terrain_uniforms
-    sky_uniforms ~w ~lat ~x ~y ~lon ~light_dir:light_dir_shader ~shadow_matrices
-    ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
+    sky_uniforms ~w ~lat ~x ~y:(h - y) ~lon ~light_dir:light_dir_shader
+    ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
+    ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
   let cover_map_size = 1024 in
@@ -2977,18 +2980,20 @@ let wait_for_service_worker =
 let featured_locations =
   [
     ("Col Girardin", 44.6078064, 6.8210935, 220.);
-    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 170.);
+    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50.);
     ("Col du Blainon", 44.209067, 6.9423065, 0.);
     ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40.);
     ("Vallon de la Braïssa", 44.280097, 6.793942, 0.);
-    ("Lacs de Morgon", 44.336025, 6.907772, 0.);
-    ("Roc Diolon (Orcières)", 44.73365, 6.3630684, 0.);
+    ("Lacs de Morgon", 44.336516, 6.913906, 0.);
+    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0.);
     ("Col Fromage", 44.6896583, 6.8061028, 180.);
-    ("Embrun", 44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.);
     ("La Mortice Sud", 44.573885, 6.7694, 0.);
     ("Le Sommet Rouge", 44.5740068, 6.7954285, 0.);
     ("Col de la Braïssa", 44.278358, 6.790589, 0.);
     ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0.);
+    ("Pic de Morgon", 44.4920, 6.3975, 0.);
+    ("Lac de Roburent", 44.424680, 6.93430, 220.);
+    ("Mont Ténibre", 44.2839, 6.9719, 0.);
   ]
 
 let get_preset_position () =
@@ -3575,6 +3580,17 @@ let create_location_ui ~size =
         Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
   in
 
+  ignore
+    (Brr.Ev.listen Brr.Ev.keydown
+       (fun e ->
+         let key = Jstr.to_string (Brr.Ev.Keyboard.key (Brr.Ev.as_type e)) in
+         if key = "Enter" then go ()
+         else if
+           key = "ArrowUp" || key = "ArrowDown" || key = "ArrowLeft"
+           || key = "ArrowRight"
+         then Brr.Ev.stop_propagation e)
+       (Brr.El.as_target input));
+
   ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
 
   (* Current Location *)
@@ -3645,29 +3661,38 @@ let create_location_ui ~size =
       Brr.El.append_children location_list [ item ])
     featured_locations;
 
+  let quick_select_header =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+      [ Brr.El.txt (Jstr.v "Quick Select") ]
+  in
+
   Brr.El.append_children menu
     [
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
         [ Brr.El.txt (Jstr.v "Coordinates") ];
       input_group;
-      Brr.El.div
-        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
-        [ Brr.El.txt (Jstr.v "Quick Select") ];
+      quick_select_header;
       current_loc_btn;
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
         [ Brr.El.txt (Jstr.v "Featured") ];
       location_list;
     ];
-  ()
+
+  fun visible ->
+    let disp = Jstr.v (if visible then "flex" else "none") in
+    let disp_header = Jstr.v (if visible then "block" else "none") in
+    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
+    Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
 let main () =
-  let tile_width = 4098 in
-  create_location_ui ~size:tile_width;
+  let tile_width = 4096 in
+  let set_loc_visible = create_location_ui ~size:tile_width in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
-  assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
+  assert (tile_width land (tile_width - 1) = 0);
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
@@ -3690,6 +3715,7 @@ let main () =
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with
+  | Preset -> set_loc_visible false
   | Url -> ()
   | _ ->
       let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
@@ -3726,8 +3752,6 @@ let main () =
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let* points =
-    let width = 3600 in
-    let height = 3600 in
     (* Extract POIs from all loaded tiles and convert to Points.t format *)
     let pois =
       List.concat_map
@@ -3736,7 +3760,11 @@ let main () =
             (fun (poi : Clc_loader.poi) ->
               {
                 Points.name = poi.name;
-                coord = { Points.lat = poi.lat; lon = poi.lon };
+                coord =
+                  {
+                    Points.lat = floor ((poi.lat *. 3600.) +. 0.5) /. 3600.;
+                    lon = floor ((poi.lon *. 3600.) +. 0.5) /. 3600.;
+                  };
                 elevation =
                   (if poi.elevation = 0 then None else Some poi.elevation);
               })
@@ -3753,25 +3781,82 @@ let main () =
     in
     Lwt.return
       (filtered
-      |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-          let x =
-            min (tile_width - 1)
-              (truncate ((lon -. tile_coord.lon) *. float width))
-          in
-          let y =
-            min (tile_height - 1)
-              (truncate ((tile_coord'.lat -. lat) *. float height))
-          in
-          (pt, (x, y))))
+      |> List.map
+           (let size = tile_width in
+            let center_lon_int = truncate (lon *. 3600.) in
+            let center_lat_int = truncate (lat *. 3600.) in
+            let min_lon_int = center_lon_int - (size / 2) in
+            (* Top row index in arcseconds. See Clc_loader/Dem_loader bounds logic *)
+            let max_lat_int = center_lat_int + (size / 2) - 1 in
+            fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
+              (* POI coords are already rounded to arcseconds in previous step, so simple truncate is safe *)
+              let pt_lon_int = truncate (pt_lon *. 3600.) in
+              let pt_lat_int = truncate (pt_lat *. 3600.) in
+              let x = max 0 (min (tile_width - 1) (pt_lon_int - min_lon_int)) in
+              let y =
+                max 0 (min (tile_height - 1) (max_lat_int - pt_lat_int))
+              in
+              (pt, (x, y))))
   in
-  let points =
-    List.filter
-      (fun (_, (dst_x, dst_y)) ->
-        Visibility.test
-          (Dem_loader.get_height tile)
-          ~src_x:x ~src_y:y ~dst_x ~dst_y)
-      points
-  in
+  if false then (
+    let w = 4 in
+    let a = Array.make (((2 * w) + 1) * ((2 * w) + 1)) 0 in
+    let count = ref 0 in
+    let dxs = ref 0 in
+    let dys = ref 0 in
+    List.iter
+      (fun (_, (x, y)) ->
+        if x > w && y > w && x < tile_width - w - 1 && y < tile_height - w - 1
+        then (
+          let get_h = Dem_loader.get_height tile in
+          let max_h = ref (get_h y x) in
+          let dx = ref 0 in
+          let dy = ref 0 in
+          for i = -w to w do
+            for j = -w to w do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
+              let h = get_h y' x' in
+              if h > !max_h then (
+                max_h := h;
+                dy := i;
+                dx := j)
+            done
+          done;
+          let x = x + !dx in
+          let y = y + !dy in
+          let is_peak = ref true in
+          for i = -1 to 1 do
+            for j = -1 to 1 do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
+              let h = get_h y' x' in
+              if h > !max_h then is_peak := false
+            done
+          done;
+          if !is_peak then (
+            let p = (((2 * w) + 1) * (w + !dy)) + w + !dx in
+            a.(p) <- a.(p) + 1;
+            incr count;
+            (*
+            Format.eprintf "- %d %d@." !dx !dy;
+*)
+            dxs := !dxs + !dx;
+            dys := !dys + !dy)))
+      points;
+    Format.eprintf "Mean offsets: %f %f (%d)@."
+      (float !dxs /. float !count)
+      (float !dys /. float !count)
+      !count;
+    for i = 0 to 2 * w do
+      for j = 0 to 2 * w do
+        Format.eprintf "%d " a.((((2 * w) + 1) * i) + j)
+      done;
+      Format.eprintf "@."
+    done);
+
   (* Bilinear interpolation for height *)
   let get_h = Dem_loader.get_height tile in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
@@ -3784,10 +3869,19 @@ let main () =
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
 
+  let points =
+    List.filter
+      (fun (_, (dst_x, dst_y)) ->
+        Visibility.test
+          (Dem_loader.get_height tile)
+          ~src_h:height ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+      points
+  in
+
   remove_message ();
   start ();
-  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
+  tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile canvas
+    ctx ~detail_map ~clc_tiles:tiles ~graphics
 
 let () =
   let open Brr_webworkers.Service_worker in
