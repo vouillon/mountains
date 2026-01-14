@@ -8,9 +8,14 @@ let put_in_cache request response =
   Brr_io.Fetch.Cache.put cache request
     (Brr_io.Fetch.Response.of_response response)
 
+let match_opts =
+  let o = Jv.obj [| ("ignoreSearch", Jv.true') |] in
+  Obj.magic o
+
 let use_cache_first request =
   let* response =
-    Brr_io.Fetch.Cache.Storage.match' (Brr_io.Fetch.caches ()) request
+    Brr_io.Fetch.Cache.Storage.match' ~query_opts:match_opts
+      (Brr_io.Fetch.caches ()) request
   in
   match response with
   | Some response when Brr_io.Fetch.Response.ok response ->
@@ -38,7 +43,8 @@ let use_cache_on_error event request =
       | Ok _ | Error _ -> (
           let open Fut.Result_syntax in
           let* response =
-            Brr_io.Fetch.Cache.Storage.match' (Brr_io.Fetch.caches ()) request
+            Brr_io.Fetch.Cache.Storage.match' ~query_opts:match_opts
+              (Brr_io.Fetch.caches ()) request
           in
           match response with
           | Some response -> Fut.return (Ok response)
