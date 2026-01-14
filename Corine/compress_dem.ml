@@ -383,8 +383,8 @@ let () =
       let src_row = (2 - tile_row) * sub_tile_size in
       let src_col = tile_col * sub_tile_size in
       let output_path =
-        Printf.sprintf "%s/N%02d_E%03d_%d_%d.dem" output_dir lat lon tile_row
-          tile_col
+        Printf.sprintf "%s/dem/N%02d_E%03d_%d_%d.dem" output_dir lat lon
+          tile_row tile_col
       in
       process_tile heights ~src_row ~src_col ~tile_width:sub_tile_size
         ~tile_height:sub_tile_size output_path

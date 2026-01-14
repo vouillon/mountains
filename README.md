@@ -44,3 +44,7 @@ dune build
 1.  **DEM**: 30m resolution Copernicus Digital Elevation Models.
 2.  **Land Cover**: CORINE dataset processed into triangulated optimized tiles.
 3.  **Water**: OSM water polygons fetched and merged for higher precision coastlines and lakes.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
