@@ -21,15 +21,16 @@ let remove_message () =
       message := None
   | None -> ()
 
-let display_element el =
+let display_message msg =
   remove_message ();
-  let container =
-    Brr.El.(v (Jstr.v "div") ~at:[ Brr.At.class' (Jstr.v "message") ] [ el ])
+  let msg =
+    Brr.El.(
+      v (Jstr.v "div")
+        ~at:[ Brr.At.class' (Jstr.v "message") ]
+        [ txt (Jstr.v msg) ])
   in
-  Brr.El.append_children (Brr.Document.body Brr.G.document) [ container ];
-  message := Some container
-
-let display_message msg = display_element Brr.El.(txt (Jstr.v msg))
+  Brr.El.append_children (Brr.Document.body Brr.G.document) [ msg ];
+  message := Some msg
 
 let display_temporary_message msg =
   display_message msg;
@@ -41,42 +42,11 @@ let zenith_linear = (0.02, 0.12, 0.55)
 
 let loading_message () =
   let open Brr.El in
-  let small_style = Brr.At.style (Jstr.v "font-size: 11px; color: #666;") in
   v (Jstr.v "div")
     [
       v (Jstr.v "div")
         ~at:[ Brr.At.style (Jstr.v "font-size: 20px; margin-bottom: 12px;") ]
         [ txt (Jstr.v "Loading...") ];
-      v (Jstr.v "div") ~at:[ small_style ]
-        [
-          v (Jstr.v "div")
-            ~at:
-              [ Brr.At.style (Jstr.v "font-weight: bold; margin-bottom: 4px;") ]
-            [ txt (Jstr.v "Map Data & Terrain Sources:") ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Elevation: Produced using Copernicus WorldDEM-30 © DLR \
-                    e.V. 2010-2014 and © Airbus Defence and Space GmbH \
-                    2014-2018 provided under COPERNICUS by the European Union \
-                    and ESA; all rights reserved.");
-            ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Land Use: © European Union, Copernicus Land Monitoring \
-                    Service 2025, European Environment Agency (EEA)");
-            ];
-          v (Jstr.v "div")
-            [
-              txt
-                (Jstr.v
-                   "Water Bodies: © OpenStreetMap contributors (Open Database \
-                    License)");
-            ];
-        ];
     ]
 
 (* Dem_loader provides direct loading of compressed .dem tiles *)
@@ -3290,22 +3260,6 @@ let setup_events canvas =
          mouse_start_x := x;
          mouse_start_y := y;
          mouse_last_x := x;
-         mouse_last_y := y;
-         if !input_mode = Sensor then begin
-           input_mode := Manual;
-           display_temporary_message "Manual mode";
-           let alpha =
-             compute_azimuth (rotation_matrix !current_orientation)
-             *. 180. /. pi
-           in
-           current_orientation :=
-             { !current_orientation with alpha; gamma = 0. }
-         end;
-         let x = Brr.Ev.Mouse.client_x mouse in
-         let y = Brr.Ev.Mouse.client_y mouse in
-         mouse_start_x := x;
-         mouse_start_y := y;
-         mouse_last_x := x;
          mouse_last_y := y)
        target);
 
@@ -3551,7 +3505,7 @@ let main () =
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
 
   let start = setup_events canvas in
-  display_element (loading_message ());
+  display_message "Loading...";
 
   (* Load DEM and CLC (for POIs) in parallel *)
   (* Load DEM, CLC, and init graphics in parallel *)
