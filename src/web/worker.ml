@@ -41,6 +41,11 @@ module Wasm = struct
            (Brr.Tarray.Buffer.of_jv (Jv.get m_palette "buffer")))
     in
     Bigarray.Array1.fill palette_ba 0;
+    Console.log
+      [
+        Jstr.v "Worker: Init Palette";
+        Jv.of_int (Array.length Clc_palette.materials);
+      ];
     Array.iteri
       (fun idx m ->
         if m.Clc_palette.code < 1024 then
@@ -148,6 +153,8 @@ end
 (* External inflate functions *)
 external inflate_into : Brr.Tarray.uint8 -> Brr.Tarray.uint8 -> Jv.Promise.t
   = "inflate_into"
+
+external inflate : Brr.Tarray.uint8 -> Jv.Promise.t = "inflate"
 
 let to_lwt f =
   let t, u = Lwt.task () in
@@ -299,10 +306,12 @@ let decode_clc_dataset ~inst msg =
     let total_verts = read_i32_be 8 in
     let total_indices = read_i32_be 12 in
 
-    let water_count, water_verts, water_indices, float_offset =
-      if is_clc5 then (read_i32_be 16, read_i32_be 20, read_i32_be 24, 32)
-      else if is_clc4 then (read_i32_be 16, read_i32_be 20, read_i32_be 24, 28)
-      else (0, 0, 0, 16)
+    let water_count, water_verts, water_indices, poi_count, float_offset =
+      if is_clc5 then
+        (read_i32_be 16, read_i32_be 20, read_i32_be 24, read_i32_be 28, 32)
+      else if is_clc4 then
+        (read_i32_be 16, read_i32_be 20, read_i32_be 24, 0, 28)
+      else (0, 0, 0, 0, 16)
     in
     ( count,
       total_verts,
@@ -310,6 +319,7 @@ let decode_clc_dataset ~inst msg =
       water_count,
       water_verts,
       water_indices,
+      poi_count,
       float_offset,
       is_clc4,
       is_clc5 )
@@ -321,11 +331,20 @@ let decode_clc_dataset ~inst msg =
         water_count,
         water_verts,
         water_indices,
+        poi_count,
         float_offset,
         is_clc4,
         is_clc5 ) =
     parse_header_ba data_ba
   in
+  Console.log
+    [
+      Jstr.v "CLC Header";
+      Jv.of_int count;
+      Jv.of_int total_verts;
+      Jv.of_bool is_clc4;
+      Jv.of_bool is_clc5;
+    ];
 
   let offset =
     float_offset + 16
@@ -357,6 +376,21 @@ let decode_clc_dataset ~inst msg =
     Lwt.return (offset + 4 + stream_len)
   in
 
+  let read_and_inflate data_ta offset =
+    let data_ba = to_ba data_ta in
+    let stream_len = get_uint32_le_ba data_ba offset in
+    let compressed =
+      Brr.Tarray.sub data_ta ~start:(offset + 4) ~stop:(offset + 4 + stream_len)
+    in
+    let* inflated =
+      to_lwt (Fut.of_promise ~ok:(fun x -> x) (inflate compressed))
+    in
+    (* Fix: Inflate returns Uint8Array, but we need ArrayBuffer for Transferable *)
+    let inflated_ta = Brr.Tarray.of_jv inflated in
+    let buffer = Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer inflated_ta) in
+    Lwt.return (buffer, offset + 4 + stream_len)
+  in
+
   let* offset = read_stream_to_wasm data_ta offset Wasm.m_meta in
   let* offset = read_stream_to_wasm data_ta offset Wasm.m_hi_x in
   let* offset = read_stream_to_wasm data_ta offset Wasm.m_lo_x in
@@ -365,16 +399,60 @@ let decode_clc_dataset ~inst msg =
   let* offset = read_stream_to_wasm data_ta offset Wasm.m_hi_i in
   let* offset = read_stream_to_wasm data_ta offset Wasm.m_lo_i in
 
+  (* Probe m_meta first code *)
+  let meta_ba = Wasm.get_ba Wasm.m_meta in
+  let first_code =
+    if Bigarray.Array1.dim meta_ba >= 2 then
+      let b0 = Bigarray.Array1.get meta_ba 0 in
+      let b1 = Bigarray.Array1.get meta_ba 1 in
+      b0 lor (b1 lsl 8)
+    else -1
+  in
+  Console.log [ Jstr.v "Probe m_meta code"; Jv.of_int first_code ];
+
   let func_main = Jv.get (Jv.get inst "exports") "decode_clc" in
   ignore
     (Jv.apply func_main
        [| Jv.of_int count; Jv.of_int total_verts; Jv.of_int total_indices |]);
 
+  (* Package result Helper *)
+  let copy_mem mem size =
+    let ba = Wasm.get_ba mem in
+    let ta = Brr.Tarray.create Brr.Tarray.Uint8 size in
+    let out_ba = Brr.Tarray.to_bigarray1 ta in
+    Bigarray.Array1.blit (Bigarray.Array1.sub ba 0 size) out_ba;
+    Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer ta)
+  in
+
+  (* Copy Main Layer Results IMMEDIATELEY *)
+  let pos_buf = copy_mem Wasm.m_out_pos (total_verts * 2 * 2) in
+  let col_buf = copy_mem Wasm.m_out_col total_verts in
+  let idx_buf = copy_mem Wasm.m_out_ebo (total_indices * 4) in
+
+  (* Probe color buffer *)
+  let col_ba =
+    let ta =
+      Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv col_buf)
+    in
+    Brr.Tarray.to_bigarray1 ta
+  in
+  let nz_count = ref 0 in
+  let counters = Hashtbl.create 16 in
+  for i = 0 to min 1000 total_verts - 1 do
+    let c = Bigarray.Array1.get col_ba i in
+    if c > 0 then incr nz_count;
+    Hashtbl.replace counters c
+      ((Hashtbl.find_opt counters c |> Option.value ~default:0) + 1)
+  done;
+  Console.log [ Jstr.v "Probe Colors (first 1000)"; Jv.of_int !nz_count ];
+  Hashtbl.iter
+    (fun k v -> Console.log [ Jstr.v "Color"; Jv.of_int k; Jv.of_int v ])
+    counters;
+
   (* Decode Water if present *)
-  let* _ =
+  let* water_pos_buf, water_col_buf, water_idx_buf, offset =
     if (is_clc4 || is_clc5) && water_count > 0 then begin
-      (* Read water streams... Wait, they are sequential in the file? 
-          clc_loader.ml just calls read_stream_to_wasm again, so yes, they follow. *)
+      (* Read water streams... *)
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_meta in
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_hi_x in
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_mid_x in
@@ -383,7 +461,7 @@ let decode_clc_dataset ~inst msg =
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_mid_y in
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_lo_y in
       let* offset = read_stream_to_wasm data_ta offset Wasm.m_hi_i in
-      let* _ = read_stream_to_wasm data_ta offset Wasm.m_lo_i in
+      let* offset = read_stream_to_wasm data_ta offset Wasm.m_lo_i in
 
       let func_w = Jv.get (Jv.get inst "exports") "decode_water" in
       ignore
@@ -393,35 +471,25 @@ let decode_clc_dataset ~inst msg =
              Jv.of_int water_verts;
              Jv.of_int water_indices;
            |]);
-      Lwt.return ()
+
+      (* Copy Water Results *)
+      let wp = copy_mem Wasm.m_out_wpos (water_verts * 4 * 2) in
+      let wc = copy_mem Wasm.m_out_col water_verts in
+      let wi = copy_mem Wasm.m_out_ebo (water_indices * 4) in
+      Lwt.return (wp, wc, wi, offset)
     end
-    else Lwt.return ()
+    else Lwt.return (Jv.null, Jv.null, Jv.null, offset)
   in
 
-  (* Package result *)
-  let copy_mem mem size =
-    let ba = Wasm.get_ba mem in
-    let ta = Brr.Tarray.create Brr.Tarray.Uint8 size in
-    let out_ba = Brr.Tarray.to_bigarray1 ta in
-    Bigarray.Array1.blit (Bigarray.Array1.sub ba 0 size) out_ba;
-    Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer ta)
-  in
-
-  let pos_buf = copy_mem Wasm.m_out_pos (total_verts * 2 * 2) in
-  let col_buf = copy_mem Wasm.m_out_col total_verts in
-  let idx_buf = copy_mem Wasm.m_out_ebo (total_indices * 4) in
-
-  let water_pos_buf =
-    if water_verts > 0 then copy_mem Wasm.m_out_wpos (water_verts * 4 * 2)
-    else Jv.null
-  in
-  let water_col_buf =
-    if water_verts > 0 then copy_mem Wasm.m_out_col water_verts else Jv.null
-  in
-
-  let water_idx_buf =
-    if water_indices > 0 then copy_mem Wasm.m_out_ebo (water_indices * 4)
-    else Jv.null
+  (* Decode POIs if present (CLC5) *)
+  let* poi_names, poi_coords, poi_elevs, poi_types =
+    if is_clc5 && poi_count > 0 then
+      let* names_buf, offset = read_and_inflate data_ta offset in
+      let* coords_buf, offset = read_and_inflate data_ta offset in
+      let* elevs_buf, offset = read_and_inflate data_ta offset in
+      let* types_buf, _ = read_and_inflate data_ta offset in
+      Lwt.return (names_buf, coords_buf, elevs_buf, types_buf)
+    else Lwt.return (Jv.null, Jv.null, Jv.null, Jv.null)
   in
   (* Note: m_out_ebo reused for water indices? 
       clc_loader.ml: 
@@ -453,6 +521,11 @@ let decode_clc_dataset ~inst msg =
         ("water_pos", water_pos_buf);
         ("water_col", water_col_buf);
         ("water_idx", water_idx_buf);
+        (* POI buffers *)
+        ("poi_names", poi_names);
+        ("poi_coords", poi_coords);
+        ("poi_elevs", poi_elevs);
+        ("poi_types", poi_types);
       |]
   in
 
@@ -462,6 +535,11 @@ let decode_clc_dataset ~inst msg =
   in
   let transfer_list =
     if water_verts > 0 then water_col_buf :: transfer_list else transfer_list
+  in
+  let transfer_list =
+    if poi_count > 0 then
+      poi_names :: poi_coords :: poi_elevs :: poi_types :: transfer_list
+    else transfer_list
   in
   let transfer_list =
     if water_indices > 0 then water_idx_buf :: transfer_list else transfer_list
@@ -478,16 +556,29 @@ let on_message e =
   let open Lwt.Syntax in
   let data = Brr.Ev.as_type e |> Brr_io.Message.Ev.data in
   let type_ = Jv.get data "type" |> Jv.to_string in
-  match type_ with
-  | "decode_dem" ->
-      let* inst = Wasm.load_dem () in
-      let* _ = decode_dataset ~inst data in
-      Lwt.return ()
-  | "decode_clc" ->
-      let* inst = Wasm.load_clc () in
-      let* _ = decode_clc_dataset ~inst data in
-      Lwt.return ()
-  | _ -> Lwt.return ()
+  Lwt.catch
+    (fun () ->
+      match type_ with
+      | "decode_dem" ->
+          let* inst = Wasm.load_dem () in
+          let* _ = decode_dataset ~inst data in
+          Lwt.return ()
+      | "decode_clc" ->
+          let* inst = Wasm.load_clc () in
+          let* _ = decode_clc_dataset ~inst data in
+          Lwt.return ()
+      | _ -> Lwt.return ())
+    (fun exn ->
+      let err_msg = Printexc.to_string exn in
+      Console.error [ Jstr.v "Worker Error"; Jv.of_string err_msg ];
+      let msg =
+        Jv.obj
+          [|
+            ("type", Jv.of_string "error"); ("message", Jv.of_string err_msg);
+          |]
+      in
+      Brr_webworkers.Worker.G.post msg;
+      Lwt.return ())
 
 let () =
   ignore
