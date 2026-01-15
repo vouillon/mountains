@@ -1933,8 +1933,8 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   if not !shadow_rendered then begin
     shadow_rendered := true;
     draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x ~y
-      ~lat ~lon ~w ctx;
+      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x
+      ~y:(w - y) ~lat ~lon ~w ctx;
     (* Rebind terrain textures after draw_shadows disturbed them *)
     bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
       ~shadow_map ~cover_map_texture ~palette_texture
@@ -2863,7 +2863,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let center_offset_x = deltax *. (float x +. off_x) in
-  let center_offset_y = deltay *. (float y +. off_y) in
+  let center_offset_y = deltay *. (float (h - y) +. off_y) in
   let world_center =
     Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
   in
@@ -2874,8 +2874,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Upload all session-static uniforms *)
   Render_state.upload_session_static ctx terrain_pid sky_pid terrain_uniforms
-    sky_uniforms ~w ~lat ~x ~y ~lon ~light_dir:light_dir_shader ~shadow_matrices
-    ~shadow_splits:splits_dist ~fog_color:fog_linear ~zenith_color:zenith_linear;
+    sky_uniforms ~w ~lat ~x ~y:(h - y) ~lon ~light_dir:light_dir_shader
+    ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
+    ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
   let cover_map_size = 1024 in
@@ -3744,7 +3745,7 @@ let main () =
     Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
     Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
-  let y = tile_height / 2 in
+  let y = (tile_height / 2) - 1 in
   let d = float x /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
@@ -3759,7 +3760,11 @@ let main () =
             (fun (poi : Clc_loader.poi) ->
               {
                 Points.name = poi.name;
-                coord = { Points.lat = poi.lat; lon = poi.lon };
+                coord =
+                  {
+                    Points.lat = floor ((poi.lat *. 3600.) +. 0.5) /. 3600.;
+                    lon = floor ((poi.lon *. 3600.) +. 0.5) /. 3600.;
+                  };
                 elevation =
                   (if poi.elevation = 0 then None else Some poi.elevation);
               })
@@ -3782,18 +3787,20 @@ let main () =
               (truncate ((lon -. tile_coord.lon) *. float width))
           in
           let y =
-            min (tile_height - 1)
-              (truncate ((tile_coord'.lat -. lat) *. float height))
+            max 0
+              (min (tile_height - 1)
+                 (truncate ((tile_coord'.lat -. lat) *. float height) - 1))
           in
           (pt, (x, y))))
   in
-  if false then (
+  if true then (
+    let w = 4 in
+    let a = Array.make (((2 * w) + 1) * ((2 * w) + 1)) 0 in
     let count = ref 0 in
     let dxs = ref 0 in
     let dys = ref 0 in
     List.iter
       (fun (_, (x, y)) ->
-        let w = 2 in
         if x > w && y > w && x < tile_width - w - 1 && y < tile_height - w - 1
         then (
           let get_h = Dem_loader.get_height tile in
@@ -3825,23 +3832,26 @@ let main () =
             done
           done;
           if !is_peak then (
+            let p = (((2 * w) + 1) * (w + !dy)) + w + !dx in
+            a.(p) <- a.(p) + 1;
             incr count;
+            (*
+            Format.eprintf "- %d %d@." !dx !dy;
+*)
             dxs := !dxs + !dx;
             dys := !dys + !dy)))
       points;
     Format.eprintf "Mean offsets: %f %f (%d)@."
       (float !dxs /. float !count)
       (float !dys /. float !count)
-      !count);
+      !count;
+    for i = 0 to 2 * w do
+      for j = 0 to 2 * w do
+        Format.eprintf "%d " a.((((2 * w) + 1) * i) + j)
+      done;
+      Format.eprintf "@."
+    done);
 
-  let points =
-    List.filter
-      (fun (_, (dst_x, dst_y)) ->
-        Visibility.test
-          (Dem_loader.get_height tile)
-          ~src_x:x ~src_y:y ~dst_x ~dst_y)
-      points
-  in
   (* Bilinear interpolation for height *)
   let get_h = Dem_loader.get_height tile in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
@@ -3853,7 +3863,15 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
-  Format.eprintf "%f %f / %f %f %f %f / %f@." off_x off_y h00 h10 h01 h11 height;
+
+  let points =
+    List.filter
+      (fun (_, (dst_x, dst_y)) ->
+        Visibility.test
+          (Dem_loader.get_height tile)
+          ~src_h:height ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+      points
+  in
 
   remove_message ();
   start ();
