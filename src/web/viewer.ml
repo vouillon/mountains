@@ -146,32 +146,33 @@ let terrain_program =
 
           // Manual bilinear interpolation for 2-byte height
           // Normalized Coordinate (0..1)
-          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
-          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
+          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
 
           // Coordinate in LOD texels
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
 
           // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
-          highp vec2 base_f = floor(lod_tex_pos - 0.5);
-          highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(lod_tex_pos - 0.5);
-          highp ivec2 w_max = tex_size - 1;
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+          highp ivec2 base = ivec2(lod_tex_pos);
+          highp vec2 f = fract(lod_tex_pos);
 
-          // Vectorized Fetch & Decode
-          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
-          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+          // Fetch 4 samples and decode height
+          highp vec2 s00 = texelFetch(relief, base, lod).rg;
+          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
+          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
+          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
 
-          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
-          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
-          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
+          // Decode heights: high*256 + low, scaled to [-500, 9000]
+          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+          highp vec4 H = vec4(
+            dot(s00, vec2(256.0, 1.0)),
+            dot(s10, vec2(256.0, 1.0)),
+            dot(s01, vec2(256.0, 1.0)),
+            dot(s11, vec2(256.0, 1.0))
+          ) * HEIGHT_SCALE - 500.0;
 
-          highp float h0 = mix(H.x, H.y, f.x);
-          highp float h1 = mix(H.z, H.w, f.x);
-          highp float z = mix(h0, h1, f.y);
+          highp float z = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 
           reliefCoord = norm_coord + (0.5 * inv_w);
 
@@ -1022,32 +1023,32 @@ let shadow_program =
           ivec2 tex_size = textureSize(relief, lod);
 
           // Manual bilinear interpolation for 2-byte height
-          highp vec2 norm_coord = vec2(coord.x, float(w) - 1.0 - coord.y) * inv_w;
-          norm_coord = clamp(norm_coord, 0.0, 1.0);
+          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
+          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
 
           highp vec2 lod_pos = norm_coord * vec2(tex_size);
 
           // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.5), vec2(tex_size) - 0.5);
-          highp vec2 base_f = floor(lod_tex_pos - 0.5);
-          highp ivec2 base = ivec2(base_f);
-          highp vec2 f = fract(lod_tex_pos - 0.5);
-          highp ivec2 w_max = tex_size - 1;
+          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+          highp ivec2 base = ivec2(lod_tex_pos);
+          highp vec2 f = fract(lod_tex_pos);
 
-          // Vectorized Fetch & Decode
-          highp vec2 s00 = texelFetch(relief, clamp(base + ivec2(0,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s10 = texelFetch(relief, clamp(base + ivec2(1,0), ivec2(0), w_max), lod).rg;
-          highp vec2 s01 = texelFetch(relief, clamp(base + ivec2(0,1), ivec2(0), w_max), lod).rg;
-          highp vec2 s11 = texelFetch(relief, clamp(base + ivec2(1,1), ivec2(0), w_max), lod).rg;
+          // Fetch 4 samples and decode height
+          highp vec2 s00 = texelFetch(relief, base, lod).rg;
+          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
+          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
+          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
 
-          highp vec4 R = vec4(s00.r, s10.r, s01.r, s11.r);
-          highp vec4 G = vec4(s00.g, s10.g, s01.g, s11.g);
+          // Decode heights: high*256 + low, scaled to [-500, 9000]
+          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+          highp vec4 H = vec4(
+            dot(s00, vec2(256.0, 1.0)),
+            dot(s10, vec2(256.0, 1.0)),
+            dot(s01, vec2(256.0, 1.0)),
+            dot(s11, vec2(256.0, 1.0))
+          ) * HEIGHT_SCALE - 500.0;
 
-          highp vec4 H = (R * 256.0 + G) * ((1.0/257.0) * 9500.0) - 500.0;
-
-          float h0 = mix(H.x, H.y, f.x);
-          float h1 = mix(H.z, H.w, f.x);
-          float h = mix(h0, h1, f.y);
+          float h = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 
           gl_Position = shadow_view_proj * vec4(world_pos.x, world_pos.y, h, 1.0);
         }
@@ -1775,8 +1776,8 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   (* Center Offset *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float y +. off_y) in
   Gl.uniform2f ctx shadow_uniforms.center_offset center_offset_x center_offset_y;
 
   (* Bind Relief Texture *)
@@ -2185,7 +2186,7 @@ let normal_program =
         void main() {
           float x = float(gl_VertexID & 1);
           float y = float(gl_VertexID >> 1);
-          tileCoord = vec2(x, y) * (size - 1.) + vec2(1.5, 1.5);
+          tileCoord = vec2(x, y) * (size - 1.) + vec2(0.5, 0.5);
           gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
         }
       |};
@@ -2201,7 +2202,7 @@ let normal_program =
         float get_z(vec2 offset) {
             // Decode from RG8: R=low byte, G=high byte (little-endian)
             // Samples are in [0, 1], need to multiply by 255 to get 0..255
-            vec2 rg = texture(tile, (tileCoord + offset) / (size + 2.)).rg * 255.0;
+            vec2 rg = texture(tile, (tileCoord + offset) / size).rg * 255.0;
             float h_val = rg.g * 256.0 + rg.r;
             // Convert back to meters: u16 range maps to -500 to 9000
             return h_val * (9500.0 / 65535.0) - 500.0;
@@ -2862,8 +2863,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let deltax = deltay *. cos (lat *. pi /. 180.) in
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float y +. off_y) in
   let world_center =
     Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
   in
@@ -3184,7 +3185,7 @@ let setup_events canvas =
     end
   in
 
-  let min_zoom = 0.5 in
+  let min_zoom = 0.25 in
   let max_zoom = 3. in
 
   (* Device orientation listener - only active in Sensor mode *)
@@ -3685,11 +3686,11 @@ let create_location_ui ~size =
     Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
 let main () =
-  let tile_width = 4098 in
+  let tile_width = 4096 in
   let set_loc_visible = create_location_ui ~size:tile_width in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
-  assert (next_power_of_two (tile_width - 2) 1 - (tile_width - 2) < 16);
+  assert (tile_width land (tile_width - 1) = 0);
   let canvas =
     Option.get (Brr.Document.find_el_by_id Brr.G.document (Jstr.v "canvas"))
   in
@@ -3744,7 +3745,7 @@ let main () =
     Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
     Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
-  let y = (tile_height / 2) - 1 in
+  let y = tile_height / 2 in
   let d = float x /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
@@ -3856,8 +3857,8 @@ let main () =
 
   remove_message ();
   start ();
-  tri ~w:(tile_width - 2) ~h:(tile_height - 2) ~x ~y ~height ~lat ~lon ~points
-    ~tile canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
+  tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile canvas
+    ctx ~detail_map ~clc_tiles:tiles ~graphics
 
 let () =
   let open Brr_webworkers.Service_worker in
