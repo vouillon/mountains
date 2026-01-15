@@ -2078,8 +2078,6 @@ let event_loop ctx draw =
 
 (* Main *)
 
-(* compute_gradient_cpu removed *)
-
 let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let mipmap_program =
@@ -2178,7 +2176,7 @@ let copy_program =
     attributes = [ "position" ];
   }
 
-let gradient_program =
+let normal_program =
   {
     vertex_shader =
       {|#version 300 es
@@ -2244,7 +2242,7 @@ let gradient_program =
     attributes = [];
   }
 
-let compute_relief ctx width height triangle_geo tile_texture relief_pid
+let compute_relief ctx width height triangle_geo tile_texture normal_pid
     mipmap_pid copy_pid (u : Render_state.relief_uniforms)
     (mipmap_u : Render_state.mipmap_uniforms)
     (copy_u : Render_state.copy_uniforms) =
@@ -2276,15 +2274,15 @@ let compute_relief ctx width height triangle_geo tile_texture relief_pid
   Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
     0;
   Gl.viewport ctx 0 0 width height;
-  Gl.use_program ctx relief_pid;
-  (* Draw Gradient (Level 0) *)
+  Gl.use_program ctx normal_pid;
+  (* Draw normals (Level 0) *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
 
   Gl.bind_vertex_array ctx (Some triangle_geo);
   Gl.uniform2f ctx u.size (float width) (float height);
 
-  (* Use default 44.0 latitude for gradient *)
+  (* Use default 44.0 latitude for normals *)
   let deltax = deltay *. cos (44. *. pi /. 180.) in
   Gl.uniform2f ctx u.delta deltax deltay;
 
@@ -2612,7 +2610,7 @@ type graphics_resources = {
   shadow_fbo : Gl.framebuffer;
   shadow_uniforms : Render_state.shadow_uniforms;
   sky_pid : Gl.program;
-  relief_pid : Gl.program;
+  normal_pid : Gl.program;
   mipmap_pid : Gl.program;
   copy_pid : Gl.program;
   ao_bake_pid : Gl.program;
@@ -2643,7 +2641,7 @@ let init_graphics ctx =
   let text_pid = create_program ctx text_program in
   let shadow_pid = create_program ctx shadow_program in
   let sky_pid = create_program ctx sky_program in
-  let relief_pid = create_program ctx gradient_program in
+  let normal_pid = create_program ctx normal_program in
   let mipmap_pid = create_program ctx mipmap_program in
   let copy_pid = create_program ctx copy_program in
   let ao_bake_pid = create_program ctx ao_bake_program in
@@ -2708,7 +2706,7 @@ let init_graphics ctx =
   Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
   Render_state.upload_texture_units_shadow ctx shadow_uniforms;
 
-  let relief_uniforms = Render_state.init_relief_uniforms ctx relief_pid in
+  let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
   let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
   let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
   let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
@@ -2739,7 +2737,7 @@ let init_graphics ctx =
     shadow_map;
     shadow_fbo;
     shadow_uniforms;
-    relief_pid;
+    normal_pid;
     mipmap_pid;
     copy_pid;
     relief_uniforms;
@@ -2774,7 +2772,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     shadow_map;
     shadow_fbo;
     shadow_uniforms;
-    relief_pid;
+    normal_pid;
     mipmap_pid;
     copy_pid;
     relief_uniforms;
@@ -2793,7 +2791,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
-    compute_relief ctx w h triangle_geo tile_texture relief_pid mipmap_pid
+    compute_relief ctx w h triangle_geo tile_texture normal_pid mipmap_pid
       copy_pid relief_uniforms mipmap_uniforms copy_uniforms
   in
   let points =
