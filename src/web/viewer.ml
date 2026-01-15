@@ -2977,18 +2977,19 @@ let wait_for_service_worker =
 let featured_locations =
   [
     ("Col Girardin", 44.6078064, 6.8210935, 220.);
-    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 170.);
+    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50.);
     ("Col du Blainon", 44.209067, 6.9423065, 0.);
     ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40.);
     ("Vallon de la Braïssa", 44.280097, 6.793942, 0.);
-    ("Lacs de Morgon", 44.336025, 6.907772, 0.);
-    ("Roc Diolon (Orcières)", 44.73365, 6.3630684, 0.);
+    ("Lacs de Morgon", 44.336516, 6.913906, 0.);
+    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0.);
     ("Col Fromage", 44.6896583, 6.8061028, 180.);
-    ("Embrun", 44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.);
     ("La Mortice Sud", 44.573885, 6.7694, 0.);
     ("Le Sommet Rouge", 44.5740068, 6.7954285, 0.);
     ("Col de la Braïssa", 44.278358, 6.790589, 0.);
     ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0.);
+    ("Pic de Morgon", 44.4920, 6.3975, 0.);
+    ("Lac de Roburent", 44.424680, 6.93430, 220.);
   ]
 
 let get_preset_position () =
@@ -3656,15 +3657,19 @@ let create_location_ui ~size =
       Brr.El.append_children location_list [ item ])
     featured_locations;
 
+  let quick_select_header =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+      [ Brr.El.txt (Jstr.v "Quick Select") ]
+  in
+
   Brr.El.append_children menu
     [
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
         [ Brr.El.txt (Jstr.v "Coordinates") ];
       input_group;
-      Brr.El.div
-        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
-        [ Brr.El.txt (Jstr.v "Quick Select") ];
+      quick_select_header;
       current_loc_btn;
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
@@ -3673,9 +3678,10 @@ let create_location_ui ~size =
     ];
 
   fun visible ->
-    Brr.El.set_inline_style (Jstr.v "display")
-      (Jstr.v (if visible then "flex" else "none"))
-      current_loc_btn
+    let disp = Jstr.v (if visible then "flex" else "none") in
+    let disp_header = Jstr.v (if visible then "block" else "none") in
+    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
+    Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
 let main () =
   let tile_width = 4098 in
