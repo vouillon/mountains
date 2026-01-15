@@ -3184,7 +3184,7 @@ let setup_events canvas =
     end
   in
 
-  let min_zoom = 0.25 in
+  let min_zoom = 0.5 in
   let max_zoom = 3. in
 
   (* Device orientation listener - only active in Sensor mode *)
@@ -3853,6 +3853,7 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
+  Format.eprintf "%f %f / %f %f %f %f / %f@." off_x off_y h00 h10 h01 h11 height;
 
   remove_message ();
   start ();

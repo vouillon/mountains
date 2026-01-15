@@ -349,8 +349,8 @@ let upload_session_static ctx terrain_pid sky_pid (u : terrain_uniforms)
   (* Center offset *)
   let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
   let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x -. 0.5) in
-  let center_offset_y = deltay *. (float y +. off_y -. 0.5) in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float y +. off_y) in
   Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y;
 
   (* CLC clipmap parameters *)
