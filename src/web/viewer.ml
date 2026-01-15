@@ -2992,6 +2992,7 @@ let featured_locations =
     ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0.);
     ("Pic de Morgon", 44.4920, 6.3975, 0.);
     ("Lac de Roburent", 44.424680, 6.93430, 220.);
+    ("Mont Ténibre", 44.2839, 6.9719, 0.);
   ]
 
 let get_preset_position () =
@@ -3788,6 +3789,53 @@ let main () =
           in
           (pt, (x, y))))
   in
+  if false then (
+    let count = ref 0 in
+    let dxs = ref 0 in
+    let dys = ref 0 in
+    List.iter
+      (fun (_, (x, y)) ->
+        let w = 2 in
+        if x > w && y > w && x < tile_width - w - 1 && y < tile_height - w - 1
+        then (
+          let get_h = Dem_loader.get_height tile in
+          let max_h = ref (get_h y x) in
+          let dx = ref 0 in
+          let dy = ref 0 in
+          for i = -w to w do
+            for j = -w to w do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
+              let h = get_h y' x' in
+              if h > !max_h then (
+                max_h := h;
+                dy := i;
+                dx := j)
+            done
+          done;
+          let x = x + !dx in
+          let y = y + !dy in
+          let is_peak = ref true in
+          for i = -1 to 1 do
+            for j = -1 to 1 do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
+              let h = get_h y' x' in
+              if h > !max_h then is_peak := false
+            done
+          done;
+          if !is_peak then (
+            incr count;
+            dxs := !dxs + !dx;
+            dys := !dys + !dy)))
+      points;
+    Format.eprintf "Mean offsets: %f %f (%d)@."
+      (float !dxs /. float !count)
+      (float !dys /. float !count)
+      !count);
+
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
