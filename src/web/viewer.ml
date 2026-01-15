@@ -12,6 +12,20 @@ let _ =
     | _ -> None)
 
 let ( let* ) = Lwt.bind
+let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
+let now_ms = now
+
+let request_animation_frame () =
+  let t, u = Lwt.task () in
+  ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
+  t
+
+let sleep s =
+  let t, u = Lwt.task () in
+  ignore
+    (Brr.G.set_timeout ~ms:(truncate (s *. 1000.)) (fun () -> Lwt.wakeup u ()));
+  t
+
 let message = ref None
 
 let remove_message () =
@@ -35,6 +49,49 @@ let display_message msg =
 let display_temporary_message msg =
   display_message msg;
   ignore (Brr.G.set_timeout ~ms:10000 remove_message)
+
+let update_startup_status msg loading =
+  let doc = Brr.G.document in
+  let status = Brr.Document.find_el_by_id doc (Jstr.v "status-text") in
+  Option.iter
+    (fun el ->
+      Brr.El.set_children el [ Brr.El.txt (Jstr.v msg) ];
+      Brr.El.set_class (Jstr.v "loading") loading el)
+    status
+
+let hide_startup_overlay () =
+  let doc = Brr.G.document in
+  let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
+  match overlay with
+  | Some el ->
+      Brr.El.set_class (Jstr.v "hidden") true el;
+      ignore
+        (Brr.G.set_timeout ~ms:500 (fun () ->
+             Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el));
+      sleep 0.5
+  | None -> Lwt.return_unit
+
+let show_startup_overlay msg loading =
+  let doc = Brr.G.document in
+  update_startup_status msg loading;
+  let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
+  match overlay with
+  | Some el ->
+      Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "flex") el;
+      (* We need to wait for the browser to process the 'display' change
+         before we can trigger the 'opacity' transition. *)
+      let* () = request_animation_frame () in
+      let* () = request_animation_frame () in
+      Brr.El.set_class (Jstr.v "hidden") false el;
+      (* Wait for the fade-in transition to complete *)
+      sleep 0.5
+  | None -> Lwt.return_unit
+
+let navigate_to uri =
+  Lwt.async (fun () ->
+      let* () = show_startup_overlay "Navigating..." false in
+      Brr.Window.set_location Brr.G.window uri;
+      Lwt.return_unit)
 
 (* Sky colors *)
 let fog_linear = (0.17, 0.38, 0.79)
@@ -2035,13 +2092,6 @@ let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
 let last_frame_time = ref 0.
-let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
-let now_ms = now
-
-let request_animation_frame () =
-  let t, u = Lwt.task () in
-  ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
-  t
 
 let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
@@ -2994,6 +3044,7 @@ let featured_locations =
     ("Pic de Morgon", 44.4920, 6.3975, 0.);
     ("Lac de Roburent", 44.424680, 6.93430, 220.);
     ("Mont Ténibre", 44.2839, 6.9719, 0.);
+    ("Baisse de Druos", 44.191930, 7.19195, 0.);
   ]
 
 let get_preset_position () =
@@ -3050,19 +3101,38 @@ let parse_input_coordinates input =
         else input
       with _ -> input
     in
-    (* 3. Parse "lat,lon" or "lat lon" *)
+    (* 3. Robust parsing of "lat,lon", "lat lon", or "lat ; lon" *)
     let parts =
-      Array.of_list
-        (List.filter
-           (fun s -> s <> "")
-           (String.split_on_char ' '
-              (String.map (fun c -> if c = ',' then ' ' else c) coords_str)))
+      let jv_coords = Jv.of_string (String.trim coords_str) in
+      let jv_re =
+        Jv.new' (Jv.get Jv.global "RegExp") [| Jv.of_string "[\\s;\\|:/]+" |]
+      in
+      let jv_parts = Jv.call jv_coords "split" [| jv_re |] in
+      let parts =
+        Jv.to_list Jv.to_string jv_parts |> List.filter (fun s -> s <> "")
+      in
+      (* Handle "45.1,6.7" (no space, just comma separator) *)
+      match parts with
+      | [ single ] when String.contains single ',' ->
+          String.split_on_char ',' single |> List.filter (fun s -> s <> "")
+      | _ -> parts
     in
-    if Array.length parts >= 2 then
-      match (parse_float_safe parts.(0), parse_float_safe parts.(1)) with
-      | Some lat, Some lon -> Some (lat, lon)
-      | _ -> None
-    else None
+    match parts with
+    | lat_s :: lon_s :: _ -> (
+        let clean s =
+          let s =
+            if String.length s > 0 && s.[String.length s - 1] = ',' then
+              String.sub s 0 (String.length s - 1)
+            else s
+          in
+          String.map (fun c -> if c = ',' then '.' else c) s
+        in
+        let lat_v = clean lat_s in
+        let lon_v = clean lon_s in
+        match (parse_float_safe lat_v, parse_float_safe lon_v) with
+        | Some lat, Some lon -> Some (lat, lon)
+        | _ -> None)
+    | _ -> None
 
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in
@@ -3520,10 +3590,26 @@ let create_location_ui ~size =
   Brr.El.append_children overlay [ menu ];
   Brr.El.append_children body [ fab; overlay ];
 
+  (* Input Section *)
+  let input =
+    Brr.El.input
+      ~at:
+        Brr.At.
+          [
+            class' (Jstr.v "input-coord");
+            type' (Jstr.v "text");
+            placeholder (Jstr.v "Lat, Lon or Map Link");
+          ]
+      ()
+  in
+
   let toggle_menu () =
     let visible = Jstr.v "visible" in
     if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
-    else Brr.El.set_class visible true overlay
+    else begin
+      Brr.El.set_class visible true overlay;
+      ignore (Jv.call (Brr.El.to_jv input) "focus" [||])
+    end
   in
 
   ignore
@@ -3538,17 +3624,6 @@ let create_location_ui ~size =
        (Brr.El.as_target overlay));
 
   (* Input Section *)
-  let input =
-    Brr.El.input
-      ~at:
-        Brr.At.
-          [
-            class' (Jstr.v "input-coord");
-            type' (Jstr.v "text");
-            placeholder (Jstr.v "Lat, Lon or Map Link");
-          ]
-      ()
-  in
   let btn_go =
     Brr.El.button
       ~at:Brr.At.[ class' (Jstr.v "btn-go") ]
@@ -3572,7 +3647,7 @@ let create_location_ui ~size =
               (Brr.Window.location Brr.G.window)
               (Brr.Uri.Params.of_jstr search)
           in
-          Brr.Window.set_location Brr.G.window uri
+          navigate_to uri
         else
           Jv.set (Brr.El.to_jv input) "value"
             (Jv.of_string "Location out of range")
@@ -3583,12 +3658,14 @@ let create_location_ui ~size =
   ignore
     (Brr.Ev.listen Brr.Ev.keydown
        (fun e ->
-         let key = Jstr.to_string (Brr.Ev.Keyboard.key (Brr.Ev.as_type e)) in
-         if key = "Enter" then go ()
-         else if
-           key = "ArrowUp" || key = "ArrowDown" || key = "ArrowLeft"
-           || key = "ArrowRight"
-         then Brr.Ev.stop_propagation e)
+         let code = Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e)) in
+         match code with
+         | "Enter" ->
+             Brr.Ev.prevent_default e;
+             Brr.Ev.stop_propagation e;
+             go ()
+         | "ArrowLeft" | "ArrowRight" -> Brr.Ev.stop_propagation e
+         | _ -> ())
        (Brr.El.as_target input));
 
   ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
@@ -3596,7 +3673,7 @@ let create_location_ui ~size =
   (* Current Location *)
   let current_loc_btn =
     Brr.El.div
-      ~at:Brr.At.[ class' (Jstr.v "location-item") ]
+      ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
       [
         Brr.El.span
           ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
@@ -3619,7 +3696,7 @@ let create_location_ui ~size =
                    (Brr.Window.location Brr.G.window)
                    (Brr.Uri.Params.of_jstr search)
                in
-               Brr.Window.set_location Brr.G.window uri;
+               navigate_to uri;
                Fut.return ()
            | None ->
                Jv.set (Brr.El.to_jv input) "value"
@@ -3633,33 +3710,72 @@ let create_location_ui ~size =
   let location_list =
     Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
   in
-  List.iter
-    (fun (name, lat, lon, alpha) ->
-      let item =
-        Brr.El.li
-          ~at:Brr.At.[ class' (Jstr.v "location-item") ]
-          [
-            Brr.El.span
-              ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
-              [ Brr.El.txt (Jstr.v "🏔️") ];
-            Brr.El.txt (Jstr.v name);
-          ]
-      in
+  let featured_items =
+    List.map
+      (fun (name, lat, lon, alpha) ->
+        let item =
+          Brr.El.li
+            ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
+            [
+              Brr.El.span
+                ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+                [ Brr.El.txt (Jstr.v "🏔️") ];
+              Brr.El.txt (Jstr.v name);
+            ]
+        in
+        ignore
+          (Brr.Ev.listen Brr.Ev.click
+             (fun _ ->
+               let search =
+                 Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+               in
+               let uri =
+                 Brr.Uri.with_query_params
+                   (Brr.Window.location Brr.G.window)
+                   (Brr.Uri.Params.of_jstr search)
+               in
+               navigate_to uri)
+             (Brr.El.as_target item));
+        Brr.El.append_children location_list [ item ];
+        item)
+      featured_locations
+  in
+
+  let focusables = [ input; btn_go; current_loc_btn ] @ featured_items in
+  let n = List.length focusables in
+  List.iteri
+    (fun i el ->
       ignore
-        (Brr.Ev.listen Brr.Ev.click
-           (fun _ ->
-             let search =
-               Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+        (Brr.Ev.listen Brr.Ev.keydown
+           (fun e ->
+             let code =
+               Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e))
              in
-             let uri =
-               Brr.Uri.with_query_params
-                 (Brr.Window.location Brr.G.window)
-                 (Brr.Uri.Params.of_jstr search)
-             in
-             Brr.Window.set_location Brr.G.window uri)
-           (Brr.El.as_target item));
-      Brr.El.append_children location_list [ item ])
-    featured_locations;
+             match code with
+             | "ArrowDown" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let next = List.nth focusables ((i + 1) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv next) "focus" [||])
+             | "ArrowUp" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let prev = List.nth focusables ((i - 1 + n) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv prev) "focus" [||])
+             | "Escape" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 toggle_menu ()
+             | "Enter" when el != input && el != btn_go ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 ignore (Jv.call (Brr.El.to_jv el) "click" [||])
+             | "Enter" ->
+                 (* Let the specific listeners handle it, but stop propagation to window *)
+                 Brr.Ev.stop_propagation e
+             | _ -> ())
+           (Brr.El.as_target el)))
+    focusables;
 
   let quick_select_header =
     Brr.El.div
@@ -3709,7 +3825,7 @@ let main () =
   let graphics = init_graphics ctx in
   resize_canvas canvas;
 
-  display_message "Getting current location...";
+  update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
   let* source, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
@@ -3728,11 +3844,11 @@ let main () =
             (Brr.Window.location Brr.G.window)
             (Brr.Uri.Params.of_jstr search)
         in
-        Brr.Window.set_location Brr.G.window uri);
+        navigate_to uri);
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
 
   let start = setup_events canvas in
-  display_message "Loading...";
+  update_startup_status "Loading Terrain..." true;
 
   (* Load DEM and CLC (for POIs) in parallel *)
   (* Load DEM, CLC, and init graphics in parallel *)
@@ -3890,7 +4006,7 @@ let main () =
       points
   in
 
-  remove_message ();
+  Lwt.async hide_startup_overlay;
   start ();
   tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile canvas
     ctx ~detail_map ~clc_tiles:tiles ~graphics
