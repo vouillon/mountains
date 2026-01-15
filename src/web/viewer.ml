@@ -2400,8 +2400,8 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   let ebo = Gl.create_buffer ctx in
 
   (* Conversion factors *)
-  let meters_per_deg_lat = 111132.0 in
-  let meters_per_deg_lon = 111132.0 *. cos (lat *. pi /. 180.) in
+  let meters_per_deg_lat = 40_000_000. /. 360. in
+  let meters_per_deg_lon = meters_per_deg_lat *. cos (lat *. pi /. 180.) in
 
   (* Pre-calculate view bounds for each level *)
   let level_bounds =
@@ -2443,8 +2443,6 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
 
   (* Set water-specific static uniforms *)
-  Gl.uniform1f ctx water_u.u_water_scale 220000.0;
-
   List.iter
     (fun (tile, tile_range_lon, tile_range_lat) ->
       let water_index_count =
@@ -2456,6 +2454,10 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
         let t_min_lat = header.Clc_loader.min_lat in
         let t_max_lon = t_min_lon +. tile_range_lon in
         let t_max_lat = t_min_lat +. tile_range_lat in
+
+        (* Set varying water scale from header to normalize 0..1 *)
+        Gl.uniform1f ctx water_u.u_water_scale
+          (tile_range_lon *. header.Clc_loader.water_scale_x);
 
         (* Check if tile intersects ANY level before uploading *)
         let visible_any =
