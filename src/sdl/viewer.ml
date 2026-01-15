@@ -1140,15 +1140,18 @@ let main () =
         in
         (pt, (x, y)))
   in
+  (* Bilinear interpolation offsets for precise visibility *)
+  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let points =
     List.filter
       (fun (_, (dst_x, dst_y)) ->
-        Visibility.test (fun r c -> tile.{r, c}) ~src_x:x ~src_y:y ~dst_x ~dst_y)
+        Visibility.test_precise
+          (fun r c -> tile.{r, c})
+          ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y ())
       points
   in
   (* Bilinear interpolation for height *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
   let h00 = tile.{y, x} in
   let h10 = tile.{y, x + 1} in
   let h01 = tile.{y - 1, x} in
