@@ -3050,19 +3050,54 @@ let parse_input_coordinates input =
         else input
       with _ -> input
     in
-    (* 3. Parse "lat,lon" or "lat lon" *)
+    Brr.Console.log [ Jstr.v "Coords string:"; Jstr.v coords_str ];
+    (* 3. Robust parsing of "lat,lon", "lat lon", or "lat ; lon" *)
     let parts =
-      Array.of_list
-        (List.filter
-           (fun s -> s <> "")
-           (String.split_on_char ' '
-              (String.map (fun c -> if c = ',' then ' ' else c) coords_str)))
+      let jv_coords = Jv.of_string (String.trim coords_str) in
+      let jv_re =
+        Jv.new' (Jv.get Jv.global "RegExp") [| Jv.of_string "[\\s;\\|:/]+" |]
+      in
+      let jv_parts = Jv.call jv_coords "split" [| jv_re |] in
+      let parts =
+        Jv.to_list Jv.to_string jv_parts |> List.filter (fun s -> s <> "")
+      in
+      Brr.Console.log
+        [ Jstr.v "JS split parts:"; Jv.of_list Jv.of_string parts ];
+      (* Handle "45.1,6.7" (no space, just comma separator) *)
+      match parts with
+      | [ single ] when String.contains single ',' ->
+          let res =
+            String.split_on_char ',' single |> List.filter (fun s -> s <> "")
+          in
+          Brr.Console.log
+            [ Jstr.v "Single comma split:"; Jv.of_list Jv.of_string res ];
+          res
+      | _ -> parts
     in
-    if Array.length parts >= 2 then
-      match (parse_float_safe parts.(0), parse_float_safe parts.(1)) with
-      | Some lat, Some lon -> Some (lat, lon)
-      | _ -> None
-    else None
+    match parts with
+    | lat_s :: lon_s :: _ -> (
+        let clean s =
+          let s =
+            if String.length s > 0 && s.[String.length s - 1] = ',' then
+              String.sub s 0 (String.length s - 1)
+            else s
+          in
+          String.map (fun c -> if c = ',' then '.' else c) s
+        in
+        let lat_v = clean lat_s in
+        let lon_v = clean lon_s in
+        Brr.Console.log [ Jstr.v "Cleaned:"; Jstr.v lat_v; Jstr.v lon_v ];
+        match (parse_float_safe lat_v, parse_float_safe lon_v) with
+        | Some lat, Some lon ->
+            Brr.Console.log
+              [ Jstr.v "Parsed:"; Jv.of_float lat; Jv.of_float lon ];
+            Some (lat, lon)
+        | _ ->
+            Brr.Console.log [ Jstr.v "Parse float failed" ];
+            None)
+    | _ ->
+        Brr.Console.log [ Jstr.v "Not enough parts" ];
+        None
 
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in
