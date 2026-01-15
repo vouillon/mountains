@@ -1757,8 +1757,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   (* Set all uniforms using cached locations *)
   Gl.uniform1i ctx shadow_uniforms.w_mask w_mask_radial;
   Gl.uniform1i ctx shadow_uniforms.w_shift w_shift_radial;
-  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div
-    (1. /. (float n_sectors /. 2.));
+  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div (1. /. float n_sectors);
   Gl.uniform1f ctx shadow_uniforms.grid_k grid_k;
   Gl.uniform1f ctx shadow_uniforms.grid_base grid_base;
   Gl.uniform1f ctx shadow_uniforms.grid_scale grid_scale;

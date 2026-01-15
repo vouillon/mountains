@@ -160,7 +160,7 @@ let compute_radial_params ~n_sectors ~n_rings =
   {
     w_mask;
     w_shift;
-    inv_sectors_div = 1. /. (float n_sectors /. 2.);
+    inv_sectors_div = 1. /. float n_sectors;
     grid_k;
     grid_base;
     grid_scale;
