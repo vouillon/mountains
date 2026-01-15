@@ -3869,12 +3869,24 @@ let main () =
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
 
+  let debug = false in
   let points =
     List.filter
-      (fun (_, (dst_x, dst_y)) ->
-        Visibility.test
-          (Dem_loader.get_height tile)
-          ~src_h:height ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+      (fun ({ Points.name; _ }, (dst_x, dst_y)) ->
+        if
+          (not debug)
+          || (String.length name > 8 && String.sub name 0 7 = "Grand G")
+        then (
+          if debug then prerr_endline name;
+
+          Visibility.test_precise
+            (Dem_loader.get_height tile)
+            ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y
+            ())
+        else
+          Visibility.test
+            (Dem_loader.get_height tile)
+            ~src_h:(height +. 2.) ~src_x:x ~src_y:y ~dst_x ~dst_y ())
       points
   in
 
