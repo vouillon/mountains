@@ -1896,8 +1896,10 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let px = deltax *. float (x' - x) in
-        let py = deltay *. float (y - y') in
+        let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
+        let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+        let px = deltax *. (float (x' - x) -. off_x) in
+        let py = deltay *. (float (y - y') -. off_y) in
         let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
@@ -3750,8 +3752,6 @@ let main () =
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   let* points =
-    let width = 3600 in
-    let height = 3600 in
     (* Extract POIs from all loaded tiles and convert to Points.t format *)
     let pois =
       List.concat_map
@@ -3781,19 +3781,24 @@ let main () =
     in
     Lwt.return
       (filtered
-      |> List.map (fun ({ Points.coord = { lat; lon }; _ } as pt) ->
-          let x =
-            min (tile_width - 1)
-              (truncate ((lon -. tile_coord.lon) *. float width))
-          in
-          let y =
-            max 0
-              (min (tile_height - 1)
-                 (truncate ((tile_coord'.lat -. lat) *. float height) - 1))
-          in
-          (pt, (x, y))))
+      |> List.map
+           (let size = tile_width in
+            let center_lon_int = truncate (lon *. 3600.) in
+            let center_lat_int = truncate (lat *. 3600.) in
+            let min_lon_int = center_lon_int - (size / 2) in
+            (* Top row index in arcseconds. See Clc_loader/Dem_loader bounds logic *)
+            let max_lat_int = center_lat_int + (size / 2) - 1 in
+            fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
+              (* POI coords are already rounded to arcseconds in previous step, so simple truncate is safe *)
+              let pt_lon_int = truncate (pt_lon *. 3600.) in
+              let pt_lat_int = truncate (pt_lat *. 3600.) in
+              let x = max 0 (min (tile_width - 1) (pt_lon_int - min_lon_int)) in
+              let y =
+                max 0 (min (tile_height - 1) (max_lat_int - pt_lat_int))
+              in
+              (pt, (x, y))))
   in
-  if true then (
+  if false then (
     let w = 4 in
     let a = Array.make (((2 * w) + 1) * ((2 * w) + 1)) 0 in
     let count = ref 0 in
