@@ -20,6 +20,21 @@ let request_animation_frame () =
   ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
   t
 
+let on_gpu_finished ctx =
+  let module Gl = Brr_canvas.Gl in
+  let t, u = Lwt.task () in
+  let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
+  let rec check () =
+    let status = Gl.client_wait_sync ctx sync 0 0 in
+    if status = Gl.already_signaled || status = Gl.condition_satisfied then begin
+      Gl.delete_sync ctx sync;
+      Lwt.wakeup u ()
+    end
+    else ignore (Brr.G.request_animation_frame (fun _ -> check ()))
+  in
+  check ();
+  t
+
 let sleep s =
   let t, u = Lwt.task () in
   ignore
@@ -62,14 +77,13 @@ let update_startup_status msg loading =
 let hide_startup_overlay () =
   let doc = Brr.G.document in
   let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
-  match overlay with
-  | Some el ->
+  Option.iter
+    (fun el ->
       Brr.El.set_class (Jstr.v "hidden") true el;
       ignore
-        (Brr.G.set_timeout ~ms:500 (fun () ->
-             Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el));
-      sleep 0.5
-  | None -> Lwt.return_unit
+        (Brr.G.set_timeout ~ms:600 (fun () ->
+             Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el)))
+    overlay
 
 let show_startup_overlay msg loading =
   let doc = Brr.G.document in
@@ -3001,7 +3015,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
   in
   let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
-
+  let* () = on_gpu_finished ctx in
+  hide_startup_overlay ();
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
@@ -3281,8 +3296,11 @@ let setup_events canvas =
              | `Init -> ()
              | `Starting ->
                  state := `Started;
-                 if beta < 90. then
-                   display_temporary_message "Raise your phone!"
+                 if beta < 90. then (
+                   Lwt.async @@ fun () ->
+                   let* () = sleep 0.6 in
+                   display_temporary_message "Raise your phone!";
+                   Lwt.return ())
              | `Started -> if beta >= 90. then remove_message ());
              current_orientation := { alpha; beta; gamma; screen }
            end
@@ -4006,10 +4024,12 @@ let main () =
       points
   in
 
-  Lwt.async hide_startup_overlay;
   start ();
-  tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile canvas
-    ctx ~detail_map ~clc_tiles:tiles ~graphics
+  let* () =
+    tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile
+      canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
+  in
+  Lwt.return_unit
 
 let () =
   let open Brr_webworkers.Service_worker in
