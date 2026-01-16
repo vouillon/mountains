@@ -26,12 +26,9 @@
     body {
       height: 100%;
       margin: 0;
-      background: #464d2e;
     }
 
     canvas {
-      position: relative;
-      z-index: 1;
       width: 100%;
       height: 100%;
       display: block;
@@ -40,7 +37,7 @@
 
     .message {
       position: absolute;
-      z-index: 2;
+      z-index: 1000;
       top: 25%;
       left: 50%;
       transform: translate(-50%, -50%);
@@ -48,17 +45,6 @@
       border-radius: 12px;
       background: white;
       font-size: 20px;
-    }
-
-    .notice {
-      position: absolute;
-      bottom: 0;
-      padding: 16px 20px;
-      padding-right: 80px;
-      /* Make space for FAB */
-      background: white;
-      right: 0;
-      left: 0;
     }
 
     .fab {
@@ -214,21 +200,101 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
+
+    /* Cinematic Startup Overlay */
+    .startup-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: black;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      transition: opacity 0.5s ease-out;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    .startup-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: rotate 1s linear infinite;
+      margin-bottom: 24px;
+    }
+
+    .status-text {
+      font-size: 18px;
+      font-weight: 300;
+      letter-spacing: 1px;
+      animation: pulse 2s ease-in-out infinite;
+      transition: color 0.3s;
+    }
+
+    .status-text.loading {
+      color: #ffb300;
+    }
+
+    .startup-overlay .notice {
+      position: absolute;
+      bottom: 40px;
+      padding: 0 20px;
+      background: transparent;
+      color: white;
+      opacity: 0.4;
+      right: 0;
+      left: 0;
+      pointer-events: none;
+    }
+
+    @keyframes rotate {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.6;
+      }
+    }
   </style>
 
 <body>
-  <div class="notice">
-    <strong> Map Data & Terrain Sources:</strong>
-    <ul>
-      <li>
-        Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V.
-        2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
-        under COPERNICUS by the European Union and ESA; all rights
-        reserved.
-      <li>
-        Land Use: © European Union, Copernicus Land Monitoring Service
-        2025, European Environment Agency (EEA)
-      <li>
-        Water Bodies: © OpenStreetMap contributors (Open Database License)
+  <div id="startup-overlay" class="startup-overlay">
+    <div class="spinner"></div>
+    <div id="status-text" class="status-text"></div>
+    <div class="notice">
+      <strong> Map Data & Terrain Sources:</strong>
+      <ul>
+        <li>
+          Elevation: Produced using Copernicus WorldDEM-30 © DLR e.V.
+          2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+          under COPERNICUS by the European Union and ESA; all rights
+          reserved.
+        <li>
+          Land Use: © European Union, Copernicus Land Monitoring Service
+          2025, European Environment Agency (EEA)
+        <li>
+          Water Bodies: © OpenStreetMap contributors (Open Database License)
+      </ul>
+    </div>
   </div>
   <canvas id="canvas" width=640 height=480>

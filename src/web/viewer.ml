@@ -12,6 +12,20 @@ let _ =
     | _ -> None)
 
 let ( let* ) = Lwt.bind
+let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
+let now_ms = now
+
+let request_animation_frame () =
+  let t, u = Lwt.task () in
+  ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
+  t
+
+let sleep s =
+  let t, u = Lwt.task () in
+  ignore
+    (Brr.G.set_timeout ~ms:(truncate (s *. 1000.)) (fun () -> Lwt.wakeup u ()));
+  t
+
 let message = ref None
 
 let remove_message () =
@@ -35,6 +49,49 @@ let display_message msg =
 let display_temporary_message msg =
   display_message msg;
   ignore (Brr.G.set_timeout ~ms:10000 remove_message)
+
+let update_startup_status msg loading =
+  let doc = Brr.G.document in
+  let status = Brr.Document.find_el_by_id doc (Jstr.v "status-text") in
+  Option.iter
+    (fun el ->
+      Brr.El.set_children el [ Brr.El.txt (Jstr.v msg) ];
+      Brr.El.set_class (Jstr.v "loading") loading el)
+    status
+
+let hide_startup_overlay () =
+  let doc = Brr.G.document in
+  let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
+  match overlay with
+  | Some el ->
+      Brr.El.set_class (Jstr.v "hidden") true el;
+      ignore
+        (Brr.G.set_timeout ~ms:500 (fun () ->
+             Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el));
+      sleep 0.5
+  | None -> Lwt.return_unit
+
+let show_startup_overlay msg loading =
+  let doc = Brr.G.document in
+  update_startup_status msg loading;
+  let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
+  match overlay with
+  | Some el ->
+      Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "flex") el;
+      (* We need to wait for the browser to process the 'display' change
+         before we can trigger the 'opacity' transition. *)
+      let* () = request_animation_frame () in
+      let* () = request_animation_frame () in
+      Brr.El.set_class (Jstr.v "hidden") false el;
+      (* Wait for the fade-in transition to complete *)
+      sleep 0.5
+  | None -> Lwt.return_unit
+
+let navigate_to uri =
+  Lwt.async (fun () ->
+      let* () = show_startup_overlay "Navigating..." false in
+      Brr.Window.set_location Brr.G.window uri;
+      Lwt.return_unit)
 
 (* Sky colors *)
 let fog_linear = (0.17, 0.38, 0.79)
@@ -2035,13 +2092,6 @@ let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
 let last_frame_time = ref 0.
-let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
-let now_ms = now
-
-let request_animation_frame () =
-  let t, u = Lwt.task () in
-  ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
-  t
 
 let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
@@ -3597,7 +3647,7 @@ let create_location_ui ~size =
               (Brr.Window.location Brr.G.window)
               (Brr.Uri.Params.of_jstr search)
           in
-          Brr.Window.set_location Brr.G.window uri
+          navigate_to uri
         else
           Jv.set (Brr.El.to_jv input) "value"
             (Jv.of_string "Location out of range")
@@ -3646,7 +3696,7 @@ let create_location_ui ~size =
                    (Brr.Window.location Brr.G.window)
                    (Brr.Uri.Params.of_jstr search)
                in
-               Brr.Window.set_location Brr.G.window uri;
+               navigate_to uri;
                Fut.return ()
            | None ->
                Jv.set (Brr.El.to_jv input) "value"
@@ -3684,7 +3734,7 @@ let create_location_ui ~size =
                    (Brr.Window.location Brr.G.window)
                    (Brr.Uri.Params.of_jstr search)
                in
-               Brr.Window.set_location Brr.G.window uri)
+               navigate_to uri)
              (Brr.El.as_target item));
         Brr.El.append_children location_list [ item ];
         item)
@@ -3775,7 +3825,7 @@ let main () =
   let graphics = init_graphics ctx in
   resize_canvas canvas;
 
-  display_message "Getting current location...";
+  update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
   let* source, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
@@ -3794,11 +3844,11 @@ let main () =
             (Brr.Window.location Brr.G.window)
             (Brr.Uri.Params.of_jstr search)
         in
-        Brr.Window.set_location Brr.G.window uri);
+        navigate_to uri);
   current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
 
   let start = setup_events canvas in
-  display_message "Loading...";
+  update_startup_status "Loading Terrain..." true;
 
   (* Load DEM and CLC (for POIs) in parallel *)
   (* Load DEM, CLC, and init graphics in parallel *)
@@ -3956,7 +4006,7 @@ let main () =
       points
   in
 
-  remove_message ();
+  Lwt.async hide_startup_overlay;
   start ();
   tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile canvas
     ctx ~detail_map ~clc_tiles:tiles ~graphics
