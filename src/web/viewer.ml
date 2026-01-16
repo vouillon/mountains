@@ -692,7 +692,9 @@ let tri ~w ~h ~x ~y ~height ~points ~tile canvas ctx =
           prepare_text ctx
             (match elevation with
             | None -> name
-            | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
+            | Some elevation ->
+                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;
+                Printf.sprintf "%s (%dm)" name elevation)
         in
         let h =
           let height' = tile.{y', x'} in
@@ -734,7 +736,11 @@ let wait_for_service_worker =
         fut
 
 let get_preset_position () =
-  if true then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
+  if false then (44.5738851 +. (1. /. 3600.), 6.7692490 +. (1. /. 3600.), 0.)
+  else if true then (44.5740068 +. (1. /. 3600.), 6.7954285 +. (1. /. 3600.), 0.)
+  else if true then (44.536194, 6.804142, 0.)
+  else if true then (44.527946, 6.802877, 0.)
+  else if true then (44.3950846, 6.7669714, 170.) (* La Chalannette, Jausiers *)
   else if true then (48.849418, 2.3674101, 0.) (* Paris *)
   else if true then (44.607649, 6.8204019, 220.) (* Col Girardin *)
   else if true then (44.209067, 6.9423065, 0.) (* Col du Blainon *)
