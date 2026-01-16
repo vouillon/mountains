@@ -2994,6 +2994,7 @@ let featured_locations =
     ("Pic de Morgon", 44.4920, 6.3975, 0.);
     ("Lac de Roburent", 44.424680, 6.93430, 220.);
     ("Mont Ténibre", 44.2839, 6.9719, 0.);
+    ("Baisse de Druos", 44.191930, 7.19195, 0.);
   ]
 
 let get_preset_position () =
@@ -3050,7 +3051,6 @@ let parse_input_coordinates input =
         else input
       with _ -> input
     in
-    Brr.Console.log [ Jstr.v "Coords string:"; Jstr.v coords_str ];
     (* 3. Robust parsing of "lat,lon", "lat lon", or "lat ; lon" *)
     let parts =
       let jv_coords = Jv.of_string (String.trim coords_str) in
@@ -3061,17 +3061,10 @@ let parse_input_coordinates input =
       let parts =
         Jv.to_list Jv.to_string jv_parts |> List.filter (fun s -> s <> "")
       in
-      Brr.Console.log
-        [ Jstr.v "JS split parts:"; Jv.of_list Jv.of_string parts ];
       (* Handle "45.1,6.7" (no space, just comma separator) *)
       match parts with
       | [ single ] when String.contains single ',' ->
-          let res =
-            String.split_on_char ',' single |> List.filter (fun s -> s <> "")
-          in
-          Brr.Console.log
-            [ Jstr.v "Single comma split:"; Jv.of_list Jv.of_string res ];
-          res
+          String.split_on_char ',' single |> List.filter (fun s -> s <> "")
       | _ -> parts
     in
     match parts with
@@ -3086,18 +3079,10 @@ let parse_input_coordinates input =
         in
         let lat_v = clean lat_s in
         let lon_v = clean lon_s in
-        Brr.Console.log [ Jstr.v "Cleaned:"; Jstr.v lat_v; Jstr.v lon_v ];
         match (parse_float_safe lat_v, parse_float_safe lon_v) with
-        | Some lat, Some lon ->
-            Brr.Console.log
-              [ Jstr.v "Parsed:"; Jv.of_float lat; Jv.of_float lon ];
-            Some (lat, lon)
-        | _ ->
-            Brr.Console.log [ Jstr.v "Parse float failed" ];
-            None)
-    | _ ->
-        Brr.Console.log [ Jstr.v "Not enough parts" ];
-        None
+        | Some lat, Some lon -> Some (lat, lon)
+        | _ -> None)
+    | _ -> None
 
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in
@@ -3555,10 +3540,26 @@ let create_location_ui ~size =
   Brr.El.append_children overlay [ menu ];
   Brr.El.append_children body [ fab; overlay ];
 
+  (* Input Section *)
+  let input =
+    Brr.El.input
+      ~at:
+        Brr.At.
+          [
+            class' (Jstr.v "input-coord");
+            type' (Jstr.v "text");
+            placeholder (Jstr.v "Lat, Lon or Map Link");
+          ]
+      ()
+  in
+
   let toggle_menu () =
     let visible = Jstr.v "visible" in
     if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
-    else Brr.El.set_class visible true overlay
+    else begin
+      Brr.El.set_class visible true overlay;
+      ignore (Jv.call (Brr.El.to_jv input) "focus" [||])
+    end
   in
 
   ignore
@@ -3573,17 +3574,6 @@ let create_location_ui ~size =
        (Brr.El.as_target overlay));
 
   (* Input Section *)
-  let input =
-    Brr.El.input
-      ~at:
-        Brr.At.
-          [
-            class' (Jstr.v "input-coord");
-            type' (Jstr.v "text");
-            placeholder (Jstr.v "Lat, Lon or Map Link");
-          ]
-      ()
-  in
   let btn_go =
     Brr.El.button
       ~at:Brr.At.[ class' (Jstr.v "btn-go") ]
@@ -3618,12 +3608,14 @@ let create_location_ui ~size =
   ignore
     (Brr.Ev.listen Brr.Ev.keydown
        (fun e ->
-         let key = Jstr.to_string (Brr.Ev.Keyboard.key (Brr.Ev.as_type e)) in
-         if key = "Enter" then go ()
-         else if
-           key = "ArrowUp" || key = "ArrowDown" || key = "ArrowLeft"
-           || key = "ArrowRight"
-         then Brr.Ev.stop_propagation e)
+         let code = Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e)) in
+         match code with
+         | "Enter" ->
+             Brr.Ev.prevent_default e;
+             Brr.Ev.stop_propagation e;
+             go ()
+         | "ArrowLeft" | "ArrowRight" -> Brr.Ev.stop_propagation e
+         | _ -> ())
        (Brr.El.as_target input));
 
   ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
@@ -3631,7 +3623,7 @@ let create_location_ui ~size =
   (* Current Location *)
   let current_loc_btn =
     Brr.El.div
-      ~at:Brr.At.[ class' (Jstr.v "location-item") ]
+      ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
       [
         Brr.El.span
           ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
@@ -3668,33 +3660,72 @@ let create_location_ui ~size =
   let location_list =
     Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
   in
-  List.iter
-    (fun (name, lat, lon, alpha) ->
-      let item =
-        Brr.El.li
-          ~at:Brr.At.[ class' (Jstr.v "location-item") ]
-          [
-            Brr.El.span
-              ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
-              [ Brr.El.txt (Jstr.v "🏔️") ];
-            Brr.El.txt (Jstr.v name);
-          ]
-      in
+  let featured_items =
+    List.map
+      (fun (name, lat, lon, alpha) ->
+        let item =
+          Brr.El.li
+            ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
+            [
+              Brr.El.span
+                ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+                [ Brr.El.txt (Jstr.v "🏔️") ];
+              Brr.El.txt (Jstr.v name);
+            ]
+        in
+        ignore
+          (Brr.Ev.listen Brr.Ev.click
+             (fun _ ->
+               let search =
+                 Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+               in
+               let uri =
+                 Brr.Uri.with_query_params
+                   (Brr.Window.location Brr.G.window)
+                   (Brr.Uri.Params.of_jstr search)
+               in
+               Brr.Window.set_location Brr.G.window uri)
+             (Brr.El.as_target item));
+        Brr.El.append_children location_list [ item ];
+        item)
+      featured_locations
+  in
+
+  let focusables = [ input; btn_go; current_loc_btn ] @ featured_items in
+  let n = List.length focusables in
+  List.iteri
+    (fun i el ->
       ignore
-        (Brr.Ev.listen Brr.Ev.click
-           (fun _ ->
-             let search =
-               Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+        (Brr.Ev.listen Brr.Ev.keydown
+           (fun e ->
+             let code =
+               Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e))
              in
-             let uri =
-               Brr.Uri.with_query_params
-                 (Brr.Window.location Brr.G.window)
-                 (Brr.Uri.Params.of_jstr search)
-             in
-             Brr.Window.set_location Brr.G.window uri)
-           (Brr.El.as_target item));
-      Brr.El.append_children location_list [ item ])
-    featured_locations;
+             match code with
+             | "ArrowDown" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let next = List.nth focusables ((i + 1) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv next) "focus" [||])
+             | "ArrowUp" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let prev = List.nth focusables ((i - 1 + n) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv prev) "focus" [||])
+             | "Escape" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 toggle_menu ()
+             | "Enter" when el != input && el != btn_go ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 ignore (Jv.call (Brr.El.to_jv el) "click" [||])
+             | "Enter" ->
+                 (* Let the specific listeners handle it, but stop propagation to window *)
+                 Brr.Ev.stop_propagation e
+             | _ -> ())
+           (Brr.El.as_target el)))
+    focusables;
 
   let quick_select_header =
     Brr.El.div
