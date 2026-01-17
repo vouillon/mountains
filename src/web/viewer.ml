@@ -1774,7 +1774,6 @@ let prepare_text_immediate ctx text =
   (tid, w, h)
 
 let prepare_text _ctx text = { text; texture = None }
-let uploaded_count = ref 0
 
 let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
     (lazy_text : lazy_text) =
@@ -1923,20 +1922,15 @@ let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
   Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
   Gl.active_texture ctx Gl.texture0
 
-(* Track whether shadows have been rendered - only render once per session *)
-let shadow_rendered = ref false
-
-let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
+let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
     ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
-    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~shadow_matrices ~w ~x ~y
-    ~height ~lat ~lon ~orientation ~points ~tile ~index_count ~ao_texture
-    ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
-    ~(shadow_uniforms : Render_state.shadow_uniforms) ~palette_texture
-    ~cover_map_texture ~sky_pid ~sky_uniforms canvas ctx =
-  (* TODO: use in draw_shadows refactoring *)
-  uploaded_count := 0;
+    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~_shadow_matrices:_ ~_w:_
+    ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
+    ~_ao_texture:_ ~_detail_map:_ ~_shadow_pid:_ ~_shadow_fbo:_ ~_shadow_map:_
+    ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
+    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1999,19 +1993,6 @@ let draw terrain_pid terrain_geo _tile_texture relief_texture triangle_pid
         if shown then Some (texture, x, y, shown) else None)
       points
   in
-
-  (* SHADOW PASS *)
-
-  (* Render shadows once on first frame *)
-  if not !shadow_rendered then begin
-    shadow_rendered := true;
-    draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-      ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x
-      ~y:(w - y) ~lat ~lon ~w ctx;
-    (* Rebind terrain textures after draw_shadows disturbed them *)
-    bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
-      ~shadow_map ~cover_map_texture ~palette_texture
-  end;
 
   (* Prepare Clear Color matching fog *)
   let r, g, b = fog_linear in
@@ -2994,10 +2975,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
 
-  (* Bind all terrain textures at init - after all textures are created *)
-  bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
-    ~cover_map_texture ~palette_texture;
-
   (* Store CLC geographic bounds for shader coordinate mapping *)
 
   (* GPU rasterize CLC tiles to FBO *)
@@ -3015,16 +2992,28 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
   in
   let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
+
+  (* Render shadows *)
+  draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+    ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x
+    ~y:(h - y) ~lat ~lon ~w ctx;
+
+  (* Bind all terrain textures at init - after all textures are created *)
+  bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
+    ~cover_map_texture ~palette_texture;
+
   let* () = on_gpu_finished ctx in
   hide_startup_overlay ();
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
         ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
-        ~shadow_matrices ~w ~x ~y ~lat ~lon ~orientation ~height ~tile ~points
-        ~index_count ~ao_texture ~detail_map ~shadow_pid ~shadow_fbo ~shadow_map
-        ~shadow_uniforms ~palette_texture ~cover_map_texture ~sky_pid
-        ~sky_uniforms canvas ctx)
+        ~_shadow_matrices:shadow_matrices ~_w:w ~x ~y ~lat ~lon ~orientation
+        ~height ~tile ~points ~index_count ~_ao_texture:ao_texture
+        ~_detail_map:detail_map ~_shadow_pid:shadow_pid ~_shadow_fbo:shadow_fbo
+        ~_shadow_map:shadow_map ~_shadow_uniforms:shadow_uniforms
+        ~_palette_texture:palette_texture ~_cover_map_texture:cover_map_texture
+        ~sky_pid ~sky_uniforms canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
