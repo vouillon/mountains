@@ -5,7 +5,17 @@ let get_cache () =
 
 let put_in_cache request response =
   let* cache = get_cache () in
-  Brr_io.Fetch.Cache.put cache request
+  (* Strip query string to avoid duplicate cache entries *)
+  let cache_url =
+    match Brr.Uri.of_jstr (Brr_io.Fetch.Request.url request) with
+    | Ok url -> (
+        match Brr.Uri.with_uri ~query:Jstr.empty url with
+        | Ok url -> Brr.Uri.to_jstr url
+        | Error _ -> Brr_io.Fetch.Request.url request)
+    | Error _ -> Brr_io.Fetch.Request.url request
+  in
+  let cache_request = Brr_io.Fetch.Request.v cache_url in
+  Brr_io.Fetch.Cache.put cache cache_request
     (Brr_io.Fetch.Response.of_response response)
 
 let match_opts =
