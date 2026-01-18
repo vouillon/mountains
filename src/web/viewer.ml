@@ -3296,8 +3296,7 @@ let setup_events canvas =
                    Lwt.return ())
              | `Started -> if beta >= 90. then remove_message ());
              current_orientation := { alpha; beta; gamma; screen }
-           end
-           else current_orientation := { !current_orientation with screen })
+           end)
        (Brr.Window.as_target Brr.G.window));
 
   (* Keyboard controls *)
@@ -3486,7 +3485,7 @@ let setup_events canvas =
                Format.eprintf "%f %f => %f@." !current_orientation.alpha
                  !current_orientation.gamma alpha;
                current_orientation :=
-                 { !current_orientation with alpha; gamma = 0. }
+                 { !current_orientation with alpha; gamma = 0.; screen = 0. }
              end;
              Brr.Ev.prevent_default ev
            end;
