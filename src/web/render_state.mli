@@ -2,6 +2,23 @@
 
 open Brr_canvas
 
+(** {1 Shared Utilities} *)
+
+val compute_deltas : lat:float -> float * float * float
+(** [compute_deltas ~lat] returns [(deltax, deltay, avg_delta)] for the given
+    latitude. *)
+
+val compute_sub_arcsec_offset : float -> float
+(** [compute_sub_arcsec_offset coord] returns the fractional part within the
+    current arc-second for a geographic coordinate. *)
+
+val compute_center_offset :
+  lat:float -> lon:float -> x:int -> y:int -> float * float
+(** [compute_center_offset ~lat ~lon ~x ~y] computes the center offset in meters
+    from tile origin. Returns [(center_offset_x, center_offset_y)]. *)
+
+(** {1 Radial Grid Parameters} *)
+
 type radial_params = {
   w_mask : int;
   w_shift : int;
@@ -80,9 +97,7 @@ type relief_uniforms = {
 (** Cached uniform locations for the relief shader. *)
 
 type mipmap_uniforms = {
-  source_level : Gl.uniform_location;
-  base_k : Gl.uniform_location;
-  decay : Gl.uniform_location;
+  k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
 }
@@ -151,8 +166,10 @@ val upload_session_static :
   Gl.t ->
   Gl.program ->
   Gl.program ->
+  Gl.program ->
   terrain_uniforms ->
   sky_uniforms ->
+  shadow_uniforms ->
   w:int ->
   lat:float ->
   x:int ->
@@ -176,3 +193,9 @@ val init_triangle_uniforms : Gl.t -> Gl.program -> triangle_uniforms
 type text_uniforms = { transform : Gl.uniform_location }
 
 val init_text_uniforms : Gl.t -> Gl.program -> text_uniforms
+
+val apply_anisotropic_filtering : Gl.t -> unit
+(** Apply cached max anisotropy to the currently bound texture. *)
+
+val init_anisotropic_filtering : Gl.t -> unit
+(** Detect and initialize anisotropic filtering extension. *)

@@ -3,9 +3,38 @@
     This module provides:
     - Cached uniform locations to avoid repeated lookups
     - Pre-computed radial grid parameters
-    - Helper functions for uploading shared uniforms *)
+    - Helper functions for uploading shared uniforms
+    - Shared constants and utilities *)
 
 open Brr_canvas
+
+(* ========== Shared Constants ========== *)
+
+(** Meters per arc-second at the equator (latitude-independent Y delta). *)
+let deltay = 40_000. /. 360. /. 3600. *. 1000.
+
+(* ========== Shared Utilities ========== *)
+
+(** Compute delta values for a given latitude. Returns (deltax, deltay,
+    avg_delta) where deltax is longitude-adjusted. *)
+let compute_deltas ~lat =
+  let deltax = deltay *. cos (lat *. Web_utils.pi /. 180.) in
+  let avg_delta = (deltax +. deltay) *. 0.5 in
+  (deltax, deltay, avg_delta)
+
+(** Compute sub-arcsecond offset for a coordinate. Returns the fractional part
+    within the current arc-second. *)
+let compute_sub_arcsec_offset coord = (coord *. 3600.) -. floor (coord *. 3600.)
+
+(** Compute center offset in meters from tile origin. [x] and [y] are
+    tile-relative indices, [lat] and [lon] are geographic coords. *)
+let compute_center_offset ~lat ~lon ~x ~y =
+  let deltax, deltay, _ = compute_deltas ~lat in
+  let off_x = compute_sub_arcsec_offset lon in
+  let off_y = compute_sub_arcsec_offset lat in
+  let center_offset_x = deltax *. (float x +. off_x) in
+  let center_offset_y = deltay *. (float y +. off_y) in
+  (center_offset_x, center_offset_y)
 
 type radial_params = {
   w_mask : int;
@@ -95,9 +124,7 @@ type relief_uniforms = {
 (** Cached uniform locations for the relief shader. *)
 
 type mipmap_uniforms = {
-  source_level : Gl.uniform_location;
-  base_k : Gl.uniform_location;
-  decay : Gl.uniform_location;
+  k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
 }
@@ -143,17 +170,10 @@ type water_raster_uniforms = {
 
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
-  let rec next_power_of_two n p =
-    if n <= p then p else next_power_of_two n (p + p)
-  in
-  let w_stride = next_power_of_two (n_sectors + 1) 1 in
+  let w_stride = Web_utils.next_power_of_two (n_sectors + 1) 1 in
   let w_mask = w_stride - 1 in
-  let w_shift =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n lsr 1) in
-    log2 w_stride
-  in
-  let pi = 4. *. atan 1. in
-  let grid_k = pi /. float n_sectors in
+  let w_shift = Web_utils.log2 w_stride in
+  let grid_k = Web_utils.pi /. 2. /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
   let grid_base = exp grid_k in
   let grid_scale = 70000. /. (height_term -. 1.) in
@@ -242,9 +262,7 @@ let init_relief_uniforms ctx pid =
 let init_mipmap_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   {
-    source_level = u "source_level";
-    base_k = u "base_k";
-    decay = u "decay";
+    k = u "k";
     source_texture = u "source_texture";
     source_size = u "source_size";
   }
@@ -326,31 +344,23 @@ let upload_texture_units_shadow ctx (u : shadow_uniforms) =
     - Light direction (u_lightDir)
     - Shadow matrices and splits
     - Fog Color *)
-let upload_session_static ctx terrain_pid sky_pid (u : terrain_uniforms)
-    (sky_u : sky_uniforms) ~w ~lat ~x ~y ~lon ~light_dir ~shadow_matrices
-    ~shadow_splits ~fog_color ~zenith_color =
-  Gl.use_program ctx terrain_pid;
-  let pi = 4. *. atan 1. in
-  let deltay = 40_000. /. 360. /. 3600. *. 1000. in
-  let deltax = deltay *. cos (lat *. pi /. 180.) in
+let upload_session_static ctx terrain_pid sky_pid shadow_pid
+    (u : terrain_uniforms) (sky_u : sky_uniforms) (shadow_u : shadow_uniforms)
+    ~w ~lat ~x ~y ~lon ~light_dir ~shadow_matrices ~shadow_splits ~fog_color
+    ~zenith_color =
+  let deltax, deltay, avg_delta = compute_deltas ~lat in
+  let max_lod = Web_utils.log2 w in
+  let center_offset_x, center_offset_y =
+    compute_center_offset ~lat ~lon ~x ~y
+  in
 
-  (* Tile parameters *)
+  (* Terrain shader uniforms *)
+  Gl.use_program ctx terrain_pid;
   Gl.uniform1i ctx u.w w;
   Gl.uniform1f ctx u.inv_w (1. /. float w);
-  let max_lod =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 w
-  in
   Gl.uniform1i ctx u.max_lod max_lod;
   Gl.uniform2f ctx u.inv_delta (1. /. deltax) (1. /. deltay);
-  let avg_delta = (deltax +. deltay) *. 0.5 in
   Gl.uniform1f ctx u.inv_avg_delta (1. /. avg_delta);
-
-  (* Center offset *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x) in
-  let center_offset_y = deltay *. (float y +. off_y) in
   Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y;
 
   (* CLC clipmap parameters *)
@@ -368,16 +378,6 @@ let upload_session_static ctx terrain_pid sky_pid (u : terrain_uniforms)
   let zr, zg, zb = zenith_color in
   Gl.uniform3f ctx u.u_zenithColor zr zg zb;
 
-  (* Sky Uniforms *)
-  Gl.use_program ctx sky_pid;
-  Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x (-.light_dir.Matrix.y)
-    light_dir.Matrix.z;
-  Gl.uniform3f ctx sky_u.u_fogColor r g b;
-  Gl.uniform3f ctx sky_u.u_zenithColor zr zg zb;
-
-  (* Restore Terrain Program for subsequent uploads (shadow matrices) *)
-  Gl.use_program ctx terrain_pid;
-
   (* Shadow matrices and splits *)
   let flat_matrices =
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (16 * 3)
@@ -393,7 +393,23 @@ let upload_session_static ctx terrain_pid sky_pid (u : terrain_uniforms)
   let splits_ba =
     Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout shadow_splits
   in
-  Gl.uniform1fv ctx u.shadow_splits (Brr.Tarray.of_bigarray1 splits_ba)
+  Gl.uniform1fv ctx u.shadow_splits (Brr.Tarray.of_bigarray1 splits_ba);
+
+  (* Shadow shader uniforms *)
+  Gl.use_program ctx shadow_pid;
+  Gl.uniform1i ctx shadow_u.w w;
+  Gl.uniform1f ctx shadow_u.inv_w (1. /. float w);
+  Gl.uniform1i ctx shadow_u.max_lod max_lod;
+  Gl.uniform2f ctx shadow_u.inv_delta (1. /. deltax) (1. /. deltay);
+  Gl.uniform1f ctx shadow_u.inv_avg_delta (1. /. avg_delta);
+  Gl.uniform2f ctx shadow_u.center_offset center_offset_x center_offset_y;
+
+  (* Sky Uniforms *)
+  Gl.use_program ctx sky_pid;
+  Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x (-.light_dir.Matrix.y)
+    light_dir.Matrix.z;
+  Gl.uniform3f ctx sky_u.u_fogColor r g b;
+  Gl.uniform3f ctx sky_u.u_zenithColor zr zg zb
 
 type triangle_uniforms = {
   transform : Gl.uniform_location;
@@ -411,3 +427,19 @@ type text_uniforms = { transform : Gl.uniform_location }
 let init_text_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   { transform = u "transform" }
+
+let anisotropy_ext = ref None
+
+let apply_anisotropic_filtering ctx =
+  match !anisotropy_ext with
+  | None -> ()
+  | Some (ext, max_val) -> Gl.tex_parameterf ctx Gl.texture_2d ext max_val
+
+let init_anisotropic_filtering ctx =
+  let ext_name = Jstr.v "EXT_texture_filter_anisotropic" in
+  let ext = Gl.get_extension ctx ext_name in
+  if Jv.is_some ext then
+    let param = Jv.to_int (Jv.get ext "TEXTURE_MAX_ANISOTROPY_EXT") in
+    let max_val_id = Jv.to_int (Jv.get ext "MAX_TEXTURE_MAX_ANISOTROPY_EXT") in
+    let max_val = Gl.get_parameter ctx max_val_id in
+    anisotropy_ext := Some (param, Jv.to_float max_val)
