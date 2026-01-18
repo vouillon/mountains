@@ -24,6 +24,7 @@
   <style>
     html,
     body {
+      overscroll-behavior-y: contain;
       height: 100%;
       margin: 0;
     }
@@ -201,6 +202,28 @@
       scrollbar-width: none;
     }
 
+    .menu-close {
+      display: none;
+      position: absolute;
+      top: calc(12px + env(safe-area-inset-top));
+      right: 12px;
+      width: 44px;
+      height: 44px;
+      border: none;
+      background: rgba(0, 0, 0, 0.05);
+      border-radius: 50%;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 24px;
+      color: #666;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .menu-close:active {
+      background: rgba(0, 0, 0, 0.1);
+    }
+
     /* Full screen menu on mobile */
     @media (max-width: 480px) {
       .menu {
@@ -215,6 +238,10 @@
 
       .menu-overlay.visible .menu {
         transform: none;
+      }
+
+      .menu-close {
+        display: flex;
       }
     }
 
@@ -238,6 +265,7 @@
 
     .startup-overlay.hidden {
       opacity: 0;
+      transition: opacity 1s ease-out;
       pointer-events: none;
     }
 
