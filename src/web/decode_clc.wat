@@ -142,7 +142,8 @@
                   (i8x16.shuffle 8 9 24 25 10 11 26 27 12 13 28 29 14 15 30 31 (local.get $vx_simd) (local.get $vy_simd)))
 
                 ;; Store colors
-                (v128.store (i32.add (local.get $m_out_col_ptr) (i32.add (local.get $out_v_ptr) (local.get $k))) (i8x16.splat (local.get $code_idx)))
+                ;; Store colors (8 bytes only)
+                (v128.store64_lane 0 (i32.add (local.get $m_out_col_ptr) (i32.add (local.get $out_v_ptr) (local.get $k))) (i8x16.splat (local.get $code_idx)))
 
                 (local.set $k (i32.add (local.get $k) (i32.const 8)))
               )

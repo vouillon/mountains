@@ -1,3 +1,5 @@
+- Fix manual mode when screen locked
+
 - Remove CLC tile margin
 - Take into account earth curvature
 - Check for off-by-one errors

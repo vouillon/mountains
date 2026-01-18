@@ -1956,7 +1956,6 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   in
   let text_scale = scale *. !zoom in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
-  Format.eprintf "POINTS %d@." (List.length points);
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -1972,7 +1971,6 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         else None)
       points
   in
-  Format.eprintf "Points %d@." (List.length points);
   let points =
     let pos = ref [] in
     let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
@@ -1995,7 +1993,6 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         if shown then Some (texture, x, y, shown) else None)
       points
   in
-  Format.eprintf "points %d@." (List.length points);
 
   (* Prepare Clear Color matching fog *)
   let r, g, b = fog_linear in
@@ -3239,6 +3236,11 @@ let setup_events canvas =
   let toggle_fullscreen () =
     match Brr.Document.fullscreen_element Brr.G.document with
     | None ->
+        ignore
+          (Jv.call
+             (Jv.get (Jv.get Jv.global "screen") "orientation")
+             "lock"
+             [| Jv.of_jstr (Jstr.v "portrait") |]);
         ignore
           (Brr.El.request_fullscreen
              ~opts:
