@@ -3,7 +3,8 @@
 
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="viewport"
+    content="initial-scale=1,viewport-fit=cover,user-scalable=no,interactive-widget=resizes-content">
   <meta name="theme-color" content="#000000">
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon192.png" />
@@ -226,14 +227,21 @@
 
     /* Full screen menu on mobile */
     @media (max-width: 480px) {
+      .menu-overlay {
+        bottom: auto;
+        height: 100%;
+      }
+
       .menu {
+        position: relative;
         box-sizing: border-box;
         width: 100%;
         max-width: 100%;
-        height: 100dvh;
-        max-height: 100dvh;
+        height: 100%;
+        max-height: 100%;
         border-radius: 0;
         transform: none;
+        padding-top: calc(24px + env(safe-area-inset-top));
       }
 
       .menu-overlay.visible .menu {
