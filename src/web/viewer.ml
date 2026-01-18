@@ -81,7 +81,7 @@ let hide_startup_overlay () =
     (fun el ->
       Brr.El.set_class (Jstr.v "hidden") true el;
       ignore
-        (Brr.G.set_timeout ~ms:600 (fun () ->
+        (Brr.G.set_timeout ~ms:1100 (fun () ->
              Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el)))
     overlay
 
@@ -1767,9 +1767,7 @@ let prepare_text_immediate ctx text =
   Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
     Gl.unsigned_byte
     (Gl.Tex_image_source.of_canvas_el text_canvas);
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, w, h)
 
@@ -1958,6 +1956,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   in
   let text_scale = scale *. !zoom in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
+  Format.eprintf "POINTS %d@." (List.length points);
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
@@ -1968,9 +1967,12 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
-        if r.z > 1. then Some (pt, r.x /. r.z, r.y /. r.z) else None)
+        if r.z > 1. && abs_float (r.x /. r.z) < 1. then
+          Some (pt, r.x /. r.z, r.y /. r.z)
+        else None)
       points
   in
+  Format.eprintf "Points %d@." (List.length points);
   let points =
     let pos = ref [] in
     let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
@@ -1993,6 +1995,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         if shown then Some (texture, x, y, shown) else None)
       points
   in
+  Format.eprintf "points %d@." (List.length points);
 
   (* Prepare Clear Color matching fog *)
   let r, g, b = fog_linear in
@@ -2801,7 +2804,7 @@ let init_graphics ctx =
   }
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
-    ~clc_tiles ~graphics =
+    ~clc_tiles ~graphics ~start =
   let {
     terrain_geo;
     indices;
@@ -3003,6 +3006,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~cover_map_texture ~palette_texture;
 
   let* () = on_gpu_finished ctx in
+  start ();
   hide_startup_overlay ();
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
@@ -3287,7 +3291,7 @@ let setup_events canvas =
                  state := `Started;
                  if beta < 90. then (
                    Lwt.async @@ fun () ->
-                   let* () = sleep 0.6 in
+                   let* () = sleep 1.1 in
                    display_temporary_message "Raise your phone!";
                    Lwt.return ())
              | `Started -> if beta >= 90. then remove_message ());
@@ -3587,9 +3591,15 @@ let create_location_ui ~size =
   in
   let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
   let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
+  let close_btn =
+    Brr.El.button
+      ~at:Brr.At.[ class' (Jstr.v "menu-close") ]
+      [ Brr.El.txt (Jstr.v "✕") ]
+  in
 
   Brr.El.append_children menu
     [
+      close_btn;
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "menu-title") ]
         [ Brr.El.txt (Jstr.v "Select Location") ];
@@ -3629,6 +3639,10 @@ let create_location_ui ~size =
          if Jv.equal (Jv.get (Obj.magic e) "target") (Brr.El.to_jv overlay) then
            toggle_menu ())
        (Brr.El.as_target overlay));
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ -> toggle_menu ())
+       (Brr.El.as_target close_btn));
 
   (* Input Section *)
   let btn_go =
@@ -4013,10 +4027,9 @@ let main () =
       points
   in
 
-  start ();
   let* () =
     tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile
-      canvas ctx ~detail_map ~clc_tiles:tiles ~graphics
+      canvas ctx ~detail_map ~clc_tiles:tiles ~graphics ~start
   in
   Lwt.return_unit
 
