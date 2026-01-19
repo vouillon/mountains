@@ -113,11 +113,42 @@ let zenith_linear = (0.02, 0.12, 0.55)
 
 (* Dem_loader provides direct loading of compressed .dem tiles *)
 
-let pi = 4. *. atan 1.
-
 (* Shaders *)
 
-let deltay = 40_000. /. 360. /. 3600. *. 1000.
+let pi = Render_state.pi
+
+let quad_vertex_shader =
+  {|#version 300 es
+    out vec2 uv;
+    void main() {
+      float x = float(gl_VertexID & 1);
+      float y = float(gl_VertexID >> 1);
+      uv = vec2(x, y);
+      gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 0.0, 1.0);
+    }
+  |}
+
+let sky_vertex_shader =
+  {|#version 300 es
+    out mediump vec2 v_uv;
+    void main() {
+      float x = float(gl_VertexID & 1);
+      float y = float(gl_VertexID >> 1);
+      v_uv = vec2(x, y);
+      // Draw at Far Plane (Z=1.0)
+      gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
+    }
+  |}
+
+let common_fragment_header =
+  {|#version 300 es
+    precision highp float;
+    const float PI = 3.14159265359;
+    const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+    highp float decode_height(highp vec2 c) {
+      return (c.r * 256.0 + c.g) * HEIGHT_SCALE - 500.0;
+    }
+  |}
 
 type program = {
   vertex_shader : string;
@@ -140,7 +171,6 @@ type input_mode = Sensor | Manual
 
 let input_mode = ref Sensor
 let zoom = ref 1.0
-let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
 
 let rotation_matrix orientation =
   let open Matrix in
@@ -159,100 +189,119 @@ let compute_azimuth m =
   in
   azimuth -. (pi /. 2.)
 
+(* Shared GLSL code for radial grid vertex shaders (terrain and shadow).
+   Contains common uniforms and a function to compute world position with height. *)
+let radial_vertex_common =
+  {|
+  // Radial grid uniforms (shared between terrain and shadow shaders)
+  uniform highp int w;
+  uniform highp int w_mask;
+  uniform highp int w_shift;
+  uniform highp vec2 center_offset;
+  uniform highp float snapped_alpha;
+  uniform highp float inv_sectors_div;
+  uniform highp float grid_k;
+  uniform highp float grid_base;
+  uniform highp float grid_scale;
+  uniform highp vec2 inv_delta;
+  uniform highp float inv_w;
+  uniform highp float inv_avg_delta;
+  uniform int max_lod;
+  uniform mediump sampler2D relief;
+
+  // Output structure for radial vertex computation
+  struct RadialVertex {
+    highp vec2 pos_plane;      // Position relative to camera in meters
+    highp vec2 coord_meters;   // Absolute world position in meters
+    highp vec2 norm_coord;     // Normalized texture coordinate (0..1)
+    highp float height;        // Terrain height at this position
+    highp float grid_spacing;  // Grid cell size for LOD calculations
+    int ring;                  // Ring index (for debugging)
+  };
+
+  // Compute radial grid vertex position and sample terrain height
+  RadialVertex computeRadialVertex() {
+    const float PI = 3.14159265359;
+    RadialVertex v;
+
+    int sector = gl_VertexID & w_mask;
+    v.ring = gl_VertexID >> w_shift;
+    float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
+    float angle = theta + snapped_alpha + (PI / 2.0);
+
+    // Exponential radial distance: r = A(e^(k*ring) - 1)
+    highp float r = grid_scale * (exp(grid_k * float(v.ring)) - 1.0);
+    v.pos_plane = vec2(cos(angle), sin(angle)) * r;
+    v.coord_meters = center_offset + v.pos_plane;
+    highp vec2 coord = v.coord_meters * inv_delta;
+
+    // Grid spacing for LOD: dr = k(r + A)
+    v.grid_spacing = grid_k * (r + grid_scale);
+
+    // LOD level based on grid spacing
+    highp float lod_f = max(0.0, log2(v.grid_spacing * inv_avg_delta));
+    int lod = min(int(lod_f), max_lod);
+
+    // Texture size at this LOD
+    ivec2 tex_size = textureSize(relief, lod);
+
+    // Normalized coordinate (Y flipped: row 0 is north)
+    v.norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
+
+    // Texel position for manual bilinear interpolation
+    highp vec2 lod_pos = v.norm_coord * vec2(tex_size);
+    highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+    highp ivec2 base = ivec2(lod_tex_pos);
+    highp vec2 f = fract(lod_tex_pos);
+
+    // Fetch 4 samples
+    highp vec2 s00 = texelFetch(relief, base, lod).rg;
+    highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
+    highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
+    highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
+
+    // Decode heights: high*256 + low, scaled to [-500, 9000]
+    const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
+    highp vec4 H = vec4(
+      dot(s00, vec2(256.0, 1.0)),
+      dot(s10, vec2(256.0, 1.0)),
+      dot(s01, vec2(256.0, 1.0)),
+      dot(s11, vec2(256.0, 1.0))
+    ) * HEIGHT_SCALE - 500.0;
+
+    v.height = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
+
+    return v;
+  }
+|}
+
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
 let terrain_program =
   {
     vertex_shader =
       {|#version 300 es
-        precision highp float;  // Ensure all floats use high precision (critical for mobile)
+        precision highp float;
         precision highp int;
         uniform mat4 proj;
-        uniform mat4 transform;
-        uniform highp int w;      // Must be highp for accurate coord calculations
-        uniform highp int w_mask;
-        uniform highp int w_shift;
-        uniform highp vec2 delta;
-        uniform highp vec2 center_offset;
-        uniform highp float snapped_alpha;
-        uniform highp float inv_sectors_div;
-        uniform highp float grid_k;
-        uniform highp float grid_base;
-        uniform highp float grid_scale;
-        uniform highp vec2 inv_delta;
-        uniform highp float inv_w;
-        uniform highp float inv_avg_delta;
-        uniform highp int max_lod;
-        uniform mediump sampler2D relief;
+        uniform mat4 transform;|}
+      ^ radial_vertex_common
+      ^ {|
         out mediump float v_dist;
         out mediump float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
-        out lowp float v_ring;  // Debug only, integer-derived
+        out lowp float v_ring;
 
-        void main()
-        {
-          const float PI = 3.14159265359;
-          int sector = gl_VertexID & w_mask;
-          int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
-          float angle = theta + snapped_alpha + (PI / 2.0);
-          // Use exp(k*ring) instead of pow(base, ring) for more consistent cross-platform behavior
-          // For ring=0, exp(0.0)-1.0 = 0.0 exactly
-          highp float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
-          highp vec2 pos_plane = vec2(cos(angle), sin(angle)) * r;
-          highp vec2 coord_meters = center_offset + pos_plane;
-          highp vec2 coord = coord_meters * inv_delta;
+        void main() {
+          RadialVertex rv = computeRadialVertex();
 
-          // Calculate approximate grid spacing in meters
-          // For exponential grid r = A(B^i - 1), dr = k(r + A), ds = kr
-          // k = grid_k, A = grid_scale
-          highp float grid_spacing = grid_k * (r + grid_scale);
+          reliefCoord = rv.norm_coord + (0.5 * inv_w);
+          v_world_pos = vec3(rv.coord_meters, rv.height);
 
-          // LOD level
-          highp float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
-          int lod = min(int(lod_f), max_lod);
-
-          // Texture Size at this LOD
-          ivec2 tex_size = textureSize(relief, lod);
-
-          // Manual bilinear interpolation for 2-byte height
-          // Normalized Coordinate (0..1)
-          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
-          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
-
-          // Coordinate in LOD texels
-          highp vec2 lod_pos = norm_coord * vec2(tex_size);
-
-          // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
-          highp ivec2 base = ivec2(lod_tex_pos);
-          highp vec2 f = fract(lod_tex_pos);
-
-          // Fetch 4 samples and decode height
-          highp vec2 s00 = texelFetch(relief, base, lod).rg;
-          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
-          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
-          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
-
-          // Decode heights: high*256 + low, scaled to [-500, 9000]
-          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
-          highp vec4 H = vec4(
-            dot(s00, vec2(256.0, 1.0)),
-            dot(s10, vec2(256.0, 1.0)),
-            dot(s01, vec2(256.0, 1.0)),
-            dot(s11, vec2(256.0, 1.0))
-          ) * HEIGHT_SCALE - 500.0;
-
-          highp float z = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
-
-          reliefCoord = norm_coord + (0.5 * inv_w);
-
-          v_world_pos = vec3(coord_meters, z);
-
-          vec4 pos = transform * vec4(pos_plane, z, 1.0);
+          vec4 pos = transform * vec4(rv.pos_plane, rv.height, 1.0);
           v_dist = length(pos.xyz);
-          v_h = z;
-          v_ring = float(ring);
+          v_h = rv.height;
+          v_ring = float(rv.ring);
           gl_Position = proj * pos;
         }
       |};
@@ -857,8 +906,8 @@ let text_program =
         }
       |};
     fragment_shader =
-      {|#version 300 es
-        precision highp float;
+      common_fragment_header
+      ^ {|
         in vec2 texture_coord;
         uniform sampler2D tex;
         out vec4 color;
@@ -871,31 +920,15 @@ let text_program =
 
 let ao_bake_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        out vec2 uv;
-        void main() {
-          float x = float(gl_VertexID & 1);
-          float y = float(gl_VertexID >> 1);
-          uv = vec2(x, y);
-          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 0.0, 1.0);
-        }
-      |};
+    vertex_shader = quad_vertex_shader;
     fragment_shader =
-      {|#version 300 es
-        precision highp float;
+      common_fragment_header
+      ^ {|
         uniform sampler2D relief;
         uniform int width;
         uniform float scale; // Added scale uniform
         in vec2 uv;
         out float occlusion;
-
-        const float PI = 3.14159265;
-
-        // Decode height from RG channels (same as terrain shader)
-        float decode_height(vec2 c) {
-          return (c.r * 256.0 + c.g) * ((1.0/257.0) * 9500.0) - 500.0;
-        }
 
         vec3 get_pos(vec2 coord) {
           float h = decode_height(texture(relief, coord).rg);
@@ -980,29 +1013,15 @@ let ao_bake_program =
 
 let ao_blur_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        out vec2 uv;
-        void main() {
-          float x = float(gl_VertexID & 1);
-          float y = float(gl_VertexID >> 1);
-          uv = vec2(x, y);
-          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 0.0, 1.0);
-        }
-      |};
+    vertex_shader = quad_vertex_shader;
     fragment_shader =
-      {|#version 300 es
-        precision highp float;
+      common_fragment_header
+      ^ {|
         uniform sampler2D ao_tex;
         uniform sampler2D relief;
         uniform vec2 inv_res;
         in vec2 uv;
         out float color;
-
-        // Height decode (same as other shaders)
-        float decode_height(vec2 c) {
-          return (c.r * 256.0 + c.g) * ((1.0/257.0) * 9500.0) - 500.0;
-        }
 
         void main() {
           float result = 0.0;
@@ -1054,88 +1073,18 @@ let shadow_program =
       {|#version 300 es
         precision highp float;
         precision highp int;
-        uniform mat4 shadow_view_proj;
-        uniform highp int w;      // Must be highp for accurate coord calculations
-        uniform highp int w_mask;
-        uniform highp int w_shift;
-        uniform highp vec2 delta;
-        uniform highp vec2 center_offset;
-        uniform highp float snapped_alpha;
-        uniform highp float inv_sectors_div;
-        uniform highp float grid_k;
-        uniform highp float grid_base;
-        uniform highp float grid_scale;
-        uniform highp vec2 inv_delta;
-        uniform highp float inv_w;
-        uniform highp float inv_avg_delta;
-        uniform int max_lod;
-        uniform mediump sampler2D relief;
-
-        void main()
-        {
-          const float PI = 3.14159265359;
-          int sector = gl_VertexID & w_mask;
-          int ring = gl_VertexID >> w_shift;
-          float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
-          float angle = theta + snapped_alpha + (PI / 2.0);
-          // Use exp(k*ring) instead of pow for consistent cross-platform behavior
-          float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
-
-          float x = r * cos(angle);
-          float y = r * sin(angle);
-
-          vec2 world_pos = vec2(x, y) + center_offset;
-
-          // Compute relief coordinate
-          vec2 coord = world_pos * inv_delta;
-
-          // Calculate approximate grid spacing in meters
-          float grid_spacing = grid_k * (r + grid_scale);
-
-          // LOD level
-          float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
-          int lod = min(int(lod_f), max_lod);
-
-          // Texture Size at this LOD
-          ivec2 tex_size = textureSize(relief, lod);
-
-          // Manual bilinear interpolation for 2-byte height
-          // Note: Y is flipped because texture row 0 is north (high lat) but coord.y increases northward
-          highp vec2 norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
-
-          highp vec2 lod_pos = norm_coord * vec2(tex_size);
-
-          // Manual Bilinear Interpolation
-          highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
-          highp ivec2 base = ivec2(lod_tex_pos);
-          highp vec2 f = fract(lod_tex_pos);
-
-          // Fetch 4 samples and decode height
-          highp vec2 s00 = texelFetch(relief, base, lod).rg;
-          highp vec2 s10 = texelFetch(relief, min(base + ivec2(1,0), tex_size - 1), lod).rg;
-          highp vec2 s01 = texelFetch(relief, min(base + ivec2(0,1), tex_size - 1), lod).rg;
-          highp vec2 s11 = texelFetch(relief, min(base + ivec2(1,1), tex_size - 1), lod).rg;
-
-          // Decode heights: high*256 + low, scaled to [-500, 9000]
-          const highp float HEIGHT_SCALE = (1.0/257.0) * 9500.0;
-          highp vec4 H = vec4(
-            dot(s00, vec2(256.0, 1.0)),
-            dot(s10, vec2(256.0, 1.0)),
-            dot(s01, vec2(256.0, 1.0)),
-            dot(s11, vec2(256.0, 1.0))
-          ) * HEIGHT_SCALE - 500.0;
-
-          float h = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
-
-          gl_Position = shadow_view_proj * vec4(world_pos.x, world_pos.y, h, 1.0);
+        uniform mat4 shadow_view_proj;|}
+      ^ radial_vertex_common
+      ^ {|
+        void main() {
+          RadialVertex rv = computeRadialVertex();
+          gl_Position = shadow_view_proj * vec4(rv.coord_meters, rv.height, 1.0);
         }
       |};
     fragment_shader =
       {|#version 300 es
         precision highp float;
-        // No Color Output for Shadow Map
-         void main() {
-         }
+        void main() { }
       |};
     attributes = [];
   }
@@ -1212,17 +1161,7 @@ let water_raster_program =
 
 let sky_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        out mediump vec2 v_uv;
-        void main() {
-          float x = float(gl_VertexID & 1);
-          float y = float(gl_VertexID >> 1);
-          v_uv = vec2(x, y);
-          // Draw at Far Plane (Z=1.0)
-          gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
-        }
-      |};
+    vertex_shader = sky_vertex_shader;
     fragment_shader =
       {|#version 300 es
         precision mediump float;
@@ -1417,8 +1356,7 @@ let make_tile_texture ctx tile =
     Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data))
     0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
@@ -1547,11 +1485,7 @@ let make_detail_map ctx =
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 1 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
+  Render_state.set_texture_params_mipmap_repeat ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   (* Start async load of compressed texture *)
   load_compressed_detail_map ctx tid;
@@ -1565,10 +1499,7 @@ let make_palette_texture ctx =
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 128 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
@@ -1588,10 +1519,7 @@ let make_dummy_cover_map ctx =
     Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, size)
 
@@ -1604,10 +1532,7 @@ let create_shadow_map ctx width height layers =
     layers;
 
   (* Linear filter for smooth shadow edges with hardware comparison *)
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
+  Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d_array;
 
   (* Enable hardware shadow comparison for sampler2DArrayShadow *)
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
@@ -1681,10 +1606,7 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
     let tid = Gl.create_texture ctx in
     Gl.bind_texture ctx Gl.texture_2d (Some tid);
     Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 w h;
-    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
-    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+    Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d;
     tid
   in
 
@@ -1799,10 +1721,9 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
-    ~index_count ~relief_texture ~x ~y ~lat ~lon ~w ctx =
+    ~index_count ~relief_texture ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
-  let deltax = deltay *. cos (lat *. pi /. 180.) in
 
   (* Unbind Shadow Map from Texture Unit 4 to prevent Feedback Loop *)
   Gl.active_texture ctx Gl.texture4;
@@ -1812,46 +1733,6 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
   Gl.viewport ctx 0 0 2048 2048;
   Gl.use_program ctx shadow_pid;
-
-  (* Radial Grid calculation *)
-  let w_stride = next_power_of_two (n_sectors + 1) 1 in
-  let w_mask_radial = w_stride - 1 in
-  let w_shift_radial =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 w_stride
-  in
-
-  (* Exponential Grid Parameters *)
-  let grid_k = pi /. float n_sectors in
-  let height_term = exp (grid_k *. float (n_rings - 1)) in
-  let grid_base = exp grid_k in
-  let grid_scale = 70000. /. (height_term -. 1.) in
-  let avg_delta = (deltax +. deltay) *. 0.5 in
-
-  (* Set all uniforms using cached locations *)
-  Gl.uniform1i ctx shadow_uniforms.w_mask w_mask_radial;
-  Gl.uniform1i ctx shadow_uniforms.w_shift w_shift_radial;
-  Gl.uniform1f ctx shadow_uniforms.inv_sectors_div (1. /. float n_sectors);
-  Gl.uniform1f ctx shadow_uniforms.grid_k grid_k;
-  Gl.uniform1f ctx shadow_uniforms.grid_base grid_base;
-  Gl.uniform1f ctx shadow_uniforms.grid_scale grid_scale;
-  Gl.uniform2f ctx shadow_uniforms.inv_delta (1. /. deltax) (1. /. deltay);
-  Gl.uniform1f ctx shadow_uniforms.inv_avg_delta (1. /. avg_delta);
-  Gl.uniform1i ctx shadow_uniforms.w w;
-  Gl.uniform1f ctx shadow_uniforms.inv_w (1. /. float w);
-
-  let max_lod =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 w
-  in
-  Gl.uniform1i ctx shadow_uniforms.max_lod max_lod;
-
-  (* Center Offset *)
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x) in
-  let center_offset_y = deltay *. (float y +. off_y) in
-  Gl.uniform2f ctx shadow_uniforms.center_offset center_offset_x center_offset_y;
 
   (* Bind Relief Texture *)
   Gl.active_texture ctx Gl.texture0;
@@ -1934,7 +1815,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
     ~_ao_texture:_ ~_detail_map:_ ~_shadow_pid:_ ~_shadow_fbo:_ ~_shadow_map:_
     ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
-    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms canvas ctx =
+    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms
+    ~(radial_params : Render_state.radial_params) canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1944,7 +1826,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     Brr_canvas.Canvas.set_h canvas canvas_height;
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
-  let deltax = deltay *. cos (lat *. pi /. 180.) in
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let transform =
     Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
@@ -1965,8 +1847,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let points =
     List.filter_map
       (fun (pt, (x', y')) ->
-        let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-        let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+        let off_x = Render_state.compute_sub_arcsec_offset lon in
+        let off_y = Render_state.compute_sub_arcsec_offset lat in
         let px = deltax *. (float (x' - x) -. off_x) in
         let py = deltay *. (float (y - y') -. off_y) in
         let z = Dem_loader.get_height tile y' x' in
@@ -2010,9 +1892,9 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.enable ctx Gl.depth_test;
   Gl.enable ctx Gl.cull_face';
   (* Determine snapped alpha - changes with camera orientation *)
-  let grid_k = pi /. float n_sectors in
+  let k_val = radial_params.Render_state.grid_k in
   let current_azimuth = compute_azimuth transform in
-  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
+  let snapped_alpha = floor ((current_azimuth /. k_val) +. 0.5) *. k_val in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
@@ -2131,7 +2013,7 @@ let event_loop ctx draw =
 
 (* Main *)
 
-let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
+let next_power_of_two = Render_state.next_power_of_two
 
 let mipmap_program =
   {
@@ -2295,29 +2177,21 @@ let normal_program =
     attributes = [];
   }
 
-let compute_relief ctx width height triangle_geo tile_texture normal_pid
+let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
     mipmap_pid copy_pid (u : Render_state.relief_uniforms)
     (mipmap_u : Render_state.mipmap_uniforms)
     (copy_u : Render_state.copy_uniforms) =
   assert (width = height);
 
   (* Not used in shader explicitly yet, using pow directly *)
-  let max_level =
-    let rec log2 n = if n <= 1 then 0 else 1 + log2 (n / 2) in
-    log2 (max width height)
-  in
+  let max_level = Render_state.log2 (max width height) in
   let levels = max_level + 1 in
 
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  (* Linear is fine for RGBA8 *)
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+  Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d;
   apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
@@ -2346,8 +2220,8 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
   Gl.bind_vertex_array ctx (Some triangle_geo);
   Gl.uniform2f ctx u.size (float width) (float height);
 
-  (* Use default 44.0 latitude for normals *)
-  let deltax = deltay *. cos (44. *. pi /. 180.) in
+  (* Use the provided latitude for normals *)
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   Gl.uniform2f ctx u.delta deltax deltay;
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
@@ -2475,8 +2349,9 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   let ebo = Gl.create_buffer ctx in
 
   (* Conversion factors *)
-  let meters_per_deg_lat = 40_000_000. /. 360. in
-  let meters_per_deg_lon = meters_per_deg_lat *. cos (lat *. pi /. 180.) in
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let meters_per_deg_lat = deltay *. 3600. in
+  let meters_per_deg_lon = deltax *. 3600. in
 
   (* Pre-calculate view bounds for each level *)
   let level_bounds =
@@ -2701,6 +2576,7 @@ type graphics_resources = {
   water_raster_pid : Gl.program;
   clc_raster_uniforms : Render_state.clc_raster_uniforms;
   water_raster_uniforms : Render_state.water_raster_uniforms;
+  radial_params : Render_state.radial_params;
 }
 
 let resize_canvas canvas =
@@ -2828,6 +2704,7 @@ let init_graphics ctx =
     water_raster_pid;
     clc_raster_uniforms;
     water_raster_uniforms;
+    radial_params;
   }
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
@@ -2863,12 +2740,14 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     water_raster_pid;
     clc_raster_uniforms;
     water_raster_uniforms;
+    radial_params;
   } =
     graphics
   in
+  let _, deltay, _ = Render_state.compute_deltas ~lat in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
-    compute_relief ctx w h triangle_geo tile_texture normal_pid mipmap_pid
+    compute_relief ctx w h lat triangle_geo tile_texture normal_pid mipmap_pid
       copy_pid relief_uniforms mipmap_uniforms copy_uniforms
   in
   let points =
@@ -2935,12 +2814,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
       }
   in
   let splits_dist = [| 2000.; 8000.; 25000. |] in
-  let deltay = 40_000. /. 360. /. 3600. *. 1000. in
-  let deltax = deltay *. cos (lat *. pi /. 180.) in
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
-  let center_offset_x = deltax *. (float x +. off_x) in
-  let center_offset_y = deltay *. (float (h - y) +. off_y) in
+  let center_offset_x, center_offset_y =
+    Render_state.compute_center_offset ~lat ~lon ~x ~y:(h - y)
+  in
   let world_center =
     Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
   in
@@ -2950,10 +2826,10 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
 
   (* Upload all session-static uniforms *)
-  Render_state.upload_session_static ctx terrain_pid sky_pid terrain_uniforms
-    sky_uniforms ~w ~lat ~x ~y:(h - y) ~lon ~light_dir:light_dir_shader
-    ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
-    ~zenith_color:zenith_linear;
+  Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
+    terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y:(h - y) ~lon
+    ~light_dir:light_dir_shader ~shadow_matrices ~shadow_splits:splits_dist
+    ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
   (* CLC GPU Rasterization setup *)
   let cover_map_size = 1024 in
@@ -2965,10 +2841,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let clc_levels = 7 in
   let cover_map_texture = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.clamp_to_edge;
+  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
   (* Initialize with grass (index 26 = Natural grasslands) *)
   let init_data =
     Bigarray.(
@@ -3025,8 +2898,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Render shadows *)
   draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-    ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ~x
-    ~y:(h - y) ~lat ~lon ~w ctx;
+    ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ctx;
 
   (* Bind all terrain textures at init - after all textures are created *)
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
@@ -3044,7 +2916,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         ~_detail_map:detail_map ~_shadow_pid:shadow_pid ~_shadow_fbo:shadow_fbo
         ~_shadow_map:shadow_map ~_shadow_uniforms:shadow_uniforms
         ~_palette_texture:palette_texture ~_cover_map_texture:cover_map_texture
-        ~sky_pid ~sky_uniforms canvas ctx)
+        ~sky_pid ~sky_uniforms ~radial_params canvas ctx)
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in
@@ -3331,197 +3203,84 @@ let setup_events canvas =
            end)
        (Brr.Window.as_target Brr.G.window));
 
-  (* Keyboard controls *)
-  ignore
-    (Brr.Ev.listen Brr.Ev.keydown
-       (fun ev ->
-         match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
-         | "ArrowLeft" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 alpha = !current_orientation.alpha +. 5.;
-               }
-         | "ArrowRight" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 alpha = !current_orientation.alpha -. 5.;
-               }
-         | "ArrowDown" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 beta = max 60. (!current_orientation.beta -. 5.);
-               }
-         | "ArrowUp" ->
-             current_orientation :=
-               {
-                 !current_orientation with
-                 beta = min 120. (!current_orientation.beta +. 5.);
-               }
-         | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
-         | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
-         | _ -> ())
-       (Brr.Window.as_target Brr.G.window));
+  (* We set the device orientation listener early so that we have the
+     correct orientation when we start rendering. The other
+     controllers are only set after initialization. *)
+  fun () ->
+    (* Keyboard controls *)
+    ignore
+      (Brr.Ev.listen Brr.Ev.keydown
+         (fun ev ->
+           match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
+           | "ArrowLeft" ->
+               current_orientation :=
+                 {
+                   !current_orientation with
+                   alpha = !current_orientation.alpha +. 5.;
+                 }
+           | "ArrowRight" ->
+               current_orientation :=
+                 {
+                   !current_orientation with
+                   alpha = !current_orientation.alpha -. 5.;
+                 }
+           | "ArrowDown" ->
+               current_orientation :=
+                 {
+                   !current_orientation with
+                   beta = max 60. (!current_orientation.beta -. 5.);
+                 }
+           | "ArrowUp" ->
+               current_orientation :=
+                 {
+                   !current_orientation with
+                   beta = min 120. (!current_orientation.beta +. 5.);
+                 }
+           | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
+           | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
+           | _ -> ())
+         (Brr.Window.as_target Brr.G.window));
 
-  (* Mouse controls *)
-  let target = Brr.El.as_target canvas in
+    (* Mouse controls *)
+    let target = Brr.El.as_target canvas in
 
-  (* Mouse wheel for zoom *)
-  ignore
-    (Brr.Ev.listen Brr.Ev.wheel
-       (fun ev ->
-         Brr.Ev.prevent_default ev;
-         let wheel = Brr.Ev.as_type ev in
-         let delta_y = Brr.Ev.Wheel.delta_y wheel in
-         let factor = (if delta_y > 0. then 0.9 else 1.1) ** 0.25 in
-         zoom := max min_zoom (min max_zoom (!zoom *. factor)))
-       target);
+    (* Mouse wheel for zoom *)
+    ignore
+      (Brr.Ev.listen Brr.Ev.wheel
+         (fun ev ->
+           Brr.Ev.prevent_default ev;
+           let wheel = Brr.Ev.as_type ev in
+           let delta_y = Brr.Ev.Wheel.delta_y wheel in
+           let factor = (if delta_y > 0. then 0.9 else 1.1) ** 0.25 in
+           zoom := max min_zoom (min max_zoom (!zoom *. factor)))
+         target);
 
-  (* Mouse drag for rotation *)
-  ignore
-    (Brr.Ev.listen Brr.Ev.mousedown
-       (fun ev ->
-         let mouse = Brr.Ev.as_type ev in
-         let x = Brr.Ev.Mouse.client_x mouse in
-         let y = Brr.Ev.Mouse.client_y mouse in
-         mouse_dragging := true;
-         is_dragging := true;
-         velocity := (0., 0.);
-         last_input_time := now ();
-         mouse_start_x := x;
-         mouse_start_y := y;
-         mouse_last_x := x;
-         mouse_last_y := y)
-       target);
-
-  ignore
-    (Brr.Ev.listen Brr.Ev.mousemove
-       (fun ev ->
-         if !mouse_dragging then begin
+    (* Mouse drag for rotation *)
+    ignore
+      (Brr.Ev.listen Brr.Ev.mousedown
+         (fun ev ->
            let mouse = Brr.Ev.as_type ev in
            let x = Brr.Ev.Mouse.client_x mouse in
            let y = Brr.Ev.Mouse.client_y mouse in
-           let dx = x -. !mouse_last_x in
-           let dy = y -. !mouse_last_y in
-           let h = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight") in
-           let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
-           let speed = 2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi in
-           let gamma = !current_orientation.screen *. Float.pi /. 180. in
-           let c = cos gamma in
-           let s = sin gamma in
-           let dx_eff = (dx *. c) -. (dy *. s) in
-           let dy_eff = (dx *. s) +. (dy *. c) in
-           let da = dx_eff *. speed in
-           let db = dy_eff *. speed in
-           let t = now () in
-           let dt = t -. !last_input_time in
-           last_input_time := t;
-           if dt > 0. then begin
-             let v_inst_x = da /. dt in
-             let v_inst_y = db /. dt in
-             let vx, vy = !velocity in
-             (* Smoothing: mix history (0.6) with new (0.4) *)
-             velocity :=
-               ( (v_inst_x *. 0.4) +. (vx *. 0.6),
-                 (v_inst_y *. 0.4) +. (vy *. 0.6) )
-           end;
-           is_dragging := true;
-           mouse_last_x := x;
-           mouse_last_y := y;
-           current_orientation :=
-             {
-               !current_orientation with
-               alpha = !current_orientation.alpha +. da;
-               beta = max 60. (min 120. (!current_orientation.beta +. db));
-             }
-         end)
-       (Brr.Window.as_target Brr.G.window));
-
-  ignore
-    (Brr.Ev.listen Brr.Ev.mouseup
-       (fun ev ->
-         if !mouse_dragging then begin
-           mouse_dragging := false;
-           is_dragging := false;
-           if now () -. !last_input_time > 300. then velocity := (0., 0.);
-           let mouse = Brr.Ev.as_type ev in
-           let x = Brr.Ev.Mouse.client_x mouse in
-           let y = Brr.Ev.Mouse.client_y mouse in
-           let dx = x -. !mouse_start_x in
-           let dy = y -. !mouse_start_y in
-           let dist = sqrt ((dx ** 2.) +. (dy ** 2.)) in
-           if dist < drag_threshold then handle_tap ()
-         end)
-       (Brr.Window.as_target Brr.G.window));
-
-  (* Touch controls *)
-  let touchstart = Brr.Ev.Type.create (Jstr.v "touchstart") in
-  let touchmove = Brr.Ev.Type.create (Jstr.v "touchmove") in
-  let touchend = Brr.Ev.Type.create (Jstr.v "touchend") in
-
-  ignore
-    (Brr.Ev.listen touchstart
-       (fun ev ->
-         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
-         let num_touches = Jv.to_int (Jv.get touches "length") in
-         if num_touches = 1 then begin
-           (* Single touch - potential drag or tap *)
-           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
-           let x = Jv.to_float (Jv.get t0 "clientX") in
-           let y = Jv.to_float (Jv.get t0 "clientY") in
-           touch_start_x := x;
-           touch_start_y := y;
-           touch_last_x := x;
-           touch_last_y := y;
-           touch_dragging := false;
+           mouse_dragging := true;
            is_dragging := true;
            velocity := (0., 0.);
-           last_input_time := now ()
-         end
-         else if num_touches >= 2 then begin
-           (* Two or more fingers - pinch zoom *)
-           Brr.Ev.prevent_default ev;
-           match touch_distance touches with
-           | Some d -> pinch_distance := d
-           | None -> ()
-         end)
-       target);
+           last_input_time := now ();
+           mouse_start_x := x;
+           mouse_start_y := y;
+           mouse_last_x := x;
+           mouse_last_y := y)
+         target);
 
-  ignore
-    (Brr.Ev.listen touchmove
-       (fun ev ->
-         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
-         let num_touches = Jv.to_int (Jv.get touches "length") in
-         if num_touches = 1 then begin
-           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
-           let x = Jv.to_float (Jv.get t0 "clientX") in
-           let y = Jv.to_float (Jv.get t0 "clientY") in
-           let dx = x -. !touch_last_x in
-           let dy = y -. !touch_last_y in
-           let total_dx = x -. !touch_start_x in
-           let total_dy = y -. !touch_start_y in
-           let total_dist = sqrt ((total_dx ** 2.) +. (total_dy ** 2.)) in
-           (* Start dragging if moved beyond threshold *)
-           if (not !touch_dragging) && total_dist > drag_threshold then begin
-             touch_dragging := true;
-             (* Switch to manual mode when user starts dragging *)
-             if !input_mode = Sensor then begin
-               input_mode := Manual;
-               display_temporary_message "Manual mode";
-               let alpha =
-                 compute_azimuth (rotation_matrix !current_orientation)
-                 *. 180. /. pi
-               in
-               Format.eprintf "%f %f => %f@." !current_orientation.alpha
-                 !current_orientation.gamma alpha;
-               current_orientation :=
-                 { !current_orientation with alpha; gamma = 0.; screen = 0. }
-             end;
-             Brr.Ev.prevent_default ev
-           end;
-           if !touch_dragging then begin
+    ignore
+      (Brr.Ev.listen Brr.Ev.mousemove
+         (fun ev ->
+           if !mouse_dragging then begin
+             let mouse = Brr.Ev.as_type ev in
+             let x = Brr.Ev.Mouse.client_x mouse in
+             let y = Brr.Ev.Mouse.client_y mouse in
+             let dx = x -. !mouse_last_x in
+             let dy = y -. !mouse_last_y in
              let h =
                Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
              in
@@ -3549,67 +3308,190 @@ let setup_events canvas =
                    (v_inst_y *. 0.4) +. (vy *. 0.6) )
              end;
              is_dragging := true;
-             touch_last_x := x;
-             touch_last_y := y;
+             mouse_last_x := x;
+             mouse_last_y := y;
              current_orientation :=
                {
                  !current_orientation with
                  alpha = !current_orientation.alpha +. da;
                  beta = max 60. (min 120. (!current_orientation.beta +. db));
                }
+           end)
+         (Brr.Window.as_target Brr.G.window));
+
+    ignore
+      (Brr.Ev.listen Brr.Ev.mouseup
+         (fun ev ->
+           if !mouse_dragging then begin
+             mouse_dragging := false;
+             is_dragging := false;
+             if now () -. !last_input_time > 300. then velocity := (0., 0.);
+             let mouse = Brr.Ev.as_type ev in
+             let x = Brr.Ev.Mouse.client_x mouse in
+             let y = Brr.Ev.Mouse.client_y mouse in
+             let dx = x -. !mouse_start_x in
+             let dy = y -. !mouse_start_y in
+             let dist = sqrt ((dx ** 2.) +. (dy ** 2.)) in
+             if dist < drag_threshold then handle_tap ()
+           end)
+         (Brr.Window.as_target Brr.G.window));
+
+    (* Touch controls *)
+    let touchstart = Brr.Ev.Type.create (Jstr.v "touchstart") in
+    let touchmove = Brr.Ev.Type.create (Jstr.v "touchmove") in
+    let touchend = Brr.Ev.Type.create (Jstr.v "touchend") in
+
+    ignore
+      (Brr.Ev.listen touchstart
+         (fun ev ->
+           let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+           let num_touches = Jv.to_int (Jv.get touches "length") in
+           if num_touches = 1 then begin
+             (* Single touch - potential drag or tap *)
+             let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+             let x = Jv.to_float (Jv.get t0 "clientX") in
+             let y = Jv.to_float (Jv.get t0 "clientY") in
+             touch_start_x := x;
+             touch_start_y := y;
+             touch_last_x := x;
+             touch_last_y := y;
+             touch_dragging := false;
+             is_dragging := true;
+             velocity := (0., 0.);
+             last_input_time := now ()
            end
-         end
-         else if num_touches >= 2 then begin
-           (* Pinch zoom *)
-           Brr.Ev.prevent_default ev;
-           match touch_distance touches with
-           | Some d when !pinch_distance > 0. ->
-               let factor = d /. !pinch_distance in
-               zoom := max min_zoom (min max_zoom (!zoom *. factor));
-               pinch_distance := d
-           | _ -> ()
-         end)
-       target);
-
-  ignore
-    (Brr.Ev.listen touchend
-       (fun ev ->
-         let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
-         let num_remaining = Jv.to_int (Jv.get touches "length") in
-
-         if num_remaining = 1 then begin
-           (* Resync drag state when switching to 1 finger (e.g. end of pinch) *)
-           let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
-           let x = Jv.to_float (Jv.get t0 "clientX") in
-           let y = Jv.to_float (Jv.get t0 "clientY") in
-           touch_start_x := x;
-           touch_start_y := y;
-           touch_last_x := x;
-           touch_last_y := y;
-           touch_dragging := false;
-           pinch_distance := 0.
-         end;
-
-         if num_remaining = 0 then begin
-           (* All fingers lifted *)
-           is_dragging := false;
-           if now () -. !last_input_time > 300. then velocity := (0., 0.);
-           if not !touch_dragging then begin
+           else if num_touches >= 2 then begin
+             (* Two or more fingers - pinch zoom *)
              Brr.Ev.prevent_default ev;
-             (* This was a tap, not a drag *)
-             handle_tap ()
+             match touch_distance touches with
+             | Some d -> pinch_distance := d
+             | None -> ()
+           end)
+         target);
+
+    ignore
+      (Brr.Ev.listen touchmove
+         (fun ev ->
+           let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+           let num_touches = Jv.to_int (Jv.get touches "length") in
+           if num_touches = 1 then begin
+             let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+             let x = Jv.to_float (Jv.get t0 "clientX") in
+             let y = Jv.to_float (Jv.get t0 "clientY") in
+             let dx = x -. !touch_last_x in
+             let dy = y -. !touch_last_y in
+             let total_dx = x -. !touch_start_x in
+             let total_dy = y -. !touch_start_y in
+             let total_dist = sqrt ((total_dx ** 2.) +. (total_dy ** 2.)) in
+             (* Start dragging if moved beyond threshold *)
+             if (not !touch_dragging) && total_dist > drag_threshold then begin
+               touch_dragging := true;
+               (* Switch to manual mode when user starts dragging *)
+               if !input_mode = Sensor then begin
+                 input_mode := Manual;
+                 display_temporary_message "Manual mode";
+                 let alpha =
+                   compute_azimuth (rotation_matrix !current_orientation)
+                   *. 180. /. pi
+                 in
+                 Format.eprintf "%f %f => %f@." !current_orientation.alpha
+                   !current_orientation.gamma alpha;
+                 current_orientation :=
+                   { !current_orientation with alpha; gamma = 0.; screen = 0. }
+               end;
+               Brr.Ev.prevent_default ev
+             end;
+             if !touch_dragging then begin
+               let h =
+                 Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
+               in
+               let w =
+                 Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth")
+               in
+               let speed =
+                 2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
+               in
+               let gamma = !current_orientation.screen *. Float.pi /. 180. in
+               let c = cos gamma in
+               let s = sin gamma in
+               let dx_eff = (dx *. c) -. (dy *. s) in
+               let dy_eff = (dx *. s) +. (dy *. c) in
+               let da = dx_eff *. speed in
+               let db = dy_eff *. speed in
+               let t = now () in
+               let dt = t -. !last_input_time in
+               last_input_time := t;
+               if dt > 0. then begin
+                 let v_inst_x = da /. dt in
+                 let v_inst_y = db /. dt in
+                 let vx, vy = !velocity in
+                 (* Smoothing: mix history (0.6) with new (0.4) *)
+                 velocity :=
+                   ( (v_inst_x *. 0.4) +. (vx *. 0.6),
+                     (v_inst_y *. 0.4) +. (vy *. 0.6) )
+               end;
+               is_dragging := true;
+               touch_last_x := x;
+               touch_last_y := y;
+               current_orientation :=
+                 {
+                   !current_orientation with
+                   alpha = !current_orientation.alpha +. da;
+                   beta = max 60. (min 120. (!current_orientation.beta +. db));
+                 }
+             end
+           end
+           else if num_touches >= 2 then begin
+             (* Pinch zoom *)
+             Brr.Ev.prevent_default ev;
+             match touch_distance touches with
+             | Some d when !pinch_distance > 0. ->
+                 let factor = d /. !pinch_distance in
+                 zoom := max min_zoom (min max_zoom (!zoom *. factor));
+                 pinch_distance := d
+             | _ -> ()
+           end)
+         target);
+
+    ignore
+      (Brr.Ev.listen touchend
+         (fun ev ->
+           let touches = Jv.get (Brr.Ev.as_type ev) "touches" in
+           let num_remaining = Jv.to_int (Jv.get touches "length") in
+
+           if num_remaining = 1 then begin
+             (* Resync drag state when switching to 1 finger (e.g. end of pinch) *)
+             let t0 = Jv.call touches "item" [| Jv.of_int 0 |] in
+             let x = Jv.to_float (Jv.get t0 "clientX") in
+             let y = Jv.to_float (Jv.get t0 "clientY") in
+             touch_start_x := x;
+             touch_start_y := y;
+             touch_last_x := x;
+             touch_last_y := y;
+             touch_dragging := false;
+             pinch_distance := 0.
            end;
-           touch_dragging := false;
-           pinch_distance := 0.
-         end)
-       target);
 
-  ignore
-    (Brr.Ev.listen Brr.Ev.resize
-       (fun _ -> force_redraw := true)
-       (Brr.Window.as_target Brr.G.window));
+           if num_remaining = 0 then begin
+             (* All fingers lifted *)
+             is_dragging := false;
+             if now () -. !last_input_time > 300. then velocity := (0., 0.);
+             if not !touch_dragging then begin
+               Brr.Ev.prevent_default ev;
+               (* This was a tap, not a drag *)
+               handle_tap ()
+             end;
+             touch_dragging := false;
+             pinch_distance := 0.
+           end)
+         target);
 
-  fun () -> state := `Starting
+    ignore
+      (Brr.Ev.listen Brr.Ev.resize
+         (fun _ -> force_redraw := true)
+         (Brr.Window.as_target Brr.G.window));
+
+    state := `Starting
 
 let create_location_ui ~size =
   let body = Brr.Document.body Brr.G.document in
@@ -4027,8 +3909,8 @@ let main () =
 
   (* Bilinear interpolation for height *)
   let get_h = Dem_loader.get_height tile in
-  let off_x = (lon *. 3600.) -. floor (lon *. 3600.) in
-  let off_y = (lat *. 3600.) -. floor (lat *. 3600.) in
+  let off_x = Render_state.compute_sub_arcsec_offset lon in
+  let off_y = Render_state.compute_sub_arcsec_offset lat in
   let h00 = get_h y x in
   let h10 = get_h y (x + 1) in
   let h01 = get_h (y - 1) x in
