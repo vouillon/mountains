@@ -2310,6 +2310,8 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
   apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
@@ -2321,6 +2323,15 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
   Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
     0;
   Gl.viewport ctx 0 0 width height;
+
+  (* Clear relief texture to zero first *)
+  Gl.clear_color ctx 0. 0. 0. 0.;
+  Gl.clear ctx Gl.color_buffer_bit;
+
+  (* Use Scissor to leave 1-pixel border zero *)
+  Gl.enable ctx Gl.scissor_test;
+  Gl.scissor ctx 1 1 (width - 2) (height - 2);
+
   Gl.use_program ctx normal_pid;
   (* Draw normals (Level 0) *)
   Gl.active_texture ctx Gl.texture0;
@@ -2334,6 +2345,8 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
   Gl.uniform2f ctx u.delta deltax deltay;
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+
+  Gl.disable ctx Gl.scissor_test;
 
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
 
@@ -2358,7 +2371,6 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
   (* Allocate initial temp storage ONCE (full size) *)
   Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 width height;
@@ -2406,7 +2418,19 @@ let compute_relief ctx width height triangle_geo tile_texture normal_pid
 
       (* Temp is Level 0 *)
       Gl.viewport ctx 0 0 w h;
-      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+
+      (* Clear Mip Level to Zero *)
+      Gl.clear_color ctx 0. 0. 0. 0.;
+      Gl.clear ctx Gl.color_buffer_bit;
+
+      if w > 2 && h > 2 then (
+        (* Enable scissor to render only inner area, leaving 1-pixel border *)
+        Gl.enable ctx Gl.scissor_test;
+        Gl.scissor ctx 1 1 (w - 2) (h - 2);
+
+        Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+
+        Gl.disable ctx Gl.scissor_test);
 
       loop (level + 1) (w / 2) (h / 2))
   in
