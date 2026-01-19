@@ -183,7 +183,7 @@ let radial_vertex_common =
   uniform highp vec2 inv_delta;
   uniform highp float inv_w;
   uniform highp float inv_avg_delta;
-  uniform int max_lod;
+  uniform highp int max_lod;
   uniform mediump sampler2D relief;
 
   // Output structure for radial vertex computation
@@ -192,8 +192,6 @@ let radial_vertex_common =
     highp vec2 coord_meters;   // Absolute world position in meters
     highp vec2 norm_coord;     // Normalized texture coordinate (0..1)
     highp float height;        // Terrain height at this position
-    highp float grid_spacing;  // Grid cell size for LOD calculations
-    int ring;                  // Ring index (for debugging)
   };
 
   // Compute radial grid vertex position and sample terrain height
@@ -202,21 +200,21 @@ let radial_vertex_common =
     RadialVertex v;
 
     int sector = gl_VertexID & w_mask;
-    v.ring = gl_VertexID >> w_shift;
+    int ring = gl_VertexID >> w_shift;
     float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
     float angle = theta + snapped_alpha + (PI / 2.0);
 
     // Exponential radial distance: r = A(e^(k*ring) - 1)
-    highp float r = grid_scale * (exp(grid_k * float(v.ring)) - 1.0);
+    highp float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
     v.pos_plane = vec2(cos(angle), sin(angle)) * r;
     v.coord_meters = center_offset + v.pos_plane;
     highp vec2 coord = v.coord_meters * inv_delta;
 
     // Grid spacing for LOD: dr = k(r + A)
-    v.grid_spacing = grid_k * (r + grid_scale);
+    highp float grid_spacing = grid_k * (r + grid_scale);
 
     // LOD level based on grid spacing
-    highp float lod_f = max(0.0, log2(v.grid_spacing * inv_avg_delta));
+    highp float lod_f = max(0.0, log2(grid_spacing * inv_avg_delta));
     int lod = min(int(lod_f), max_lod);
 
     // Texture size at this LOD
@@ -269,7 +267,6 @@ let terrain_program =
         out mediump float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
-        out lowp float v_ring;
 
         void main() {
           RadialVertex rv = computeRadialVertex();
@@ -277,10 +274,9 @@ let terrain_program =
           reliefCoord = rv.norm_coord + (0.5 * inv_w);
           v_world_pos = vec3(rv.coord_meters, rv.height);
 
-          vec4 pos = transform * vec4(rv.pos_plane, rv.height, 1.0);
+          highp vec4 pos = transform * vec4(rv.pos_plane, rv.height, 1.0);
           v_dist = length(pos.xyz);
           v_h = rv.height;
-          v_ring = float(rv.ring);
           gl_Position = proj * pos;
         }
       |};
@@ -310,7 +306,6 @@ let terrain_program =
         in mediump float v_dist;
         in mediump float v_h;
         in highp vec3 v_world_pos;               // Highp for world coords
-        in lowp float v_ring;
 
         out lowp vec4 color;
 
@@ -1780,10 +1775,7 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
 
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
 
   (* PASS 2: Blur AO with bilateral filter *)
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
@@ -1829,7 +1821,11 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
-  Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
   apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
@@ -2412,9 +2408,9 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.enable ctx Gl.depth_test;
   Gl.enable ctx Gl.cull_face';
   (* Determine snapped alpha - changes with camera orientation *)
-  let k_val = radial_params.Render_state.grid_k in
+  let grid_k = radial_params.Render_state.grid_k in
   let current_azimuth = compute_azimuth transform in
-  let snapped_alpha = floor ((current_azimuth /. k_val) +. 0.5) *. k_val in
+  let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
