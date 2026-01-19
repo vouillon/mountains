@@ -1192,10 +1192,7 @@ let mipmap_program =
         precision highp float;
         uniform sampler2D source_texture;
         uniform vec2 source_size;
-        uniform float base_k;
-        uniform float decay;
-        uniform int level; // Target level (unused in logic, but passed)
-        uniform int source_level; // Explicit source level
+        uniform float k;
         in vec2 uv;
         out vec4 frag_color;
         void main() {
@@ -1212,18 +1209,16 @@ let mipmap_program =
           ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
           ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
 
-          // Source is main texture at source_level
-          vec4 h00_v = texelFetch(source_texture, c00, source_level);
-          vec4 h10_v = texelFetch(source_texture, c10, source_level);
-          vec4 h01_v = texelFetch(source_texture, c01, source_level);
-          vec4 h11_v = texelFetch(source_texture, c11, source_level);
+          vec4 h00_v = texelFetch(source_texture, c00, 0);
+          vec4 h10_v = texelFetch(source_texture, c10, 0);
+          vec4 h01_v = texelFetch(source_texture, c01, 0);
+          vec4 h11_v = texelFetch(source_texture, c11, 0);
 
           float h00 = h00_v.r + h00_v.g / 256.0;
           float h10 = h10_v.r + h10_v.g / 256.0;
           float h01 = h01_v.r + h01_v.g / 256.0;
           float h11 = h11_v.r + h11_v.g / 256.0;
 
-          float k = base_k;
           float max_h = max(max(h00, h10), max(h01, h11));
           float h_scale = 10000.0;
 
@@ -1516,8 +1511,6 @@ let make_palette_texture ctx =
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
-
-[@@@warning "-32"]
 
 let create_shadow_map ctx width height layers =
   let tid = Gl.create_texture ctx in
@@ -1881,9 +1874,6 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   (* Common Uniforms *)
   Gl.use_program ctx mipmap_pid;
   Gl.uniform1i ctx mipmap_u.source_texture 0;
-  Gl.uniform1f ctx mipmap_u.base_k 0.1;
-  Gl.uniform1f ctx mipmap_u.decay 0.5;
-
   Gl.use_program ctx copy_pid;
   Gl.uniform1i ctx copy_u.source 0;
 
@@ -1914,7 +1904,6 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
       (* Use Copy Program *)
       Gl.use_program ctx copy_pid;
-      Gl.uniform1i ctx copy_u.source 0;
       Gl.uniform1i ctx copy_u.level (level - 1);
       (* Source size is previous level size *)
       Gl.uniform2f ctx copy_u.source_size (float (w * 2)) (float (h * 2));
@@ -1933,12 +1922,11 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
       (* Use Mipmap Program *)
       Gl.use_program ctx mipmap_pid;
-      Gl.uniform1i ctx mipmap_u.source_texture 0;
+      Gl.uniform1f ctx mipmap_u.k (0.1 *. (0.2 ** float (level - 1)));
 
       let source_w = float (w * 2) in
       let source_h = float (h * 2) in
       Gl.uniform2f ctx mipmap_u.source_size source_w source_h;
-      Gl.uniform1i ctx mipmap_u.source_level 0;
 
       (* Temp is Level 0 *)
       Gl.viewport ctx 0 0 w h;

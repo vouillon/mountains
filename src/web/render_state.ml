@@ -124,9 +124,7 @@ type relief_uniforms = {
 (** Cached uniform locations for the relief shader. *)
 
 type mipmap_uniforms = {
-  source_level : Gl.uniform_location;
-  base_k : Gl.uniform_location;
-  decay : Gl.uniform_location;
+  k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
 }
@@ -264,9 +262,7 @@ let init_relief_uniforms ctx pid =
 let init_mipmap_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   {
-    source_level = u "source_level";
-    base_k = u "base_k";
-    decay = u "decay";
+    k = u "k";
     source_texture = u "source_texture";
     source_size = u "source_size";
   }

@@ -2,11 +2,6 @@
 
 open Brr_canvas
 
-(** {1 Shared Constants} *)
-
-val deltay : float
-(** Meters per arc-second at the equator (latitude-independent Y delta). *)
-
 (** {1 Shared Utilities} *)
 
 val compute_deltas : lat:float -> float * float * float
@@ -102,9 +97,7 @@ type relief_uniforms = {
 (** Cached uniform locations for the relief shader. *)
 
 type mipmap_uniforms = {
-  source_level : Gl.uniform_location;
-  base_k : Gl.uniform_location;
-  decay : Gl.uniform_location;
+  k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
 }
