@@ -946,9 +946,6 @@ let ao_bake_program =
              for (float s = 1.0; s <= 16.0; s++) {
                 vec2 sample_uv = uv + dir * (s / 16.0) * R_uv;
 
-                // Boundary check
-                if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
-
                 float h_sample = decode_height(texture(relief, sample_uv).rg);
                 float h_diff = h_sample - h_center;
                 float dist = s * step_dist_world;
