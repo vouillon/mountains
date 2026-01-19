@@ -15,16 +15,125 @@ let ( let* ) = Lwt.bind
 let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
 let now_ms = now
 
-(** Time a GPU operation by calling glFinish to wait for completion. Logs the
-    operation name and duration to console. *)
+(* GPU Timer using EXT_disjoint_timer_query_webgl2 with fallback to glFinish *)
+module Gpu_timer = struct
+  type ext = { time_elapsed_ext : int }
+
+  let extension : ext option ref = ref None
+
+  let init ctx =
+    let ext =
+      Brr_canvas.Gl.get_extension ctx (Jstr.v "EXT_disjoint_timer_query_webgl2")
+    in
+    if Jv.is_some ext then begin
+      let time_elapsed_ext = Jv.to_int (Jv.get ext "TIME_ELAPSED_EXT") in
+      extension := Some { time_elapsed_ext };
+      Brr.Console.(
+        log [ Jstr.v "GPU Timer: Using EXT_disjoint_timer_query_webgl2" ])
+    end
+    else
+      Brr.Console.(
+        log
+          [ Jstr.v "GPU Timer: Extension unavailable, using glFinish fallback" ])
+
+  (* Pending queries waiting for results *)
+  type pending_query = { name : string; query : Jv.t; t0 : float }
+
+  let pending_queries : pending_query list ref = ref []
+
+  (* Poll for completed queries and log results *)
+  let poll_results ctx =
+    let module Gl = Brr_canvas.Gl in
+    let gl = (Obj.magic ctx : Jv.t) in
+    let query_result_available = 0x8867 in
+    (* GL_QUERY_RESULT_AVAILABLE *)
+    let query_result = 0x8866 in
+    (* GL_QUERY_RESULT *)
+    let gpu_disjoint = 0x8FBB in
+    (* GPU_DISJOINT_EXT *)
+
+    match !extension with
+    | None -> ()
+    | Some _ ->
+        (* Check if GPU was disjoint (results may be invalid) *)
+        let disjoint =
+          Jv.to_bool (Jv.call gl "getParameter" [| Jv.of_int gpu_disjoint |])
+        in
+        (if disjoint then
+           Brr.Console.(
+             log
+               [
+                 Jstr.v "GPU Timer: Disjoint detected - results may be invalid";
+               ]));
+
+        let still_pending = ref [] in
+        List.iter
+          (fun pq ->
+            let available =
+              Jv.to_bool
+                (Jv.call gl "getQueryParameter"
+                   [| pq.query; Jv.of_int query_result_available |])
+            in
+            if available then begin
+              let time_ns =
+                Jv.to_float
+                  (Jv.call gl "getQueryParameter"
+                     [| pq.query; Jv.of_int query_result |])
+              in
+              let time_ms = time_ns /. 1_000_000. in
+              let wall_ms = now () -. pq.t0 in
+              let prefix = if disjoint then "[DISJOINT] " else "" in
+              Brr.Console.(
+                log
+                  [
+                    Jstr.v
+                      (Printf.sprintf "%s%s: GPU %.2fms (wall %.1fms)" prefix
+                         pq.name time_ms wall_ms);
+                  ]);
+              ignore (Jv.call gl "deleteQuery" [| pq.query |])
+            end
+            else still_pending := pq :: !still_pending)
+          !pending_queries;
+        pending_queries := List.rev !still_pending
+
+  (* Start timing a GPU operation *)
+  let begin_query ctx name =
+    let module Gl = Brr_canvas.Gl in
+    match !extension with
+    | None -> None
+    | Some ext ->
+        let gl = (Obj.magic ctx : Jv.t) in
+        let query = Jv.call gl "createQuery" [||] in
+        ignore
+          (Jv.call gl "beginQuery" [| Jv.of_int ext.time_elapsed_ext; query |]);
+        Some { name; query; t0 = now () }
+
+  (* End timing and queue for result polling *)
+  let end_query ctx pq_opt =
+    match (!extension, pq_opt) with
+    | Some ext, Some pq ->
+        let gl = (Obj.magic ctx : Jv.t) in
+        ignore (Jv.call gl "endQuery" [| Jv.of_int ext.time_elapsed_ext |]);
+        pending_queries := pq :: !pending_queries
+    | _ -> ()
+end
+
+(** Time a GPU operation. Uses extension if available, otherwise glFinish. *)
 let time_gpu ctx name f =
   let module Gl = Brr_canvas.Gl in
-  let t0 = now () in
-  let result = f () in
-  Gl.finish ctx;
-  let t1 = now () in
-  Brr.Console.(log [ Jstr.v (Printf.sprintf "%s: %.1fms" name (t1 -. t0)) ]);
-  result
+  match !Gpu_timer.extension with
+  | Some _ ->
+      let pq = Gpu_timer.begin_query ctx name in
+      let result = f () in
+      Gpu_timer.end_query ctx pq;
+      result
+  | None ->
+      let t0 = now () in
+      let result = f () in
+      Gl.finish ctx;
+      let t1 = now () in
+      Brr.Console.(log [ Jstr.v (Printf.sprintf "%s: %.1fms" name (t1 -. t0)) ]);
+      result
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
@@ -1632,6 +1741,8 @@ let resize_canvas canvas =
     Brr_canvas.Canvas.set_h canvas canvas_height
 
 let init_graphics ctx =
+  (* Initialize GPU timer extension *)
+  Gpu_timer.init ctx;
   (* Initialize anisotropic filtering extension *)
   let triangle_pid = Web_utils.create_program ctx triangle_program in
   let text_pid = Web_utils.create_program ctx text_program in
@@ -2053,174 +2164,232 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
         (min_lon, min_lat, extent_lon, extent_lat, max_lon, max_lat))
   in
 
-  (* PASS 1: Clear all levels *)
+  (* Pre-upload all tile geometry to GPU buffers *)
+  let uploaded_tiles =
+    List.filter_map
+      (fun (tile, tile_range_lon, tile_range_lat) ->
+        let header = tile.Clc_loader.header in
+        let t_min_lon = header.Clc_loader.min_lon in
+        let t_min_lat = header.Clc_loader.min_lat in
+        let t_max_lon = t_min_lon +. tile_range_lon in
+        let t_max_lat = t_min_lat +. tile_range_lat in
+
+        (* Check if tile intersects ANY level *)
+        let visible_any =
+          Array.exists
+            (fun level_params ->
+              Web_utils.intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                level_params)
+            level_bounds
+        in
+
+        if not visible_any then None
+        else
+          let land_index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
+          let water_index_count =
+            Bigarray.Array1.dim tile.Clc_loader.water_indices
+          in
+
+          (* Create and upload land buffers if needed *)
+          let land_buffers =
+            if land_index_count > 0 then begin
+              let pos_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
+                Gl.static_draw;
+
+              let col_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
+                Gl.static_draw;
+
+              let idx_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
+              Gl.buffer_data ctx Gl.element_array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
+                Gl.static_draw;
+
+              Some (pos_buf, col_buf, idx_buf, land_index_count)
+            end
+            else None
+          in
+
+          (* Create and upload water buffers if needed *)
+          let water_buffers =
+            if water_index_count > 0 then begin
+              let pos_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
+                Gl.static_draw;
+
+              let col_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
+              Gl.buffer_data ctx Gl.array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
+                Gl.static_draw;
+
+              let idx_buf = Gl.create_buffer ctx in
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
+              Gl.buffer_data ctx Gl.element_array_buffer
+                (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
+                Gl.static_draw;
+
+              let water_scale =
+                tile_range_lon *. header.Clc_loader.water_scale_x
+              in
+              Some (pos_buf, col_buf, idx_buf, water_index_count, water_scale)
+            end
+            else None
+          in
+
+          Some
+            ( tile_range_lon,
+              tile_range_lat,
+              t_min_lon,
+              t_min_lat,
+              t_max_lon,
+              t_max_lat,
+              land_buffers,
+              water_buffers ))
+      clc_tiles
+  in
+
+  (* Render each level in turn *)
   for level = 0 to 6 do
-    Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+    let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, v_max_lon, v_max_lat =
+      level_bounds.(level)
+    in
+
+    (* Switch FBO to this level ONCE *)
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
       cover_map_texture 0 level;
     Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
       Gl.renderbuffer clc_depth_rbs.(level);
+
+    (* Clear depth buffer *)
     Gl.clear_depth ctx 1.0;
     Gl.clear ctx Gl.depth_buffer_bit;
     Gl.depth_mask ctx true;
     Gl.enable ctx Gl.depth_test;
-    Gl.depth_func ctx Gl.less
+    Gl.depth_func ctx Gl.less;
+
+    (* WATER PASS for this level *)
+    Gl.use_program ctx water_raster_pid;
+
+    List.iter
+      (fun ( tile_range_lon,
+             tile_range_lat,
+             t_min_lon,
+             t_min_lat,
+             t_max_lon,
+             t_max_lat,
+             _land_buffers,
+             water_buffers ) ->
+        match water_buffers with
+        | None -> ()
+        | Some (pos_buf, col_buf, idx_buf, water_index_count, water_scale) ->
+            if
+              Web_utils.intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                ( v_min_lon,
+                  v_min_lat,
+                  v_ext_lon,
+                  v_ext_lat,
+                  v_max_lon,
+                  v_max_lat )
+            then begin
+              (* Bind pre-uploaded buffers *)
+              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
+              Gl.enable_vertex_attrib_array ctx 0;
+              Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
+
+              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
+              Gl.enable_vertex_attrib_array ctx 1;
+              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
+
+              (* Set Uniforms *)
+              Gl.uniform1f ctx water_u.u_water_scale water_scale;
+              Gl.uniform2f ctx water_u.u_tile_range tile_range_lon
+                tile_range_lat;
+              Gl.uniform2f ctx water_u.u_tile_min t_min_lon t_min_lat;
+              Gl.uniform2f ctx water_u.u_tex_min v_min_lon v_min_lat;
+              Gl.uniform2f ctx water_u.u_tex_range v_ext_lon v_ext_lat;
+
+              Gl.draw_elements ctx Gl.triangles water_index_count
+                Gl.unsigned_int 0
+            end)
+      uploaded_tiles;
+
+    (* LAND PASS for this level *)
+    Gl.use_program ctx clc_raster_pid;
+
+    List.iter
+      (fun ( tile_range_lon,
+             tile_range_lat,
+             t_min_lon,
+             t_min_lat,
+             t_max_lon,
+             t_max_lat,
+             land_buffers,
+             _water_buffers ) ->
+        match land_buffers with
+        | None -> ()
+        | Some (pos_buf, col_buf, idx_buf, index_count) ->
+            if
+              Web_utils.intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                ( v_min_lon,
+                  v_min_lat,
+                  v_ext_lon,
+                  v_ext_lat,
+                  v_max_lon,
+                  v_max_lat )
+            then begin
+              (* Bind pre-uploaded buffers *)
+              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
+              Gl.enable_vertex_attrib_array ctx 0;
+              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
+              Gl.enable_vertex_attrib_array ctx 1;
+              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
+
+              (* Set Uniforms *)
+              Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
+              Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
+              Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
+              Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
+
+              Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
+            end)
+      uploaded_tiles
   done;
 
-  (* PASS 2: Water Layer (Render all visible water tiles to all levels) *)
-  Gl.use_program ctx water_raster_pid;
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-
-  (* Set water-specific static uniforms *)
+  (* Cleanup - delete pre-uploaded buffers *)
   List.iter
-    (fun (tile, tile_range_lon, tile_range_lat) ->
-      let water_index_count =
-        Bigarray.Array1.dim tile.Clc_loader.water_indices
-      in
-      if water_index_count > 0 then begin
-        let header = tile.Clc_loader.header in
-        let t_min_lon = header.Clc_loader.min_lon in
-        let t_min_lat = header.Clc_loader.min_lat in
-        let t_max_lon = t_min_lon +. tile_range_lon in
-        let t_max_lat = t_min_lat +. tile_range_lat in
+    (fun (_, _, _, _, _, _, land_buffers, water_buffers) ->
+      (match land_buffers with
+      | Some (pos_buf, col_buf, idx_buf, _) ->
+          Gl.delete_buffer ctx pos_buf;
+          Gl.delete_buffer ctx col_buf;
+          Gl.delete_buffer ctx idx_buf
+      | None -> ());
+      match water_buffers with
+      | Some (pos_buf, col_buf, idx_buf, _, _) ->
+          Gl.delete_buffer ctx pos_buf;
+          Gl.delete_buffer ctx col_buf;
+          Gl.delete_buffer ctx idx_buf
+      | None -> ())
+    uploaded_tiles;
 
-        (* Set varying water scale from header to normalize 0..1 *)
-        Gl.uniform1f ctx water_u.u_water_scale
-          (tile_range_lon *. header.Clc_loader.water_scale_x);
-
-        (* Check if tile intersects ANY level before uploading *)
-        let visible_any =
-          Array.exists
-            (fun level_params ->
-              Web_utils.intersects
-                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-                level_params)
-            level_bounds
-        in
-
-        if visible_any then begin
-          (* Upload Geometry ONCE per tile *)
-          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
-          Gl.buffer_data ctx Gl.array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_positions)
-            Gl.stream_draw;
-          Gl.enable_vertex_attrib_array ctx 0;
-          Gl.vertex_attrib_ipointer ctx 0 2 Gl.int 0 0;
-
-          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
-          Gl.buffer_data ctx Gl.array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_colors)
-            Gl.stream_draw;
-          Gl.enable_vertex_attrib_array ctx 1;
-          Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-          Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
-          Gl.buffer_data ctx Gl.element_array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
-            Gl.stream_draw;
-
-          (* Set Tile Uniforms ONCE *)
-          Gl.uniform2f ctx water_u.u_tile_range tile_range_lon tile_range_lat;
-          Gl.uniform2f ctx water_u.u_tile_min t_min_lon t_min_lat;
-
-          (* Render to all intersecting levels *)
-          Array.iteri
-            (fun level params ->
-              let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
-              if
-                Web_utils.intersects
-                  (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-                  params
-              then begin
-                Gl.framebuffer_texture_layer ctx Gl.framebuffer
-                  Gl.color_attachment0 cover_map_texture 0 level;
-                Gl.framebuffer_renderbuffer ctx Gl.framebuffer
-                  Gl.depth_attachment Gl.renderbuffer clc_depth_rbs.(level);
-                Gl.uniform2f ctx water_u.u_tex_min v_min_lon v_min_lat;
-                Gl.uniform2f ctx water_u.u_tex_range v_ext_lon v_ext_lat;
-
-                Gl.draw_elements ctx Gl.triangles water_index_count
-                  Gl.unsigned_int 0
-              end)
-            level_bounds
-        end
-      end)
-    clc_tiles;
-
-  (* PASS 3: Land Layer (Render all visible land tiles to all levels) *)
-  Gl.use_program ctx clc_raster_pid;
-
-  (* Re-bind attributes for land format *)
-  List.iter
-    (fun (tile, tile_range_lon, tile_range_lat) ->
-      let index_count = Bigarray.Array1.dim tile.Clc_loader.indices in
-      if index_count > 0 then begin
-        let header = tile.Clc_loader.header in
-        let t_min_lon = header.Clc_loader.min_lon in
-        let t_min_lat = header.Clc_loader.min_lat in
-        let t_max_lon = t_min_lon +. tile_range_lon in
-        let t_max_lat = t_min_lat +. tile_range_lat in
-
-        (* Check if tile intersects ANY level before uploading *)
-        let visible_any =
-          Array.exists
-            (fun level_params ->
-              Web_utils.intersects
-                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-                level_params)
-            level_bounds
-        in
-
-        if visible_any then begin
-          (* Upload Geometry ONCE per tile *)
-          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_pos);
-          Gl.buffer_data ctx Gl.array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.positions)
-            Gl.stream_draw;
-          Gl.enable_vertex_attrib_array ctx 0;
-          (* Land uses ushort normalized *)
-          Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
-
-          Gl.bind_buffer ctx Gl.array_buffer (Some vbo_col);
-          Gl.buffer_data ctx Gl.array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.colors)
-            Gl.stream_draw;
-          Gl.enable_vertex_attrib_array ctx 1;
-          Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-          Gl.bind_buffer ctx Gl.element_array_buffer (Some ebo);
-          Gl.buffer_data ctx Gl.element_array_buffer
-            (Brr.Tarray.of_bigarray1 tile.Clc_loader.indices)
-            Gl.stream_draw;
-
-          (* Set Tile Uniforms ONCE *)
-          Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
-          Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
-
-          (* Render to all intersecting levels *)
-          Array.iteri
-            (fun level params ->
-              let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
-              if
-                Web_utils.intersects
-                  (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-                  params
-              then begin
-                Gl.framebuffer_texture_layer ctx Gl.framebuffer
-                  Gl.color_attachment0 cover_map_texture 0 level;
-                Gl.framebuffer_renderbuffer ctx Gl.framebuffer
-                  Gl.depth_attachment Gl.renderbuffer clc_depth_rbs.(level);
-                Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
-                Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
-
-                Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
-              end)
-            level_bounds
-        end
-      end)
-    clc_tiles;
-
-  (* Cleanup *)
   Gl.bind_vertex_array ctx None;
   Gl.delete_vertex_array ctx vao;
   Gl.delete_buffer ctx vbo_pos;
@@ -2399,6 +2568,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
     ~_cover_map_texture:_ ~sky_pid ~sky_uniforms
     ~(radial_params : Render_state.radial_params) canvas ctx =
+  (* Poll for completed GPU timer queries *)
+  Gpu_timer.poll_results ctx;
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
