@@ -902,14 +902,14 @@ let ao_bake_program =
           float h_center = decode_height(texture(relief, uv).rg);
 
           float AO = 0.0;
-          float R_uv = 150.0 * dist_step; // ~150 pixels radius in UV space
+          float R_uv = 50.0 * dist_step; // ~150 pixels radius in UV space
 
           // Precompute world distance for one step
           // R_pixels = 150.0.
           // R_world = 150.0 * scale.
           // step_len_uv = R_uv / 16.0
           // step_len_world = (150.0 * scale) / 16.0
-          float step_dist_world = (150.0 * scale) / 16.0;
+          float step_dist_world = (50.0 * scale) / 16.0;
 
           // Jitter
           float random_val = rand(gl_FragCoord.xy);
@@ -1608,6 +1608,7 @@ type graphics_resources = {
   clc_raster_uniforms : Render_state.clc_raster_uniforms;
   water_raster_uniforms : Render_state.water_raster_uniforms;
   radial_params : Render_state.radial_params;
+  nearest_sampler : Gl.sampler;
 }
 
 let resize_canvas canvas =
@@ -1708,6 +1709,13 @@ let init_graphics ctx =
     Render_state.init_water_raster_uniforms ctx water_raster_pid
   in
 
+  (* Create nearest sampler for AO passes (relief texture needs nearest filtering there) *)
+  let nearest_sampler = Gl.create_sampler ctx in
+  Gl.sampler_parameteri ctx nearest_sampler Gl.texture_min_filter Gl.nearest;
+  Gl.sampler_parameteri ctx nearest_sampler Gl.texture_mag_filter Gl.nearest;
+  Gl.sampler_parameteri ctx nearest_sampler Gl.texture_wrap_s Gl.clamp_to_edge;
+  Gl.sampler_parameteri ctx nearest_sampler Gl.texture_wrap_t Gl.clamp_to_edge;
+
   {
     terrain_geo;
     indices;
@@ -1740,11 +1748,12 @@ let init_graphics ctx =
     clc_raster_uniforms;
     water_raster_uniforms;
     radial_params;
+    nearest_sampler;
   }
 (* Rendering Passes *)
 
-let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
-    (bake_u : Render_state.ao_bake_uniforms)
+let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
+    ao_blur_pid (bake_u : Render_state.ao_bake_uniforms)
     (blur_u : Render_state.ao_blur_uniforms) =
   (* Helper to create FBO and R8 Texture *)
   let create_r8_target w h =
@@ -1774,6 +1783,8 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
 
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  (* Use nearest sampler for AO - overrides texture's mipmap filter *)
+  Gl.bind_sampler ctx 0 (Some nearest_sampler);
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
@@ -1787,19 +1798,23 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
   Gl.uniform1i ctx blur_u.relief 1;
   Gl.uniform2f ctx blur_u.inv_res (1.0 /. float width) (1.0 /. float height);
 
-  (* Bind AO bake texture on unit 0 *)
+  (* Bind AO bake texture on unit 0 - no sampler needed (not mipmapped) *)
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_bake_tex);
+  Gl.bind_sampler ctx 0 None;
 
-  (* Bind relief texture on unit 1 for bilateral comparison *)
+  (* Bind relief texture on unit 1 with nearest sampler for bilateral comparison *)
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.bind_sampler ctx 1 (Some nearest_sampler);
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
   (* Cleanup *)
   Gl.delete_framebuffer ctx fbo;
   Gl.delete_texture ctx ao_bake_tex;
+  Gl.bind_sampler ctx 0 None;
+  Gl.bind_sampler ctx 1 None;
 
   (* Restore State *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
@@ -2562,6 +2577,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     clc_raster_uniforms;
     water_raster_uniforms;
     radial_params;
+    nearest_sampler;
   } =
     graphics
   in
@@ -2604,8 +2620,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Approx 30m per pixel *)
   let ao_texture =
-    compute_ao ctx w h deltay relief_texture ao_bake_pid ao_blur_pid
-      ao_bake_uniforms ao_blur_uniforms
+    compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
+      ao_blur_pid ao_bake_uniforms ao_blur_uniforms
   in
 
   (* Compute session-static values for terrain uniforms *)
