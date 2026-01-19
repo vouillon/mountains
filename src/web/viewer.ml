@@ -1010,72 +1010,54 @@ let ao_bake_program =
           return vec3(coord * float(width) * scale, h);
         }
 
-        // Pseudo-random noise
-        float rand(vec2 co){
-            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        float IGN(vec2 p) {
+          vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+          return fract(magic.z * fract(dot(p, magic.xy)));
         }
 
         void main() {
-          float dist_step = 1.0 / float(width);
+          const float DIRECTIONS = 8.0;
+          const float STEPS = 10.0;
+
+          float R_uv = 50.0 / float(width);
+          float R_world = 50. * scale;
 
           // Center Height
           float h_center = decode_height(texture(relief, uv).rg);
 
-          float AO = 0.0;
-          float R_uv = 50.0 * dist_step; // ~150 pixels radius in UV space
+          float noise = IGN(gl_FragCoord.xy);
 
-          // Precompute world distance for one step
-          // R_pixels = 150.0.
-          // R_world = 150.0 * scale.
-          // step_len_uv = R_uv / 16.0
-          // step_len_world = (150.0 * scale) / 16.0
-          float step_dist_world = (50.0 * scale) / 16.0;
+          float totalOcclusion = 0.0;
 
-          // Jitter
-          float random_val = rand(gl_FragCoord.xy);
-          float random_angle = random_val * 2.0 * PI;
-
-          float directions = 8.0;
-          float steps = 16.0;
-
-          for (float d = 0.0; d < 8.0; d++) {
-             float angle = random_angle + (d / 8.0) * 2.0 * PI;
+          for (float d = 0.0; d < DIRECTIONS; d++) {
+             float angle = (d + noise) * (2.0 * PI / DIRECTIONS);
              vec2 dir = vec2(cos(angle), sin(angle));
 
              // Maximize Tangent (Height Diff / Dist) instead of Angle
              // Initialize to small value (tan(-89deg))
              float max_tan = -100.0;
-             float max_obj_s = 0.0;
 
-             for (float s = 1.0; s <= 16.0; s++) {
-                vec2 sample_uv = uv + dir * (s / 16.0) * R_uv;
+             for (float s = 1.0; s <= STEPS; s++) {
+                float t_linear = (s + 1. + noise) / (STEPS + 2.);
+                float sample_t = t_linear * t_linear;
+                vec2 sample_uv = uv + dir * sample_t * R_uv;
 
                 float h_sample = decode_height(texture(relief, sample_uv).rg);
                 float h_diff = h_sample - h_center;
-                float dist = s * step_dist_world;
+                float dist = sample_t * R_world;
 
                 float tan_s = h_diff / dist;
-
-                if (tan_s > max_tan) {
-                   max_tan = tan_s;
-                   max_obj_s = s;
-                }
+                max_tan = max(max_tan, tan_s);
              }
 
              // Convert max_tan back to sin(horizon_angle)
              float sin_horizon = max_tan / sqrt(1.0 + max_tan * max_tan);
 
-             // Distance Attenuation
-             // 1.0 - (dist / max_dist)^2
-             float dist_ratio = max_obj_s / 16.0;
-             float attenuation = 1.0 - dist_ratio * dist_ratio;
-
-             AO += max(0.0, sin_horizon) * max(0.0, attenuation);
+             totalOcclusion += max(0.0, sin_horizon);
           }
 
-          AO = AO / 8.0;
-
-          occlusion = 1.0 - AO; // Output visibility
+          totalOcclusion = totalOcclusion / DIRECTIONS;
+          occlusion = 1.0 - totalOcclusion; // Output visibility
         }
       |};
     attributes = [];
@@ -1886,8 +1868,12 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
     tid
   in
 
-  let ao_bake_tex = create_r8_target width height in
-  let ao_final_tex = create_r8_target width height in
+  (* Use Half Resolution for AO *)
+  let ao_width = width / 2 in
+  let ao_height = height / 2 in
+
+  let ao_bake_tex = create_r8_target ao_width ao_height in
+  let ao_final_tex = create_r8_target ao_width ao_height in
 
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
@@ -1896,10 +1882,11 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
     ao_bake_tex 0;
 
-  Gl.viewport ctx 0 0 width height;
+  Gl.viewport ctx 0 0 ao_width ao_height;
   Gl.use_program ctx ao_bake_pid;
 
   Gl.uniform1i ctx bake_u.relief 0;
+  (* Keep generating noise/radius based on FULL width for consistent world scale *)
   Gl.uniform1i ctx bake_u.width width;
   Gl.uniform1f ctx bake_u.scale scale;
 
@@ -1918,7 +1905,10 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
 
   Gl.uniform1i ctx blur_u.ao_tex 0;
   Gl.uniform1i ctx blur_u.relief 1;
-  Gl.uniform2f ctx blur_u.inv_res (1.0 /. float width) (1.0 /. float height);
+  (* Step size relative to LOW res texture *)
+  Gl.uniform2f ctx blur_u.inv_res
+    (1.0 /. float ao_width)
+    (1.0 /. float ao_height);
 
   (* Bind AO bake texture on unit 0 - no sampler needed (not mipmapped) *)
   Gl.active_texture ctx Gl.texture0;
