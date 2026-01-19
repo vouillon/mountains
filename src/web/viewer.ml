@@ -15,6 +15,17 @@ let ( let* ) = Lwt.bind
 let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
 let now_ms = now
 
+(** Time a GPU operation by calling glFinish to wait for completion. Logs the
+    operation name and duration to console. *)
+let time_gpu ctx name f =
+  let module Gl = Brr_canvas.Gl in
+  let t0 = now () in
+  let result = f () in
+  Gl.finish ctx;
+  let t1 = now () in
+  Brr.Console.(log [ Jstr.v (Printf.sprintf "%s: %.1fms" name (t1 -. t0)) ]);
+  result
+
 let request_animation_frame () =
   let t, u = Lwt.task () in
   ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
@@ -2624,8 +2635,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let _, deltay, _ = Render_state.compute_deltas ~lat in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
-    compute_relief ctx w h lat triangle_geo tile_texture normal_pid mipmap_pid
-      copy_pid relief_uniforms mipmap_uniforms copy_uniforms
+    time_gpu ctx "compute_relief" (fun () ->
+        compute_relief ctx w h lat triangle_geo tile_texture normal_pid
+          mipmap_pid copy_pid relief_uniforms mipmap_uniforms copy_uniforms)
   in
   let points =
     List.map
@@ -2660,8 +2672,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Approx 30m per pixel *)
   let ao_texture =
-    compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
-      ao_blur_pid ao_bake_uniforms ao_blur_uniforms
+    time_gpu ctx "compute_ao" (fun () ->
+        compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
+          ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
   in
 
   (* Compute session-static values for terrain uniforms *)
@@ -2710,16 +2723,18 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* GPU rasterize CLC tiles to FBO *)
   let cover_map_texture =
-    rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
-      ~water_raster_pid clc_raster_uniforms water_raster_uniforms
+    time_gpu ctx "rasterize_clc_tiles" (fun () ->
+        rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
+          ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
   in
 
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
 
   (* Render shadows *)
-  draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-    ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ctx;
+  time_gpu ctx "draw_shadows" (fun () ->
+      draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+        ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ctx);
 
   (* Bind all terrain textures at init - after all textures are created *)
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
