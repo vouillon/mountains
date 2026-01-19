@@ -1780,7 +1780,10 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
 
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
 
   (* PASS 2: Blur AO with bilateral filter *)
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
