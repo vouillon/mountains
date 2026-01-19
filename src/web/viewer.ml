@@ -156,18 +156,6 @@ let quad_vertex_shader =
     }
   |}
 
-let sky_vertex_shader =
-  {|#version 300 es
-    out mediump vec2 v_uv;
-    void main() {
-      float x = float(gl_VertexID & 1);
-      float y = float(gl_VertexID >> 1);
-      v_uv = vec2(x, y);
-      // Draw at Far Plane (Z=1.0)
-      gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
-    }
-  |}
-
 let common_fragment_header =
   {|#version 300 es
     precision highp float;
@@ -263,6 +251,7 @@ let radial_vertex_common =
     return v;
   }
   |}
+
 (* Shader Programs *)
 
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
@@ -1125,7 +1114,17 @@ let water_raster_program =
 
 let sky_program =
   {
-    vertex_shader = sky_vertex_shader;
+    vertex_shader =
+      {|#version 300 es
+    out mediump vec2 v_uv;
+    void main() {
+      float x = float(gl_VertexID & 1);
+      float y = float(gl_VertexID >> 1);
+      v_uv = vec2(x, y);
+      // Draw at Far Plane (Z=1.0)
+      gl_Position = vec4(2.0 * x - 1.0, 2.0 * y - 1.0, 1.0, 1.0);
+    }
+  |};
     fragment_shader =
       {|#version 300 es
         precision mediump float;
