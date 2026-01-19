@@ -20,21 +20,6 @@ let request_animation_frame () =
   ignore (Brr.G.request_animation_frame (fun _ -> Lwt.wakeup u ()));
   t
 
-let on_gpu_finished ctx =
-  let module Gl = Brr_canvas.Gl in
-  let t, u = Lwt.task () in
-  let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
-  let rec check () =
-    let status = Gl.client_wait_sync ctx sync 0 0 in
-    if status = Gl.already_signaled || status = Gl.condition_satisfied then begin
-      Gl.delete_sync ctx sync;
-      Lwt.wakeup u ()
-    end
-    else ignore (Brr.G.request_animation_frame (fun _ -> check ()))
-  in
-  check ();
-  t
-
 let sleep s =
   let t, u = Lwt.task () in
   ignore
@@ -112,10 +97,7 @@ let fog_linear = (0.17, 0.38, 0.79)
 let zenith_linear = (0.02, 0.12, 0.55)
 
 (* Dem_loader provides direct loading of compressed .dem tiles *)
-
-(* Shaders *)
-
-let pi = Render_state.pi
+let pi = Web_utils.pi
 
 let quad_vertex_shader =
   {|#version 300 es
@@ -150,7 +132,7 @@ let common_fragment_header =
     }
   |}
 
-type program = {
+type program = Web_utils.program_spec = {
   vertex_shader : string;
   fragment_shader : string;
   attributes : string list;
@@ -306,7 +288,8 @@ let terrain_program =
         }
       |};
     fragment_shader =
-      {|#version 300 es
+      common_fragment_header
+      ^ {|
         precision mediump float;  // Default mediump for mobile performance
         precision highp sampler2DArray;
 
@@ -1221,77 +1204,7 @@ let sky_program =
 
 module Gl = Brr_canvas.Gl
 
-type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
-
-let create_buffer ctx target (Buffer b) =
-  let id = Gl.create_buffer ctx in
-  Gl.bind_buffer ctx target (Some id);
-  Gl.buffer_data ctx target (Brr.Tarray.of_bigarray1 b) Gl.static_draw;
-  id
-
-let create_geometry ctx ~indices ~buffers =
-  let gid = Gl.create_vertex_array ctx in
-  Gl.bind_vertex_array ctx (Some gid);
-  let iid = create_buffer ctx Gl.element_array_buffer (Buffer indices) in
-  Gl.bind_buffer ctx Gl.element_array_buffer (Some iid);
-  let bind_attrib loc dim typ data =
-    let id = create_buffer ctx Gl.array_buffer data in
-    Gl.bind_buffer ctx Gl.array_buffer (Some id);
-    Gl.enable_vertex_attrib_array ctx loc;
-    Gl.vertex_attrib_pointer ctx loc dim typ false 0 0
-  in
-  List.iteri (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers;
-  Gl.bind_vertex_array ctx None;
-  Gl.bind_buffer ctx Gl.array_buffer None;
-  Gl.bind_buffer ctx Gl.element_array_buffer None;
-  gid
-
-let compile_shader ctx src typ =
-  let sid = Gl.create_shader ctx typ in
-  Gl.shader_source ctx sid (Jstr.v src);
-  Gl.compile_shader ctx sid;
-  sid
-(*
-;
-  if Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status) then sid
-  else
-    let log = Gl.get_shader_info_log ctx sid in
-    Gl.delete_shader ctx sid;
-    failwith (Jstr.to_string log)
-*)
-
-let create_program ctx p =
-  let vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
-  let fid = compile_shader ctx p.fragment_shader Gl.fragment_shader in
-  let pid = Gl.create_program ctx in
-  Gl.attach_shader ctx pid vid;
-  Gl.delete_shader ctx vid;
-  Gl.attach_shader ctx pid fid;
-  Gl.delete_shader ctx fid;
-  List.iteri
-    (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
-    p.attributes;
-  Gl.link_program ctx pid;
-  (*
-  if Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status) then pid
-  else
-    let log = Gl.get_program_info_log ctx pid in
-    Gl.delete_program ctx pid;
-    failwith (Jstr.to_string log)
-*)
-  pid
-
 (* Geometry *)
-
-let linearize2 a =
-  Buffer
-    Bigarray.(reshape_1 (genarray_of_array2 a) (Array2.dim1 a * Array2.dim2 a))
-
-let linearize3 a =
-  Buffer
-    Bigarray.(
-      reshape_1 (genarray_of_array3 a)
-        (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
 
 let instantiate ~size =
   let sz = (size + 65535) lsr 16 in
@@ -1356,7 +1269,7 @@ let make_tile_texture ctx tile =
     Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data))
     0;
-  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
@@ -1485,7 +1398,7 @@ let make_detail_map ctx =
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 1 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Render_state.set_texture_params_mipmap_repeat ctx Gl.texture_2d;
+  Web_utils.set_texture_params_mipmap_repeat ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   (* Start async load of compressed texture *)
   load_compressed_detail_map ctx tid;
@@ -1499,7 +1412,7 @@ let make_palette_texture ctx =
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 128 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
@@ -1519,7 +1432,7 @@ let make_dummy_cover_map ctx =
     Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
-  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   (tid, size)
 
@@ -1532,7 +1445,7 @@ let create_shadow_map ctx width height layers =
     layers;
 
   (* Linear filter for smooth shadow edges with hardware comparison *)
-  Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d_array;
+  Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d_array;
 
   (* Enable hardware shadow comparison for sampler2DArrayShadow *)
   Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_compare_mode
@@ -1606,7 +1519,7 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
     let tid = Gl.create_texture ctx in
     Gl.bind_texture ctx Gl.texture_2d (Some tid);
     Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 w h;
-    Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d;
+    Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
     tid
   in
 
@@ -2013,19 +1926,11 @@ let event_loop ctx draw =
 
 (* Main *)
 
-let next_power_of_two = Render_state.next_power_of_two
+let next_power_of_two = Web_utils.next_power_of_two
 
 let mipmap_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        precision highp float;
-        layout(location = 0) in vec3 position;
-        out highp vec2 v_uv;
-        void main() {
-          v_uv = position.xy * 0.5 + 0.5;
-          gl_Position = vec4(position, 1.);
-        }|};
+    vertex_shader = quad_vertex_shader;
     fragment_shader =
       {|#version 300 es
         precision highp float;
@@ -2035,13 +1940,13 @@ let mipmap_program =
         uniform float decay;
         uniform int level; // Target level (unused in logic, but passed)
         uniform int source_level; // Explicit source level
-        in highp vec2 v_uv;
+        in vec2 uv;
         out vec4 frag_color;
         void main() {
           vec2 size = source_size;
           // Map UV to Source Pixel Coordinates
-          // v_uv points to center of the 2x2 block in source
-          ivec2 p = ivec2(v_uv * size);
+          // uv points to center of the 2x2 block in source
+          ivec2 p = ivec2(uv * size);
 
           // Force alignment to even coordinates (top-left of 2x2 block)
           ivec2 p00 = (p / 2) * 2;
@@ -2080,60 +1985,44 @@ let mipmap_program =
 
           frag_color = vec4(r, g, n_avg);
         }|};
-    attributes = [ "position" ];
+    attributes = [];
   }
 
 let copy_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        layout(location = 0) in vec3 position;
-        out mediump vec2 v_uv;
-        void main() {
-          v_uv = position.xy * 0.5 + 0.5;
-          gl_Position = vec4(position, 1.);
-        }|};
+    vertex_shader = quad_vertex_shader;
     fragment_shader =
       {|#version 300 es
         precision highp float;
         uniform sampler2D source;
         uniform int level;
         uniform vec2 source_size;
-        in mediump vec2 v_uv;
+        in vec2 uv;
         out vec4 color;
         void main() {
           // Robust 1:1 Copy using UVs + Explicit Level
           // Works now that MinFilter is Mipmap-compatible
-          ivec2 p = ivec2(v_uv * source_size);
+          ivec2 p = ivec2(uv * source_size);
           p = clamp(p, ivec2(0), ivec2(source_size) - 1);
           color = texelFetch(source, p, level);
         }|};
-    attributes = [ "position" ];
+    attributes = [];
   }
 
 let normal_program =
   {
-    vertex_shader =
-      {|#version 300 es
-        out vec2 tileCoord;
-        uniform vec2 size;
-        void main() {
-          float x = float(gl_VertexID & 1);
-          float y = float(gl_VertexID >> 1);
-          tileCoord = vec2(x, y) * (size - 1.) + vec2(0.5, 0.5);
-          gl_Position = vec4(2. * vec2(x, y) - 1., 0, 1.);
-        }
-      |};
+    vertex_shader = quad_vertex_shader;
     fragment_shader =
-      {|#version 300 es
-        precision highp float;
+      common_fragment_header
+      ^ {|
         uniform vec2 size;
         uniform vec2 delta;
-        in vec2 tileCoord;
         uniform sampler2D tile;
+        in vec2 uv;
         out mediump vec4 color;
 
         float get_z(vec2 offset) {
+            vec2 tileCoord = uv * (size - 1.0) + 0.5;
             // Decode from RG8: R=low byte, G=high byte (little-endian)
             // Samples are in [0, 1], need to multiply by 255 to get 0..255
             vec2 rg = texture(tile, (tileCoord + offset) / size).rg * 255.0;
@@ -2184,14 +2073,14 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   assert (width = height);
 
   (* Not used in shader explicitly yet, using pow directly *)
-  let max_level = Render_state.log2 (max width height) in
+  let max_level = Web_utils.log2 (max width height) in
   let levels = max_level + 1 in
 
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
-  Render_state.set_texture_params_linear_clamp ctx Gl.texture_2d;
+  Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
   apply_anisotropic_filtering ctx;
 
   (* Use RGBA8 (4 bytes per pixel) *)
@@ -2366,14 +2255,6 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
         (min_lon, min_lat, extent_lon, extent_lat, max_lon, max_lat))
   in
 
-  (* Helper: Simple AABB intersection *)
-  let intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-      (v_min_lon, v_min_lat, _, _, v_max_lon, v_max_lat) =
-    not
-      (t_min_lon > v_max_lon || t_max_lon < v_min_lon || t_min_lat > v_max_lat
-     || t_max_lat < v_min_lat)
-  in
-
   (* PASS 1: Clear all levels *)
   for level = 0 to 6 do
     Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
@@ -2413,7 +2294,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
         let visible_any =
           Array.exists
             (fun level_params ->
-              intersects
+              Web_utils.intersects
                 (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
                 level_params)
             level_bounds
@@ -2448,7 +2329,10 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
           Array.iteri
             (fun level params ->
               let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
-              if intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat) params
+              if
+                Web_utils.intersects
+                  (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                  params
               then begin
                 Gl.framebuffer_texture_layer ctx Gl.framebuffer
                   Gl.color_attachment0 cover_map_texture 0 level;
@@ -2483,7 +2367,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
         let visible_any =
           Array.exists
             (fun level_params ->
-              intersects
+              Web_utils.intersects
                 (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
                 level_params)
             level_bounds
@@ -2519,7 +2403,10 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
           Array.iteri
             (fun level params ->
               let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, _, _ = params in
-              if intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat) params
+              if
+                Web_utils.intersects
+                  (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                  params
               then begin
                 Gl.framebuffer_texture_layer ctx Gl.framebuffer
                   Gl.color_attachment0 cover_map_texture 0 level;
@@ -2590,16 +2477,16 @@ let resize_canvas canvas =
 
 let init_graphics ctx =
   (* Initialize anisotropic filtering extension *)
-  let triangle_pid = create_program ctx triangle_program in
-  let text_pid = create_program ctx text_program in
-  let shadow_pid = create_program ctx shadow_program in
-  let sky_pid = create_program ctx sky_program in
-  let normal_pid = create_program ctx normal_program in
-  let mipmap_pid = create_program ctx mipmap_program in
-  let copy_pid = create_program ctx copy_program in
-  let ao_bake_pid = create_program ctx ao_bake_program in
-  let ao_blur_pid = create_program ctx ao_blur_program in
-  let terrain_pid = create_program ctx terrain_program in
+  let triangle_pid = Web_utils.create_program ctx triangle_program in
+  let text_pid = Web_utils.create_program ctx text_program in
+  let shadow_pid = Web_utils.create_program ctx shadow_program in
+  let sky_pid = Web_utils.create_program ctx sky_program in
+  let normal_pid = Web_utils.create_program ctx normal_program in
+  let mipmap_pid = Web_utils.create_program ctx mipmap_program in
+  let copy_pid = Web_utils.create_program ctx copy_program in
+  let ao_bake_pid = Web_utils.create_program ctx ao_bake_program in
+  let ao_blur_pid = Web_utils.create_program ctx ao_blur_program in
+  let terrain_pid = Web_utils.create_program ctx terrain_program in
 
   let shadow_map = create_shadow_map ctx 2048 2048 3 in
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
@@ -2619,10 +2506,10 @@ let init_graphics ctx =
     let rings = n_rings in
     let w' = next_power_of_two sectors 1 in
     let indices = build_indices sectors w' rings in
-    (create_geometry ctx ~indices ~buffers:[], indices)
+    (Web_utils.create_geometry ctx ~indices ~buffers:[], indices)
   in
   let text_geo =
-    create_geometry ctx
+    Web_utils.create_geometry ctx
       ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
       ~buffers:[]
   in
@@ -2644,9 +2531,9 @@ let init_graphics ctx =
       b.{9} <- 1.;
       b.{10} <- -1.;
       b.{11} <- 0.;
-      Buffer b
+      Web_utils.Buffer b
     in
-    create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
+    Web_utils.create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
   in
 
   (* Upload static uniforms once at initialization *)
@@ -2664,11 +2551,11 @@ let init_graphics ctx =
   let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
   let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
   let ao_blur_uniforms = Render_state.init_ao_blur_uniforms ctx ao_blur_pid in
-  let clc_raster_pid = create_program ctx clc_raster_program in
+  let clc_raster_pid = Web_utils.create_program ctx clc_raster_program in
   let clc_raster_uniforms =
     Render_state.init_clc_raster_uniforms ctx clc_raster_pid
   in
-  let water_raster_pid = create_program ctx water_raster_program in
+  let water_raster_pid = Web_utils.create_program ctx water_raster_program in
   let water_raster_uniforms =
     Render_state.init_water_raster_uniforms ctx water_raster_pid
   in
@@ -2841,7 +2728,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let clc_levels = 7 in
   let cover_map_texture = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-  Render_state.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
   (* Initialize with grass (index 26 = Natural grasslands) *)
   let init_data =
     Bigarray.(
@@ -2904,7 +2791,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
     ~cover_map_texture ~palette_texture;
 
-  let* () = on_gpu_finished ctx in
+  let* () = Web_utils.on_gpu_finished ctx in
   start ();
   hide_startup_overlay ();
   event_loop ctx (fun ~orientation ctx ->

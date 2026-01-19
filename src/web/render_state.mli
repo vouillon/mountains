@@ -4,20 +4,10 @@ open Brr_canvas
 
 (** {1 Shared Constants} *)
 
-val pi : float
-(** Pi constant. *)
-
 val deltay : float
 (** Meters per arc-second at the equator (latitude-independent Y delta). *)
 
 (** {1 Shared Utilities} *)
-
-val next_power_of_two : int -> int -> int
-(** [next_power_of_two n p] computes the smallest power of two >= n, starting
-    from p. *)
-
-val log2 : int -> int
-(** Integer log base 2 (floor). *)
 
 val compute_deltas : lat:float -> float * float * float
 (** [compute_deltas ~lat] returns [(deltax, deltay, avg_delta)] for the given
@@ -211,14 +201,8 @@ type text_uniforms = { transform : Gl.uniform_location }
 
 val init_text_uniforms : Gl.t -> Gl.program -> text_uniforms
 
-(** {1 Texture Parameter Helpers} *)
+val apply_anisotropic_filtering : Gl.t -> unit
+(** Apply cached max anisotropy to the currently bound texture. *)
 
-val set_texture_params_nearest_clamp : Gl.t -> Gl.enum -> unit
-(** Set texture parameters for nearest filtering with clamp-to-edge wrapping. *)
-
-val set_texture_params_linear_clamp : Gl.t -> Gl.enum -> unit
-(** Set texture parameters for linear filtering with clamp-to-edge wrapping. *)
-
-val set_texture_params_mipmap_repeat : Gl.t -> Gl.enum -> unit
-(** Set texture parameters for linear mipmapped filtering with repeat wrapping.
-*)
+val init_anisotropic_filtering : Gl.t -> unit
+(** Detect and initialize anisotropic filtering extension. *)

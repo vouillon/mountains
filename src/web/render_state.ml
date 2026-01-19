@@ -10,26 +10,15 @@ open Brr_canvas
 
 (* ========== Shared Constants ========== *)
 
-(** Pi constant. *)
-let pi = 4. *. atan 1.
-
 (** Meters per arc-second at the equator (latitude-independent Y delta). *)
 let deltay = 40_000. /. 360. /. 3600. *. 1000.
 
 (* ========== Shared Utilities ========== *)
 
-(** Compute the smallest power of two >= n, starting from p. *)
-let rec next_power_of_two n p = if n <= p then p else next_power_of_two n (p + p)
-
-(** Integer log base 2 (floor). *)
-let log2 n =
-  let rec go n = if n <= 1 then 0 else 1 + go (n lsr 1) in
-  go n
-
 (** Compute delta values for a given latitude. Returns (deltax, deltay,
     avg_delta) where deltax is longitude-adjusted. *)
 let compute_deltas ~lat =
-  let deltax = deltay *. cos (lat *. pi /. 180.) in
+  let deltax = deltay *. cos (lat *. Web_utils.pi /. 180.) in
   let avg_delta = (deltax +. deltay) *. 0.5 in
   (deltax, deltay, avg_delta)
 
@@ -183,10 +172,10 @@ type water_raster_uniforms = {
 
 (** Compute radial grid parameters from sector/ring counts. *)
 let compute_radial_params ~n_sectors ~n_rings =
-  let w_stride = next_power_of_two (n_sectors + 1) 1 in
+  let w_stride = Web_utils.next_power_of_two (n_sectors + 1) 1 in
   let w_mask = w_stride - 1 in
-  let w_shift = log2 w_stride in
-  let grid_k = pi /. 2. /. float n_sectors in
+  let w_shift = Web_utils.log2 w_stride in
+  let grid_k = Web_utils.pi /. 2. /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
   let grid_base = exp grid_k in
   let grid_scale = 70000. /. (height_term -. 1.) in
@@ -364,7 +353,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
     ~w ~lat ~x ~y ~lon ~light_dir ~shadow_matrices ~shadow_splits ~fog_color
     ~zenith_color =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
-  let max_lod = log2 w in
+  let max_lod = Web_utils.log2 w in
   let center_offset_x, center_offset_y =
     compute_center_offset ~lat ~lon ~x ~y
   in
@@ -443,28 +432,18 @@ let init_text_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   { transform = u "transform" }
 
-(* ========== Texture Parameter Helpers ========== *)
+let anisotropy_ext = ref None
 
-(** Set texture parameters for nearest filtering with clamp-to-edge wrapping.
-    Used for integer textures, palettes, and cover maps. *)
-let set_texture_params_nearest_clamp ctx target =
-  Gl.tex_parameteri ctx target Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx target Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_t Gl.clamp_to_edge
+let apply_anisotropic_filtering ctx =
+  match !anisotropy_ext with
+  | None -> ()
+  | Some (ext, max_val) -> Gl.tex_parameterf ctx Gl.texture_2d ext max_val
 
-(** Set texture parameters for linear filtering with clamp-to-edge wrapping.
-    Used for AO textures, relief textures, etc. *)
-let set_texture_params_linear_clamp ctx target =
-  Gl.tex_parameteri ctx target Gl.texture_min_filter Gl.linear;
-  Gl.tex_parameteri ctx target Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_t Gl.clamp_to_edge
-
-(** Set texture parameters for linear mipmapped filtering with repeat wrapping.
-    Used for detail maps and tiling textures. *)
-let set_texture_params_mipmap_repeat ctx target =
-  Gl.tex_parameteri ctx target Gl.texture_min_filter Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx target Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_s Gl.repeat;
-  Gl.tex_parameteri ctx target Gl.texture_wrap_t Gl.repeat
+let init_anisotropic_filtering ctx =
+  let ext_name = Jstr.v "EXT_texture_filter_anisotropic" in
+  let ext = Gl.get_extension ctx ext_name in
+  if Jv.is_some ext then
+    let param = Jv.to_int (Jv.get ext "TEXTURE_MAX_ANISOTROPY_EXT") in
+    let max_val_id = Jv.to_int (Jv.get ext "MAX_TEXTURE_MAX_ANISOTROPY_EXT") in
+    let max_val = Gl.get_parameter ctx max_val_id in
+    anisotropy_ext := Some (param, Jv.to_float max_val)
