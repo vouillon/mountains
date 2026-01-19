@@ -96,8 +96,54 @@ let navigate_to uri =
 let fog_linear = (0.17, 0.38, 0.79)
 let zenith_linear = (0.02, 0.12, 0.55)
 
-(* Dem_loader provides direct loading of compressed .dem tiles *)
+(* Web Utils Aliases *)
 let pi = Web_utils.pi
+let next_power_of_two = Web_utils.next_power_of_two
+
+(* Types *)
+
+type program = Web_utils.program_spec = {
+  vertex_shader : string;
+  fragment_shader : string;
+  attributes : string list;
+}
+
+let n_sectors = 512
+let n_rings = 1024
+
+type orientation = {
+  alpha : float;
+  beta : float;
+  gamma : float;
+  screen : float;
+}
+
+(* Input mode: Sensor (device orientation) vs Manual (touch/mouse drag) *)
+type input_mode = Sensor | Manual
+
+let input_mode = ref Sensor
+let zoom = ref 1.0
+
+(* Math Helpers *)
+
+let rotation_matrix orientation =
+  let open Matrix in
+  rotate_z (-.orientation.alpha *. pi /. 180.)
+  * rotate_x (-.orientation.beta *. pi /. 180.)
+  * rotate_y (-.orientation.gamma *. pi /. 180.)
+  * rotate_z (orientation.screen *. pi /. 180.)
+
+let compute_azimuth m =
+  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
+  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
+  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
+  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
+  let azimuth =
+    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
+  in
+  azimuth -. (pi /. 2.)
+
+(* GLSL Common *)
 
 let quad_vertex_shader =
   {|#version 300 es
@@ -131,45 +177,6 @@ let common_fragment_header =
       return (c.r * 256.0 + c.g) * HEIGHT_SCALE - 500.0;
     }
   |}
-
-type program = Web_utils.program_spec = {
-  vertex_shader : string;
-  fragment_shader : string;
-  attributes : string list;
-}
-
-let n_sectors = 512
-let n_rings = 1024
-
-type orientation = {
-  alpha : float;
-  beta : float;
-  gamma : float;
-  screen : float;
-}
-
-(* Input mode: Sensor (device orientation) vs Manual (touch/mouse drag) *)
-type input_mode = Sensor | Manual
-
-let input_mode = ref Sensor
-let zoom = ref 1.0
-
-let rotation_matrix orientation =
-  let open Matrix in
-  rotate_z (-.orientation.alpha *. pi /. 180.)
-  * rotate_x (-.orientation.beta *. pi /. 180.)
-  * rotate_y (-.orientation.gamma *. pi /. 180.)
-  * rotate_z (orientation.screen *. pi /. 180.)
-
-let compute_azimuth m =
-  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
-  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
-  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
-  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
-  let azimuth =
-    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
-  in
-  azimuth -. (pi /. 2.)
 
 (* Shared GLSL code for radial grid vertex shaders (terrain and shadow).
    Contains common uniforms and a function to compute world position with height. *)
@@ -255,7 +262,8 @@ let radial_vertex_common =
 
     return v;
   }
-|}
+  |}
+(* Shader Programs *)
 
 (* Terrain shader with compile-time CLC toggle for optimal code generation *)
 let terrain_program =
@@ -432,7 +440,6 @@ let terrain_program =
         }
 
         // Triplanar sampling for packed RGBA detail map
-        // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
         vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
           highp float scale = 0.002;  // ~500m per texture repeat (matches validated debug scale)
@@ -462,7 +469,6 @@ let terrain_program =
             // We subtract 0.5 to center the noise [-0.5 to +0.5]
 
             // ROCK (Red): Strong, sharp cracks
-//            float rockBump = (texNoise.r - 0.5) * 1.5;
             float rockBump = (texNoise.r - 0.5) * 0.5;
 
             // GRASS (Green): Soft, rolling mounds (Multiplied by 0.4 to be gentle)
@@ -822,26 +828,6 @@ let terrain_program =
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
 
-          // DEBUG: Visualize normal-map mip level
-          // Blue(0) -> Cyan(1) -> Green(2) -> Yellow(3) -> Orange(4) -> Red(5) -> Magenta(6) -> White(7+)
-          vec2 dxCoord = dFdx(reliefCoord);
-          vec2 dyCoord = dFdy(reliefCoord);
-          ivec2 texSize = textureSize(relief, 0);
-          float maxDeriv = max(length(dxCoord * vec2(texSize)), length(dyCoord * vec2(texSize)));
-          int mipLevel = int(log2(max(1.0, maxDeriv)));
-          vec3 mipColors[8] = vec3[8](
-              vec3(0.0, 0.0, 1.0),  // 0: Blue
-              vec3(0.0, 1.0, 1.0),  // 1: Cyan
-              vec3(0.0, 1.0, 0.0),  // 2: Green
-              vec3(1.0, 1.0, 0.0),  // 3: Yellow
-              vec3(1.0, 0.5, 0.0),  // 4: Orange
-              vec3(1.0, 0.0, 0.0),  // 5: Red
-              vec3(1.0, 0.0, 1.0),  // 6: Magenta
-              vec3(1.0, 1.0, 1.0)   // 7+: White
-          );
-          // Uncomment below to enable mipmap visualization:
-          // final_color = mipColors[min(mipLevel, 7)];
-
           // Gamma correction
           color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
         }
@@ -1048,8 +1034,6 @@ let ao_blur_program =
     attributes = [];
   }
 
-[@@@warning "-32"]
-
 let shadow_program =
   {
     vertex_shader =
@@ -1200,29 +1184,146 @@ let sky_program =
     attributes = [];
   }
 
-(* OpenGL setup *)
+let mipmap_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D source_texture;
+        uniform vec2 source_size;
+        uniform float base_k;
+        uniform float decay;
+        uniform int level; // Target level (unused in logic, but passed)
+        uniform int source_level; // Explicit source level
+        in vec2 uv;
+        out vec4 frag_color;
+        void main() {
+          vec2 size = source_size;
+          // Map UV to Source Pixel Coordinates
+          // uv points to center of the 2x2 block in source
+          ivec2 p = ivec2(uv * size);
+
+          // Force alignment to even coordinates (top-left of 2x2 block)
+          ivec2 p00 = (p / 2) * 2;
+
+          ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
+          ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
+          ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
+          ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
+
+          // Source is main texture at source_level
+          vec4 h00_v = texelFetch(source_texture, c00, source_level);
+          vec4 h10_v = texelFetch(source_texture, c10, source_level);
+          vec4 h01_v = texelFetch(source_texture, c01, source_level);
+          vec4 h11_v = texelFetch(source_texture, c11, source_level);
+
+          float h00 = h00_v.r + h00_v.g / 256.0;
+          float h10 = h10_v.r + h10_v.g / 256.0;
+          float h01 = h01_v.r + h01_v.g / 256.0;
+          float h11 = h11_v.r + h11_v.g / 256.0;
+
+          float k = base_k;
+          float max_h = max(max(h00, h10), max(h01, h11));
+          float h_scale = 10000.0;
+
+          float w00 = exp(k * (h00 - max_h) * h_scale);
+          float w10 = exp(k * (h10 - max_h) * h_scale);
+          float w01 = exp(k * (h01 - max_h) * h_scale);
+          float w11 = exp(k * (h11 - max_h) * h_scale);
+
+          float sum_w = w00 + w10 + w01 + w11;
+          float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
+          vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
+
+          float r = floor(h_avg * 255.0) / 255.0;
+          float g = (h_avg - r) * 256.0;
+
+          frag_color = vec4(r, g, n_avg);
+        }|};
+    attributes = [];
+  }
+
+let copy_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader =
+      {|#version 300 es
+        precision highp float;
+        uniform sampler2D source;
+        uniform int level;
+        uniform vec2 source_size;
+        in vec2 uv;
+        out vec4 color;
+        void main() {
+          // Robust 1:1 Copy using UVs + Explicit Level
+          // Works now that MinFilter is Mipmap-compatible
+          ivec2 p = ivec2(uv * source_size);
+          p = clamp(p, ivec2(0), ivec2(source_size) - 1);
+          color = texelFetch(source, p, level);
+        }|};
+    attributes = [];
+  }
+
+let normal_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader =
+      common_fragment_header
+      ^ {|
+        uniform vec2 size;
+        uniform vec2 delta;
+        uniform sampler2D tile;
+        in vec2 uv;
+        out mediump vec4 color;
+
+        float get_z(vec2 offset) {
+            vec2 tileCoord = uv * (size - 1.0) + 0.5;
+            // Decode from RG8: R=low byte, G=high byte (little-endian)
+            // Samples are in [0, 1], need to multiply by 255 to get 0..255
+            vec2 rg = texture(tile, (tileCoord + offset) / size).rg * 255.0;
+            float h_val = rg.g * 256.0 + rg.r;
+            // Convert back to meters: u16 range maps to -500 to 9000
+            return h_val * (9500.0 / 65535.0) - 500.0;
+        }
+
+        void main() {
+          // Sobel filter
+          float tl = get_z(vec2(-1, -1));
+          float t  = get_z(vec2( 0, -1));
+          float tr = get_z(vec2( 1, -1));
+          float l  = get_z(vec2(-1,  0));
+          float c  = get_z(vec2( 0,  0));
+          float r  = get_z(vec2( 1,  0));
+          float bl = get_z(vec2(-1,  1));
+          float b  = get_z(vec2( 0,  1));
+          float br = get_z(vec2( 1,  1));
+
+          float dX = tr + 2.0*r + br - (tl + 2.0*l + bl);
+          float dY = bl + 2.0*b + br - (tl + 2.0*t + tr);
+
+          // Normal vector
+          // Note: dX is dHeight/dPixelX * 8 (scaling of Sobel).
+          // We divide by (8 * deltax) to get slope.
+          vec3 n = normalize(vec3(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y), 1.0));
+
+          // Encode Normal (xy components to [0,1])
+          vec2 encN = n.xy * 0.5 + 0.5;
+
+          // Encode Height (-500 to 9000 -> 0 to 1)
+          float h_norm = clamp((c - (-500.0)) / 9500.0, 0.0, 1.0);
+          float h_val = floor(h_norm * 65535.0 + 0.5);
+          float h_high = floor(h_val / 256.0) / 255.0;
+          float h_low = floor(mod(h_val, 256.0)) / 255.0;
+
+          color = vec4(h_high, h_low, encN.x, encN.y);
+        }
+      |};
+    attributes = [];
+  }
+(* Graphics Resources & Setup *)
 
 module Gl = Brr_canvas.Gl
-
-(* Geometry *)
-
-let instantiate ~size =
-  let sz = (size + 65535) lsr 16 in
-  let _WebAssembly = Jv.(get global "WebAssembly") in
-  let file = Jstr.v "compute.wasm" in
-  let memory =
-    Jv.(new' (get _WebAssembly "Memory") [| obj [| ("initial", of_int sz) |] |])
-  in
-  Fut.of_promise
-    ~ok:(fun e ->
-      ( Brr.Tarray.Buffer.of_jv (Jv.get memory "buffer"),
-        Jv.(get (get e "instance") "exports") ))
-    Jv.(
-      call _WebAssembly "instantiateStreaming"
-        [|
-          call global "fetch" [| Jv.of_jstr file |];
-          obj [| ("env", obj [| ("memory", memory) |]) |];
-        |])
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
@@ -1416,26 +1517,6 @@ let make_palette_texture ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-(* Create dummy CLC cover map for testing (uniform grass ID) *)
-let make_dummy_cover_map ctx =
-  let size = 64 in
-  let data = Bigarray.(Array1.create int8_unsigned c_layout (size * size)) in
-  (* Fill with natural grassland ID (index 26 = code 321) *)
-  let grass_idx = Clc_palette.get_index 321 in
-  for i = 0 to (size * size) - 1 do
-    data.{i} <- grass_idx
-  done;
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (* Use R8UI for integer texture *)
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8ui size size 0 Gl.red_integer
-    Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
-    0;
-  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  (tid, size)
-
 [@@@warning "-32"]
 
 let create_shadow_map ctx width height layers =
@@ -1511,6 +1592,173 @@ let calculate_shadow_matrices ~light_dir ~world_center =
 
   matrices
 
+type graphics_resources = {
+  terrain_geo : Gl.vertex_array_object;
+  indices : (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t;
+  text_geo : Gl.vertex_array_object;
+  triangle_geo : Gl.vertex_array_object;
+  terrain_pid : Gl.program;
+  triangle_pid : Gl.program;
+  text_pid : Gl.program;
+  shadow_pid : Gl.program;
+  sky_uniforms : Render_state.sky_uniforms;
+  terrain_uniforms : Render_state.terrain_uniforms;
+  triangle_uniforms : Render_state.triangle_uniforms;
+  text_uniforms : Render_state.text_uniforms;
+  shadow_map : Gl.texture;
+  shadow_fbo : Gl.framebuffer;
+  shadow_uniforms : Render_state.shadow_uniforms;
+  sky_pid : Gl.program;
+  normal_pid : Gl.program;
+  mipmap_pid : Gl.program;
+  copy_pid : Gl.program;
+  ao_bake_pid : Gl.program;
+  ao_blur_pid : Gl.program;
+  relief_uniforms : Render_state.relief_uniforms;
+  mipmap_uniforms : Render_state.mipmap_uniforms;
+  copy_uniforms : Render_state.copy_uniforms;
+  ao_bake_uniforms : Render_state.ao_bake_uniforms;
+  ao_blur_uniforms : Render_state.ao_blur_uniforms;
+  clc_raster_pid : Gl.program;
+  water_raster_pid : Gl.program;
+  clc_raster_uniforms : Render_state.clc_raster_uniforms;
+  water_raster_uniforms : Render_state.water_raster_uniforms;
+  radial_params : Render_state.radial_params;
+}
+
+let resize_canvas canvas =
+  let canvas_width = truncate (Brr.El.inner_w canvas) in
+  let canvas_height = truncate (Brr.El.inner_h canvas) in
+  let canvas = Brr_canvas.Canvas.of_el canvas in
+  if Brr_canvas.Canvas.w canvas <> canvas_width then
+    Brr_canvas.Canvas.set_w canvas canvas_width;
+  if Brr_canvas.Canvas.h canvas <> canvas_height then
+    Brr_canvas.Canvas.set_h canvas canvas_height
+
+let init_graphics ctx =
+  (* Initialize anisotropic filtering extension *)
+  let triangle_pid = Web_utils.create_program ctx triangle_program in
+  let text_pid = Web_utils.create_program ctx text_program in
+  let shadow_pid = Web_utils.create_program ctx shadow_program in
+  let sky_pid = Web_utils.create_program ctx sky_program in
+  let normal_pid = Web_utils.create_program ctx normal_program in
+  let mipmap_pid = Web_utils.create_program ctx mipmap_program in
+  let copy_pid = Web_utils.create_program ctx copy_program in
+  let ao_bake_pid = Web_utils.create_program ctx ao_bake_program in
+  let ao_blur_pid = Web_utils.create_program ctx ao_blur_program in
+  let terrain_pid = Web_utils.create_program ctx terrain_program in
+
+  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_fbo = create_shadow_fbo ctx shadow_map in
+  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
+
+  (* Initialize render state - cache uniform locations and pre-compute params *)
+  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
+  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
+  let triangle_uniforms =
+    Render_state.init_triangle_uniforms ctx triangle_pid
+  in
+  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
+  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
+
+  let terrain_geo, indices =
+    let sectors = n_sectors + 1 in
+    let rings = n_rings in
+    let w' = next_power_of_two sectors 1 in
+    let indices = build_indices sectors w' rings in
+    (* Add dummy buffer to ensure VAO has at least one attribute - fixes 'Index buffer not bound' on some drivers *)
+    let dummy_data = Bigarray.(Array1.create float32 c_layout 4) in
+    let buffers = [ (0, 1, Gl.float, Web_utils.Buffer dummy_data) ] in
+    (Web_utils.create_geometry ctx ~indices ~buffers, indices)
+  in
+  let text_geo =
+    Web_utils.create_geometry ctx
+      ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
+      ~buffers:[]
+  in
+  let triangle_geo =
+    let indices =
+      Bigarray.(Array1.of_array int8_unsigned c_layout [| 0; 1; 2; 1; 3; 2 |])
+    in
+    let positions =
+      let b = Bigarray.(Array1.create float32 c_layout 12) in
+      b.{0} <- -1.;
+      b.{1} <- 1.;
+      b.{2} <- 0.;
+      b.{3} <- 1.;
+      b.{4} <- 1.;
+      b.{5} <- 0.;
+      b.{6} <- -1.;
+      b.{7} <- -1.;
+      b.{8} <- 0.;
+      b.{9} <- 1.;
+      b.{10} <- -1.;
+      b.{11} <- 0.;
+      Web_utils.Buffer b
+    in
+    let buffers = [ (0, 3, Gl.float, positions) ] in
+    Web_utils.create_geometry ctx ~indices ~buffers
+  in
+
+  (* Upload static uniforms once at initialization *)
+  Gl.use_program ctx terrain_pid;
+
+  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
+  Render_state.upload_texture_units ctx terrain_uniforms;
+
+  Gl.use_program ctx shadow_pid;
+  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
+  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+
+  let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
+  let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
+  let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
+  let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
+  let ao_blur_uniforms = Render_state.init_ao_blur_uniforms ctx ao_blur_pid in
+  let clc_raster_pid = Web_utils.create_program ctx clc_raster_program in
+  let clc_raster_uniforms =
+    Render_state.init_clc_raster_uniforms ctx clc_raster_pid
+  in
+  let water_raster_pid = Web_utils.create_program ctx water_raster_program in
+  let water_raster_uniforms =
+    Render_state.init_water_raster_uniforms ctx water_raster_pid
+  in
+
+  {
+    terrain_geo;
+    indices;
+    text_geo;
+    triangle_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    triangle_uniforms;
+    text_uniforms;
+    shadow_map;
+    shadow_fbo;
+    shadow_uniforms;
+    normal_pid;
+    mipmap_pid;
+    copy_pid;
+    relief_uniforms;
+    mipmap_uniforms;
+    copy_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
+    clc_raster_pid;
+    water_raster_pid;
+    clc_raster_uniforms;
+    water_raster_uniforms;
+    radial_params;
+  }
+(* Rendering Passes *)
+
 let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
     (bake_u : Render_state.ao_bake_uniforms)
     (blur_u : Render_state.ao_blur_uniforms) =
@@ -1545,8 +1793,6 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
-  (* Fullscreen Quad *)
-
   (* PASS 2: Blur AO with bilateral filter *)
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
     ao_final_tex 0;
@@ -1576,495 +1822,6 @@ let compute_ao ctx width height scale relief_texture ao_bake_pid ao_blur_pid
   Gl.bind_texture ctx Gl.texture_2d None;
 
   ao_final_tex
-
-let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
-let text_ctx = Brr_canvas.C2d.get_context text_canvas
-
-type lazy_text = {
-  text : string;
-  mutable texture : (Gl.texture * int * int) option;
-}
-
-let prepare_text_immediate ctx text =
-  let open Brr_canvas in
-  let text = Jstr.v text in
-  C2d.set_font text_ctx (Jstr.v "48px sans");
-  let m = C2d.measure_text text_ctx text in
-  let ascent = C2d.Text_metrics.font_bounding_box_ascent m in
-  let descent = C2d.Text_metrics.font_bounding_box_descent m in
-  let left = C2d.Text_metrics.actual_bounding_box_left m in
-  let right = C2d.Text_metrics.actual_bounding_box_right m in
-  let w = truncate (left +. right +. 0.5) in
-  let h = truncate (ascent +. descent +. 0.5) in
-  (* Avoid 0x0 canvas which causes GL errors *)
-  let w = max 1 w in
-  let h = max 1 h in
-  Brr_canvas.Canvas.set_w text_canvas w;
-  Brr_canvas.Canvas.set_h text_canvas h;
-  C2d.set_font text_ctx (Jstr.v "48px sans");
-  C2d.fill_text text_ctx text ~x:left ~y:ascent;
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
-    Gl.unsigned_byte
-    (Gl.Tex_image_source.of_canvas_el text_canvas);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  (tid, w, h)
-
-let prepare_text _ctx text = { text; texture = None }
-
-let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
-    (lazy_text : lazy_text) =
-  let tid, w, h =
-    match lazy_text.texture with
-    | Some t -> t
-    | None ->
-        let t = prepare_text_immediate ctx lazy_text.text in
-        lazy_text.texture <- Some t;
-        t
-  in
-  let open Brr_canvas in
-  let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Matrix.blit transform buffer;
-  Gl.uniform_matrix4fv ctx uniforms.transform false view;
-  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
-(* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
-
-let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
-    (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
-    ~index_count ~relief_texture ctx =
-  let width = Brr_canvas.Gl.drawing_buffer_width ctx in
-  let height = Brr_canvas.Gl.drawing_buffer_height ctx in
-
-  (* Unbind Shadow Map from Texture Unit 4 to prevent Feedback Loop *)
-  Gl.active_texture ctx Gl.texture4;
-  Gl.bind_texture ctx Gl.texture_2d_array None;
-
-  (* Setup FBO and viewport *)
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
-  Gl.viewport ctx 0 0 2048 2048;
-  Gl.use_program ctx shadow_pid;
-
-  (* Bind Relief Texture *)
-  Gl.active_texture ctx Gl.texture0;
-  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.uniform1i ctx shadow_uniforms.relief 0;
-
-  Gl.bind_vertex_array ctx (Some terrain_geo);
-
-  (* Setup render state *)
-  Gl.depth_mask ctx true;
-  Gl.disable ctx Gl.scissor_test;
-  Gl.disable ctx Gl.blend;
-  Gl.enable ctx Gl.depth_test;
-  Gl.depth_func ctx Gl.less;
-  Gl.disable ctx Gl.cull_face';
-  Gl.color_mask ctx false false false false;
-  Gl.clear_depth ctx 1.0;
-
-  (* Render shadow map with 4 rotations to cover full 360° terrain *)
-  let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
-
-  for layer = 0 to 2 do
-    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
-      shadow_map 0 layer;
-
-    (* Clear full texture including 1-pixel border with depth=1.0 *)
-    Gl.disable ctx Gl.scissor_test;
-    Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
-
-    (* Enable scissor to render only inner area, leaving 1-pixel border *)
-    Gl.enable ctx Gl.scissor_test;
-    Gl.scissor ctx 1 1 2046 2046;
-
-    Gl.uniform_matrix4fv ctx shadow_uniforms.shadow_view_proj false
-      (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
-
-    (* Render 4 rotations to cover full terrain *)
-    for rotation = 0 to 3 do
-      Gl.uniform1f ctx shadow_uniforms.snapped_alpha rotation_angles.(rotation);
-      Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
-    done;
-
-    Gl.disable ctx Gl.scissor_test
-  done;
-
-  (* Restore state *)
-  Gl.color_mask ctx true true true true;
-  Gl.cull_face ctx Gl.back;
-  Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Gl.clear_depth ctx 1.0;
-  Gl.viewport ctx 0 0 width height
-
-let scale = (*2. *. 27. /. 24.*) 3.2
-let text_height = 0.07
-
-(** Bind all terrain textures to their units. Call at init and after
-    draw_shadows. *)
-let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
-    ~shadow_map ~cover_map_texture ~palette_texture =
-  let open Brr_canvas in
-  Gl.active_texture ctx Gl.texture1;
-  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
-  Gl.active_texture ctx Gl.texture3;
-  Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
-  Gl.active_texture ctx Gl.texture5;
-  Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
-  Gl.active_texture ctx Gl.texture4;
-  Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
-  Gl.active_texture ctx Gl.texture7;
-  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-  Gl.active_texture ctx Gl.texture8;
-  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
-  Gl.active_texture ctx Gl.texture0
-
-let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
-    text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
-    ~(triangle_uniforms : Render_state.triangle_uniforms)
-    ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
-    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~_shadow_matrices:_ ~_w:_
-    ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
-    ~_ao_texture:_ ~_detail_map:_ ~_shadow_pid:_ ~_shadow_fbo:_ ~_shadow_map:_
-    ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
-    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms
-    ~(radial_params : Render_state.radial_params) canvas ctx =
-  let canvas_width = truncate (Brr.El.inner_w canvas) in
-  let canvas_height = truncate (Brr.El.inner_h canvas) in
-  let canvas = Brr_canvas.Canvas.of_el canvas in
-  if Brr_canvas.Canvas.w canvas <> canvas_width then
-    Brr_canvas.Canvas.set_w canvas canvas_width;
-  if Brr_canvas.Canvas.h canvas <> canvas_height then
-    Brr_canvas.Canvas.set_h canvas canvas_height;
-  Gl.viewport ctx 0 0 canvas_width canvas_height;
-  let aspect = float canvas_width /. float canvas_height in
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-  let transform =
-    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
-  in
-  let screen_inclination =
-    orientation.screen
-    +. 180. /. pi
-       *. atan2
-            (sin (orientation.gamma *. pi /. 180.)
-            *. cos (orientation.beta *. pi /. 180.))
-            (sin (orientation.beta *. pi /. 180.))
-  in
-  let x_scale, y_scale =
-    let s = scale *. !zoom in
-    if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
-  in
-  let text_scale = scale *. !zoom in
-  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
-  let points =
-    List.filter_map
-      (fun (pt, (x', y')) ->
-        let off_x = Render_state.compute_sub_arcsec_offset lon in
-        let off_y = Render_state.compute_sub_arcsec_offset lat in
-        let px = deltax *. (float (x' - x) -. off_x) in
-        let py = deltay *. (float (y - y') -. off_y) in
-        let z = Dem_loader.get_height tile y' x' in
-        let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
-        let r = { r with z = -.r.z } in
-        if r.z > 1. && abs_float (r.x /. r.z) < 1. then
-          Some (pt, r.x /. r.z, r.y /. r.z)
-        else None)
-      points
-  in
-  let points =
-    let pos = ref [] in
-    let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
-    let ca = cos angle in
-    let sa = sin angle in
-    List.filter_map
-      (fun (texture, x, y) ->
-        let p = text_scale *. ((y *. ca) -. (x *. sa)) in
-        let shown =
-          if
-            not
-              (List.exists
-                 (fun p' -> abs_float (p' -. p) < 0.8 *. text_height)
-                 !pos)
-          then (
-            pos := p :: !pos;
-            true)
-          else false
-        in
-        if shown then Some (texture, x, y, shown) else None)
-      points
-  in
-
-  (* Prepare Clear Color matching fog *)
-  let r, g, b = fog_linear in
-  Gl.clear_color ctx r g b 1.;
-  Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
-
-  Gl.depth_mask ctx true;
-  Gl.use_program ctx terrain_pid;
-  Gl.enable ctx Gl.depth_test;
-  Gl.enable ctx Gl.cull_face';
-  (* Determine snapped alpha - changes with camera orientation *)
-  let k_val = radial_params.Render_state.grid_k in
-  let current_azimuth = compute_azimuth transform in
-  let snapped_alpha = floor ((current_azimuth /. k_val) +. 0.5) *. k_val in
-  Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
-  (* Matrices - change with camera orientation and aspect ratio *)
-  Matrix.blit proj proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
-  Matrix.blit transform transform_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
-  Gl.bind_vertex_array ctx (Some terrain_geo);
-  Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
-  Gl.bind_vertex_array ctx None;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  Gl.disable ctx Gl.cull_face';
-
-  (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
-  Gl.depth_mask ctx false;
-  Gl.depth_func ctx Gl.lequal;
-  (* Draw if Z <= 1.0 (Far Plane) *)
-  Gl.disable ctx Gl.cull_face';
-  Gl.use_program ctx sky_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
-  (* Compute Inverse View *)
-  let inv_view = Matrix.inverse transform in
-  Matrix.blit inv_view inv_view_ba;
-  Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
-  Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
-  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-
-  (* VAO text_geo is still bound, reused for POIs *)
-  Gl.disable ctx Gl.depth_test;
-  Gl.enable ctx Gl.blend;
-  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
-
-  (* 1. Triangles *)
-  Gl.use_program ctx triangle_pid;
-  List.iter
-    (fun (_, x, y, shown) ->
-      let x = x *. x_scale in
-      let y = y *. y_scale in
-      let angle = if shown then -.pi /. 4. else 0. in
-      let transform =
-        let sx = 0.6 *. text_height *. x_scale /. text_scale in
-        let sy = 0.6 *. text_height *. y_scale /. text_scale in
-        Matrix.(
-          rotate_z (angle +. (screen_inclination *. pi /. 180.))
-          * scale sx sy 1. * translate x y 0.)
-      in
-      Matrix.blit transform transform_ba;
-      Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
-      if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
-      else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
-      Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
-    points;
-
-  (* 2. Text *)
-  Gl.use_program ctx text_pid;
-  List.iter
-    (fun (texture, x, y, shown) ->
-      if shown then
-        let x = x *. x_scale in
-        let y = y *. y_scale in
-        let transform =
-          let sx = text_height *. x_scale /. text_scale in
-          let sy = text_height *. y_scale /. text_scale in
-          Matrix.(
-            translate 0.7 (-0.5) 0.
-            * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
-            * scale sx sy 1. * translate x y 0.)
-        in
-        draw_text ctx text_uniforms transform transform_ba transform_ta texture)
-    points;
-
-  Gl.disable ctx Gl.blend;
-  Gl.bind_vertex_array ctx None
-
-(* Event loop *)
-
-let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
-let is_dragging = ref false
-let velocity = ref (0., 0.)
-let last_input_time = ref 0.
-let last_frame_time = ref 0.
-
-let event_loop ctx draw =
-  let rec loop prev_orientation prev_zoom =
-    let t = now () in
-    let dt = t -. !last_frame_time in
-    last_frame_time := t;
-
-    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
-      let va, vb = !velocity in
-      (* Friction: 0.95 per 16ms *)
-      let friction = 0.95 ** (dt /. 16.6) in
-      let va = va *. friction in
-      let vb = vb *. friction in
-      let va = if abs_float va < 0.0001 then 0. else va in
-      let vb = if abs_float vb < 0.0001 then 0. else vb in
-      velocity := (va, vb);
-      current_orientation :=
-        {
-          !current_orientation with
-          alpha = !current_orientation.alpha +. (va *. dt);
-          beta = max 60. (min 120. (!current_orientation.beta +. (vb *. dt)));
-        }
-    end;
-    let orientation = !current_orientation in
-    let z = !zoom in
-    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
-      force_redraw := false;
-      draw ~orientation ctx);
-    let* () = request_animation_frame () in
-    loop orientation z
-  in
-  last_frame_time := now ();
-  loop
-    { !current_orientation with alpha = !current_orientation.alpha -. 1. }
-    (!zoom -. 1.)
-
-(* Main *)
-
-let next_power_of_two = Web_utils.next_power_of_two
-
-let mipmap_program =
-  {
-    vertex_shader = quad_vertex_shader;
-    fragment_shader =
-      {|#version 300 es
-        precision highp float;
-        uniform sampler2D source_texture;
-        uniform vec2 source_size;
-        uniform float base_k;
-        uniform float decay;
-        uniform int level; // Target level (unused in logic, but passed)
-        uniform int source_level; // Explicit source level
-        in vec2 uv;
-        out vec4 frag_color;
-        void main() {
-          vec2 size = source_size;
-          // Map UV to Source Pixel Coordinates
-          // uv points to center of the 2x2 block in source
-          ivec2 p = ivec2(uv * size);
-
-          // Force alignment to even coordinates (top-left of 2x2 block)
-          ivec2 p00 = (p / 2) * 2;
-
-          ivec2 c00 = clamp(p00, ivec2(0), ivec2(size) - 1);
-          ivec2 c10 = clamp(p00 + ivec2(1, 0), ivec2(0), ivec2(size) - 1);
-          ivec2 c01 = clamp(p00 + ivec2(0, 1), ivec2(0), ivec2(size) - 1);
-          ivec2 c11 = clamp(p00 + ivec2(1, 1), ivec2(0), ivec2(size) - 1);
-
-          // Source is main texture at source_level
-          vec4 h00_v = texelFetch(source_texture, c00, source_level);
-          vec4 h10_v = texelFetch(source_texture, c10, source_level);
-          vec4 h01_v = texelFetch(source_texture, c01, source_level);
-          vec4 h11_v = texelFetch(source_texture, c11, source_level);
-
-          float h00 = h00_v.r + h00_v.g / 256.0;
-          float h10 = h10_v.r + h10_v.g / 256.0;
-          float h01 = h01_v.r + h01_v.g / 256.0;
-          float h11 = h11_v.r + h11_v.g / 256.0;
-
-          float k = base_k;
-          float max_h = max(max(h00, h10), max(h01, h11));
-          float h_scale = 10000.0;
-
-          float w00 = exp(k * (h00 - max_h) * h_scale);
-          float w10 = exp(k * (h10 - max_h) * h_scale);
-          float w01 = exp(k * (h01 - max_h) * h_scale);
-          float w11 = exp(k * (h11 - max_h) * h_scale);
-
-          float sum_w = w00 + w10 + w01 + w11;
-          float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
-          vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
-
-          float r = floor(h_avg * 255.0) / 255.0;
-          float g = (h_avg - r) * 256.0;
-
-          frag_color = vec4(r, g, n_avg);
-        }|};
-    attributes = [];
-  }
-
-let copy_program =
-  {
-    vertex_shader = quad_vertex_shader;
-    fragment_shader =
-      {|#version 300 es
-        precision highp float;
-        uniform sampler2D source;
-        uniform int level;
-        uniform vec2 source_size;
-        in vec2 uv;
-        out vec4 color;
-        void main() {
-          // Robust 1:1 Copy using UVs + Explicit Level
-          // Works now that MinFilter is Mipmap-compatible
-          ivec2 p = ivec2(uv * source_size);
-          p = clamp(p, ivec2(0), ivec2(source_size) - 1);
-          color = texelFetch(source, p, level);
-        }|};
-    attributes = [];
-  }
-
-let normal_program =
-  {
-    vertex_shader = quad_vertex_shader;
-    fragment_shader =
-      common_fragment_header
-      ^ {|
-        uniform vec2 size;
-        uniform vec2 delta;
-        uniform sampler2D tile;
-        in vec2 uv;
-        out mediump vec4 color;
-
-        float get_z(vec2 offset) {
-            vec2 tileCoord = uv * (size - 1.0) + 0.5;
-            // Decode from RG8: R=low byte, G=high byte (little-endian)
-            // Samples are in [0, 1], need to multiply by 255 to get 0..255
-            vec2 rg = texture(tile, (tileCoord + offset) / size).rg * 255.0;
-            float h_val = rg.g * 256.0 + rg.r;
-            // Convert back to meters: u16 range maps to -500 to 9000
-            return h_val * (9500.0 / 65535.0) - 500.0;
-        }
-
-        void main() {
-          // Sobel filter
-          float tl = get_z(vec2(-1, -1));
-          float t  = get_z(vec2( 0, -1));
-          float tr = get_z(vec2( 1, -1));
-          float l  = get_z(vec2(-1,  0));
-          float c  = get_z(vec2( 0,  0));
-          float r  = get_z(vec2( 1,  0));
-          float bl = get_z(vec2(-1,  1));
-          float b  = get_z(vec2( 0,  1));
-          float br = get_z(vec2( 1,  1));
-
-          float dX = tr + 2.0*r + br - (tl + 2.0*l + bl);
-          float dY = bl + 2.0*b + br - (tl + 2.0*t + tr);
-
-          // Normal vector
-          // Note: dX is dHeight/dPixelX * 8 (scaling of Sobel).
-          // We divide by (8 * deltax) to get slope.
-          vec3 n = normalize(vec3(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y), 1.0));
-
-          // Encode Normal (xy components to [0,1])
-          vec2 encN = n.xy * 0.5 + 0.5;
-
-          // Encode Height (-500 to 9000 -> 0 to 1)
-          float h_norm = clamp((c - (-500.0)) / 9500.0, 0.0, 1.0);
-          float h_val = floor(h_norm * 65535.0 + 0.5);
-          float h_high = floor(h_val / 256.0) / 255.0;
-          float h_low = floor(mod(h_val, 256.0)) / 255.0;
-
-          color = vec4(h_high, h_low, encN.x, encN.y);
-        }
-      |};
-    attributes = [];
-  }
 
 let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
     mipmap_pid copy_pid (u : Render_state.relief_uniforms)
@@ -2129,8 +1886,6 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
   Gl.use_program ctx copy_pid;
   Gl.uniform1i ctx copy_u.source 0;
-
-  (* Not used in shader explicitly yet, using pow directly *)
 
   (* Start from level 1 *)
 
@@ -2206,12 +1961,6 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   loop 1 (width / 2) (height / 2);
 
   Gl.delete_texture ctx temp_tid;
-
-  (* Restore Texture Params - Not modified inside loop anymore *)
-  (* Gl.bind_texture ctx Gl.texture_2d (Some tid);
-     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
-     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level 1000;
-     Gl.bind_texture ctx Gl.texture_2d None; *)
 
   (* Restore Framebuffer *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
@@ -2423,6 +2172,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
     clc_tiles;
 
   (* Cleanup *)
+  Gl.bind_vertex_array ctx None;
   Gl.delete_vertex_array ctx vao;
   Gl.delete_buffer ctx vbo_pos;
   Gl.delete_buffer ctx vbo_col;
@@ -2432,167 +2182,368 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Brr.Console.(
     log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ])
 
-type graphics_resources = {
-  terrain_geo : Gl.vertex_array_object;
-  indices : (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t;
-  text_geo : Gl.vertex_array_object;
-  triangle_geo : Gl.vertex_array_object;
-  terrain_pid : Gl.program;
-  triangle_pid : Gl.program;
-  text_pid : Gl.program;
-  shadow_pid : Gl.program;
-  sky_uniforms : Render_state.sky_uniforms;
-  terrain_uniforms : Render_state.terrain_uniforms;
-  triangle_uniforms : Render_state.triangle_uniforms;
-  text_uniforms : Render_state.text_uniforms;
-  shadow_map : Gl.texture;
-  shadow_fbo : Gl.framebuffer;
-  shadow_uniforms : Render_state.shadow_uniforms;
-  sky_pid : Gl.program;
-  normal_pid : Gl.program;
-  mipmap_pid : Gl.program;
-  copy_pid : Gl.program;
-  ao_bake_pid : Gl.program;
-  ao_blur_pid : Gl.program;
-  relief_uniforms : Render_state.relief_uniforms;
-  mipmap_uniforms : Render_state.mipmap_uniforms;
-  copy_uniforms : Render_state.copy_uniforms;
-  ao_bake_uniforms : Render_state.ao_bake_uniforms;
-  ao_blur_uniforms : Render_state.ao_blur_uniforms;
-  clc_raster_pid : Gl.program;
-  water_raster_pid : Gl.program;
-  clc_raster_uniforms : Render_state.clc_raster_uniforms;
-  water_raster_uniforms : Render_state.water_raster_uniforms;
-  radial_params : Render_state.radial_params;
+let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
+    (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
+    ~index_count ~relief_texture ctx =
+  let width = Brr_canvas.Gl.drawing_buffer_width ctx in
+  let height = Brr_canvas.Gl.drawing_buffer_height ctx in
+
+  (* Unbind Shadow Map from Texture Unit 4 to prevent Feedback Loop *)
+  Gl.active_texture ctx Gl.texture4;
+  Gl.bind_texture ctx Gl.texture_2d_array None;
+
+  (* Setup FBO and viewport *)
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
+  Gl.viewport ctx 0 0 2048 2048;
+  Gl.use_program ctx shadow_pid;
+
+  (* Bind Relief Texture *)
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.uniform1i ctx shadow_uniforms.relief 0;
+
+  Gl.bind_vertex_array ctx (Some terrain_geo);
+
+  (* Setup render state *)
+  Gl.depth_mask ctx true;
+  Gl.disable ctx Gl.scissor_test;
+  Gl.disable ctx Gl.blend;
+  Gl.enable ctx Gl.depth_test;
+  Gl.depth_func ctx Gl.less;
+  Gl.disable ctx Gl.cull_face';
+  Gl.color_mask ctx false false false false;
+  Gl.clear_depth ctx 1.0;
+
+  (* Render shadow map with 4 rotations to cover full 360° terrain *)
+  let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
+
+  for layer = 0 to 2 do
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
+      shadow_map 0 layer;
+
+    (* Clear full texture including 1-pixel border with depth=1.0 *)
+    Gl.disable ctx Gl.scissor_test;
+    Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
+
+    (* Enable scissor to render only inner area, leaving 1-pixel border *)
+    Gl.enable ctx Gl.scissor_test;
+    Gl.scissor ctx 1 1 2046 2046;
+
+    Gl.uniform_matrix4fv ctx shadow_uniforms.shadow_view_proj false
+      (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
+
+    (* Render 4 rotations to cover full terrain *)
+    for rotation = 0 to 3 do
+      Gl.uniform1f ctx shadow_uniforms.snapped_alpha rotation_angles.(rotation);
+      Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+    done;
+
+    Gl.disable ctx Gl.scissor_test
+  done;
+
+  Gl.bind_vertex_array ctx None;
+
+  (* Restore state *)
+  Gl.color_mask ctx true true true true;
+  Gl.cull_face ctx Gl.back;
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.clear_depth ctx 1.0;
+  Gl.viewport ctx 0 0 width height
+
+(** Bind all terrain textures to their units. Call at init and after
+    draw_shadows. *)
+let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
+    ~shadow_map ~cover_map_texture ~palette_texture =
+  let open Brr_canvas in
+  Gl.active_texture ctx Gl.texture1;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.active_texture ctx Gl.texture3;
+  Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
+  Gl.active_texture ctx Gl.texture5;
+  Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
+  Gl.active_texture ctx Gl.texture4;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
+  Gl.active_texture ctx Gl.texture7;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+  Gl.active_texture ctx Gl.texture8;
+  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
+  Gl.active_texture ctx Gl.texture0
+(* Text Rendering *)
+
+type lazy_text = {
+  text : string;
+  mutable texture : (Gl.texture * int * int) option;
 }
 
-let resize_canvas canvas =
+let text_canvas =
+  let c = Brr_canvas.Canvas.create [] in
+  Brr_canvas.Canvas.set_w c 1;
+  Brr_canvas.Canvas.set_h c 1;
+  Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none")
+    (Brr_canvas.Canvas.to_el c);
+  Brr.El.append_children
+    (Brr.Document.body Brr.G.document)
+    [ Brr_canvas.Canvas.to_el c ];
+  c
+
+let text_ctx = Brr_canvas.C2d.get_context text_canvas
+
+let prepare_text_immediate ctx text =
+  let open Brr_canvas in
+  let text = Jstr.v text in
+  C2d.set_font text_ctx (Jstr.v "48px sans");
+  let m = C2d.measure_text text_ctx text in
+  let ascent = C2d.Text_metrics.font_bounding_box_ascent m in
+  let descent = C2d.Text_metrics.font_bounding_box_descent m in
+  let left = C2d.Text_metrics.actual_bounding_box_left m in
+  let right = C2d.Text_metrics.actual_bounding_box_right m in
+  let w = truncate (left +. right +. 0.5) in
+  let h = truncate (ascent +. descent +. 0.5) in
+  (* Avoid 0x0 canvas which causes GL errors *)
+  let w = max 1 w in
+  let h = max 1 h in
+  Brr_canvas.Canvas.set_w text_canvas w;
+  Brr_canvas.Canvas.set_h text_canvas h;
+  C2d.set_font text_ctx (Jstr.v "48px sans");
+  C2d.fill_text text_ctx text ~x:left ~y:ascent;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
+    Gl.unsigned_byte
+    (Gl.Tex_image_source.of_canvas_el text_canvas);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  (tid, w, h)
+
+let prepare_text _ctx text = { text; texture = None }
+
+let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
+    (lazy_text : lazy_text) =
+  let tid, w, h =
+    match lazy_text.texture with
+    | Some t -> t
+    | None ->
+        let t = prepare_text_immediate ctx lazy_text.text in
+        lazy_text.texture <- Some t;
+        t
+  in
+  let open Brr_canvas in
+  let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Matrix.blit transform buffer;
+  Gl.uniform_matrix4fv ctx uniforms.transform false view;
+  Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
+(* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
+
+(* Main Draw Loop *)
+
+let scale = (*2. *. 27. /. 24.*) 3.2
+let text_height = 0.07
+
+let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
+    text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
+    ~(triangle_uniforms : Render_state.triangle_uniforms)
+    ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
+    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~_shadow_matrices:_ ~_w:_
+    ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
+    ~_ao_texture:_ ~_detail_map:_ ~_shadow_pid:_ ~_shadow_fbo:_ ~_shadow_map:_
+    ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
+    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms
+    ~(radial_params : Render_state.radial_params) canvas ctx =
   let canvas_width = truncate (Brr.El.inner_w canvas) in
   let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
   if Brr_canvas.Canvas.w canvas <> canvas_width then
     Brr_canvas.Canvas.set_w canvas canvas_width;
   if Brr_canvas.Canvas.h canvas <> canvas_height then
-    Brr_canvas.Canvas.set_h canvas canvas_height
-
-let init_graphics ctx =
-  (* Initialize anisotropic filtering extension *)
-  let triangle_pid = Web_utils.create_program ctx triangle_program in
-  let text_pid = Web_utils.create_program ctx text_program in
-  let shadow_pid = Web_utils.create_program ctx shadow_program in
-  let sky_pid = Web_utils.create_program ctx sky_program in
-  let normal_pid = Web_utils.create_program ctx normal_program in
-  let mipmap_pid = Web_utils.create_program ctx mipmap_program in
-  let copy_pid = Web_utils.create_program ctx copy_program in
-  let ao_bake_pid = Web_utils.create_program ctx ao_bake_program in
-  let ao_blur_pid = Web_utils.create_program ctx ao_blur_program in
-  let terrain_pid = Web_utils.create_program ctx terrain_program in
-
-  let shadow_map = create_shadow_map ctx 2048 2048 3 in
-  let shadow_fbo = create_shadow_fbo ctx shadow_map in
-  let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
-
-  (* Initialize render state - cache uniform locations and pre-compute params *)
-  let radial_params = Render_state.compute_radial_params ~n_sectors ~n_rings in
-  let terrain_uniforms = Render_state.init_terrain_uniforms ctx terrain_pid in
-  let triangle_uniforms =
-    Render_state.init_triangle_uniforms ctx triangle_pid
+    Brr_canvas.Canvas.set_h canvas canvas_height;
+  Gl.viewport ctx 0 0 canvas_width canvas_height;
+  let aspect = float canvas_width /. float canvas_height in
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let transform =
+    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
-  let text_uniforms = Render_state.init_text_uniforms ctx text_pid in
-  let shadow_uniforms = Render_state.init_shadow_uniforms ctx shadow_pid in
-
-  let terrain_geo, indices =
-    let sectors = n_sectors + 1 in
-    let rings = n_rings in
-    let w' = next_power_of_two sectors 1 in
-    let indices = build_indices sectors w' rings in
-    (Web_utils.create_geometry ctx ~indices ~buffers:[], indices)
+  let screen_inclination =
+    orientation.screen
+    +. 180. /. pi
+       *. atan2
+            (sin (orientation.gamma *. pi /. 180.)
+            *. cos (orientation.beta *. pi /. 180.))
+            (sin (orientation.beta *. pi /. 180.))
   in
-  let text_geo =
-    Web_utils.create_geometry ctx
-      ~indices:(Bigarray.(Array1.init int8_unsigned c_layout) 4 (fun i -> i))
-      ~buffers:[]
+  let x_scale, y_scale =
+    let s = scale *. !zoom in
+    if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
-  let triangle_geo =
-    let indices =
-      Bigarray.(Array1.of_array int8_unsigned c_layout [| 0; 1; 2; 1; 3; 2 |])
-    in
-    let positions =
-      let b = Bigarray.(Array1.create float32 c_layout 12) in
-      b.{0} <- -1.;
-      b.{1} <- 1.;
-      b.{2} <- 0.;
-      b.{3} <- 1.;
-      b.{4} <- 1.;
-      b.{5} <- 0.;
-      b.{6} <- -1.;
-      b.{7} <- -1.;
-      b.{8} <- 0.;
-      b.{9} <- 1.;
-      b.{10} <- -1.;
-      b.{11} <- 0.;
-      Web_utils.Buffer b
-    in
-    Web_utils.create_geometry ctx ~indices ~buffers:[ (3, Gl.float, positions) ]
+  let text_scale = scale *. !zoom in
+  let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
+  let points =
+    List.filter_map
+      (fun (pt, (x', y')) ->
+        let off_x = Render_state.compute_sub_arcsec_offset lon in
+        let off_y = Render_state.compute_sub_arcsec_offset lat in
+        let px = deltax *. (float (x' - x) -. off_x) in
+        let py = deltay *. (float (y - y') -. off_y) in
+        let z = Dem_loader.get_height tile y' x' in
+        let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
+        let r = { r with z = -.r.z } in
+        if r.z > 1. && abs_float (r.x /. r.z) < 1. then
+          Some (pt, r.x /. r.z, r.y /. r.z)
+        else None)
+      points
+  in
+  let points =
+    let pos = ref [] in
+    let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
+    let ca = cos angle in
+    let sa = sin angle in
+    List.filter_map
+      (fun (texture, x, y) ->
+        let p = text_scale *. ((y *. ca) -. (x *. sa)) in
+        let shown =
+          if
+            not
+              (List.exists
+                 (fun p' -> abs_float (p' -. p) < 0.8 *. text_height)
+                 !pos)
+          then (
+            pos := p :: !pos;
+            true)
+          else false
+        in
+        if shown then Some (texture, x, y, shown) else None)
+      points
   in
 
-  (* Upload static uniforms once at initialization *)
+  (* Prepare Clear Color matching fog *)
+  let r, g, b = fog_linear in
+  Gl.clear_color ctx r g b 1.;
+  Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
+
+  Gl.depth_mask ctx true;
   Gl.use_program ctx terrain_pid;
+  Gl.enable ctx Gl.depth_test;
+  Gl.enable ctx Gl.cull_face';
+  (* Determine snapped alpha - changes with camera orientation *)
+  let k_val = radial_params.Render_state.grid_k in
+  let current_azimuth = compute_azimuth transform in
+  let snapped_alpha = floor ((current_azimuth /. k_val) +. 0.5) *. k_val in
+  Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
+  (* Matrices - change with camera orientation and aspect ratio *)
+  Matrix.blit proj proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  Matrix.blit transform transform_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
+  Gl.bind_vertex_array ctx (Some terrain_geo);
+  Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
+  Gl.bind_vertex_array ctx None;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  Gl.disable ctx Gl.cull_face';
 
-  Render_state.upload_radial_static ctx terrain_uniforms radial_params;
-  Render_state.upload_texture_units ctx terrain_uniforms;
+  (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
+  Gl.depth_mask ctx false;
+  Gl.depth_func ctx Gl.lequal;
+  (* Draw if Z <= 1.0 (Far Plane) *)
+  Gl.disable ctx Gl.cull_face';
+  Gl.use_program ctx sky_pid;
+  Gl.bind_vertex_array ctx (Some text_geo);
+  (* Compute Inverse View *)
+  let inv_view = Matrix.inverse transform in
+  Matrix.blit inv_view inv_view_ba;
+  Gl.uniform_matrix4fv ctx sky_uniforms.Render_state.inv_view false inv_view_ta;
+  Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
-  Gl.use_program ctx shadow_pid;
-  Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
-  Render_state.upload_texture_units_shadow ctx shadow_uniforms;
+  (* VAO text_geo is still bound, reused for POIs *)
+  Gl.disable ctx Gl.depth_test;
+  Gl.enable ctx Gl.blend;
+  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
 
-  let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
-  let mipmap_uniforms = Render_state.init_mipmap_uniforms ctx mipmap_pid in
-  let copy_uniforms = Render_state.init_copy_uniforms ctx copy_pid in
-  let ao_bake_uniforms = Render_state.init_ao_bake_uniforms ctx ao_bake_pid in
-  let ao_blur_uniforms = Render_state.init_ao_blur_uniforms ctx ao_blur_pid in
-  let clc_raster_pid = Web_utils.create_program ctx clc_raster_program in
-  let clc_raster_uniforms =
-    Render_state.init_clc_raster_uniforms ctx clc_raster_pid
+  (* 1. Triangles *)
+  Gl.use_program ctx triangle_pid;
+  List.iter
+    (fun (_, x, y, shown) ->
+      let x = x *. x_scale in
+      let y = y *. y_scale in
+      let angle = if shown then -.pi /. 4. else 0. in
+      let transform =
+        let sx = 0.6 *. text_height *. x_scale /. text_scale in
+        let sy = 0.6 *. text_height *. y_scale /. text_scale in
+        Matrix.(
+          rotate_z (angle +. (screen_inclination *. pi /. 180.))
+          * scale sx sy 1. * translate x y 0.)
+      in
+      Matrix.blit transform transform_ba;
+      Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
+      if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
+      else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
+      Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
+    points;
+
+  (* 2. Text *)
+  Gl.use_program ctx text_pid;
+  List.iter
+    (fun (texture, x, y, shown) ->
+      if shown then
+        let x = x *. x_scale in
+        let y = y *. y_scale in
+        let transform =
+          let sx = text_height *. x_scale /. text_scale in
+          let sy = text_height *. y_scale /. text_scale in
+          Matrix.(
+            translate 0.7 (-0.5) 0.
+            * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
+            * scale sx sy 1. * translate x y 0.)
+        in
+        draw_text ctx text_uniforms transform transform_ba transform_ta texture)
+    points;
+
+  Gl.disable ctx Gl.blend;
+  Gl.bind_vertex_array ctx None
+
+(* Event loop *)
+
+let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
+let is_dragging = ref false
+let velocity = ref (0., 0.)
+let last_input_time = ref 0.
+let last_frame_time = ref 0.
+
+let event_loop ctx draw =
+  let rec loop prev_orientation prev_zoom =
+    let t = now () in
+    let dt = t -. !last_frame_time in
+    last_frame_time := t;
+
+    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
+      let va, vb = !velocity in
+      (* Friction: 0.95 per 16ms *)
+      let friction = 0.95 ** (dt /. 16.6) in
+      let va = va *. friction in
+      let vb = vb *. friction in
+      let va = if abs_float va < 0.0001 then 0. else va in
+      let vb = if abs_float vb < 0.0001 then 0. else vb in
+      velocity := (va, vb);
+      current_orientation :=
+        {
+          !current_orientation with
+          alpha = !current_orientation.alpha +. (va *. dt);
+          beta = max 60. (min 120. (!current_orientation.beta +. (vb *. dt)));
+        }
+    end;
+    let orientation = !current_orientation in
+    let z = !zoom in
+    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
+      force_redraw := false;
+      draw ~orientation ctx);
+    let* () = request_animation_frame () in
+    loop orientation z
   in
-  let water_raster_pid = Web_utils.create_program ctx water_raster_program in
-  let water_raster_uniforms =
-    Render_state.init_water_raster_uniforms ctx water_raster_pid
-  in
-
-  {
-    terrain_geo;
-    indices;
-    text_geo;
-    triangle_geo;
-    terrain_pid;
-    triangle_pid;
-    text_pid;
-    shadow_pid;
-    sky_pid;
-    sky_uniforms;
-    terrain_uniforms;
-    triangle_uniforms;
-    text_uniforms;
-    shadow_map;
-    shadow_fbo;
-    shadow_uniforms;
-    normal_pid;
-    mipmap_pid;
-    copy_pid;
-    relief_uniforms;
-    mipmap_uniforms;
-    copy_uniforms;
-    ao_bake_pid;
-    ao_blur_pid;
-    ao_bake_uniforms;
-    ao_blur_uniforms;
-    clc_raster_pid;
-    water_raster_pid;
-    clc_raster_uniforms;
-    water_raster_uniforms;
-    radial_params;
-  }
+  last_frame_time := now ();
+  loop
+    { !current_orientation with alpha = !current_orientation.alpha -. 1. }
+    (!zoom -. 1.)
+(* Orchestration *)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~clc_tiles ~graphics ~start =
@@ -2804,22 +2755,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         ~_shadow_map:shadow_map ~_shadow_uniforms:shadow_uniforms
         ~_palette_texture:palette_texture ~_cover_map_texture:cover_map_texture
         ~sky_pid ~sky_uniforms ~radial_params canvas ctx)
-
-let wait_for_service_worker =
-  let open Fut.Result_syntax in
-  let open Brr_webworkers.Service_worker in
-  let* r = Container.ready (Container.of_navigator Brr.G.navigator) in
-  match Registration.active r with
-  | None -> assert false
-  | Some r ->
-      if state r = State.activated then Fut.return (Ok ())
-      else
-        let fut, set = Fut.create () in
-        ignore
-          (Brr.Ev.listen Brr.Ev.statechange
-             (fun _ -> if state r = State.activated then set (Ok ()))
-             (as_target r));
-        fut
+(* Location & UI *)
 
 let featured_locations =
   [
@@ -2974,6 +2910,250 @@ let get_position ~size =
       match loc with
       | Some loc -> Ok (Geolocation, loc)
       | None -> Ok (Preset, get_preset_position ()))
+
+let create_location_ui ~size =
+  let body = Brr.Document.body Brr.G.document in
+  let fab =
+    let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab") ] [] in
+    Jv.set (Brr.El.to_jv el) "innerHTML"
+      (Jv.of_string
+         {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>|});
+    el
+  in
+  let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
+  let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
+  let close_btn =
+    Brr.El.button
+      ~at:Brr.At.[ class' (Jstr.v "menu-close") ]
+      [ Brr.El.txt (Jstr.v "✕") ]
+  in
+
+  Brr.El.append_children menu
+    [
+      close_btn;
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "menu-title") ]
+        [ Brr.El.txt (Jstr.v "Select Location") ];
+    ];
+  Brr.El.append_children overlay [ menu ];
+  Brr.El.append_children body [ fab; overlay ];
+
+  (* Input Section *)
+  let input =
+    Brr.El.input
+      ~at:
+        Brr.At.
+          [
+            class' (Jstr.v "input-coord");
+            type' (Jstr.v "text");
+            placeholder (Jstr.v "Lat, Lon or Map Link");
+          ]
+      ()
+  in
+
+  let toggle_menu () =
+    let visible = Jstr.v "visible" in
+    if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
+    else begin
+      Brr.El.set_class visible true overlay;
+      ignore (Jv.call (Brr.El.to_jv input) "focus" [||])
+    end
+  in
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ -> toggle_menu ())
+       (Brr.El.as_target fab));
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun e ->
+         if Jv.equal (Jv.get (Obj.magic e) "target") (Brr.El.to_jv overlay) then
+           toggle_menu ())
+       (Brr.El.as_target overlay));
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ -> toggle_menu ())
+       (Brr.El.as_target close_btn));
+
+  (* Input Section *)
+  let btn_go =
+    Brr.El.button
+      ~at:Brr.At.[ class' (Jstr.v "btn-go") ]
+      [ Brr.El.txt (Jstr.v "GO") ]
+  in
+  let input_group =
+    Brr.El.div ~at:Brr.At.[ class' (Jstr.v "input-group") ] [ input; btn_go ]
+  in
+
+  let go () =
+    let text = Jv.to_string (Jv.get (Brr.El.to_jv input) "value") in
+    match parse_input_coordinates text with
+    | Some (lat, lon) ->
+        if
+          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5
+            ~max_lon:9 ~lat ~lon
+        then
+          let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
+          let uri =
+            Brr.Uri.with_query_params
+              (Brr.Window.location Brr.G.window)
+              (Brr.Uri.Params.of_jstr search)
+          in
+          navigate_to uri
+        else
+          Jv.set (Brr.El.to_jv input) "value"
+            (Jv.of_string "Location out of range")
+    | None ->
+        Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
+  in
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.keydown
+       (fun e ->
+         let code = Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e)) in
+         match code with
+         | "Enter" ->
+             Brr.Ev.prevent_default e;
+             Brr.Ev.stop_propagation e;
+             go ()
+         | "ArrowLeft" | "ArrowRight" -> Brr.Ev.stop_propagation e
+         | _ -> ())
+       (Brr.El.as_target input));
+
+  ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
+
+  (* Current Location *)
+  let current_loc_btn =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
+      [
+        Brr.El.span
+          ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+          [ Brr.El.txt (Jstr.v "📍") ];
+        Brr.El.txt (Jstr.v "Use My Location");
+      ]
+  in
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ ->
+         let _ =
+           let open Fut.Syntax in
+           let* res = get_current_position ~size in
+           match res with
+           | Some (lat, lon, _) ->
+               let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
+               let uri =
+                 Brr.Uri.with_query_params
+                   (Brr.Window.location Brr.G.window)
+                   (Brr.Uri.Params.of_jstr search)
+               in
+               navigate_to uri;
+               Fut.return ()
+           | None ->
+               Jv.set (Brr.El.to_jv input) "value"
+                 (Jv.of_string "Location out of range or unavailable");
+               Fut.return ()
+         in
+         ())
+       (Brr.El.as_target current_loc_btn));
+
+  (* Featured Locations *)
+  let location_list =
+    Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
+  in
+  let featured_items =
+    List.map
+      (fun (name, lat, lon, alpha) ->
+        let item =
+          Brr.El.li
+            ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
+            [
+              Brr.El.span
+                ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+                [ Brr.El.txt (Jstr.v "🏔️") ];
+              Brr.El.txt (Jstr.v name);
+            ]
+        in
+        ignore
+          (Brr.Ev.listen Brr.Ev.click
+             (fun _ ->
+               let search =
+                 Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+               in
+               let uri =
+                 Brr.Uri.with_query_params
+                   (Brr.Window.location Brr.G.window)
+                   (Brr.Uri.Params.of_jstr search)
+               in
+               navigate_to uri)
+             (Brr.El.as_target item));
+        Brr.El.append_children location_list [ item ];
+        item)
+      featured_locations
+  in
+
+  let focusables = [ input; btn_go; current_loc_btn ] @ featured_items in
+  let n = List.length focusables in
+  List.iteri
+    (fun i el ->
+      ignore
+        (Brr.Ev.listen Brr.Ev.keydown
+           (fun e ->
+             let code =
+               Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e))
+             in
+             match code with
+             | "ArrowDown" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let next = List.nth focusables ((i + 1) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv next) "focus" [||])
+             | "ArrowUp" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 let prev = List.nth focusables ((i - 1 + n) mod n) in
+                 ignore (Jv.call (Brr.El.to_jv prev) "focus" [||])
+             | "Escape" ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 toggle_menu ()
+             | "Enter" when el != input && el != btn_go ->
+                 Brr.Ev.prevent_default e;
+                 Brr.Ev.stop_propagation e;
+                 ignore (Jv.call (Brr.El.to_jv el) "click" [||])
+             | "Enter" ->
+                 (* Let the specific listeners handle it, but stop propagation to window *)
+                 Brr.Ev.stop_propagation e
+             | _ -> ())
+           (Brr.El.as_target el)))
+    focusables;
+
+  let quick_select_header =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+      [ Brr.El.txt (Jstr.v "Quick Select") ]
+  in
+
+  Brr.El.append_children menu
+    [
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+        [ Brr.El.txt (Jstr.v "Coordinates") ];
+      input_group;
+      quick_select_header;
+      current_loc_btn;
+      Brr.El.div
+        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
+        [ Brr.El.txt (Jstr.v "Featured") ];
+      location_list;
+    ];
+
+  fun visible ->
+    let disp = Jstr.v (if visible then "flex" else "none") in
+    let disp_header = Jstr.v (if visible then "block" else "none") in
+    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
+    Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
 let setup_events canvas =
   let deviceorientation =
@@ -3380,249 +3560,22 @@ let setup_events canvas =
 
     state := `Starting
 
-let create_location_ui ~size =
-  let body = Brr.Document.body Brr.G.document in
-  let fab =
-    let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab") ] [] in
-    Jv.set (Brr.El.to_jv el) "innerHTML"
-      (Jv.of_string
-         {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>|});
-    el
-  in
-  let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
-  let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
-  let close_btn =
-    Brr.El.button
-      ~at:Brr.At.[ class' (Jstr.v "menu-close") ]
-      [ Brr.El.txt (Jstr.v "✕") ]
-  in
-
-  Brr.El.append_children menu
-    [
-      close_btn;
-      Brr.El.div
-        ~at:Brr.At.[ class' (Jstr.v "menu-title") ]
-        [ Brr.El.txt (Jstr.v "Select Location") ];
-    ];
-  Brr.El.append_children overlay [ menu ];
-  Brr.El.append_children body [ fab; overlay ];
-
-  (* Input Section *)
-  let input =
-    Brr.El.input
-      ~at:
-        Brr.At.
-          [
-            class' (Jstr.v "input-coord");
-            type' (Jstr.v "text");
-            placeholder (Jstr.v "Lat, Lon or Map Link");
-          ]
-      ()
-  in
-
-  let toggle_menu () =
-    let visible = Jstr.v "visible" in
-    if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
-    else begin
-      Brr.El.set_class visible true overlay;
-      ignore (Jv.call (Brr.El.to_jv input) "focus" [||])
-    end
-  in
-
-  ignore
-    (Brr.Ev.listen Brr.Ev.click
-       (fun _ -> toggle_menu ())
-       (Brr.El.as_target fab));
-  ignore
-    (Brr.Ev.listen Brr.Ev.click
-       (fun e ->
-         if Jv.equal (Jv.get (Obj.magic e) "target") (Brr.El.to_jv overlay) then
-           toggle_menu ())
-       (Brr.El.as_target overlay));
-  ignore
-    (Brr.Ev.listen Brr.Ev.click
-       (fun _ -> toggle_menu ())
-       (Brr.El.as_target close_btn));
-
-  (* Input Section *)
-  let btn_go =
-    Brr.El.button
-      ~at:Brr.At.[ class' (Jstr.v "btn-go") ]
-      [ Brr.El.txt (Jstr.v "GO") ]
-  in
-  let input_group =
-    Brr.El.div ~at:Brr.At.[ class' (Jstr.v "input-group") ] [ input; btn_go ]
-  in
-
-  let go () =
-    let text = Jv.to_string (Jv.get (Brr.El.to_jv input) "value") in
-    match parse_input_coordinates text with
-    | Some (lat, lon) ->
-        if
-          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5
-            ~max_lon:9 ~lat ~lon
-        then
-          let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
-          let uri =
-            Brr.Uri.with_query_params
-              (Brr.Window.location Brr.G.window)
-              (Brr.Uri.Params.of_jstr search)
-          in
-          navigate_to uri
-        else
-          Jv.set (Brr.El.to_jv input) "value"
-            (Jv.of_string "Location out of range")
-    | None ->
-        Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
-  in
-
-  ignore
-    (Brr.Ev.listen Brr.Ev.keydown
-       (fun e ->
-         let code = Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e)) in
-         match code with
-         | "Enter" ->
-             Brr.Ev.prevent_default e;
-             Brr.Ev.stop_propagation e;
-             go ()
-         | "ArrowLeft" | "ArrowRight" -> Brr.Ev.stop_propagation e
-         | _ -> ())
-       (Brr.El.as_target input));
-
-  ignore (Brr.Ev.listen Brr.Ev.click (fun _ -> go ()) (Brr.El.as_target btn_go));
-
-  (* Current Location *)
-  let current_loc_btn =
-    Brr.El.div
-      ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
-      [
-        Brr.El.span
-          ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
-          [ Brr.El.txt (Jstr.v "📍") ];
-        Brr.El.txt (Jstr.v "Use My Location");
-      ]
-  in
-
-  ignore
-    (Brr.Ev.listen Brr.Ev.click
-       (fun _ ->
-         let _ =
-           let open Fut.Syntax in
-           let* res = get_current_position ~size in
-           match res with
-           | Some (lat, lon, _) ->
-               let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
-               let uri =
-                 Brr.Uri.with_query_params
-                   (Brr.Window.location Brr.G.window)
-                   (Brr.Uri.Params.of_jstr search)
-               in
-               navigate_to uri;
-               Fut.return ()
-           | None ->
-               Jv.set (Brr.El.to_jv input) "value"
-                 (Jv.of_string "Location out of range or unavailable");
-               Fut.return ()
-         in
-         ())
-       (Brr.El.as_target current_loc_btn));
-
-  (* Featured Locations *)
-  let location_list =
-    Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
-  in
-  let featured_items =
-    List.map
-      (fun (name, lat, lon, alpha) ->
-        let item =
-          Brr.El.li
-            ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
-            [
-              Brr.El.span
-                ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
-                [ Brr.El.txt (Jstr.v "🏔️") ];
-              Brr.El.txt (Jstr.v name);
-            ]
-        in
+let wait_for_service_worker =
+  let open Fut.Result_syntax in
+  let open Brr_webworkers.Service_worker in
+  let* r = Container.ready (Container.of_navigator Brr.G.navigator) in
+  match Registration.active r with
+  | None -> assert false
+  | Some r ->
+      if state r = State.activated then Fut.return (Ok ())
+      else
+        let fut, set = Fut.create () in
         ignore
-          (Brr.Ev.listen Brr.Ev.click
-             (fun _ ->
-               let search =
-                 Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
-               in
-               let uri =
-                 Brr.Uri.with_query_params
-                   (Brr.Window.location Brr.G.window)
-                   (Brr.Uri.Params.of_jstr search)
-               in
-               navigate_to uri)
-             (Brr.El.as_target item));
-        Brr.El.append_children location_list [ item ];
-        item)
-      featured_locations
-  in
-
-  let focusables = [ input; btn_go; current_loc_btn ] @ featured_items in
-  let n = List.length focusables in
-  List.iteri
-    (fun i el ->
-      ignore
-        (Brr.Ev.listen Brr.Ev.keydown
-           (fun e ->
-             let code =
-               Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type e))
-             in
-             match code with
-             | "ArrowDown" ->
-                 Brr.Ev.prevent_default e;
-                 Brr.Ev.stop_propagation e;
-                 let next = List.nth focusables ((i + 1) mod n) in
-                 ignore (Jv.call (Brr.El.to_jv next) "focus" [||])
-             | "ArrowUp" ->
-                 Brr.Ev.prevent_default e;
-                 Brr.Ev.stop_propagation e;
-                 let prev = List.nth focusables ((i - 1 + n) mod n) in
-                 ignore (Jv.call (Brr.El.to_jv prev) "focus" [||])
-             | "Escape" ->
-                 Brr.Ev.prevent_default e;
-                 Brr.Ev.stop_propagation e;
-                 toggle_menu ()
-             | "Enter" when el != input && el != btn_go ->
-                 Brr.Ev.prevent_default e;
-                 Brr.Ev.stop_propagation e;
-                 ignore (Jv.call (Brr.El.to_jv el) "click" [||])
-             | "Enter" ->
-                 (* Let the specific listeners handle it, but stop propagation to window *)
-                 Brr.Ev.stop_propagation e
-             | _ -> ())
-           (Brr.El.as_target el)))
-    focusables;
-
-  let quick_select_header =
-    Brr.El.div
-      ~at:Brr.At.[ class' (Jstr.v "section-title") ]
-      [ Brr.El.txt (Jstr.v "Quick Select") ]
-  in
-
-  Brr.El.append_children menu
-    [
-      Brr.El.div
-        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
-        [ Brr.El.txt (Jstr.v "Coordinates") ];
-      input_group;
-      quick_select_header;
-      current_loc_btn;
-      Brr.El.div
-        ~at:Brr.At.[ class' (Jstr.v "section-title") ]
-        [ Brr.El.txt (Jstr.v "Featured") ];
-      location_list;
-    ];
-
-  fun visible ->
-    let disp = Jstr.v (if visible then "flex" else "none") in
-    let disp_header = Jstr.v (if visible then "block" else "none") in
-    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
-    Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
+          (Brr.Ev.listen Brr.Ev.statechange
+             (fun _ -> if state r = State.activated then set (Ok ()))
+             (as_target r));
+        fut
+(* Main *)
 
 let main () =
   let tile_width = 4096 in

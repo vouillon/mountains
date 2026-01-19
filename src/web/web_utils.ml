@@ -53,7 +53,7 @@ let create_geometry ctx ~indices ~buffers =
     Gl.enable_vertex_attrib_array ctx loc;
     Gl.vertex_attrib_pointer ctx loc dim typ false 0 0
   in
-  List.iteri (fun loc (dim, typ, data) -> bind_attrib loc dim typ data) buffers;
+  List.iter (fun (loc, dim, typ, data) -> bind_attrib loc dim typ data) buffers;
   Gl.bind_vertex_array ctx None;
   Gl.bind_buffer ctx Gl.array_buffer None;
   Gl.bind_buffer ctx Gl.element_array_buffer None;

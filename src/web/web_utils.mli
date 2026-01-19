@@ -31,7 +31,7 @@ val create_buffer : Gl.t -> int -> buffer -> Gl.buffer
 val create_geometry :
   Gl.t ->
   indices:(_, _, Bigarray.c_layout) Bigarray.Array1.t ->
-  buffers:(int * int * buffer) list ->
+  buffers:(int * int * int * buffer) list ->
   Gl.vertex_array_object
 (** [create_geometry ctx ~indices ~buffers] creates a VAO with the given indices
     and vertex attribute buffers. Each buffer is a tuple of (location,
