@@ -1967,12 +1967,52 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
   tid
 
-let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
-    ~cover_map_size ~clc_depth_rbs ~clc_raster_pid ~water_raster_pid
-    (clc_u : Render_state.clc_raster_uniforms)
+let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
+    ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
-  (* Prepare FBO *)
+  (* CLC GPU Rasterization setup *)
+  let cover_map_size = 1024 in
+
+  (* Create FBO for CLC rasterization *)
+  let clc_fbo = Gl.create_framebuffer ctx in
+
+  (* Create R8UI texture array for CLC output (7 levels) *)
+  let clc_levels = 7 in
+  let cover_map_texture = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
+  (* Initialize with grass (index 26 = Natural grasslands) *)
+  let init_data =
+    Bigarray.(
+      Array1.create int8_unsigned c_layout
+        (cover_map_size * cover_map_size * clc_levels))
+  in
+  Bigarray.Array1.fill init_data 26;
+  Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
+    clc_levels 0 Gl.red_integer Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
+    0;
+
+  (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
+  (* Separate depth buffer for each level to prevent conflicts when batching tiles *)
+  let clc_depth_rbs =
+    Array.init 7 (fun _ ->
+        let rb = Gl.create_renderbuffer ctx in
+        Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
+        Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
+          cover_map_size cover_map_size;
+        rb)
+  in
+
+  (* Attach to FBO (attach layer 0 initially) *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+    cover_map_texture 0 0;
+  Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
+    Gl.renderbuffer clc_depth_rbs.(0);
+  Gl.bind_texture ctx Gl.texture_2d None;
+
+  (* Prepare FBO *)
   Gl.viewport ctx 0 0 cover_map_size cover_map_size;
   Gl.use_program ctx clc_raster_pid;
 
@@ -2177,8 +2217,8 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
   Gl.delete_buffer ctx ebo;
   Gl.disable ctx Gl.depth_test;
   Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Brr.Console.(
-    log [ Jstr.v (Printf.sprintf "CLC clipmap loaded (%d levels)" 7) ])
+
+  cover_map_texture
 
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
@@ -2668,70 +2708,14 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~light_dir:light_dir_shader ~shadow_matrices ~shadow_splits:splits_dist
     ~fog_color:fog_linear ~zenith_color:zenith_linear;
 
-  (* CLC GPU Rasterization setup *)
-  let cover_map_size = 1024 in
-
-  (* Create FBO for CLC rasterization *)
-  let clc_fbo = Gl.create_framebuffer ctx in
-
-  (* Create R8UI texture array for CLC output (7 levels) *)
-  let clc_levels = 7 in
-  let cover_map_texture = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
-  (* Initialize with grass (index 26 = Natural grasslands) *)
-  let init_data =
-    Bigarray.(
-      Array1.create int8_unsigned c_layout
-        (cover_map_size * cover_map_size * clc_levels))
+  (* GPU rasterize CLC tiles to FBO *)
+  let cover_map_texture =
+    rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
+      ~water_raster_pid clc_raster_uniforms water_raster_uniforms
   in
-  Bigarray.Array1.fill init_data 26;
-  Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
-    clc_levels 0 Gl.red_integer Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
-    0;
-
-  (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
-  (* Separate depth buffer for each level to prevent conflicts when batching tiles *)
-  let clc_depth_rbs =
-    Array.init 7 (fun _ ->
-        let rb = Gl.create_renderbuffer ctx in
-        Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
-        Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
-          cover_map_size cover_map_size;
-        rb)
-  in
-
-  (* Attach to FBO (attach layer 0 initially) *)
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-    cover_map_texture 0 0;
-  Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
-    Gl.renderbuffer clc_depth_rbs.(0);
-
-  Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Gl.bind_texture ctx Gl.texture_2d None;
 
   (* CLC Textures *)
   let palette_texture = make_palette_texture ctx in
-
-  (* Store CLC geographic bounds for shader coordinate mapping *)
-
-  (* GPU rasterize CLC tiles to FBO *)
-  rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_fbo ~cover_map_texture
-    ~cover_map_size ~clc_depth_rbs ~clc_raster_pid ~water_raster_pid
-    clc_raster_uniforms water_raster_uniforms;
-
-  let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
-  let transform_ba =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
-  in
-  let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
-  let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
-  let inv_view_ba =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
-  in
-  let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
 
   (* Render shadows *)
   draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
@@ -2744,6 +2728,18 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let* () = Web_utils.on_gpu_finished ctx in
   start ();
   hide_startup_overlay ();
+
+  let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
+  let transform_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
+  let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
+  let inv_view_ba =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+  in
+  let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
+
   event_loop ctx (fun ~orientation ctx ->
       draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
         text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
