@@ -647,68 +647,74 @@ let terrain_program =
 
             // Water Wave Logic
             if (waterMask > 0.01) {
-               // 1. Low frequency waves (Swell) - Isotropic Interference Pattern
-               // Using 3 waves at 120-degree offsets to eliminate directional banding
-               highp vec2 waveCoord = v_world_pos.xy * 0.05;
+               // Distance-based fade: waves visible up to 2km, fully calm by 5km
+               float waveFade = 1.0 - smoothstep(2000.0, 5000.0, v_dist);
 
-               // Wave 1: 0 degrees, Freq 1.0
-               float w1 = sin(waveCoord.x);
-               // Wave 2: 120 degrees, Freq 1.1 (Detuned)
-               highp float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1;
-               float w2 = sin(input2);
-               // Wave 3: 240 degrees, Freq 1.2 (Detuned)
-               highp float input3 = (waveCoord.x * -0.5 - waveCoord.y * 0.866) * 1.2;
-               float w3 = sin(input3);
+               // Skip wave calculations if too far (optimization)
+               if (waveFade > 0.01) {
+                  // 1. Low frequency waves (Swell) - Isotropic Interference Pattern
+                  // Using 3 waves at 120-degree offsets to eliminate directional banding
+                  highp vec2 waveCoord = v_world_pos.xy * 0.05;
 
-               float waveHeight = w1 + w2 + w3;
+                  // Wave 1: 0 degrees, Freq 1.0
+                  float w1 = sin(waveCoord.x);
+                  // Wave 2: 120 degrees, Freq 1.1 (Detuned)
+                  highp float input2 = (waveCoord.x * -0.5 + waveCoord.y * 0.866) * 1.1;
+                  float w2 = sin(input2);
+                  // Wave 3: 240 degrees, Freq 1.2 (Detuned)
+                  highp float input3 = (waveCoord.x * -0.5 - waveCoord.y * 0.866) * 1.2;
+                  float w3 = sin(input3);
 
-               // Analytical Derivatives
-               float dw1_dx = cos(waveCoord.x);
-               float dw1_dy = 0.0;
+                  // Analytical Derivatives
+                  float dw1_dx = cos(waveCoord.x);
+                  float dw1_dy = 0.0;
 
-               float dw2_base = cos(input2) * 1.1;
-               float dw2_dx = dw2_base * -0.5;
-               float dw2_dy = dw2_base * 0.866;
+                  float dw2_base = cos(input2) * 1.1;
+                  float dw2_dx = dw2_base * -0.5;
+                  float dw2_dy = dw2_base * 0.866;
 
-               float dw3_base = cos(input3) * 1.2;
-               float dw3_dx = dw3_base * -0.5;
-               float dw3_dy = dw3_base * -0.866;
+                  float dw3_base = cos(input3) * 1.2;
+                  float dw3_dx = dw3_base * -0.5;
+                  float dw3_dy = dw3_base * -0.866;
 
-               vec3 waveNormal = normalize(vec3(
-                   -(dw1_dx + dw2_dx + dw3_dx),
-                   -(dw1_dy + dw2_dy + dw3_dy),
-                   20.0 // Higher divisor = flatter waves (Previously 5.0)
-               ));
+                  vec3 waveNormal = normalize(vec3(
+                      -(dw1_dx + dw2_dx + dw3_dx),
+                      -(dw1_dy + dw2_dy + dw3_dy),
+                      20.0 // Higher divisor = flatter waves
+                  ));
 
-               // No extra flatten mix needed, controlled by z-component above
+                  // 2. High frequency ripples - Texture based (Rotated & Layered)
+                  // Use Green/Blue channels as X/Y vector components
+                  // Sample 1: Base Scale (Green=X, Blue=Y) - Soft Noise
+                  vec2 r1 = texture(u_detailMap, v_world_pos.xy * 0.15).gb * 2.0 - 1.0;
 
-               // 2. High frequency ripples - Texture based (Rotated & Layered)
-               // Use Green/Blue channels as X/Y vector components
-               // Sample 1: Base Scale (Green=X, Blue=Y) - Soft Noise
-               vec2 r1 = texture(u_detailMap, v_world_pos.xy * 0.15).gb * 2.0 - 1.0;
+                  // Sample 2: Rotated & Scaled (Green=X, Blue=Y)
+                  // Rotation breaks grid alignment
+                  float c_rot = 0.8; // cos(37 deg)
+                  float s_rot = 0.6; // sin(37 deg)
+                  highp mat2 rot = mat2(c_rot, -s_rot, s_rot, c_rot);
+                  highp vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3);
+                  vec2 r2 = texture(u_detailMap, uv2).gb * 2.0 - 1.0;
 
-               // Sample 2: Rotated & Scaled (Green=X, Blue=Y)
-               // Rotation breaks grid alignment
-               // Matrix math must be highp to preserve precision during rotation
-               float c = 0.8; // cos(37 deg)
-               float s = 0.6; // sin(37 deg)
-               highp mat2 rot = mat2(c, -s, s, c);
-               highp vec2 uv2 = rot * v_world_pos.xy * 0.24 + vec2(7.1, 3.3);
-               vec2 r2 = texture(u_detailMap, uv2).gb * 2.0 - 1.0;
+                  // Combine vectors
+                  vec2 rippleXY = r1 + r2;
 
-               // Combine vectors
-               vec2 rippleXY = r1 + r2;
+                  // Construct Normal
+                  // Z-component controls flatness (Higher = Flatter)
+                  vec3 rippleNormal = normalize(vec3(rippleXY, 8.0));
 
-               // Construct Normal
-               // Z-component controls flatness (Higher = Flatter)
-               // 8.0 gives subtle but visible ripples (balance between 5.0 and 20.0)
-               vec3 rippleNormal = normalize(vec3(rippleXY, 8.0));
+                  // Combine: Swell provides structure, Ripples provide detail
+                  vec3 waterNormal = normalize(waveNormal + rippleNormal);
 
-               // Combine: Swell provides structure, Ripples provide detail
-               vec3 waterNormal = normalize(waveNormal + rippleNormal);
+                  // Fade towards flat normal (0, 0, 1) with distance
+                  waterNormal = normalize(mix(vec3(0.0, 0.0, 1.0), waterNormal, waveFade));
 
-               // Blend terrain normal with water normal
-               final_normal = normalize(mix(final_normal, waterNormal, waterMask));
+                  // Blend terrain normal with water normal
+                  final_normal = normalize(mix(final_normal, waterNormal, waterMask));
+               } else {
+                  // Beyond fade distance: use flat vertical normal for water
+                  final_normal = normalize(mix(final_normal, vec3(0.0, 0.0, 1.0), waterMask));
+               }
             }
 
             // Store roughness and reflection properties for lighting
