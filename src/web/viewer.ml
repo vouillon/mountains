@@ -238,20 +238,16 @@ type input_mode = Sensor | Manual
 
 let input_mode = ref Sensor
 let zoom = ref 1.0
+let min_zoom = 0.5
+let max_zoom = 3.0
 
 (* Math Helpers *)
 
 let rotation_matrix orientation = Quaternion.to_matrix orientation
 
-let compute_azimuth m =
-  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
-  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
-  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
-  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
-  let azimuth =
-    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
-  in
-  azimuth -. (pi /. 2.)
+let compute_azimuth q =
+  let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
+  atan2 (-.fwd.x) fwd.y
 
 (* GLSL Common *)
 
@@ -2494,11 +2490,10 @@ let prepare_text_immediate ctx text =
   let right = C2d.Text_metrics.actual_bounding_box_right m in
   let w = truncate (left +. right +. 0.5) in
   let h = truncate (ascent +. descent +. 0.5) in
-  (* Avoid 0x0 canvas which causes GL errors *)
-  let w = max 1 w in
-  let h = max 1 h in
-  Brr_canvas.Canvas.set_w text_canvas w;
-  Brr_canvas.Canvas.set_h text_canvas h;
+  if w > Brr_canvas.Canvas.w text_canvas then
+    Brr_canvas.Canvas.set_w text_canvas (2 * w);
+  if h > Brr_canvas.Canvas.h text_canvas then
+    Brr_canvas.Canvas.set_h text_canvas h;
   C2d.set_font text_ctx (Jstr.v "48px sans");
   C2d.fill_text text_ctx text ~x:left ~y:ascent;
   let tid = Gl.create_texture ctx in
@@ -2508,6 +2503,7 @@ let prepare_text_immediate ctx text =
     (Gl.Tex_image_source.of_canvas_el text_canvas);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.bind_texture ctx Gl.texture_2d None;
+  C2d.clear_rect text_ctx ~x:0. ~y:0. ~w:(float w) ~h:(float h);
   (tid, w, h)
 
 let prepare_text _ctx text = { text; texture = None }
@@ -2535,6 +2531,71 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+(* Helper functions for orientation control *)
+let get_inclination_rad q =
+  let q_inv = Quaternion.conjugate q in
+  let up_cam =
+    Quaternion.transform_vector q_inv { x = 0.; y = 0.; z = 1.; w = 0. }
+  in
+  atan2 up_cam.x up_cam.y
+
+let screen_inclination q =
+  let angle = get_inclination_rad q in
+  -.angle *. 180. /. Float.pi
+
+let snap_to_turntable q =
+  (* 1. Extract Forward vector (World space direction of Camera -Z) *)
+  let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
+  (* 2. Extract Yaw (psi). Align 0 to North (Y).
+     RotZ(psi) maps (0,1) to (-sin(psi), cos(psi)).
+     We want psi. atan2(sin, cos).
+     sin = -x, cos = y.
+     psi = atan2(-x, y). *)
+  let psi = atan2 (-.fwd.x) fwd.y in
+  (* 3. Extract Pitch (theta). Angle from Down (-Z).
+     fwd.z = -cos(theta) -> theta = acos(-z) *)
+  let fwd_z = max (-1.) (min 1. fwd.z) in
+  let theta = acos (-.fwd_z) in
+  (* 4. Reconstruct
+     Yaw (Z axis) then Pitch (X axis, negative angle from Down) *)
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } psi
+  in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } theta
+  in
+  Quaternion.(q_yaw * q_pitch)
+
+let apply_manual_rotation q da_rad db_rad =
+  (* 1. Apply Yaw (Global Z) *)
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } da_rad
+  in
+  let q_yawed = Quaternion.mult q_yaw q in
+
+  (* 2. Extract current Pitch (theta) from yawed quaternion
+     Forward vector z component tells us the inclination.
+     fwd = q * (0,0,-1)
+     fwd.z = -cos(theta) -> theta = acos(-fwd.z) *)
+  let fwd =
+    Quaternion.transform_vector q_yawed { x = 0.; y = 0.; z = -1.; w = 0. }
+  in
+  let fwd_z = max (-1.) (min 1. fwd.z) in
+  let theta = acos (-.fwd_z) in
+
+  (* 3. Calculate target pitch and Clamp *)
+  let target_theta = theta +. db_rad in
+  let min_pitch = 60. *. Float.pi /. 180. in
+  let max_pitch = 120. *. Float.pi /. 180. in
+  let clamped_theta = max min_pitch (min max_pitch target_theta) in
+
+  (* 4. Apply effective pitch delta (Local X) *)
+  let effective_db = clamped_theta -. theta in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } effective_db
+  in
+  Quaternion.mult q_yawed q_pitch
+
 let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
@@ -2554,33 +2615,11 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let transform =
-    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
+    Matrix.(
+      translate 0. 0. (-.height -. 2.)
+      * rotation_matrix (Quaternion.conjugate orientation))
   in
-  (* Extract Euler angles for text orientation - keeping consistency with existing logic *)
-  (* let _roll, _pitch, _yaw = Quaternion.to_euler orientation in *)
-  (* Note: Quaternion.to_euler return radians.
-     beta (pitch) corresponds to pitch.
-     gamma (roll) corresponds to roll.
-     screen corresponds to 0. (assuming no screen rotation for now).
-   *)
 
-  let screen_inclination =
-    (* Re-using the logic:
-        orientation.screen (0) 
-        + 180/pi * atan2 (sin gamma * cos beta) (sin beta)
-     *)
-    (* For now, let's simplify. If we assume the camera is upright (turntable), 
-        screen_inclination is mostly related to pitch.
-        The original code formula:
-        atan2 (sin gamma * cos beta) (sin beta)
-        
-        If gamma (roll) is 0: sin(0) = 0. atan2(0, sin beta) = 0.
-        So if there is no roll, inclination is 0. 
-        
-        Let's try to pass 0.0 for now as we maintain horizon level.
-      *)
-    0.0
-  in
   let x_scale, y_scale =
     let s = scale *. !zoom in
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
@@ -2604,7 +2643,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   in
   let points =
     let pos = ref [] in
-    let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
+    let angle = (screen_inclination orientation *. pi /. 180.) +. (pi /. 4.) in
     let ca = cos angle in
     let sa = sin angle in
     List.filter_map
@@ -2636,7 +2675,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.enable ctx Gl.cull_face';
   (* Determine snapped alpha - changes with camera orientation *)
   let grid_k = radial_params.Render_state.grid_k in
-  let current_azimuth = compute_azimuth transform in
+  let current_azimuth = compute_azimuth orientation in
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
   (* Matrices - change with camera orientation and aspect ratio *)
@@ -2680,7 +2719,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         let sx = 0.6 *. text_height *. x_scale /. text_scale in
         let sy = 0.6 *. text_height *. y_scale /. text_scale in
         Matrix.(
-          rotate_z (angle +. (screen_inclination *. pi /. 180.))
+          rotate_z (angle +. (screen_inclination orientation *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
       in
       Matrix.blit transform transform_ba;
@@ -2702,7 +2741,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
           let sy = text_height *. y_scale /. text_scale in
           Matrix.(
             translate 0.7 (-0.5) 0.
-            * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
+            * rotate_z
+                ((pi /. 4.) +. (screen_inclination orientation *. pi /. 180.))
             * scale sx sy 1. * translate x y 0.)
         in
         draw_text ctx text_uniforms transform transform_ba transform_ta texture)
@@ -2714,9 +2754,33 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 (* Event loop *)
 
 let current_orientation = ref Quaternion.identity
+let target_orientation = ref Quaternion.identity
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
+
+(* Mouse state *)
+let mouse_dragging = ref false
+let mouse_start_x = ref 0.
+let mouse_start_y = ref 0.
+let mouse_last_x = ref 0.
+let mouse_last_y = ref 0.
+
+(* Touch state *)
+let touch_start_x = ref 0.
+let touch_start_y = ref 0.
+let touch_last_x = ref 0.
+let touch_last_y = ref 0.
+let touch_dragging = ref false
+let pinch_distance = ref 0.
+
+(* Double-tap detection for returning to sensor mode *)
+let last_tap_time = ref 0.
+let double_tap_threshold = 300.
+(* ms *)
+
+(* Drag threshold to distinguish tap from drag (in pixels) *)
+let drag_threshold = 10.
 let last_frame_time = ref 0.
 
 let event_loop ctx draw =
@@ -2725,7 +2789,26 @@ let event_loop ctx draw =
     let dt = t -. !last_frame_time in
     last_frame_time := t;
 
-    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
+    if !input_mode = Sensor then begin
+      (* Sensor Mode: Adaptive Smoothing using SLERP
+         Tau (time constant) varies with FOV to prevent jitter when zoomed in.
+         - Wide FOV (Zoomed Out): Tau = 0.1s (Fast response)
+         - Narrow FOV (Zoomed In): Tau = 0.5s (Slow, smooth response)
+      *)
+      let tau =
+        let min_tau = 0.02 in
+        let max_tau = 0.15 in
+        let t = (log !zoom -. log min_zoom) /. (log max_zoom -. log min_zoom) in
+        let t = max 0. (min 1. t) in
+        let t = t *. t in
+        min_tau +. (t *. (max_tau -. min_tau))
+      in
+      let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
+      current_orientation :=
+        Quaternion.slerp !current_orientation !target_orientation alpha
+    end
+    else if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.)
+    then begin
       let va, vb = !velocity in
       (* Friction: 0.95 per 16ms *)
       let friction = 0.95 ** (dt /. 16.6) in
@@ -2736,60 +2819,29 @@ let event_loop ctx draw =
       velocity := (va, vb);
       velocity := (va, vb);
 
-      (* Update Quaternion *)
-      let dt_sec = dt /. 1000. in
-      let d_alpha = va *. dt_sec in
-      (* rad/s * s = rad *)
-      let d_beta = vb *. dt_sec in
+      if (not !is_dragging) && (not !touch_dragging) && !velocity <> (0., 0.)
+      then begin
+        let vx, vy = !velocity in
+        let dt = dt *. 1.5 in
+        (* Speed tweaks *)
+        if abs_float vx > 0.001 || abs_float vy > 0.001 then begin
+          let da = vx *. dt in
+          let db = vy *. dt in
+          let da_rad = da *. Float.pi /. 180. in
+          let db_rad = db *. Float.pi /. 180. in
 
-      let q = !current_orientation in
-
-      (* Yaw: Rotate around Z (up) *)
-      (* Note: va/alpha uses degrees in original code but velocity seems to be in deg/ms?
-         Checking viewer.ml:
-         alpha = alpha + va * dt
-         rotate_z (-alpha * pi / 180)
-         So alpha is in degrees. va is degrees/ms.
-         
-         We want to update our quaternion.
-         Let's convert d_alpha/d_beta to radians.
-      *)
-      let d_alpha_rad = d_alpha (* va *. dt *) *. pi /. 180. in
-      let d_beta_rad = d_beta (* vb *. dt *) *. pi /. 180. in
-
-      let q_yaw =
-        Quaternion.from_axis_angle
-          { x = 0.; y = 0.; z = 1.; w = 0. }
-          (-.d_alpha_rad)
-      in
-      let q_pitch =
-        Quaternion.from_axis_angle
-          { x = 1.; y = 0.; z = 0.; w = 0. }
-          (-.d_beta_rad)
-      in
-
-      (* Apply: New = Yaw * Old * Pitch *)
-      (* This maintains the "Turntable" feel:
-          - Yaw is always global Z (0,0,1)
-          - Pitch is local X (1,0,0) relative to current view (but simpler to just multiply on the right for local)
-         
-         Actually:
-         Global Yaw (Pre-multiply):  Q_new = Q_yaw * Q_old
-         Local Pitch (Post-multiply): Q_new = Q_old * Q_pitch
-         
-         But wait, our rotate_x/y/z in Matrix.ml might have different conventions.
-         Original: rotate_z(-alpha) * rotate_x(-beta) * ...
-         This means specific Euler order: Z then X.
-      
-         If we want Global Z and Local X:
-         q_new = q_yaw * q * q_pitch
-      *)
-      let q_new = Quaternion.(q_yaw * q * q_pitch) in
-      current_orientation := Quaternion.normalize q_new;
-
-      (* Clamping Pitch (Optional but good for terrain) *)
-      (* TODO: Implement pitch clamping if needed later *)
-      ()
+          current_orientation :=
+            apply_manual_rotation !current_orientation da_rad db_rad
+        end
+        else velocity := (0., 0.)
+      end
+    end;
+    if !input_mode = Manual then begin
+      (* Smooth "Righting Moment": pull current orientation towards upright.
+         Tau = 0.2s provides a smooth but firm correction. *)
+      let upright = snap_to_turntable !current_orientation in
+      let alpha = 1. -. exp (-.dt /. 200.0) in
+      current_orientation := Quaternion.slerp !current_orientation upright alpha
     end;
     let orientation = !current_orientation in
     let z = !zoom in
@@ -2800,16 +2852,7 @@ let event_loop ctx draw =
     loop orientation z
   in
   last_frame_time := now ();
-  (* Initial rotation: Rotate a bit for demo *)
-  let q_init =
-    Quaternion.(
-      mult
-        (from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-1. *. pi /. 180.))
-        !current_orientation)
-  in
-  current_orientation := q_init;
-  loop q_init (!zoom -. 1.)
-(* Orchestration *)
+  loop !current_orientation (!zoom -. 1.)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~clc_tiles ~graphics ~start =
@@ -2849,52 +2892,21 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   } =
     graphics
   in
-  let _, deltay, _ = Render_state.compute_deltas ~lat in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
     time_gpu ctx "compute_relief" (fun () ->
         compute_relief ctx w h lat triangle_geo tile_texture normal_pid
           mipmap_pid copy_pid relief_uniforms mipmap_uniforms copy_uniforms)
   in
-  let points =
-    List.map
-      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
-        let texture =
-          prepare_text ctx
-            (match elevation with
-            | None -> name
-            | Some elevation ->
-                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
-                Printf.sprintf "%s (%dm)" name elevation)
-        in
-        let h =
-          let height' = Dem_loader.get_height tile y' x' in
-          let dist =
-            let dx = float (x' - x) in
-            let dy = float (y' - y) in
-            let dz = height' -. height in
-            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
-          in
-          (height' -. height) /. dist
-        in
-        ((texture, pos), h))
-      points
-  in
-  let points =
-    points
-    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
-    |> List.map fst
-  in
   let index_count = Bigarray.Array1.dim indices in
 
-  (* Approx 30m per pixel *)
   let ao_texture =
+    let _, deltay, _ = Render_state.compute_deltas ~lat in
     time_gpu ctx "compute_ao" (fun () ->
         compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
           ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
   in
 
-  (* Compute session-static values for terrain uniforms *)
   let light_dir_shader =
     let date_ctor = Jv.get Jv.global "Date" in
     let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
@@ -2957,6 +2969,46 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
     ~cover_map_texture ~palette_texture;
 
+  let points =
+    let off_x = Render_state.compute_sub_arcsec_offset lon in
+    let off_y = Render_state.compute_sub_arcsec_offset lat in
+    List.filter
+      (fun (_, (dst_x, dst_y)) ->
+        Visibility.test_precise
+          (Dem_loader.get_height tile)
+          ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+      points
+  in
+  let points =
+    List.map
+      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
+        let texture =
+          prepare_text ctx
+            (match elevation with
+            | None -> name
+            | Some elevation ->
+                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
+                Printf.sprintf "%s (%dm)" name elevation)
+        in
+        let h =
+          let height' = Dem_loader.get_height tile y' x' in
+          let dist =
+            let dx = float (x' - x) in
+            let dy = float (y' - y) in
+            let dz = height' -. height in
+            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
+          in
+          (height' -. height) /. dist
+        in
+        ((texture, pos), h))
+      points
+  in
+  let points =
+    points
+    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
+    |> List.map fst
+  in
+
   let* () = Web_utils.on_gpu_finished ctx in
   start ();
   hide_startup_overlay ();
@@ -3015,12 +3067,6 @@ let set_orientation_from_yaw alpha =
        Original defaults: beta=0 means looking down? 
        Wait, original code:
        rotate_x (-beta)
-       beta was initialized to 0.
-       beta was clamped to 60..120.
-       Usually 90 is horizon? or 0 is horizon?
-       
-       If I look at code:
-       rotate_x (-beta)
        
        If beta=0, no X rotation. Camera looks down -Z?
        Camera setup usually looks -Z.
@@ -3036,16 +3082,18 @@ let set_orientation_from_yaw alpha =
        We want Global Z rotation.
     *)
   let q_yaw =
-    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-.alpha_rad)
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
   in
 
   (* Set default pitch to something reasonable, e.g. 80 degrees (near horizon) *)
-  let pitch_rad = 80. *. pi /. 180. in
+  let pitch_rad = pi /. 2. in
   let q_pitch =
-    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } (-.pitch_rad)
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
   in
 
-  current_orientation := Quaternion.(q_yaw * q_pitch)
+  (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
+  (current_orientation := Quaternion.(q_yaw * q_pitch));
+  target_orientation := !current_orientation
 
 let parse_float_safe s = try Some (float_of_string s) with _ -> None
 
@@ -3428,30 +3476,6 @@ let setup_events canvas =
 
   (* Sensitivity for drag rotation (degrees per pixel) *)
 
-  (* Mouse state *)
-  let mouse_dragging = ref false in
-  let mouse_start_x = ref 0. in
-  let mouse_start_y = ref 0. in
-  let mouse_last_x = ref 0. in
-  let mouse_last_y = ref 0. in
-
-  (* Touch state *)
-  let touch_start_x = ref 0. in
-  let touch_start_y = ref 0. in
-  let touch_last_x = ref 0. in
-  let touch_last_y = ref 0. in
-  let touch_dragging = ref false in
-  let pinch_distance = ref 0. in
-
-  (* Double-tap detection for returning to sensor mode *)
-  let last_tap_time = ref 0. in
-  let double_tap_threshold =
-    300.
-    (* ms *)
-  in
-
-  (* Drag threshold to distinguish tap from drag (in pixels) *)
-  let drag_threshold = 10. in
   (* Helper: get current time in ms *)
 
   (* Helper: calculate distance between two touches *)
@@ -3470,17 +3494,21 @@ let setup_events canvas =
   let toggle_fullscreen () =
     match Brr.Document.fullscreen_element Brr.G.document with
     | None ->
+        Lwt.async @@ fun () ->
+        let* () =
+          to_lwt
+            (Brr.El.request_fullscreen
+               ~opts:
+                 (Brr.El.fullscreen_opts
+                    ~navigation_ui:Brr.El.Navigation_ui.hide ())
+               (Brr.Document.body Brr.G.document))
+        in
         ignore
           (Jv.call
              (Jv.get (Jv.get Jv.global "screen") "orientation")
              "lock"
              [| Jv.of_jstr (Jstr.v "portrait") |]);
-        ignore
-          (Brr.El.request_fullscreen
-             ~opts:
-               (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
-                  ())
-             (Brr.Document.body Brr.G.document))
+        Lwt.return ()
     | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
   in
 
@@ -3501,9 +3529,6 @@ let setup_events canvas =
     end
   in
 
-  let min_zoom = 0.5 in
-  let max_zoom = 3. in
-
   (* Device orientation listener - only active in Sensor mode *)
   ignore
     (Brr.Ev.listen deviceorientation
@@ -3521,36 +3546,35 @@ let setup_events canvas =
              let alpha = angle "alpha" in
              let beta = angle "beta" in
              let gamma = angle "gamma" in
-             (match !state with
-             | `Init -> ()
-             | `Starting ->
-                 state := `Started;
-                 if beta < 90. then (
-                   Lwt.async @@ fun () ->
-                   let* () = sleep 1.1 in
-                   display_temporary_message "Raise your phone!";
-                   Lwt.return ())
-             | `Started -> if beta >= 90. then remove_message ());
-
              let q =
                Quaternion.(
                  mult
                    (from_axis_angle
                       { x = 0.; y = 0.; z = 1.; w = 0. }
-                      (-.alpha *. pi /. 180.))
+                      (alpha *. pi /. 180.))
                    (mult
                       (from_axis_angle
                          { x = 1.; y = 0.; z = 0.; w = 0. }
-                         (-.beta *. pi /. 180.))
+                         (beta *. pi /. 180.))
                       (mult
                          (from_axis_angle
                             { x = 0.; y = 1.; z = 0.; w = 0. }
-                            (-.gamma *. pi /. 180.))
+                            (gamma *. pi /. 180.))
                          (from_axis_angle
                             { x = 0.; y = 0.; z = 1.; w = 0. }
-                            (screen *. pi /. 180.)))))
+                            (-.screen *. pi /. 180.)))))
              in
-             current_orientation := q
+             target_orientation := q;
+             match !state with
+             | `Init -> current_orientation := q
+             | `Starting ->
+                 state := `Started;
+                 if beta < 80. then (
+                   Lwt.async @@ fun () ->
+                   let* () = sleep 1.1 in
+                   display_temporary_message "Raise your phone!";
+                   Lwt.return ())
+             | `Started -> if beta >= 80. then remove_message ()
            end)
        (Brr.Window.as_target Brr.G.window));
 
@@ -3564,33 +3588,30 @@ let setup_events canvas =
          (fun ev ->
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
+               (* Yaw Left: 5 degrees *)
+               input_mode := Manual;
+               current_orientation :=
+                 apply_manual_rotation !current_orientation
                    (5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult q_rot !current_orientation
+                   0.
            | "ArrowRight" ->
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
+               (* Yaw Right: -5 degrees *)
+               input_mode := Manual;
+               current_orientation :=
+                 apply_manual_rotation !current_orientation
                    (-5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult q_rot !current_orientation
+                   0.
            | "ArrowDown" ->
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
+               (* Pitch Down: -5 degrees *)
+               input_mode := Manual;
+               current_orientation :=
+                 apply_manual_rotation !current_orientation 0.
                    (-5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult !current_orientation q_rot
            | "ArrowUp" ->
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
-                   (5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult !current_orientation q_rot
+               (* Pitch Up: 5 degrees *)
+               input_mode := Manual;
+               current_orientation :=
+                 apply_manual_rotation !current_orientation 0. (5. *. pi /. 180.)
            | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
            | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
            | _ -> ())
@@ -3631,6 +3652,7 @@ let setup_events canvas =
       (Brr.Ev.listen Brr.Ev.mousemove
          (fun ev ->
            if !mouse_dragging then begin
+             input_mode := Manual;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -3660,10 +3682,11 @@ let setup_events canvas =
                let v_inst_x = da /. dt in
                let v_inst_y = db /. dt in
                let vx, vy = !velocity in
-               (* Smoothing: mix history (0.6) with new (0.4) *)
+               (* Time-based smoothing (50ms window) to handle variable polling rates *)
+               let alpha = 1. -. exp (-.dt /. 50.) in
                velocity :=
-                 ( (v_inst_x *. 0.4) +. (vx *. 0.6),
-                   (v_inst_y *. 0.4) +. (vy *. 0.6) )
+                 ( (v_inst_x *. alpha) +. (vx *. (1. -. alpha)),
+                   (v_inst_y *. alpha) +. (vy *. (1. -. alpha)) )
              end;
              is_dragging := true;
              mouse_last_x := x;
@@ -3671,17 +3694,7 @@ let setup_events canvas =
              current_orientation :=
                let da_rad = da *. Float.pi /. 180. in
                let db_rad = db *. Float.pi /. 180. in
-               let q_yaw =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (-.da_rad)
-               in
-               let q_pitch =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
-                   (-.db_rad)
-               in
-               Quaternion.(q_yaw * !current_orientation * q_pitch)
+               apply_manual_rotation !current_orientation da_rad db_rad
            end)
          (Brr.Window.as_target Brr.G.window));
 
@@ -3691,7 +3704,7 @@ let setup_events canvas =
            if !mouse_dragging then begin
              mouse_dragging := false;
              is_dragging := false;
-             if now () -. !last_input_time > 300. then velocity := (0., 0.);
+             (* Removed inertia killer timeout *)
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -3755,9 +3768,7 @@ let setup_events canvas =
                (* Switch to manual mode when user starts dragging *)
                if !input_mode = Sensor then begin
                  input_mode := Manual;
-                 display_temporary_message "Manual mode";
-                 (* No need to snap orientation with quaternions - preserve current view *)
-                 ()
+                 display_temporary_message "Manual mode"
                end;
                Brr.Ev.prevent_default ev
              end;
@@ -3799,17 +3810,7 @@ let setup_events canvas =
                current_orientation :=
                  let da_rad = da *. Float.pi /. 180. in
                  let db_rad = db *. Float.pi /. 180. in
-                 let q_yaw =
-                   Quaternion.from_axis_angle
-                     { x = 0.; y = 0.; z = 1.; w = 0. }
-                     (-.da_rad)
-                 in
-                 let q_pitch =
-                   Quaternion.from_axis_angle
-                     { x = 1.; y = 0.; z = 0.; w = 0. }
-                     (-.db_rad)
-                 in
-                 Quaternion.(q_yaw * !current_orientation * q_pitch)
+                 apply_manual_rotation !current_orientation da_rad db_rad
              end
            end
            else if num_touches >= 2 then begin
@@ -3857,29 +3858,6 @@ let setup_events canvas =
            end)
          target);
 
-    (* Use ResizeObserver to detect canvas size changes *)
-    let observer_cb =
-      Jv.callback ~arity:1 (fun entries ->
-          let len = Jv.to_int (Jv.get entries "length") in
-          if len > 0 then begin
-            let entry = Jv.call entries "at" [| Jv.of_int 0 |] in
-            let device_box = Jv.get entry "devicePixelContentBoxSize" in
-            let device_width, device_height =
-              if Jv.is_undefined device_box then (None, None)
-              else
-                let box = Jv.call device_box "at" [| Jv.of_int 0 |] in
-                ( Some (Jv.to_int (Jv.get box "inlineSize")),
-                  Some (Jv.to_int (Jv.get box "blockSize")) )
-            in
-            resize_canvas ?device_width ?device_height canvas;
-            force_redraw := true
-          end)
-    in
-    let observer =
-      Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
-    in
-    ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
-
     state := `Starting
 
 let wait_for_service_worker =
@@ -3919,7 +3897,28 @@ let main () =
   let detail_map = make_detail_map ctx in
   Worker_pool.init ();
   let graphics = init_graphics ctx in
-  resize_canvas canvas;
+  (* Use ResizeObserver to detect canvas size changes *)
+  let observer_cb =
+    Jv.callback ~arity:1 (fun entries ->
+        let len = Jv.to_int (Jv.get entries "length") in
+        if len > 0 then begin
+          let entry = Jv.call entries "at" [| Jv.of_int 0 |] in
+          let device_box = Jv.get entry "devicePixelContentBoxSize" in
+          let device_width, device_height =
+            if Jv.is_undefined device_box then (None, None)
+            else
+              let box = Jv.call device_box "at" [| Jv.of_int 0 |] in
+              ( Some (Jv.to_int (Jv.get box "inlineSize")),
+                Some (Jv.to_int (Jv.get box "blockSize")) )
+          in
+          resize_canvas ?device_width ?device_height canvas;
+          force_redraw := true
+        end)
+  in
+  let observer =
+    Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
+  in
+  ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
 
   update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
@@ -4081,27 +4080,6 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
-
-  let debug = false in
-  let points =
-    List.filter
-      (fun ({ Points.name; _ }, (dst_x, dst_y)) ->
-        if
-          (not debug)
-          || (String.length name > 8 && String.sub name 0 7 = "Grand G")
-        then (
-          if debug then prerr_endline name;
-
-          Visibility.test_precise
-            (Dem_loader.get_height tile)
-            ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y
-            ())
-        else
-          Visibility.test
-            (Dem_loader.get_height tile)
-            ~src_h:(height +. 2.) ~src_x:x ~src_y:y ~dst_x ~dst_y ())
-      points
-  in
 
   let* () =
     tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile
