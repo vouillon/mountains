@@ -3045,7 +3045,8 @@ let set_orientation_from_yaw alpha =
     Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } (-.pitch_rad)
   in
 
-  current_orientation := Quaternion.(q_yaw * q_pitch)
+  (* Rotate around X first (pitch up to horizon), then around Z (yaw) *)
+  current_orientation := Quaternion.(q_pitch * q_yaw)
 
 let parse_float_safe s = try Some (float_of_string s) with _ -> None
 
@@ -3537,18 +3538,18 @@ let setup_events canvas =
                  mult
                    (from_axis_angle
                       { x = 0.; y = 0.; z = 1.; w = 0. }
-                      (-.alpha *. pi /. 180.))
+                      (screen *. pi /. 180.))
                    (mult
                       (from_axis_angle
-                         { x = 1.; y = 0.; z = 0.; w = 0. }
-                         (-.beta *. pi /. 180.))
+                         { x = 0.; y = 1.; z = 0.; w = 0. }
+                         (-.gamma *. pi /. 180.))
                       (mult
                          (from_axis_angle
-                            { x = 0.; y = 1.; z = 0.; w = 0. }
-                            (-.gamma *. pi /. 180.))
+                            { x = 1.; y = 0.; z = 0.; w = 0. }
+                            (-.beta *. pi /. 180.))
                          (from_axis_angle
                             { x = 0.; y = 0.; z = 1.; w = 0. }
-                            (screen *. pi /. 180.)))))
+                            (-.alpha *. pi /. 180.)))))
              in
              current_orientation := q
            end)
@@ -3564,33 +3565,37 @@ let setup_events canvas =
          (fun ev ->
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
+               (* Yaw Left: Rotate around World Z (Post-multiply) *)
                let q_rot =
                  Quaternion.from_axis_angle
                    { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (5. *. pi /. 180.)
+                   (-5. *. pi /. 180.)
                in
-               current_orientation := Quaternion.mult q_rot !current_orientation
+               current_orientation := Quaternion.mult !current_orientation q_rot
            | "ArrowRight" ->
+               (* Yaw Right: Rotate around World Z (Post-multiply) *)
                let q_rot =
                  Quaternion.from_axis_angle
                    { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (-5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult q_rot !current_orientation
-           | "ArrowDown" ->
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
-                   (-5. *. pi /. 180.)
+                   (5. *. pi /. 180.)
                in
                current_orientation := Quaternion.mult !current_orientation q_rot
-           | "ArrowUp" ->
+           | "ArrowDown" ->
+               (* Pitch Down: Rotate around Local X (Pre-multiply) *)
                let q_rot =
                  Quaternion.from_axis_angle
                    { x = 1.; y = 0.; z = 0.; w = 0. }
                    (5. *. pi /. 180.)
                in
-               current_orientation := Quaternion.mult !current_orientation q_rot
+               current_orientation := Quaternion.mult q_rot !current_orientation
+           | "ArrowUp" ->
+               (* Pitch Up: Rotate around Local X (Pre-multiply) *)
+               let q_rot =
+                 Quaternion.from_axis_angle
+                   { x = 1.; y = 0.; z = 0.; w = 0. }
+                   (-5. *. pi /. 180.)
+               in
+               current_orientation := Quaternion.mult q_rot !current_orientation
            | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
            | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
            | _ -> ())
@@ -3671,6 +3676,8 @@ let setup_events canvas =
              current_orientation :=
                let da_rad = da *. Float.pi /. 180. in
                let db_rad = db *. Float.pi /. 180. in
+               (* Yaw (da): World Z -> Post-multiply
+                  Pitch (db): Local X -> Pre-multiply *)
                let q_yaw =
                  Quaternion.from_axis_angle
                    { x = 0.; y = 0.; z = 1.; w = 0. }
@@ -3681,7 +3688,8 @@ let setup_events canvas =
                    { x = 1.; y = 0.; z = 0.; w = 0. }
                    (-.db_rad)
                in
-               Quaternion.(q_yaw * !current_orientation * q_pitch)
+               (* Order: q_pitch * (current * q_yaw) *)
+               Quaternion.(q_pitch * (!current_orientation * q_yaw))
            end)
          (Brr.Window.as_target Brr.G.window));
 
@@ -3799,6 +3807,8 @@ let setup_events canvas =
                current_orientation :=
                  let da_rad = da *. Float.pi /. 180. in
                  let db_rad = db *. Float.pi /. 180. in
+                 (* Yaw (da): World Z -> Post-multiply
+                   Pitch (db): Local X -> Pre-multiply *)
                  let q_yaw =
                    Quaternion.from_axis_angle
                      { x = 0.; y = 0.; z = 1.; w = 0. }
@@ -3809,7 +3819,8 @@ let setup_events canvas =
                      { x = 1.; y = 0.; z = 0.; w = 0. }
                      (-.db_rad)
                  in
-                 Quaternion.(q_yaw * !current_orientation * q_pitch)
+                 (* Order: q_pitch * (current * q_yaw) *)
+                 Quaternion.(q_pitch * (!current_orientation * q_yaw))
              end
            end
            else if num_touches >= 2 then begin
