@@ -1381,139 +1381,169 @@ module Triangulator = struct
 
   let optimize_triangulation (verts : float array) (indices : int array)
       start_offset end_offset =
-    let get_sq_dist i1 i2 = Geometry.dist_sq verts i1 i2 in
-
-    (* Helper to calculate min angle of a triangle *)
-    let get_min_angle i1 i2 i3 =
-      let d12 = sqrt (get_sq_dist i1 i2) in
-      let d23 = sqrt (get_sq_dist i2 i3) in
-      let d31 = sqrt (get_sq_dist i3 i1) in
-      let angle a b c =
-        let cos_c = ((a *. a) +. (b *. b) -. (c *. c)) /. (2.0 *. a *. b) in
-        let cos_c =
-          if cos_c > 1.0 then 1.0 else if cos_c < -1.0 then -1.0 else cos_c
+    (* Helper to calculate angle at vertex i1 in triangle (i1, i2, i3) *)
+    let get_angle i1 i2 i3 =
+      let x1, y1 = (Geometry.get_x verts i1, Geometry.get_y verts i1) in
+      let x2, y2 = (Geometry.get_x verts i2, Geometry.get_y verts i2) in
+      let x3, y3 = (Geometry.get_x verts i3, Geometry.get_y verts i3) in
+      (* Vectors from i1 to i2 and i1 to i3 *)
+      let v1x, v1y = (x2 -. x1, y2 -. y1) in
+      let v2x, v2y = (x3 -. x1, y3 -. y1) in
+      let dot = (v1x *. v2x) +. (v1y *. v2y) in
+      let len1 = sqrt ((v1x *. v1x) +. (v1y *. v1y)) in
+      let len2 = sqrt ((v2x *. v2x) +. (v2y *. v2y)) in
+      if len1 < epsilon || len2 < epsilon then 0.0
+      else
+        let cos_angle = dot /. (len1 *. len2) in
+        let cos_angle =
+          if cos_angle > 1.0 then 1.0
+          else if cos_angle < -1.0 then -1.0
+          else cos_angle
         in
-        acos cos_c
-      in
-      if d12 < epsilon || d23 < epsilon || d31 < epsilon then 0.0
-      else
-        let a1 = angle d12 d23 d31 in
-        let a2 = angle d23 d31 d12 in
-        let a3 = angle d31 d12 d23 in
-        fmin a1 (fmin a2 a3)
+        acos cos_angle
     in
 
-    (* Edge map: (min_v, max_v) -> tri_index list *)
-    let edge_capacity = end_offset - start_offset in
+    let make_key v1 v2 = if v1 < v2 then (v1, v2) else (v2, v1) in
+
+    (* Edge map: (min_v, max_v) -> tri_base list *)
+    let num_tris = (end_offset - start_offset) / 3 in
+    let edge_capacity = num_tris * 3 in
     let edge_map = Hashtbl.create edge_capacity in
-    let add_edge v1 v2 tri_idx =
-      let key = if v1 < v2 then (v1, v2) else (v2, v1) in
+
+    let add_edge v1 v2 tri_base =
+      let key = make_key v1 v2 in
       let current = try Hashtbl.find edge_map key with Not_found -> [] in
-      Hashtbl.replace edge_map key (tri_idx :: current)
+      Hashtbl.replace edge_map key (tri_base :: current)
     in
 
-    let rec loop pass =
-      if pass > 100 then (
-        if !verbose then Printf.printf "Optimization: Max passes reached\n%!";
-        ())
-      else
-        let changed = ref false in
-        Hashtbl.clear edge_map;
-        (* Build edge map *)
-        let num_tris = (end_offset - start_offset) / 3 in
-        for i = 0 to num_tris - 1 do
-          let base = start_offset + (i * 3) in
-          let v1 = indices.(base) in
-          let v2 = indices.(base + 1) in
-          let v3 = indices.(base + 2) in
-          add_edge v1 v2 base;
-          add_edge v2 v3 base;
-          add_edge v3 v1 base
-        done;
+    let remove_edge v1 v2 tri_base =
+      let key = make_key v1 v2 in
+      match Hashtbl.find_opt edge_map key with
+      | Some tris ->
+          let filtered = List.filter (fun t -> t <> tri_base) tris in
+          if filtered = [] then Hashtbl.remove edge_map key
+          else Hashtbl.replace edge_map key filtered
+      | None -> ()
+    in
 
-        (* Check edges *)
-        Hashtbl.iter
-          (fun (u, v) tris ->
-            if List.length tris = 2 then
-              let t1_base = List.nth tris 0 in
-              let t2_base = List.nth tris 1 in
+    (* Build initial edge map *)
+    for i = 0 to num_tris - 1 do
+      let base = start_offset + (i * 3) in
+      let v1 = indices.(base) in
+      let v2 = indices.(base + 1) in
+      let v3 = indices.(base + 2) in
+      add_edge v1 v2 base;
+      add_edge v2 v3 base;
+      add_edge v3 v1 base
+    done;
 
-              (* Verify triangles still contain this edge (it might have been flipped already) *)
-              let has_edge base =
-                let i1, i2, i3 =
-                  (indices.(base), indices.(base + 1), indices.(base + 2))
-                in
-                (i1 = u || i2 = u || i3 = u) && (i1 = v || i2 = v || i3 = v)
+    (* Queue of edges to check *)
+    let queue = Queue.create () in
+    let in_queue = Hashtbl.create edge_capacity in
+
+    let enqueue_edge v1 v2 =
+      let key = make_key v1 v2 in
+      if not (Hashtbl.mem in_queue key) then (
+        Hashtbl.add in_queue key ();
+        Queue.add key queue)
+    in
+
+    (* Initially enqueue all interior edges (those shared by 2 triangles) *)
+    Hashtbl.iter
+      (fun key tris ->
+        if List.length tris = 2 then enqueue_edge (fst key) (snd key))
+      edge_map;
+
+    let flip_count = ref 0 in
+
+    while not (Queue.is_empty queue) do
+      let u, v = Queue.pop queue in
+      Hashtbl.remove in_queue (u, v);
+
+      match Hashtbl.find_opt edge_map (u, v) with
+      | Some [ t1_base; t2_base ] ->
+          (* Get triangle vertices *)
+          let get_tri_verts base =
+            (indices.(base), indices.(base + 1), indices.(base + 2))
+          in
+          let v1_1, v1_2, v1_3 = get_tri_verts t1_base in
+          let v2_1, v2_2, v2_3 = get_tri_verts t2_base in
+
+          (* Verify edge still exists in both triangles *)
+          let has_edge i1 i2 i3 =
+            (i1 = u || i2 = u || i3 = u) && (i1 = v || i2 = v || i3 = v)
+          in
+
+          if has_edge v1_1 v1_2 v1_3 && has_edge v2_1 v2_2 v2_3 then
+            (* Identify third points (opposite vertices) *)
+            let get_other i1 i2 i3 =
+              if i1 <> u && i1 <> v then i1
+              else if i2 <> u && i2 <> v then i2
+              else i3
+            in
+            let a = get_other v1_1 v1_2 v1_3 in
+            let b = get_other v2_1 v2_2 v2_3 in
+
+            (* Delaunay criterion: flip if sum of opposite angles > π *)
+            (* α = angle at 'a' opposite to edge u-v in triangle (a, u, v) *)
+            (* β = angle at 'b' opposite to edge u-v in triangle (b, v, u) *)
+            let angle_a = get_angle a u v in
+            let angle_b = get_angle b v u in
+
+            (* Check if quad is convex (diagonals cross) and Delaunay criterion *)
+            if
+              Geometry.segments_cross verts u v a b
+              && angle_a +. angle_b > Float.pi +. epsilon
+            then (
+              incr flip_count;
+              if !verbose then
+                Printf.printf
+                  "Optimization: Flipping edge %d-%d to %d-%d (α+β = %g > π)\n\
+                   %!"
+                  u v a b (angle_a +. angle_b);
+
+              (* Remove old edges from map *)
+              (* T1 had edges: u-v, v-a, a-u *)
+              (* T2 had edges: v-u, u-b, b-v (but u-v is shared, listed once) *)
+              remove_edge u v t1_base;
+              remove_edge u v t2_base;
+              remove_edge v a t1_base;
+              remove_edge a u t1_base;
+              remove_edge u b t2_base;
+              remove_edge b v t2_base;
+
+              (* Perform the flip by modifying indices in place *)
+              (* T1 (u, v, a) -> (u, b, a) : replace v with b *)
+              (* T2 (v, u, b) -> (v, a, b) : replace u with a *)
+              let replace_vertex base old_v new_v =
+                if indices.(base) = old_v then indices.(base) <- new_v
+                else if indices.(base + 1) = old_v then
+                  indices.(base + 1) <- new_v
+                else indices.(base + 2) <- new_v
               in
+              replace_vertex t1_base v b;
+              replace_vertex t2_base u a;
 
-              if has_edge t1_base && has_edge t2_base then
-                (* Identify third points *)
-                let get_other tri_base =
-                  if indices.(tri_base) <> u && indices.(tri_base) <> v then
-                    indices.(tri_base)
-                  else if
-                    indices.(tri_base + 1) <> u && indices.(tri_base + 1) <> v
-                  then indices.(tri_base + 1)
-                  else indices.(tri_base + 2)
-                in
-                let a = get_other t1_base in
-                let b = get_other t2_base in
+              (* Add new edges to map *)
+              (* T1 now has edges: u-b, b-a, a-u *)
+              (* T2 now has edges: v-a, a-b, b-v *)
+              add_edge u b t1_base;
+              add_edge b a t1_base;
+              add_edge a u t1_base;
+              add_edge v a t2_base;
+              add_edge a b t2_base;
+              add_edge b v t2_base;
 
-                (* Current min angle *)
-                let min_orig =
-                  fmin (get_min_angle u v a) (get_min_angle v u b)
-                in
+              (* Enqueue the 4 boundary edges for re-checking *)
+              enqueue_edge u a;
+              enqueue_edge a v;
+              enqueue_edge v b;
+              enqueue_edge b u)
+      | _ -> ()
+    done;
 
-                (* Check intersection of diagonals a-b and u-v *)
-                if Geometry.segments_cross verts u v a b then
-                  let min_new =
-                    fmin (get_min_angle u a b) (get_min_angle v a b)
-                  in
-                  if min_new > min_orig +. epsilon then (
-                    if !verbose then
-                      Printf.printf
-                        "Optimization: Flipping edge %d-%d to %d-%d (Angle %g \
-                         -> %g)\n\
-                         %!"
-                        u v a b min_orig min_new;
-
-                    (* Swap diagonal *)
-                    let replace_vertex base old_v new_v =
-                      if indices.(base) = old_v then indices.(base) <- new_v
-                      else if indices.(base + 1) = old_v then
-                        indices.(base + 1) <- new_v
-                      else indices.(base + 2) <- new_v
-                    in
-
-                    (* 
-                       T1 (u, v, a) -> (u, b, a) : replace v with b
-                       T2 (v, u, b) -> (v, a, b) : replace u with a
-                       
-                       Wait, need to be careful with winding.
-                       Triangulation must preserve orientation.
-                       Original: T1 has edge u->v (or v->u). T2 has v->u (or u->v).
-                       Together they form quad u-a-v-b ?
-                       If T1 is (u, v, a) CCW, then u,v,a order.
-                       If T2 is (v, u, b) CCW, then v,u,b order.
-                       Sharing edge u-v.
-                       If we flip to a-b.
-                       New T1 seems to be (u, b, a) ??
-                       Let's check u->b->a.
-                       u->b is edge of T2 (reversed). b->a is new edge. a->u is edge of T1 (reversed).
-                       This forms a cycle u->b->a.
-                       New T2 seems to be (v, a, b).
-                       v->a is edge of T1 (reversed). a->b is new edge (reversed). b->v is edge of T2.
-                       This seems correct.
-                    *)
-                    replace_vertex t1_base v b;
-                    replace_vertex t2_base u a;
-
-                    changed := true))
-          edge_map;
-
-        if !changed then loop (pass + 1)
-    in
-    loop 1
+    if !verbose && !flip_count > 0 then
+      Printf.printf "Optimization: %d edge flips performed\n%!" !flip_count
 
   let triangulate_multi ?(tile = "") ?(feature_type = "") (verts : float array)
       polygons =
