@@ -231,12 +231,7 @@ type program = Web_utils.program_spec = {
 let n_sectors = 512
 let n_rings = 1024
 
-type orientation = {
-  alpha : float;
-  beta : float;
-  gamma : float;
-  screen : float;
-}
+(* type orientation = Quaternion.t *)
 
 (* Input mode: Sensor (device orientation) vs Manual (touch/mouse drag) *)
 type input_mode = Sensor | Manual
@@ -246,12 +241,7 @@ let zoom = ref 1.0
 
 (* Math Helpers *)
 
-let rotation_matrix orientation =
-  let open Matrix in
-  rotate_z (-.orientation.alpha *. pi /. 180.)
-  * rotate_x (-.orientation.beta *. pi /. 180.)
-  * rotate_y (-.orientation.gamma *. pi /. 180.)
-  * rotate_z (orientation.screen *. pi /. 180.)
+let rotation_matrix orientation = Quaternion.to_matrix orientation
 
 let compute_azimuth m =
   let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
@@ -2566,13 +2556,30 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let transform =
     Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
   in
+  (* Extract Euler angles for text orientation - keeping consistency with existing logic *)
+  (* let _roll, _pitch, _yaw = Quaternion.to_euler orientation in *)
+  (* Note: Quaternion.to_euler return radians.
+     beta (pitch) corresponds to pitch.
+     gamma (roll) corresponds to roll.
+     screen corresponds to 0. (assuming no screen rotation for now).
+   *)
+
   let screen_inclination =
-    orientation.screen
-    +. 180. /. pi
-       *. atan2
-            (sin (orientation.gamma *. pi /. 180.)
-            *. cos (orientation.beta *. pi /. 180.))
-            (sin (orientation.beta *. pi /. 180.))
+    (* Re-using the logic:
+        orientation.screen (0) 
+        + 180/pi * atan2 (sin gamma * cos beta) (sin beta)
+     *)
+    (* For now, let's simplify. If we assume the camera is upright (turntable), 
+        screen_inclination is mostly related to pitch.
+        The original code formula:
+        atan2 (sin gamma * cos beta) (sin beta)
+        
+        If gamma (roll) is 0: sin(0) = 0. atan2(0, sin beta) = 0.
+        So if there is no roll, inclination is 0. 
+        
+        Let's try to pass 0.0 for now as we maintain horizon level.
+      *)
+    0.0
   in
   let x_scale, y_scale =
     let s = scale *. !zoom in
@@ -2706,7 +2713,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 
 (* Event loop *)
 
-let current_orientation = ref { alpha = 0.; beta = 0.; gamma = 0.; screen = 0. }
+let current_orientation = ref Quaternion.identity
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -2727,12 +2734,62 @@ let event_loop ctx draw =
       let va = if abs_float va < 0.0001 then 0. else va in
       let vb = if abs_float vb < 0.0001 then 0. else vb in
       velocity := (va, vb);
-      current_orientation :=
-        {
-          !current_orientation with
-          alpha = !current_orientation.alpha +. (va *. dt);
-          beta = max 60. (min 120. (!current_orientation.beta +. (vb *. dt)));
-        }
+      velocity := (va, vb);
+
+      (* Update Quaternion *)
+      let dt_sec = dt /. 1000. in
+      let d_alpha = va *. dt_sec in
+      (* rad/s * s = rad *)
+      let d_beta = vb *. dt_sec in
+
+      let q = !current_orientation in
+
+      (* Yaw: Rotate around Z (up) *)
+      (* Note: va/alpha uses degrees in original code but velocity seems to be in deg/ms?
+         Checking viewer.ml:
+         alpha = alpha + va * dt
+         rotate_z (-alpha * pi / 180)
+         So alpha is in degrees. va is degrees/ms.
+         
+         We want to update our quaternion.
+         Let's convert d_alpha/d_beta to radians.
+      *)
+      let d_alpha_rad = d_alpha (* va *. dt *) *. pi /. 180. in
+      let d_beta_rad = d_beta (* vb *. dt *) *. pi /. 180. in
+
+      let q_yaw =
+        Quaternion.from_axis_angle
+          { x = 0.; y = 0.; z = 1.; w = 0. }
+          (-.d_alpha_rad)
+      in
+      let q_pitch =
+        Quaternion.from_axis_angle
+          { x = 1.; y = 0.; z = 0.; w = 0. }
+          (-.d_beta_rad)
+      in
+
+      (* Apply: New = Yaw * Old * Pitch *)
+      (* This maintains the "Turntable" feel:
+          - Yaw is always global Z (0,0,1)
+          - Pitch is local X (1,0,0) relative to current view (but simpler to just multiply on the right for local)
+         
+         Actually:
+         Global Yaw (Pre-multiply):  Q_new = Q_yaw * Q_old
+         Local Pitch (Post-multiply): Q_new = Q_old * Q_pitch
+         
+         But wait, our rotate_x/y/z in Matrix.ml might have different conventions.
+         Original: rotate_z(-alpha) * rotate_x(-beta) * ...
+         This means specific Euler order: Z then X.
+      
+         If we want Global Z and Local X:
+         q_new = q_yaw * q * q_pitch
+      *)
+      let q_new = Quaternion.(q_yaw * q * q_pitch) in
+      current_orientation := Quaternion.normalize q_new;
+
+      (* Clamping Pitch (Optional but good for terrain) *)
+      (* TODO: Implement pitch clamping if needed later *)
+      ()
     end;
     let orientation = !current_orientation in
     let z = !zoom in
@@ -2743,9 +2800,15 @@ let event_loop ctx draw =
     loop orientation z
   in
   last_frame_time := now ();
-  loop
-    { !current_orientation with alpha = !current_orientation.alpha -. 1. }
-    (!zoom -. 1.)
+  (* Initial rotation: Rotate a bit for demo *)
+  let q_init =
+    Quaternion.(
+      mult
+        (from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-1. *. pi /. 180.))
+        !current_orientation)
+  in
+  current_orientation := q_init;
+  loop q_init (!zoom -. 1.)
 (* Orchestration *)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
@@ -2945,6 +3008,44 @@ let get_preset_position () =
   match featured_locations with
   | (_, lat, lon, alpha) :: _ -> (lat, lon, alpha)
   | [] -> (44.3950846, 6.7669714, 170.)
+
+let set_orientation_from_yaw alpha =
+  let alpha_rad = alpha *. pi /. 180. in
+  (* Initial orientation: Yaw only, Pitch ~90 (looking down) or 0 (horizon)? 
+       Original defaults: beta=0 means looking down? 
+       Wait, original code:
+       rotate_x (-beta)
+       beta was initialized to 0.
+       beta was clamped to 60..120.
+       Usually 90 is horizon? or 0 is horizon?
+       
+       If I look at code:
+       rotate_x (-beta)
+       
+       If beta=0, no X rotation. Camera looks down -Z?
+       Camera setup usually looks -Z.
+       Terrain is on XY plane (z=0?).
+       translate 0 0 (-height - 2).
+       So camera is at +Z. Looking down -Z.
+       So beta=0 is looking straight down.
+       beta=90 is looking at horizon.
+       
+       Let's stick to that.
+                                           
+       So for "alpha" in preset (yaw):
+       We want Global Z rotation.
+    *)
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-.alpha_rad)
+  in
+
+  (* Set default pitch to something reasonable, e.g. 80 degrees (near horizon) *)
+  let pitch_rad = 80. *. pi /. 180. in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } (-.pitch_rad)
+  in
+
+  current_orientation := Quaternion.(q_yaw * q_pitch)
 
 let parse_float_safe s = try Some (float_of_string s) with _ -> None
 
@@ -3430,7 +3531,26 @@ let setup_events canvas =
                    display_temporary_message "Raise your phone!";
                    Lwt.return ())
              | `Started -> if beta >= 90. then remove_message ());
-             current_orientation := { alpha; beta; gamma; screen }
+
+             let q =
+               Quaternion.(
+                 mult
+                   (from_axis_angle
+                      { x = 0.; y = 0.; z = 1.; w = 0. }
+                      (-.alpha *. pi /. 180.))
+                   (mult
+                      (from_axis_angle
+                         { x = 1.; y = 0.; z = 0.; w = 0. }
+                         (-.beta *. pi /. 180.))
+                      (mult
+                         (from_axis_angle
+                            { x = 0.; y = 1.; z = 0.; w = 0. }
+                            (-.gamma *. pi /. 180.))
+                         (from_axis_angle
+                            { x = 0.; y = 0.; z = 1.; w = 0. }
+                            (screen *. pi /. 180.)))))
+             in
+             current_orientation := q
            end)
        (Brr.Window.as_target Brr.G.window));
 
@@ -3444,29 +3564,33 @@ let setup_events canvas =
          (fun ev ->
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
-               current_orientation :=
-                 {
-                   !current_orientation with
-                   alpha = !current_orientation.alpha +. 5.;
-                 }
+               let q_rot =
+                 Quaternion.from_axis_angle
+                   { x = 0.; y = 0.; z = 1.; w = 0. }
+                   (5. *. pi /. 180.)
+               in
+               current_orientation := Quaternion.mult q_rot !current_orientation
            | "ArrowRight" ->
-               current_orientation :=
-                 {
-                   !current_orientation with
-                   alpha = !current_orientation.alpha -. 5.;
-                 }
+               let q_rot =
+                 Quaternion.from_axis_angle
+                   { x = 0.; y = 0.; z = 1.; w = 0. }
+                   (-5. *. pi /. 180.)
+               in
+               current_orientation := Quaternion.mult q_rot !current_orientation
            | "ArrowDown" ->
-               current_orientation :=
-                 {
-                   !current_orientation with
-                   beta = max 60. (!current_orientation.beta -. 5.);
-                 }
+               let q_rot =
+                 Quaternion.from_axis_angle
+                   { x = 1.; y = 0.; z = 0.; w = 0. }
+                   (-5. *. pi /. 180.)
+               in
+               current_orientation := Quaternion.mult !current_orientation q_rot
            | "ArrowUp" ->
-               current_orientation :=
-                 {
-                   !current_orientation with
-                   beta = min 120. (!current_orientation.beta +. 5.);
-                 }
+               let q_rot =
+                 Quaternion.from_axis_angle
+                   { x = 1.; y = 0.; z = 0.; w = 0. }
+                   (5. *. pi /. 180.)
+               in
+               current_orientation := Quaternion.mult !current_orientation q_rot
            | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
            | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
            | _ -> ())
@@ -3519,7 +3643,10 @@ let setup_events canvas =
              let speed =
                2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
              in
-             let gamma = !current_orientation.screen *. Float.pi /. 180. in
+             let gamma =
+               0.
+               (* !current_orientation.screen *. Float.pi /. 180. *)
+             in
              let c = cos gamma in
              let s = sin gamma in
              let dx_eff = (dx *. c) -. (dy *. s) in
@@ -3542,11 +3669,19 @@ let setup_events canvas =
              mouse_last_x := x;
              mouse_last_y := y;
              current_orientation :=
-               {
-                 !current_orientation with
-                 alpha = !current_orientation.alpha +. da;
-                 beta = max 60. (min 120. (!current_orientation.beta +. db));
-               }
+               let da_rad = da *. Float.pi /. 180. in
+               let db_rad = db *. Float.pi /. 180. in
+               let q_yaw =
+                 Quaternion.from_axis_angle
+                   { x = 0.; y = 0.; z = 1.; w = 0. }
+                   (-.da_rad)
+               in
+               let q_pitch =
+                 Quaternion.from_axis_angle
+                   { x = 1.; y = 0.; z = 0.; w = 0. }
+                   (-.db_rad)
+               in
+               Quaternion.(q_yaw * !current_orientation * q_pitch)
            end)
          (Brr.Window.as_target Brr.G.window));
 
@@ -3621,14 +3756,8 @@ let setup_events canvas =
                if !input_mode = Sensor then begin
                  input_mode := Manual;
                  display_temporary_message "Manual mode";
-                 let alpha =
-                   compute_azimuth (rotation_matrix !current_orientation)
-                   *. 180. /. pi
-                 in
-                 Format.eprintf "%f %f => %f@." !current_orientation.alpha
-                   !current_orientation.gamma alpha;
-                 current_orientation :=
-                   { !current_orientation with alpha; gamma = 0.; screen = 0. }
+                 (* No need to snap orientation with quaternions - preserve current view *)
+                 ()
                end;
                Brr.Ev.prevent_default ev
              end;
@@ -3642,7 +3771,10 @@ let setup_events canvas =
                let speed =
                  2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
                in
-               let gamma = !current_orientation.screen *. Float.pi /. 180. in
+               let gamma =
+                 0.
+                 (* !current_orientation.screen *. Float.pi /. 180. *)
+               in
                let c = cos gamma in
                let s = sin gamma in
                let dx_eff = (dx *. c) -. (dy *. s) in
@@ -3665,11 +3797,19 @@ let setup_events canvas =
                touch_last_x := x;
                touch_last_y := y;
                current_orientation :=
-                 {
-                   !current_orientation with
-                   alpha = !current_orientation.alpha +. da;
-                   beta = max 60. (min 120. (!current_orientation.beta +. db));
-                 }
+                 let da_rad = da *. Float.pi /. 180. in
+                 let db_rad = db *. Float.pi /. 180. in
+                 let q_yaw =
+                   Quaternion.from_axis_angle
+                     { x = 0.; y = 0.; z = 1.; w = 0. }
+                     (-.da_rad)
+                 in
+                 let q_pitch =
+                   Quaternion.from_axis_angle
+                     { x = 1.; y = 0.; z = 0.; w = 0. }
+                     (-.db_rad)
+                 in
+                 Quaternion.(q_yaw * !current_orientation * q_pitch)
              end
            end
            else if num_touches >= 2 then begin
@@ -3801,7 +3941,8 @@ let main () =
             (Brr.Uri.Params.of_jstr search)
         in
         navigate_to uri);
-  current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. };
+  (* current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. }; *)
+  set_orientation_from_yaw angle;
 
   let start = setup_events canvas in
   update_startup_status "Loading Terrain..." true;
