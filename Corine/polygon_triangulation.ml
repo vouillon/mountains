@@ -1379,6 +1379,142 @@ module Triangulator = struct
     in
     outer_area -. holes_area
 
+  let optimize_triangulation (verts : float array) (indices : int array)
+      start_offset end_offset =
+    let get_sq_dist i1 i2 = Geometry.dist_sq verts i1 i2 in
+
+    (* Helper to calculate min angle of a triangle *)
+    let get_min_angle i1 i2 i3 =
+      let d12 = sqrt (get_sq_dist i1 i2) in
+      let d23 = sqrt (get_sq_dist i2 i3) in
+      let d31 = sqrt (get_sq_dist i3 i1) in
+      let angle a b c =
+        let cos_c = ((a *. a) +. (b *. b) -. (c *. c)) /. (2.0 *. a *. b) in
+        let cos_c =
+          if cos_c > 1.0 then 1.0 else if cos_c < -1.0 then -1.0 else cos_c
+        in
+        acos cos_c
+      in
+      if d12 < epsilon || d23 < epsilon || d31 < epsilon then 0.0
+      else
+        let a1 = angle d12 d23 d31 in
+        let a2 = angle d23 d31 d12 in
+        let a3 = angle d31 d12 d23 in
+        fmin a1 (fmin a2 a3)
+    in
+
+    (* Edge map: (min_v, max_v) -> tri_index list *)
+    let edge_capacity = end_offset - start_offset in
+    let edge_map = Hashtbl.create edge_capacity in
+    let add_edge v1 v2 tri_idx =
+      let key = if v1 < v2 then (v1, v2) else (v2, v1) in
+      let current = try Hashtbl.find edge_map key with Not_found -> [] in
+      Hashtbl.replace edge_map key (tri_idx :: current)
+    in
+
+    let rec loop pass =
+      if pass > 100 then (
+        if !verbose then Printf.printf "Optimization: Max passes reached\n%!";
+        ())
+      else
+        let changed = ref false in
+        Hashtbl.clear edge_map;
+        (* Build edge map *)
+        let num_tris = (end_offset - start_offset) / 3 in
+        for i = 0 to num_tris - 1 do
+          let base = start_offset + (i * 3) in
+          let v1 = indices.(base) in
+          let v2 = indices.(base + 1) in
+          let v3 = indices.(base + 2) in
+          add_edge v1 v2 base;
+          add_edge v2 v3 base;
+          add_edge v3 v1 base
+        done;
+
+        (* Check edges *)
+        Hashtbl.iter
+          (fun (u, v) tris ->
+            if List.length tris = 2 then
+              let t1_base = List.nth tris 0 in
+              let t2_base = List.nth tris 1 in
+
+              (* Verify triangles still contain this edge (it might have been flipped already) *)
+              let has_edge base =
+                let i1, i2, i3 =
+                  (indices.(base), indices.(base + 1), indices.(base + 2))
+                in
+                (i1 = u || i2 = u || i3 = u) && (i1 = v || i2 = v || i3 = v)
+              in
+
+              if has_edge t1_base && has_edge t2_base then
+                (* Identify third points *)
+                let get_other tri_base =
+                  if indices.(tri_base) <> u && indices.(tri_base) <> v then
+                    indices.(tri_base)
+                  else if
+                    indices.(tri_base + 1) <> u && indices.(tri_base + 1) <> v
+                  then indices.(tri_base + 1)
+                  else indices.(tri_base + 2)
+                in
+                let a = get_other t1_base in
+                let b = get_other t2_base in
+
+                (* Current min angle *)
+                let min_orig =
+                  fmin (get_min_angle u v a) (get_min_angle v u b)
+                in
+
+                (* Check intersection of diagonals a-b and u-v *)
+                if Geometry.segments_cross verts u v a b then
+                  let min_new =
+                    fmin (get_min_angle u a b) (get_min_angle v a b)
+                  in
+                  if min_new > min_orig +. epsilon then (
+                    if !verbose then
+                      Printf.printf
+                        "Optimization: Flipping edge %d-%d to %d-%d (Angle %g \
+                         -> %g)\n\
+                         %!"
+                        u v a b min_orig min_new;
+
+                    (* Swap diagonal *)
+                    let replace_vertex base old_v new_v =
+                      if indices.(base) = old_v then indices.(base) <- new_v
+                      else if indices.(base + 1) = old_v then
+                        indices.(base + 1) <- new_v
+                      else indices.(base + 2) <- new_v
+                    in
+
+                    (* 
+                       T1 (u, v, a) -> (u, b, a) : replace v with b
+                       T2 (v, u, b) -> (v, a, b) : replace u with a
+                       
+                       Wait, need to be careful with winding.
+                       Triangulation must preserve orientation.
+                       Original: T1 has edge u->v (or v->u). T2 has v->u (or u->v).
+                       Together they form quad u-a-v-b ?
+                       If T1 is (u, v, a) CCW, then u,v,a order.
+                       If T2 is (v, u, b) CCW, then v,u,b order.
+                       Sharing edge u-v.
+                       If we flip to a-b.
+                       New T1 seems to be (u, b, a) ??
+                       Let's check u->b->a.
+                       u->b is edge of T2 (reversed). b->a is new edge. a->u is edge of T1 (reversed).
+                       This forms a cycle u->b->a.
+                       New T2 seems to be (v, a, b).
+                       v->a is edge of T1 (reversed). a->b is new edge (reversed). b->v is edge of T2.
+                       This seems correct.
+                    *)
+                    replace_vertex t1_base v b;
+                    replace_vertex t2_base u a;
+
+                    changed := true))
+          edge_map;
+
+        if !changed then loop (pass + 1)
+    in
+    loop 1
+
   let triangulate_multi ?(tile = "") ?(feature_type = "") (verts : float array)
       polygons =
     Array.iter
@@ -1423,6 +1559,9 @@ module Triangulator = struct
         let start_offset = !offset in
         (* Use normalized vertices for triangulation *)
         offset := triangulate_single norm_verts poly out_buffer !offset;
+
+        (* Optimize triangulation *)
+        optimize_triangulation norm_verts out_buffer start_offset !offset;
         let expected = polygon_area verts poly in
 
         (* Verify this specific polygon *)
