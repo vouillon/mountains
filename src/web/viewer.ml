@@ -2490,17 +2490,7 @@ type lazy_text = {
   mutable texture : (Gl.texture * int * int) option;
 }
 
-let text_canvas =
-  let c = Brr_canvas.Canvas.create [] in
-  Brr_canvas.Canvas.set_w c 1;
-  Brr_canvas.Canvas.set_h c 1;
-  Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none")
-    (Brr_canvas.Canvas.to_el c);
-  Brr.El.append_children
-    (Brr.Document.body Brr.G.document)
-    [ Brr_canvas.Canvas.to_el c ];
-  c
-
+let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
 let text_ctx = Brr_canvas.C2d.get_context text_canvas
 
 let prepare_text_immediate ctx text =
