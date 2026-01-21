@@ -1713,9 +1713,16 @@ type graphics_resources = {
   nearest_sampler : Gl.sampler;
 }
 
-let resize_canvas canvas =
-  let canvas_width = truncate (Brr.El.inner_w canvas) in
-  let canvas_height = truncate (Brr.El.inner_h canvas) in
+let resize_canvas ?device_width ?device_height canvas =
+  let canvas_width, canvas_height =
+    match (device_width, device_height) with
+    | Some w, Some h -> (w, h)
+    | _ ->
+        (* Fallback: use devicePixelRatio *)
+        let dpr = Brr.Window.device_pixel_ratio Brr.G.window in
+        ( truncate (Brr.El.inner_w canvas *. dpr),
+          truncate (Brr.El.inner_h canvas *. dpr) )
+  in
   let canvas = Brr_canvas.Canvas.of_el canvas in
   if Brr_canvas.Canvas.w canvas <> canvas_width then
     Brr_canvas.Canvas.set_w canvas canvas_width;
@@ -3722,9 +3729,21 @@ let setup_events canvas =
 
     (* Use ResizeObserver to detect canvas size changes *)
     let observer_cb =
-      Jv.callback ~arity:1 (fun _ ->
-          resize_canvas canvas;
-          force_redraw := true)
+      Jv.callback ~arity:1 (fun entries ->
+          let len = Jv.to_int (Jv.get entries "length") in
+          if len > 0 then begin
+            let entry = Jv.call entries "at" [| Jv.of_int 0 |] in
+            let device_box = Jv.get entry "devicePixelContentBoxSize" in
+            let device_width, device_height =
+              if Jv.is_undefined device_box then (None, None)
+              else
+                let box = Jv.call device_box "at" [| Jv.of_int 0 |] in
+                ( Some (Jv.to_int (Jv.get box "inlineSize")),
+                  Some (Jv.to_int (Jv.get box "blockSize")) )
+            in
+            resize_canvas ?device_width ?device_height canvas;
+            force_redraw := true
+          end)
     in
     let observer =
       Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
