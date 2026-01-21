@@ -2560,13 +2560,9 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     ~(radial_params : Render_state.radial_params) canvas ctx =
   (* Poll for completed GPU timer queries *)
   Gpu_timer.poll_results ctx;
-  let canvas_width = truncate (Brr.El.inner_w canvas) in
-  let canvas_height = truncate (Brr.El.inner_h canvas) in
   let canvas = Brr_canvas.Canvas.of_el canvas in
-  if Brr_canvas.Canvas.w canvas <> canvas_width then
-    Brr_canvas.Canvas.set_w canvas canvas_width;
-  if Brr_canvas.Canvas.h canvas <> canvas_height then
-    Brr_canvas.Canvas.set_h canvas canvas_height;
+  let canvas_width = Brr_canvas.Canvas.w canvas in
+  let canvas_height = Brr_canvas.Canvas.h canvas in
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
@@ -3724,10 +3720,16 @@ let setup_events canvas =
            end)
          target);
 
-    ignore
-      (Brr.Ev.listen Brr.Ev.resize
-         (fun _ -> force_redraw := true)
-         (Brr.Window.as_target Brr.G.window));
+    (* Use ResizeObserver to detect canvas size changes *)
+    let observer_cb =
+      Jv.callback ~arity:1 (fun _ ->
+          resize_canvas canvas;
+          force_redraw := true)
+    in
+    let observer =
+      Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
+    in
+    ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
 
     state := `Starting
 
