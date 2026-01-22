@@ -238,6 +238,8 @@ type input_mode = Sensor | Manual
 
 let input_mode = ref Sensor
 let zoom = ref 1.0
+let min_zoom = 0.5
+let max_zoom = 3.0
 
 (* Math Helpers *)
 
@@ -2758,6 +2760,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 (* Event loop *)
 
 let current_orientation = ref Quaternion.identity
+let target_orientation = ref Quaternion.identity
+let first_sensor_update = ref true
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -2792,7 +2796,26 @@ let event_loop ctx draw =
     let dt = t -. !last_frame_time in
     last_frame_time := t;
 
-    if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.) then begin
+    if !input_mode = Sensor then begin
+      (* Sensor Mode: Adaptive Smoothing using SLERP
+         Tau (time constant) varies with FOV to prevent jitter when zoomed in.
+         - Wide FOV (Zoomed Out): Tau = 0.1s (Fast response)
+         - Narrow FOV (Zoomed In): Tau = 0.5s (Slow, smooth response)
+      *)
+      let tau =
+        let min_tau = 0.02 in
+        let max_tau = 0.15 in
+        let t = (log !zoom -. log min_zoom) /. (log max_zoom -. log min_zoom) in
+        let t = max 0. (min 1. t) in
+        let t = t *. t in
+        min_tau +. (t *. (max_tau -. min_tau))
+      in
+      let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
+      current_orientation :=
+        Quaternion.slerp !current_orientation !target_orientation alpha
+    end
+    else if (not !is_dragging) && (fst !velocity <> 0. || snd !velocity <> 0.)
+    then begin
       let va, vb = !velocity in
       (* Friction: 0.95 per 16ms *)
       let friction = 0.95 ** (dt /. 16.6) in
@@ -2803,17 +2826,6 @@ let event_loop ctx draw =
       velocity := (va, vb);
       velocity := (va, vb);
 
-      (* Update Quaternion *)
-      (* Yaw: Rotate around Z (up) *)
-      (* Note: va/alpha uses degrees in original code but velocity seems to be in deg/ms?
-         Checking viewer.ml:
-         alpha = alpha + va * dt
-         rotate_z (-alpha * pi / 180)
-         So alpha is in degrees. va is degrees/ms.
-         
-         We want to update our quaternion.
-         Let's convert d_alpha/d_beta to radians.
-      *)
       if (not !is_dragging) && (not !touch_dragging) && !velocity <> (0., 0.)
       then begin
         let vx, vy = !velocity in
@@ -2828,9 +2840,6 @@ let event_loop ctx draw =
           if !input_mode = Manual then
             current_orientation :=
               apply_manual_rotation !current_orientation da_rad db_rad
-          else
-            (* Sensor mode specific or fallback *)
-            ()
         end
         else velocity := (0., 0.)
       end
@@ -3516,9 +3525,6 @@ let setup_events canvas =
     end
   in
 
-  let min_zoom = 0.5 in
-  let max_zoom = 3. in
-
   (* Device orientation listener - only active in Sensor mode *)
   ignore
     (Brr.Ev.listen deviceorientation
@@ -3565,7 +3571,11 @@ let setup_events canvas =
                             { x = 0.; y = 0.; z = 1.; w = 0. }
                             (-.screen *. pi /. 180.)))))
              in
-             current_orientation := q
+             target_orientation := q;
+             if !first_sensor_update then begin
+               current_orientation := q;
+               first_sensor_update := false
+             end
            end)
        (Brr.Window.as_target Brr.G.window));
 

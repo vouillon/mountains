@@ -6,6 +6,8 @@ val normalize : t -> t
 val mult : t -> t -> t
 val ( * ) : t -> t -> t
 val conjugate : t -> t
+val dot : t -> t -> float
+val slerp : t -> t -> float -> t
 val from_axis_angle : Matrix.vector -> float -> t
 val transform_vector : t -> Matrix.vector -> Matrix.vector
 val to_matrix : t -> Matrix.t
