@@ -245,15 +245,9 @@ let max_zoom = 3.0
 
 let rotation_matrix orientation = Quaternion.to_matrix orientation
 
-let compute_azimuth m =
-  let v_up = Matrix.(m *> { x = 0.; y = 1.; z = 0.; w = 0. }) in
-  let v_fwd = Matrix.(m *> { x = 0.; y = 0.; z = -1.; w = 0. }) in
-  let len_up = (v_up.x ** 2.) +. (v_up.y ** 2.) in
-  let len_fwd = (v_fwd.x ** 2.) +. (v_fwd.y ** 2.) in
-  let azimuth =
-    if len_up > len_fwd then atan2 v_up.y v_up.x else atan2 v_fwd.y v_fwd.x
-  in
-  azimuth -. (pi /. 2.)
+let compute_azimuth q =
+  let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
+  atan2 (-.fwd.x) fwd.y
 
 (* GLSL Common *)
 
@@ -2681,7 +2675,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.enable ctx Gl.cull_face';
   (* Determine snapped alpha - changes with camera orientation *)
   let grid_k = radial_params.Render_state.grid_k in
-  let current_azimuth = compute_azimuth transform in
+  let current_azimuth = compute_azimuth orientation in
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
   (* Matrices - change with camera orientation and aspect ratio *)
@@ -3500,17 +3494,21 @@ let setup_events canvas =
   let toggle_fullscreen () =
     match Brr.Document.fullscreen_element Brr.G.document with
     | None ->
+        Lwt.async @@ fun () ->
+        let* () =
+          to_lwt
+            (Brr.El.request_fullscreen
+               ~opts:
+                 (Brr.El.fullscreen_opts
+                    ~navigation_ui:Brr.El.Navigation_ui.hide ())
+               (Brr.Document.body Brr.G.document))
+        in
         ignore
           (Jv.call
              (Jv.get (Jv.get Jv.global "screen") "orientation")
              "lock"
              [| Jv.of_jstr (Jstr.v "portrait") |]);
-        ignore
-          (Brr.El.request_fullscreen
-             ~opts:
-               (Brr.El.fullscreen_opts ~navigation_ui:Brr.El.Navigation_ui.hide
-                  ())
-             (Brr.Document.body Brr.G.document))
+        Lwt.return ()
     | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
   in
 
