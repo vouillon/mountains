@@ -2761,7 +2761,6 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 
 let current_orientation = ref Quaternion.identity
 let target_orientation = ref Quaternion.identity
-let first_sensor_update = ref true
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -3549,17 +3548,6 @@ let setup_events canvas =
              let alpha = angle "alpha" in
              let beta = angle "beta" in
              let gamma = angle "gamma" in
-             (match !state with
-             | `Init -> ()
-             | `Starting ->
-                 state := `Started;
-                 if beta < 90. then (
-                   Lwt.async @@ fun () ->
-                   let* () = sleep 1.1 in
-                   display_temporary_message "Raise your phone!";
-                   Lwt.return ())
-             | `Started -> if beta >= 90. then remove_message ());
-
              let q =
                Quaternion.(
                  mult
@@ -3579,10 +3567,16 @@ let setup_events canvas =
                             (-.screen *. pi /. 180.)))))
              in
              target_orientation := q;
-             if !first_sensor_update then begin
-               current_orientation := q;
-               first_sensor_update := false
-             end
+             match !state with
+             | `Init -> current_orientation := q
+             | `Starting ->
+                 state := `Started;
+                 if beta < 80. then (
+                   Lwt.async @@ fun () ->
+                   let* () = sleep 1.1 in
+                   display_temporary_message "Raise your phone!";
+                   Lwt.return ())
+             | `Started -> if beta >= 80. then remove_message ()
            end)
        (Brr.Window.as_target Brr.G.window));
 
