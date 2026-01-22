@@ -2535,6 +2535,71 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+(* Helper functions for orientation control *)
+let get_inclination_rad q =
+  let q_inv = Quaternion.conjugate q in
+  let up_cam =
+    Quaternion.transform_vector q_inv { x = 0.; y = 0.; z = 1.; w = 0. }
+  in
+  atan2 up_cam.x up_cam.y
+
+let screen_inclination q =
+  let angle = get_inclination_rad q in
+  -.angle *. 180. /. Float.pi
+
+let snap_to_turntable q =
+  (* 1. Extract Forward vector (World space direction of Camera -Z) *)
+  let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
+  (* 2. Extract Yaw (psi). Align 0 to North (Y).
+     RotZ(psi) maps (0,1) to (-sin(psi), cos(psi)).
+     We want psi. atan2(sin, cos).
+     sin = -x, cos = y.
+     psi = atan2(-x, y). *)
+  let psi = atan2 (-.fwd.x) fwd.y in
+  (* 3. Extract Pitch (theta). Angle from Down (-Z).
+     fwd.z = -cos(theta) -> theta = acos(-z) *)
+  let fwd_z = max (-1.) (min 1. fwd.z) in
+  let theta = acos (-.fwd_z) in
+  (* 4. Reconstruct
+     Yaw (Z axis) then Pitch (X axis, negative angle from Down) *)
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } psi
+  in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } theta
+  in
+  Quaternion.(q_yaw * q_pitch)
+
+let apply_manual_rotation q da_rad db_rad =
+  (* 1. Apply Yaw (Global Z) *)
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } da_rad
+  in
+  let q_yawed = Quaternion.mult q_yaw q in
+
+  (* 2. Extract current Pitch (theta) from yawed quaternion
+     Forward vector z component tells us the inclination.
+     fwd = q * (0,0,-1)
+     fwd.z = -cos(theta) -> theta = acos(-fwd.z) *)
+  let fwd =
+    Quaternion.transform_vector q_yawed { x = 0.; y = 0.; z = -1.; w = 0. }
+  in
+  let fwd_z = max (-1.) (min 1. fwd.z) in
+  let theta = acos (-.fwd_z) in
+
+  (* 3. Calculate target pitch and Clamp *)
+  let target_theta = theta +. db_rad in
+  let min_pitch = 60. *. Float.pi /. 180. in
+  let max_pitch = 120. *. Float.pi /. 180. in
+  let clamped_theta = max min_pitch (min max_pitch target_theta) in
+
+  (* 4. Apply effective pitch delta (Local X) *)
+  let effective_db = clamped_theta -. theta in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } effective_db
+  in
+  Quaternion.mult q_yawed q_pitch
+
 let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
@@ -2554,33 +2619,11 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let aspect = float canvas_width /. float canvas_height in
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let transform =
-    Matrix.(translate 0. 0. (-.height -. 2.) * rotation_matrix orientation)
+    Matrix.(
+      translate 0. 0. (-.height -. 2.)
+      * rotation_matrix (Quaternion.conjugate orientation))
   in
-  (* Extract Euler angles for text orientation - keeping consistency with existing logic *)
-  (* let _roll, _pitch, _yaw = Quaternion.to_euler orientation in *)
-  (* Note: Quaternion.to_euler return radians.
-     beta (pitch) corresponds to pitch.
-     gamma (roll) corresponds to roll.
-     screen corresponds to 0. (assuming no screen rotation for now).
-   *)
 
-  let screen_inclination =
-    (* Re-using the logic:
-        orientation.screen (0) 
-        + 180/pi * atan2 (sin gamma * cos beta) (sin beta)
-     *)
-    (* For now, let's simplify. If we assume the camera is upright (turntable), 
-        screen_inclination is mostly related to pitch.
-        The original code formula:
-        atan2 (sin gamma * cos beta) (sin beta)
-        
-        If gamma (roll) is 0: sin(0) = 0. atan2(0, sin beta) = 0.
-        So if there is no roll, inclination is 0. 
-        
-        Let's try to pass 0.0 for now as we maintain horizon level.
-      *)
-    0.0
-  in
   let x_scale, y_scale =
     let s = scale *. !zoom in
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
@@ -2604,7 +2647,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   in
   let points =
     let pos = ref [] in
-    let angle = (screen_inclination *. pi /. 180.) +. (pi /. 4.) in
+    let angle = (screen_inclination orientation *. pi /. 180.) +. (pi /. 4.) in
     let ca = cos angle in
     let sa = sin angle in
     List.filter_map
@@ -2680,7 +2723,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         let sx = 0.6 *. text_height *. x_scale /. text_scale in
         let sy = 0.6 *. text_height *. y_scale /. text_scale in
         Matrix.(
-          rotate_z (angle +. (screen_inclination *. pi /. 180.))
+          rotate_z (angle +. (screen_inclination orientation *. pi /. 180.))
           * scale sx sy 1. * translate x y 0.)
       in
       Matrix.blit transform transform_ba;
@@ -2702,7 +2745,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
           let sy = text_height *. y_scale /. text_scale in
           Matrix.(
             translate 0.7 (-0.5) 0.
-            * rotate_z ((pi /. 4.) +. (screen_inclination *. pi /. 180.))
+            * rotate_z
+                ((pi /. 4.) +. (screen_inclination orientation *. pi /. 180.))
             * scale sx sy 1. * translate x y 0.)
         in
         draw_text ctx text_uniforms transform transform_ba transform_ta texture)
@@ -2717,6 +2761,29 @@ let current_orientation = ref Quaternion.identity
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
+
+(* Mouse state *)
+let mouse_dragging = ref false
+let mouse_start_x = ref 0.
+let mouse_start_y = ref 0.
+let mouse_last_x = ref 0.
+let mouse_last_y = ref 0.
+
+(* Touch state *)
+let touch_start_x = ref 0.
+let touch_start_y = ref 0.
+let touch_last_x = ref 0.
+let touch_last_y = ref 0.
+let touch_dragging = ref false
+let pinch_distance = ref 0.
+
+(* Double-tap detection for returning to sensor mode *)
+let last_tap_time = ref 0.
+let double_tap_threshold = 300.
+(* ms *)
+
+(* Drag threshold to distinguish tap from drag (in pixels) *)
+let drag_threshold = 10.
 let last_frame_time = ref 0.
 
 let event_loop ctx draw =
@@ -2737,13 +2804,6 @@ let event_loop ctx draw =
       velocity := (va, vb);
 
       (* Update Quaternion *)
-      let dt_sec = dt /. 1000. in
-      let d_alpha = va *. dt_sec in
-      (* rad/s * s = rad *)
-      let d_beta = vb *. dt_sec in
-
-      let q = !current_orientation in
-
       (* Yaw: Rotate around Z (up) *)
       (* Note: va/alpha uses degrees in original code but velocity seems to be in deg/ms?
          Checking viewer.ml:
@@ -2754,42 +2814,26 @@ let event_loop ctx draw =
          We want to update our quaternion.
          Let's convert d_alpha/d_beta to radians.
       *)
-      let d_alpha_rad = d_alpha (* va *. dt *) *. pi /. 180. in
-      let d_beta_rad = d_beta (* vb *. dt *) *. pi /. 180. in
+      if (not !is_dragging) && (not !touch_dragging) && !velocity <> (0., 0.)
+      then begin
+        let vx, vy = !velocity in
+        let dt = dt *. 1.5 in
+        (* Speed tweaks *)
+        if abs_float vx > 0.001 || abs_float vy > 0.001 then begin
+          let da = vx *. dt in
+          let db = vy *. dt in
+          let da_rad = da *. Float.pi /. 180. in
+          let db_rad = db *. Float.pi /. 180. in
 
-      let q_yaw =
-        Quaternion.from_axis_angle
-          { x = 0.; y = 0.; z = 1.; w = 0. }
-          (-.d_alpha_rad)
-      in
-      let q_pitch =
-        Quaternion.from_axis_angle
-          { x = 1.; y = 0.; z = 0.; w = 0. }
-          (-.d_beta_rad)
-      in
-
-      (* Apply: New = Yaw * Old * Pitch *)
-      (* This maintains the "Turntable" feel:
-          - Yaw is always global Z (0,0,1)
-          - Pitch is local X (1,0,0) relative to current view (but simpler to just multiply on the right for local)
-         
-         Actually:
-         Global Yaw (Pre-multiply):  Q_new = Q_yaw * Q_old
-         Local Pitch (Post-multiply): Q_new = Q_old * Q_pitch
-         
-         But wait, our rotate_x/y/z in Matrix.ml might have different conventions.
-         Original: rotate_z(-alpha) * rotate_x(-beta) * ...
-         This means specific Euler order: Z then X.
-      
-         If we want Global Z and Local X:
-         q_new = q_yaw * q * q_pitch
-      *)
-      let q_new = Quaternion.(q_yaw * q * q_pitch) in
-      current_orientation := Quaternion.normalize q_new;
-
-      (* Clamping Pitch (Optional but good for terrain) *)
-      (* TODO: Implement pitch clamping if needed later *)
-      ()
+          if !input_mode = Manual then
+            current_orientation :=
+              apply_manual_rotation !current_orientation da_rad db_rad
+          else
+            (* Sensor mode specific or fallback *)
+            ()
+        end
+        else velocity := (0., 0.)
+      end
     end;
     let orientation = !current_orientation in
     let z = !zoom in
@@ -3015,12 +3059,6 @@ let set_orientation_from_yaw alpha =
        Original defaults: beta=0 means looking down? 
        Wait, original code:
        rotate_x (-beta)
-       beta was initialized to 0.
-       beta was clamped to 60..120.
-       Usually 90 is horizon? or 0 is horizon?
-       
-       If I look at code:
-       rotate_x (-beta)
        
        If beta=0, no X rotation. Camera looks down -Z?
        Camera setup usually looks -Z.
@@ -3036,17 +3074,17 @@ let set_orientation_from_yaw alpha =
        We want Global Z rotation.
     *)
   let q_yaw =
-    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-.alpha_rad)
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
   in
 
   (* Set default pitch to something reasonable, e.g. 80 degrees (near horizon) *)
-  let pitch_rad = 80. *. pi /. 180. in
+  let pitch_rad = pi /. 2. in
   let q_pitch =
-    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } (-.pitch_rad)
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
   in
 
-  (* Rotate around X first (pitch up to horizon), then around Z (yaw) *)
-  current_orientation := Quaternion.(q_pitch * q_yaw)
+  (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
+  current_orientation := Quaternion.(q_yaw * q_pitch)
 
 let parse_float_safe s = try Some (float_of_string s) with _ -> None
 
@@ -3429,30 +3467,6 @@ let setup_events canvas =
 
   (* Sensitivity for drag rotation (degrees per pixel) *)
 
-  (* Mouse state *)
-  let mouse_dragging = ref false in
-  let mouse_start_x = ref 0. in
-  let mouse_start_y = ref 0. in
-  let mouse_last_x = ref 0. in
-  let mouse_last_y = ref 0. in
-
-  (* Touch state *)
-  let touch_start_x = ref 0. in
-  let touch_start_y = ref 0. in
-  let touch_last_x = ref 0. in
-  let touch_last_y = ref 0. in
-  let touch_dragging = ref false in
-  let pinch_distance = ref 0. in
-
-  (* Double-tap detection for returning to sensor mode *)
-  let last_tap_time = ref 0. in
-  let double_tap_threshold =
-    300.
-    (* ms *)
-  in
-
-  (* Drag threshold to distinguish tap from drag (in pixels) *)
-  let drag_threshold = 10. in
   (* Helper: get current time in ms *)
 
   (* Helper: calculate distance between two touches *)
@@ -3538,18 +3552,18 @@ let setup_events canvas =
                  mult
                    (from_axis_angle
                       { x = 0.; y = 0.; z = 1.; w = 0. }
-                      (screen *. pi /. 180.))
+                      (alpha *. pi /. 180.))
                    (mult
                       (from_axis_angle
-                         { x = 0.; y = 1.; z = 0.; w = 0. }
-                         (-.gamma *. pi /. 180.))
+                         { x = 1.; y = 0.; z = 0.; w = 0. }
+                         (beta *. pi /. 180.))
                       (mult
                          (from_axis_angle
-                            { x = 1.; y = 0.; z = 0.; w = 0. }
-                            (-.beta *. pi /. 180.))
+                            { x = 0.; y = 1.; z = 0.; w = 0. }
+                            (gamma *. pi /. 180.))
                          (from_axis_angle
                             { x = 0.; y = 0.; z = 1.; w = 0. }
-                            (-.alpha *. pi /. 180.)))))
+                            (-.screen *. pi /. 180.)))))
              in
              current_orientation := q
            end)
@@ -3565,37 +3579,26 @@ let setup_events canvas =
          (fun ev ->
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
-               (* Yaw Left: Rotate around World Z (Post-multiply) *)
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (-5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult !current_orientation q_rot
+               (* Yaw Left: 5 degrees *)
+               current_orientation :=
+                 apply_manual_rotation !current_orientation
+                   (5. *. pi /. 180.)
+                   0.
            | "ArrowRight" ->
-               (* Yaw Right: Rotate around World Z (Post-multiply) *)
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult !current_orientation q_rot
-           | "ArrowDown" ->
-               (* Pitch Down: Rotate around Local X (Pre-multiply) *)
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
-                   (5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult q_rot !current_orientation
-           | "ArrowUp" ->
-               (* Pitch Up: Rotate around Local X (Pre-multiply) *)
-               let q_rot =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
+               (* Yaw Right: -5 degrees *)
+               current_orientation :=
+                 apply_manual_rotation !current_orientation
                    (-5. *. pi /. 180.)
-               in
-               current_orientation := Quaternion.mult q_rot !current_orientation
+                   0.
+           | "ArrowDown" ->
+               (* Pitch Down: -5 degrees *)
+               current_orientation :=
+                 apply_manual_rotation !current_orientation 0.
+                   (-5. *. pi /. 180.)
+           | "ArrowUp" ->
+               (* Pitch Up: 5 degrees *)
+               current_orientation :=
+                 apply_manual_rotation !current_orientation 0. (5. *. pi /. 180.)
            | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
            | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
            | _ -> ())
@@ -3636,6 +3639,13 @@ let setup_events canvas =
       (Brr.Ev.listen Brr.Ev.mousemove
          (fun ev ->
            if !mouse_dragging then begin
+             (* Switch to manual mode when user starts dragging *)
+             if !input_mode = Sensor then begin
+               input_mode := Manual;
+               display_temporary_message "Manual mode";
+               (* Snap to upright: apply 0 delta to reconstruct upright orientation *)
+               current_orientation := snap_to_turntable !current_orientation
+             end;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -3665,10 +3675,11 @@ let setup_events canvas =
                let v_inst_x = da /. dt in
                let v_inst_y = db /. dt in
                let vx, vy = !velocity in
-               (* Smoothing: mix history (0.6) with new (0.4) *)
+               (* Time-based smoothing (50ms window) to handle variable polling rates *)
+               let alpha = 1. -. exp (-.dt /. 50.) in
                velocity :=
-                 ( (v_inst_x *. 0.4) +. (vx *. 0.6),
-                   (v_inst_y *. 0.4) +. (vy *. 0.6) )
+                 ( (v_inst_x *. alpha) +. (vx *. (1. -. alpha)),
+                   (v_inst_y *. alpha) +. (vy *. (1. -. alpha)) )
              end;
              is_dragging := true;
              mouse_last_x := x;
@@ -3676,20 +3687,7 @@ let setup_events canvas =
              current_orientation :=
                let da_rad = da *. Float.pi /. 180. in
                let db_rad = db *. Float.pi /. 180. in
-               (* Yaw (da): World Z -> Post-multiply
-                  Pitch (db): Local X -> Pre-multiply *)
-               let q_yaw =
-                 Quaternion.from_axis_angle
-                   { x = 0.; y = 0.; z = 1.; w = 0. }
-                   (-.da_rad)
-               in
-               let q_pitch =
-                 Quaternion.from_axis_angle
-                   { x = 1.; y = 0.; z = 0.; w = 0. }
-                   (-.db_rad)
-               in
-               (* Order: q_pitch * (current * q_yaw) *)
-               Quaternion.(q_pitch * (!current_orientation * q_yaw))
+               apply_manual_rotation !current_orientation da_rad db_rad
            end)
          (Brr.Window.as_target Brr.G.window));
 
@@ -3699,7 +3697,7 @@ let setup_events canvas =
            if !mouse_dragging then begin
              mouse_dragging := false;
              is_dragging := false;
-             if now () -. !last_input_time > 300. then velocity := (0., 0.);
+             (* Removed inertia killer timeout *)
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -3764,8 +3762,8 @@ let setup_events canvas =
                if !input_mode = Sensor then begin
                  input_mode := Manual;
                  display_temporary_message "Manual mode";
-                 (* No need to snap orientation with quaternions - preserve current view *)
-                 ()
+                 (* Snap to upright: apply 0 delta to reconstruct upright orientation *)
+                 current_orientation := snap_to_turntable !current_orientation
                end;
                Brr.Ev.prevent_default ev
              end;
@@ -3807,20 +3805,7 @@ let setup_events canvas =
                current_orientation :=
                  let da_rad = da *. Float.pi /. 180. in
                  let db_rad = db *. Float.pi /. 180. in
-                 (* Yaw (da): World Z -> Post-multiply
-                   Pitch (db): Local X -> Pre-multiply *)
-                 let q_yaw =
-                   Quaternion.from_axis_angle
-                     { x = 0.; y = 0.; z = 1.; w = 0. }
-                     (-.da_rad)
-                 in
-                 let q_pitch =
-                   Quaternion.from_axis_angle
-                     { x = 1.; y = 0.; z = 0.; w = 0. }
-                     (-.db_rad)
-                 in
-                 (* Order: q_pitch * (current * q_yaw) *)
-                 Quaternion.(q_pitch * (!current_orientation * q_yaw))
+                 apply_manual_rotation !current_orientation da_rad db_rad
              end
            end
            else if num_touches >= 2 then begin

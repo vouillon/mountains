@@ -37,6 +37,25 @@ let from_axis_angle axis angle =
       w = cos half_angle;
     }
 
+let transform_vector q v =
+  let qx = q.x and qy = q.y and qz = q.z and w = q.w in
+  let vx = v.Matrix.x and vy = v.y and vz = v.z in
+  let uvx = (qy *. vz) -. (qz *. vy) in
+  let uvy = (qz *. vx) -. (qx *. vz) in
+  let uvz = (qx *. vy) -. (qy *. vx) in
+  let uuvx = (qy *. uvz) -. (qz *. uvy) in
+  let uuvy = (qz *. uvx) -. (qx *. uvz) in
+  let uuvz = (qx *. uvy) -. (qy *. uvx) in
+  let w_uvx = w *. uvx in
+  let w_uvy = w *. uvy in
+  let w_uvz = w *. uvz in
+  {
+    Matrix.x = vx +. (2. *. (w_uvx +. uuvx));
+    y = vy +. (2. *. (w_uvy +. uuvy));
+    z = vz +. (2. *. (w_uvz +. uuvz));
+    w = v.Matrix.w;
+  }
+
 let to_matrix t =
   let xx = t.x *. t.x in
   let yy = t.y *. t.y in
