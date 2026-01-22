@@ -2844,6 +2844,13 @@ let event_loop ctx draw =
         else velocity := (0., 0.)
       end
     end;
+    if !input_mode = Manual then begin
+      (* Smooth "Righting Moment": pull current orientation towards upright.
+         Tau = 0.2s provides a smooth but firm correction. *)
+      let upright = snap_to_turntable !current_orientation in
+      let alpha = 1. -. exp (-.dt /. 200.0) in
+      current_orientation := Quaternion.slerp !current_orientation upright alpha
+    end;
     let orientation = !current_orientation in
     let z = !zoom in
     if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
@@ -3652,9 +3659,7 @@ let setup_events canvas =
              (* Switch to manual mode when user starts dragging *)
              if !input_mode = Sensor then begin
                input_mode := Manual;
-               display_temporary_message "Manual mode";
-               (* Snap to upright: apply 0 delta to reconstruct upright orientation *)
-               current_orientation := snap_to_turntable !current_orientation
+               display_temporary_message "Manual mode"
              end;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
@@ -3771,9 +3776,7 @@ let setup_events canvas =
                (* Switch to manual mode when user starts dragging *)
                if !input_mode = Sensor then begin
                  input_mode := Manual;
-                 display_temporary_message "Manual mode";
-                 (* Snap to upright: apply 0 delta to reconstruct upright orientation *)
-                 current_orientation := snap_to_turntable !current_orientation
+                 display_temporary_message "Manual mode"
                end;
                Brr.Ev.prevent_default ev
              end;
