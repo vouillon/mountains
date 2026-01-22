@@ -2496,11 +2496,10 @@ let prepare_text_immediate ctx text =
   let right = C2d.Text_metrics.actual_bounding_box_right m in
   let w = truncate (left +. right +. 0.5) in
   let h = truncate (ascent +. descent +. 0.5) in
-  (* Avoid 0x0 canvas which causes GL errors *)
-  let w = max 1 w in
-  let h = max 1 h in
-  Brr_canvas.Canvas.set_w text_canvas w;
-  Brr_canvas.Canvas.set_h text_canvas h;
+  if w > Brr_canvas.Canvas.w text_canvas then
+    Brr_canvas.Canvas.set_w text_canvas (2 * w);
+  if h > Brr_canvas.Canvas.h text_canvas then
+    Brr_canvas.Canvas.set_h text_canvas h;
   C2d.set_font text_ctx (Jstr.v "48px sans");
   C2d.fill_text text_ctx text ~x:left ~y:ascent;
   let tid = Gl.create_texture ctx in
@@ -2510,6 +2509,7 @@ let prepare_text_immediate ctx text =
     (Gl.Tex_image_source.of_canvas_el text_canvas);
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.bind_texture ctx Gl.texture_2d None;
+  C2d.clear_rect text_ctx ~x:0. ~y:0. ~w:(float w) ~h:(float h);
   (tid, w, h)
 
 let prepare_text _ctx text = { text; texture = None }
