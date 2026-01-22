@@ -2898,7 +2898,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   } =
     graphics
   in
-  let _, deltay, _ = Render_state.compute_deltas ~lat in
   let tile_texture = make_tile_texture ctx tile in
   let relief_texture =
     time_gpu ctx "compute_relief" (fun () ->
@@ -2907,14 +2906,13 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
   let index_count = Bigarray.Array1.dim indices in
 
-  (* Approx 30m per pixel *)
   let ao_texture =
+    let _, deltay, _ = Render_state.compute_deltas ~lat in
     time_gpu ctx "compute_ao" (fun () ->
         compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
           ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
   in
 
-  (* Compute session-static values for terrain uniforms *)
   let light_dir_shader =
     let date_ctor = Jv.get Jv.global "Date" in
     let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
