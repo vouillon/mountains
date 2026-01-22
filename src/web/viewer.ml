@@ -2836,9 +2836,8 @@ let event_loop ctx draw =
           let da_rad = da *. Float.pi /. 180. in
           let db_rad = db *. Float.pi /. 180. in
 
-          if !input_mode = Manual then
-            current_orientation :=
-              apply_manual_rotation !current_orientation da_rad db_rad
+          current_orientation :=
+            apply_manual_rotation !current_orientation da_rad db_rad
         end
         else velocity := (0., 0.)
       end
@@ -2859,16 +2858,7 @@ let event_loop ctx draw =
     loop orientation z
   in
   last_frame_time := now ();
-  (* Initial rotation: Rotate a bit for demo *)
-  let q_init =
-    Quaternion.(
-      mult
-        (from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } (-1. *. pi /. 180.))
-        !current_orientation)
-  in
-  current_orientation := q_init;
-  loop q_init (!zoom -. 1.)
-(* Orchestration *)
+  loop !current_orientation (!zoom -. 1.)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     ~clc_tiles ~graphics ~start =
@@ -3099,7 +3089,8 @@ let set_orientation_from_yaw alpha =
   in
 
   (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
-  current_orientation := Quaternion.(q_yaw * q_pitch)
+  (current_orientation := Quaternion.(q_yaw * q_pitch));
+  target_orientation := !current_orientation
 
 let parse_float_safe s = try Some (float_of_string s) with _ -> None
 
@@ -3591,23 +3582,27 @@ let setup_events canvas =
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
                (* Yaw Left: 5 degrees *)
+               input_mode := Manual;
                current_orientation :=
                  apply_manual_rotation !current_orientation
                    (5. *. pi /. 180.)
                    0.
            | "ArrowRight" ->
                (* Yaw Right: -5 degrees *)
+               input_mode := Manual;
                current_orientation :=
                  apply_manual_rotation !current_orientation
                    (-5. *. pi /. 180.)
                    0.
            | "ArrowDown" ->
                (* Pitch Down: -5 degrees *)
+               input_mode := Manual;
                current_orientation :=
                  apply_manual_rotation !current_orientation 0.
                    (-5. *. pi /. 180.)
            | "ArrowUp" ->
                (* Pitch Up: 5 degrees *)
+               input_mode := Manual;
                current_orientation :=
                  apply_manual_rotation !current_orientation 0. (5. *. pi /. 180.)
            | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
@@ -3650,11 +3645,7 @@ let setup_events canvas =
       (Brr.Ev.listen Brr.Ev.mousemove
          (fun ev ->
            if !mouse_dragging then begin
-             (* Switch to manual mode when user starts dragging *)
-             if !input_mode = Sensor then begin
-               input_mode := Manual;
-               display_temporary_message "Manual mode"
-             end;
+             input_mode := Manual;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
