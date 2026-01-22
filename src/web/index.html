@@ -8,20 +8,7 @@
   <meta name="theme-color" content="#000000">
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon192.png" />
-  <script>
-    function loadScript(src) {
-      const script = document.createElement('script');
-      script.src = src;
-      script.type = 'text/javascript';
-      script.defer = true;
-      document.head.appendChild(script);
-    }
-    function isSafari() {
-      const ua = navigator.userAgent;
-      return /^((?!chrome|android|crios|fxios|edg).)*safari/i.test(ua);
-    }
-    loadScript(WebAssembly.JSTag ? 'viewer.bc.wasm.js' : 'viewer.bc.js');
-  </script>
+  <script src="viewer.bc.wasm.js"></script>
   <style>
     html,
     body {

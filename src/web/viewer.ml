@@ -2905,35 +2905,6 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         compute_relief ctx w h lat triangle_geo tile_texture normal_pid
           mipmap_pid copy_pid relief_uniforms mipmap_uniforms copy_uniforms)
   in
-  let points =
-    List.map
-      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
-        let texture =
-          prepare_text ctx
-            (match elevation with
-            | None -> name
-            | Some elevation ->
-                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
-                Printf.sprintf "%s (%dm)" name elevation)
-        in
-        let h =
-          let height' = Dem_loader.get_height tile y' x' in
-          let dist =
-            let dx = float (x' - x) in
-            let dy = float (y' - y) in
-            let dz = height' -. height in
-            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
-          in
-          (height' -. height) /. dist
-        in
-        ((texture, pos), h))
-      points
-  in
-  let points =
-    points
-    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
-    |> List.map fst
-  in
   let index_count = Bigarray.Array1.dim indices in
 
   (* Approx 30m per pixel *)
@@ -3005,6 +2976,46 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   (* Bind all terrain textures at init - after all textures are created *)
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
     ~cover_map_texture ~palette_texture;
+
+  let points =
+    let off_x = Render_state.compute_sub_arcsec_offset lon in
+    let off_y = Render_state.compute_sub_arcsec_offset lat in
+    List.filter
+      (fun (_, (dst_x, dst_y)) ->
+        Visibility.test_precise
+          (Dem_loader.get_height tile)
+          ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+      points
+  in
+  let points =
+    List.map
+      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
+        let texture =
+          prepare_text ctx
+            (match elevation with
+            | None -> name
+            | Some elevation ->
+                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
+                Printf.sprintf "%s (%dm)" name elevation)
+        in
+        let h =
+          let height' = Dem_loader.get_height tile y' x' in
+          let dist =
+            let dx = float (x' - x) in
+            let dy = float (y' - y) in
+            let dz = height' -. height in
+            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
+          in
+          (height' -. height) /. dist
+        in
+        ((texture, pos), h))
+      points
+  in
+  let points =
+    points
+    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
+    |> List.map fst
+  in
 
   let* () = Web_utils.on_gpu_finished ctx in
   start ();
@@ -3851,29 +3862,6 @@ let setup_events canvas =
            end)
          target);
 
-    (* Use ResizeObserver to detect canvas size changes *)
-    let observer_cb =
-      Jv.callback ~arity:1 (fun entries ->
-          let len = Jv.to_int (Jv.get entries "length") in
-          if len > 0 then begin
-            let entry = Jv.call entries "at" [| Jv.of_int 0 |] in
-            let device_box = Jv.get entry "devicePixelContentBoxSize" in
-            let device_width, device_height =
-              if Jv.is_undefined device_box then (None, None)
-              else
-                let box = Jv.call device_box "at" [| Jv.of_int 0 |] in
-                ( Some (Jv.to_int (Jv.get box "inlineSize")),
-                  Some (Jv.to_int (Jv.get box "blockSize")) )
-            in
-            resize_canvas ?device_width ?device_height canvas;
-            force_redraw := true
-          end)
-    in
-    let observer =
-      Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
-    in
-    ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
-
     state := `Starting
 
 let wait_for_service_worker =
@@ -3913,7 +3901,28 @@ let main () =
   let detail_map = make_detail_map ctx in
   Worker_pool.init ();
   let graphics = init_graphics ctx in
-  resize_canvas canvas;
+  (* Use ResizeObserver to detect canvas size changes *)
+  let observer_cb =
+    Jv.callback ~arity:1 (fun entries ->
+        let len = Jv.to_int (Jv.get entries "length") in
+        if len > 0 then begin
+          let entry = Jv.call entries "at" [| Jv.of_int 0 |] in
+          let device_box = Jv.get entry "devicePixelContentBoxSize" in
+          let device_width, device_height =
+            if Jv.is_undefined device_box then (None, None)
+            else
+              let box = Jv.call device_box "at" [| Jv.of_int 0 |] in
+              ( Some (Jv.to_int (Jv.get box "inlineSize")),
+                Some (Jv.to_int (Jv.get box "blockSize")) )
+          in
+          resize_canvas ?device_width ?device_height canvas;
+          force_redraw := true
+        end)
+  in
+  let observer =
+    Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
+  in
+  ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
 
   update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
@@ -4075,27 +4084,6 @@ let main () =
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in
-
-  let debug = false in
-  let points =
-    List.filter
-      (fun ({ Points.name; _ }, (dst_x, dst_y)) ->
-        if
-          (not debug)
-          || (String.length name > 8 && String.sub name 0 7 = "Grand G")
-        then (
-          if debug then prerr_endline name;
-
-          Visibility.test_precise
-            (Dem_loader.get_height tile)
-            ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y
-            ())
-        else
-          Visibility.test
-            (Dem_loader.get_height tile)
-            ~src_h:(height +. 2.) ~src_x:x ~src_y:y ~dst_x ~dst_y ())
-      points
-  in
 
   let* () =
     tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile
