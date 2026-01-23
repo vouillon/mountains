@@ -12,12 +12,11 @@ let _ =
     | _ -> None)
 
 let ( let* ) = Lwt.bind
-let now () = Jv.to_float (Jv.call (Jv.get Jv.global "performance") "now" [||])
-let now_ms = now
+let now_ms () = Brr.(Performance.now_ms G.performance)
 
 (* GPU Timer using EXT_disjoint_timer_query_webgl2 with fallback to glFinish *)
 module Gpu_timer = struct
-  type ext = { time_elapsed_ext : int }
+  type ext = { time_elapsed_ext : int; gpu_disjoint : int }
 
   let extension : ext option ref = ref None
 
@@ -27,7 +26,8 @@ module Gpu_timer = struct
     in
     if Jv.is_some ext then begin
       let time_elapsed_ext = Jv.to_int (Jv.get ext "TIME_ELAPSED_EXT") in
-      extension := Some { time_elapsed_ext };
+      let gpu_disjoint = Jv.to_int (Jv.get ext "GPU_DISJOINT") in
+      extension := Some { time_elapsed_ext; gpu_disjoint };
       Brr.Console.(
         log [ Jstr.v "GPU Timer: Using EXT_disjoint_timer_query_webgl2" ])
     end
@@ -37,27 +37,23 @@ module Gpu_timer = struct
           [ Jstr.v "GPU Timer: Extension unavailable, using glFinish fallback" ])
 
   (* Pending queries waiting for results *)
-  type pending_query = { name : string; query : Jv.t; t0 : float }
+  type pending_query = {
+    name : string;
+    query : Brr_canvas.Gl.query;
+    t0 : float;
+  }
 
   let pending_queries : pending_query list ref = ref []
 
   (* Poll for completed queries and log results *)
   let poll_results ctx =
     let module Gl = Brr_canvas.Gl in
-    let gl = (Obj.magic ctx : Jv.t) in
-    let query_result_available = 0x8867 in
-    (* GL_QUERY_RESULT_AVAILABLE *)
-    let query_result = 0x8866 in
-    (* GL_QUERY_RESULT *)
-    let gpu_disjoint = 0x8FBB in
-    (* GPU_DISJOINT_EXT *)
-
     match !extension with
     | None -> ()
-    | Some _ ->
+    | Some ext ->
         (* Check if GPU was disjoint (results may be invalid) *)
         let disjoint =
-          Jv.to_bool (Jv.call gl "getParameter" [| Jv.of_int gpu_disjoint |])
+          Jv.to_bool Brr_canvas.Gl.(get_parameter ctx ext.gpu_disjoint)
         in
         (if disjoint then
            Brr.Console.(
@@ -71,17 +67,16 @@ module Gpu_timer = struct
           (fun pq ->
             let available =
               Jv.to_bool
-                (Jv.call gl "getQueryParameter"
-                   [| pq.query; Jv.of_int query_result_available |])
+                Brr_canvas.Gl.(
+                  get_query_parameter ctx pq.query query_result_available)
             in
             if available then begin
               let time_ns =
                 Jv.to_float
-                  (Jv.call gl "getQueryParameter"
-                     [| pq.query; Jv.of_int query_result |])
+                  Brr_canvas.Gl.(get_query_parameter ctx pq.query query_result)
               in
               let time_ms = time_ns /. 1_000_000. in
-              let wall_ms = now () -. pq.t0 in
+              let wall_ms = now_ms () -. pq.t0 in
               let prefix = if disjoint then "[DISJOINT] " else "" in
               Brr.Console.(
                 log
@@ -90,7 +85,7 @@ module Gpu_timer = struct
                       (Printf.sprintf "%s%s: GPU %.2fms (wall %.1fms)" prefix
                          pq.name time_ms wall_ms);
                   ]);
-              ignore (Jv.call gl "deleteQuery" [| pq.query |])
+              Brr_canvas.Gl.delete_query ctx pq.query
             end
             else still_pending := pq :: !still_pending)
           !pending_queries;
@@ -102,18 +97,15 @@ module Gpu_timer = struct
     match !extension with
     | None -> None
     | Some ext ->
-        let gl = (Obj.magic ctx : Jv.t) in
-        let query = Jv.call gl "createQuery" [||] in
-        ignore
-          (Jv.call gl "beginQuery" [| Jv.of_int ext.time_elapsed_ext; query |]);
-        Some { name; query; t0 = now () }
+        let query = Brr_canvas.Gl.create_query ctx in
+        Brr_canvas.Gl.begin_query ctx ext.time_elapsed_ext query;
+        Some { name; query; t0 = now_ms () }
 
   (* End timing and queue for result polling *)
   let end_query ctx pq_opt =
     match (!extension, pq_opt) with
     | Some ext, Some pq ->
-        let gl = (Obj.magic ctx : Jv.t) in
-        ignore (Jv.call gl "endQuery" [| Jv.of_int ext.time_elapsed_ext |]);
+        Brr_canvas.Gl.end_query ctx ext.time_elapsed_ext;
         pending_queries := pq :: !pending_queries
     | _ -> ()
 end
@@ -128,10 +120,10 @@ let time_gpu ctx name f =
       Gpu_timer.end_query ctx pq;
       result
   | None ->
-      let t0 = now () in
+      let t0 = now_ms () in
       let result = f () in
       Gl.finish ctx;
-      let t1 = now () in
+      let t1 = now_ms () in
       Brr.Console.(log [ Jstr.v (Printf.sprintf "%s: %.1fms" name (t1 -. t0)) ]);
       result
 
@@ -213,8 +205,8 @@ let navigate_to uri =
       Lwt.return_unit)
 
 (* Sky colors *)
-let fog_linear = (0.17, 0.38, 0.79)
-let zenith_linear = (0.02, 0.12, 0.55)
+let fog_linear = (0.18, 0.42, 0.85)
+let zenith_linear = (0.01, 0.10, 0.45)
 
 (* Web Utils Aliases *)
 let pi = Web_utils.pi
@@ -514,18 +506,25 @@ let terrain_program =
           // Steep slopes increase rock weight, decrease others
           float rockForce = smoothstep(0.15, 0.5, slope);
 
-          // Scale down non-rock weights
-          s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
-          s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
-          s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
+          if (rockForce > 0.01) {
+            // Blend albedo and roughness towards Bare Rock (ID 31)
+            Surface rock = getSurfaceFromID(31.0);
+            s.albedo = mix(s.albedo, rock.albedo, rockForce);
+            s.roughness = mix(s.roughness, rock.roughness, rockForce);
 
-          // Increase rock weight
-          s.detailWeights.r += rockForce;
+            // Scale down non-rock weights
+            s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
+            s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
+            s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
 
-          // Normalize weights
-          float total = dot(s.detailWeights, vec4(1.0));
-          if (total > 0.01) {
-            s.detailWeights /= total;
+            // Increase rock weight
+            s.detailWeights.r += rockForce;
+
+            // Normalize weights
+            float total = dot(s.detailWeights, vec4(1.0));
+            if (total > 0.01) {
+              s.detailWeights /= total;
+            }
           }
         }
 
@@ -877,8 +876,9 @@ let terrain_program =
 
 
             // Apply specular and reflection to terrain color
-            vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
-            terrain_color += specColor * 0.3;
+            float specBoost = (waterMask > 0.01 || iceAmount > 0.5) ? 2.5 : 1.0;
+            vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val * specBoost;
+            terrain_color += specColor * 0.4;
 
             // Fresnel for water
             if (waterMask > 0.01) {
@@ -900,12 +900,16 @@ let terrain_program =
 
           // Matched to Sky Shader: Horizon -> Zenith
           vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
-          vec3 ground_color = vec3(0.1, 0.08, 0.05); // Slightly darker ground bounce
-          float sky_factor = final_normal.z * 0.5 + 0.5;
-          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5; // Tuned intensity
+          vec3 ground_color = vec3(0.08, 0.07, 0.05); // Deeper ground bounce for contrast
+          float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
+          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5;
+
+          // Normal-based Micro-AO: Darken steep crevices
+          float microAO = mix(0.85, 1.0, final_normal.z);
+          ambient *= microAO;
 
           vec3 sun_color = vec3(1.0, 0.95, 0.9);
-          vec3 direct = sun_color * final_l * shadow_val * 0.5; // Reduced direct intensity slightly to balance
+          vec3 direct = sun_color * final_l * shadow_val * 0.5;
           vec3 lighting = ambient + direct;
 
           // === AO (unchanged) ===
@@ -913,8 +917,10 @@ let terrain_program =
           terrain_color = terrain_color * occlusion;
 
 
-          // === Fog ===
-          float fog_coeff = exp(v_dist * -2e-5);
+          // === Fog & Haze ===
+          // Height-based Haze: exp(-h/H) where H=1500m
+          float haze_density = exp(-v_world_pos.z * 0.0006);
+          float fog_coeff = exp(v_dist * -0.8e-4 * haze_density);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
 
@@ -1515,13 +1521,9 @@ let load_compressed_detail_map ctx tid =
               (Jv.Error.message e |> Jstr.to_string)
         | Ok buffer ->
             (* Parse KTX2 header using DataView *)
-            let view =
-              Jv.new'
-                (Jv.get Jv.global "DataView")
-                [| Brr.Tarray.Buffer.to_jv buffer |]
-            in
+            let view = Brr.Tarray.Data_view.of_buffer buffer in
             let get_u32 off =
-              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+              Int32.to_int (Brr.Tarray.Data_view.get_uint32_le view off)
             in
             (* Header fields at known offsets:
                12: vkFormat, 16: typeSize, 20: pixelWidth, 24: pixelHeight,
@@ -1530,9 +1532,9 @@ let load_compressed_detail_map ctx tid =
             let pixel_height = get_u32 24 in
             let level_count = get_u32 40 in
             (* Level index starts at offset 80, each entry is 24 bytes (3 x uint64) *)
-            let get_u64_low off =
+            let get_u64_low =
               (* Just read low 32 bits - file offsets won't exceed 4GB *)
-              Jv.to_int (Jv.call view "getUint32" [| Jv.of_int off; Jv.true' |])
+              get_u32
             in
             (* Upload each mip level - Level Index is in GL order: [0]=largest, [n-1]=smallest *)
             Gl.active_texture ctx Gl.texture5;
@@ -2785,7 +2787,7 @@ let last_frame_time = ref 0.
 
 let event_loop ctx draw =
   let rec loop prev_orientation prev_zoom =
-    let t = now () in
+    let t = now_ms () in
     let dt = t -. !last_frame_time in
     last_frame_time := t;
 
@@ -2851,7 +2853,7 @@ let event_loop ctx draw =
     let* () = request_animation_frame () in
     loop orientation z
   in
-  last_frame_time := now ();
+  last_frame_time := now_ms ();
   loop !current_orientation (!zoom -. 1.)
 
 let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
@@ -3063,34 +3065,13 @@ let get_preset_position () =
 
 let set_orientation_from_yaw alpha =
   let alpha_rad = alpha *. pi /. 180. in
-  (* Initial orientation: Yaw only, Pitch ~90 (looking down) or 0 (horizon)? 
-       Original defaults: beta=0 means looking down? 
-       Wait, original code:
-       rotate_x (-beta)
-       
-       If beta=0, no X rotation. Camera looks down -Z?
-       Camera setup usually looks -Z.
-       Terrain is on XY plane (z=0?).
-       translate 0 0 (-height - 2).
-       So camera is at +Z. Looking down -Z.
-       So beta=0 is looking straight down.
-       beta=90 is looking at horizon.
-       
-       Let's stick to that.
-                                           
-       So for "alpha" in preset (yaw):
-       We want Global Z rotation.
-    *)
   let q_yaw =
     Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
   in
-
-  (* Set default pitch to something reasonable, e.g. 80 degrees (near horizon) *)
   let pitch_rad = pi /. 2. in
   let q_pitch =
     Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
   in
-
   (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
   (current_orientation := Quaternion.(q_yaw * q_pitch));
   target_orientation := !current_orientation
@@ -3269,7 +3250,7 @@ let create_location_ui ~size =
     if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
     else begin
       Brr.El.set_class visible true overlay;
-      ignore (Jv.call (Brr.El.to_jv input) "focus" [||])
+      Brr.El.set_has_focus true input
     end
   in
 
@@ -3280,8 +3261,7 @@ let create_location_ui ~size =
   ignore
     (Brr.Ev.listen Brr.Ev.click
        (fun e ->
-         if Jv.equal (Jv.get (Obj.magic e) "target") (Brr.El.to_jv overlay) then
-           toggle_menu ())
+         if Brr.Ev.target e == Brr.El.as_target overlay then toggle_menu ())
        (Brr.El.as_target overlay));
   ignore
     (Brr.Ev.listen Brr.Ev.click
@@ -3299,7 +3279,7 @@ let create_location_ui ~size =
   in
 
   let go () =
-    let text = Jv.to_string (Jv.get (Brr.El.to_jv input) "value") in
+    let text = Jstr.to_string (Brr.El.prop Brr.El.Prop.value input) in
     match parse_input_coordinates text with
     | Some (lat, lon) ->
         if
@@ -3314,10 +3294,13 @@ let create_location_ui ~size =
           in
           navigate_to uri
         else
-          Jv.set (Brr.El.to_jv input) "value"
-            (Jv.of_string "Location out of range")
+          Brr.El.set_prop Brr.El.Prop.value
+            (Jstr.of_string "Location out of range")
+            input
     | None ->
-        Jv.set (Brr.El.to_jv input) "value" (Jv.of_string "Invalid coordinates")
+        Brr.El.set_prop Brr.El.Prop.value
+          (Jstr.of_string "Invalid coordinates")
+          input
   in
 
   ignore
@@ -3364,8 +3347,9 @@ let create_location_ui ~size =
                navigate_to uri;
                Fut.return ()
            | None ->
-               Jv.set (Brr.El.to_jv input) "value"
-                 (Jv.of_string "Location out of range or unavailable");
+               Brr.El.set_prop Brr.El.Prop.value
+                 (Jstr.of_string "Location out of range or unavailable")
+                 input;
                Fut.return ()
          in
          ())
@@ -3421,12 +3405,12 @@ let create_location_ui ~size =
                  Brr.Ev.prevent_default e;
                  Brr.Ev.stop_propagation e;
                  let next = List.nth focusables ((i + 1) mod n) in
-                 ignore (Jv.call (Brr.El.to_jv next) "focus" [||])
+                 Brr.El.set_has_focus true next
              | "ArrowUp" ->
                  Brr.Ev.prevent_default e;
                  Brr.Ev.stop_propagation e;
                  let prev = List.nth focusables ((i - 1 + n) mod n) in
-                 ignore (Jv.call (Brr.El.to_jv prev) "focus" [||])
+                 Brr.El.set_has_focus true prev
              | "Escape" ->
                  Brr.Ev.prevent_default e;
                  Brr.Ev.stop_propagation e;
@@ -3434,7 +3418,7 @@ let create_location_ui ~size =
              | "Enter" when el != input && el != btn_go ->
                  Brr.Ev.prevent_default e;
                  Brr.Ev.stop_propagation e;
-                 ignore (Jv.call (Brr.El.to_jv el) "click" [||])
+                 Brr.El.click el
              | "Enter" ->
                  (* Let the specific listeners handle it, but stop propagation to window *)
                  Brr.Ev.stop_propagation e
@@ -3473,10 +3457,6 @@ let setup_events canvas =
     Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
   in
   let state = ref `Init in
-
-  (* Sensitivity for drag rotation (degrees per pixel) *)
-
-  (* Helper: get current time in ms *)
 
   (* Helper: calculate distance between two touches *)
   let touch_distance touches =
@@ -3641,7 +3621,7 @@ let setup_events canvas =
            mouse_dragging := true;
            is_dragging := true;
            velocity := (0., 0.);
-           last_input_time := now ();
+           last_input_time := now_ms ();
            mouse_start_x := x;
            mouse_start_y := y;
            mouse_last_x := x;
@@ -3658,10 +3638,8 @@ let setup_events canvas =
              let y = Brr.Ev.Mouse.client_y mouse in
              let dx = x -. !mouse_last_x in
              let dy = y -. !mouse_last_y in
-             let h =
-               Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
-             in
-             let w = Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth") in
+             let h = Brr.El.inner_h canvas in
+             let w = Brr.El.inner_w canvas in
              let speed =
                2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
              in
@@ -3675,7 +3653,7 @@ let setup_events canvas =
              let dy_eff = (dx *. s) +. (dy *. c) in
              let da = dx_eff *. speed in
              let db = dy_eff *. speed in
-             let t = now () in
+             let t = now_ms () in
              let dt = t -. !last_input_time in
              last_input_time := t;
              if dt > 0. then begin
@@ -3704,7 +3682,6 @@ let setup_events canvas =
            if !mouse_dragging then begin
              mouse_dragging := false;
              is_dragging := false;
-             (* Removed inertia killer timeout *)
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -3737,7 +3714,7 @@ let setup_events canvas =
              touch_dragging := false;
              is_dragging := true;
              velocity := (0., 0.);
-             last_input_time := now ()
+             last_input_time := now_ms ()
            end
            else if num_touches >= 2 then begin
              (* Two or more fingers - pinch zoom *)
@@ -3773,12 +3750,8 @@ let setup_events canvas =
                Brr.Ev.prevent_default ev
              end;
              if !touch_dragging then begin
-               let h =
-                 Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientHeight")
-               in
-               let w =
-                 Jv.to_float (Jv.get (Brr.El.to_jv canvas) "clientWidth")
-               in
+               let h = Brr.El.inner_h canvas in
+               let w = Brr.El.inner_w canvas in
                let speed =
                  2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
                in
@@ -3792,7 +3765,7 @@ let setup_events canvas =
                let dy_eff = (dx *. s) +. (dy *. c) in
                let da = dx_eff *. speed in
                let db = dy_eff *. speed in
-               let t = now () in
+               let t = now_ms () in
                let dt = t -. !last_input_time in
                last_input_time := t;
                if dt > 0. then begin
@@ -3847,7 +3820,7 @@ let setup_events canvas =
            if num_remaining = 0 then begin
              (* All fingers lifted *)
              is_dragging := false;
-             if now () -. !last_input_time > 300. then velocity := (0., 0.);
+             if now_ms () -. !last_input_time > 300. then velocity := (0., 0.);
              if not !touch_dragging then begin
                Brr.Ev.prevent_default ev;
                (* This was a tap, not a drag *)

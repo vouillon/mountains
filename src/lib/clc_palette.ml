@@ -203,7 +203,7 @@ let materials =
     (* 18: Pastures *)
     {
       code = 231;
-      albedo = (80, 135, 50);
+      albedo = (90, 125, 65);
       roughness = 0.9;
       detail_rock = 0.05;
       detail_grass = 0.9;
@@ -264,7 +264,7 @@ let materials =
     (* 24: Coniferous forest *)
     {
       code = 312;
-      albedo = (25, 65, 30);
+      albedo = (35, 75, 40);
       roughness = 0.95;
       detail_rock = 0.05;
       detail_grass = 0.15;
@@ -367,7 +367,7 @@ let materials =
     (* 34: Glaciers and perpetual snow - ICE LOGIC trigger *)
     {
       code = 335;
-      albedo = (240, 245, 255);
+      albedo = (245, 248, 255);
       roughness = 0.25;
       detail_rock = 0.0;
       detail_grass = 0.0;
