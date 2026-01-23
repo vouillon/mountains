@@ -38,21 +38,21 @@
 
     .fab {
       position: absolute;
-      bottom: 24px;
-      right: 24px;
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      right: calc(24px + env(safe-area-inset-right));
       width: 56px;
       height: 56px;
       border-radius: 50%;
-      background: rgba(255, 255, 255, 0.9);
-      backdrop-filter: blur(10px);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-      border: none;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.3);
       z-index: 100;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.2s;
       -webkit-tap-highlight-color: transparent;
     }
 
@@ -63,7 +63,7 @@
     .fab svg {
       width: 28px;
       height: 28px;
-      stroke: #333;
+      stroke: #4f46e5;
     }
 
     .menu-overlay {
@@ -89,15 +89,17 @@
     }
 
     .menu {
-      background: rgba(255, 255, 255, 0.95);
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.4);
       width: 90%;
       max-width: 400px;
       max-height: 80vh;
       border-radius: 20px;
       padding: 24px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-      transform: scale(0.9);
-      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+      transform: scale(0.95);
+      transition: transform 0.25s cubic-bezier(0.23, 1, 0.32, 1);
       overflow-y: auto;
       display: flex;
       flex-direction: column;
@@ -125,18 +127,24 @@
     }
 
     .input-coord:focus {
-      border-color: #5f8fd9;
+      border-color: #6366f1;
       background: white;
+      box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
     }
 
     .btn-go {
       padding: 0 20px;
       border: none;
-      background: #5f8fd9;
+      background: #6366f1;
       color: white;
       border-radius: 12px;
       font-weight: bold;
       cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-go:active {
+      background: #4f46e5;
     }
 
     .section-title {
@@ -155,24 +163,26 @@
     }
 
     .location-item {
-      padding: 12px;
-      margin: 4px 0;
-      background: rgba(0, 0, 0, 0.03);
-      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 8px 0;
+      background: rgba(0, 0, 0, 0.04);
+      border-radius: 12px;
       cursor: pointer;
       display: flex;
       align-items: center;
       gap: 12px;
-      transition: background 0.2s;
+      transition: transform 0.2s, background 0.2s;
+      min-height: 48px;
     }
 
     .location-item:hover {
       background: rgba(0, 0, 0, 0.08);
+      transform: translateX(4px);
     }
 
     .location-item:focus {
       background: rgba(0, 0, 0, 0.12);
-      outline: 2px solid #5f8fd9;
+      outline: 2px solid #6366f1;
       outline-offset: -2px;
     }
 

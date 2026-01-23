@@ -213,8 +213,8 @@ let navigate_to uri =
       Lwt.return_unit)
 
 (* Sky colors *)
-let fog_linear = (0.17, 0.38, 0.79)
-let zenith_linear = (0.02, 0.12, 0.55)
+let fog_linear = (0.18, 0.42, 0.85)
+let zenith_linear = (0.01, 0.10, 0.45)
 
 (* Web Utils Aliases *)
 let pi = Web_utils.pi
