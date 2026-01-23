@@ -514,18 +514,25 @@ let terrain_program =
           // Steep slopes increase rock weight, decrease others
           float rockForce = smoothstep(0.15, 0.5, slope);
 
-          // Scale down non-rock weights
-          s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
-          s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
-          s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
+          if (rockForce > 0.01) {
+            // Blend albedo and roughness towards Bare Rock (ID 31)
+            Surface rock = getSurfaceFromID(31.0);
+            s.albedo = mix(s.albedo, rock.albedo, rockForce);
+            s.roughness = mix(s.roughness, rock.roughness, rockForce);
 
-          // Increase rock weight
-          s.detailWeights.r += rockForce;
+            // Scale down non-rock weights
+            s.detailWeights.g *= (1.0 - rockForce);  // Reduce grass
+            s.detailWeights.b *= (1.0 - rockForce);  // Reduce forest
+            s.detailWeights.a *= (1.0 - rockForce);  // Reduce ice
 
-          // Normalize weights
-          float total = dot(s.detailWeights, vec4(1.0));
-          if (total > 0.01) {
-            s.detailWeights /= total;
+            // Increase rock weight
+            s.detailWeights.r += rockForce;
+
+            // Normalize weights
+            float total = dot(s.detailWeights, vec4(1.0));
+            if (total > 0.01) {
+              s.detailWeights /= total;
+            }
           }
         }
 
