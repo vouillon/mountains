@@ -2904,13 +2904,21 @@ let event_loop ctx draw =
     end;
     let orientation = !current_orientation in
     let z = !zoom in
-    if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
+
+    (* Optimization: Only draw if change is visible (> ~1 pixel) *)
+    let angle_diff = Quaternion.angle_between orientation prev_orientation in
+    let zoom_diff = abs_float (z -. prev_zoom) in
+    let should_draw =
+      angle_diff > 0.0001 || zoom_diff > 0.00001 || !force_redraw
+    in
+
+    if should_draw then (
       force_redraw := false;
       draw ~orientation ctx);
 
-    (* URL Update Logic: Check for stability *)
-    let diff = Quaternion.angle_between orientation prev_orientation in
-    if diff < 0.0001 then (
+    (* URL Update Logic: Check for stability (using current orientation vs previous frame) *)
+    (* Note: We use the actual current orientation for stability check, even if we didn't draw *)
+    if angle_diff < 0.0001 then (
       (* Camera is effectively stable *)
       let change_since_update =
         Quaternion.angle_between orientation !last_url_update_orientation
@@ -2926,7 +2934,9 @@ let event_loop ctx draw =
     else last_url_update_time := now_ms ();
     (* Reset timer while moving *)
     let* () = request_animation_frame () in
-    loop orientation z
+
+    (* If we drew this frame, update prev state. If not, keep old prev state to accumulate changes *)
+    if should_draw then loop orientation z else loop prev_orientation prev_zoom
   in
   last_frame_time := now_ms ();
   loop !current_orientation (!zoom -. 1.)
