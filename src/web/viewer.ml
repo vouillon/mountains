@@ -3065,34 +3065,13 @@ let get_preset_position () =
 
 let set_orientation_from_yaw alpha =
   let alpha_rad = alpha *. pi /. 180. in
-  (* Initial orientation: Yaw only, Pitch ~90 (looking down) or 0 (horizon)? 
-       Original defaults: beta=0 means looking down? 
-       Wait, original code:
-       rotate_x (-beta)
-       
-       If beta=0, no X rotation. Camera looks down -Z?
-       Camera setup usually looks -Z.
-       Terrain is on XY plane (z=0?).
-       translate 0 0 (-height - 2).
-       So camera is at +Z. Looking down -Z.
-       So beta=0 is looking straight down.
-       beta=90 is looking at horizon.
-       
-       Let's stick to that.
-                                           
-       So for "alpha" in preset (yaw):
-       We want Global Z rotation.
-    *)
   let q_yaw =
     Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
   in
-
-  (* Set default pitch to something reasonable, e.g. 80 degrees (near horizon) *)
   let pitch_rad = pi /. 2. in
   let q_pitch =
     Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
   in
-
   (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
   (current_orientation := Quaternion.(q_yaw * q_pitch));
   target_orientation := !current_orientation
@@ -3479,10 +3458,6 @@ let setup_events canvas =
   in
   let state = ref `Init in
 
-  (* Sensitivity for drag rotation (degrees per pixel) *)
-
-  (* Helper: get current time in ms *)
-
   (* Helper: calculate distance between two touches *)
   let touch_distance touches =
     if Jv.to_int (Jv.get touches "length") >= 2 then
@@ -3707,7 +3682,6 @@ let setup_events canvas =
            if !mouse_dragging then begin
              mouse_dragging := false;
              is_dragging := false;
-             (* Removed inertia killer timeout *)
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
