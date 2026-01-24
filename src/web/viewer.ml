@@ -2545,29 +2545,6 @@ let screen_inclination q =
   let angle = get_inclination_rad q in
   -.angle *. 180. /. Float.pi
 
-let snap_to_turntable q =
-  (* 1. Extract Forward vector (World space direction of Camera -Z) *)
-  let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
-  (* 2. Extract Yaw (psi). Align 0 to North (Y).
-     RotZ(psi) maps (0,1) to (-sin(psi), cos(psi)).
-     We want psi. atan2(sin, cos).
-     sin = -x, cos = y.
-     psi = atan2(-x, y). *)
-  let psi = atan2 (-.fwd.x) fwd.y in
-  (* 3. Extract Pitch (theta). Angle from Down (-Z).
-     fwd.z = -cos(theta) -> theta = acos(-z) *)
-  let fwd_z = max (-1.) (min 1. fwd.z) in
-  let theta = acos (-.fwd_z) in
-  (* 4. Reconstruct
-     Yaw (Z axis) then Pitch (X axis, negative angle from Down) *)
-  let q_yaw =
-    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } psi
-  in
-  let q_pitch =
-    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } theta
-  in
-  Quaternion.(q_yaw * q_pitch)
-
 let apply_manual_rotation q da_rad db_rad =
   (* 1. Apply Yaw (Global Z) *)
   let q_yaw =
@@ -2591,12 +2568,30 @@ let apply_manual_rotation q da_rad db_rad =
   let max_pitch = 120. *. Float.pi /. 180. in
   let clamped_theta = max min_pitch (min max_pitch target_theta) in
 
-  (* 4. Apply effective pitch delta (Local X) *)
+  (* 4. Apply effective pitch delta around Horizon Right Axis *)
   let effective_db = clamped_theta -. theta in
+
+  (* Compute Horizon Right Axis = Cross(Fwd, WorldUp{0,0,1}).
+     Fwd x WorldUp = (fx, fy, fz) x (0,0,1) = (fy, -fx, 0). *)
+  let rx = fwd.y in
+  let ry = -.fwd.x in
+  let len_sq = (rx ** 2.) +. (ry ** 2.) in
+
   let q_pitch =
-    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } effective_db
+    if len_sq > 0.000001 then
+      let len = sqrt len_sq in
+      Quaternion.from_axis_angle
+        { x = rx /. len; y = ry /. len; z = 0.; w = 0. }
+        effective_db
+    else
+      (* Fallback for gimbal lock: use Local Right *)
+      let axis =
+        Quaternion.transform_vector q_yawed { x = 1.; y = 0.; z = 0.; w = 0. }
+      in
+      Quaternion.from_axis_angle axis effective_db
   in
-  Quaternion.mult q_yawed q_pitch
+  (* Apply Pitch Globally (Left Multiply) since axis is in World Space *)
+  Quaternion.mult q_pitch q_yawed
 
 let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
     text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
@@ -2757,6 +2752,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 
 let current_orientation = ref Quaternion.identity
 let target_orientation = ref Quaternion.identity
+let sensor_orientation = ref Quaternion.identity
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -2786,6 +2782,14 @@ let drag_threshold = 10.
 let last_frame_time = ref 0.
 
 let event_loop ctx draw =
+  let calculate_tau () =
+    let min_tau = 0.02 in
+    let max_tau = 0.15 in
+    let t = (log !zoom -. log min_zoom) /. (log max_zoom -. log min_zoom) in
+    let t = max 0. (min 1. t) in
+    let t = t *. t in
+    min_tau +. (t *. (max_tau -. min_tau))
+  in
   let rec loop prev_orientation prev_zoom =
     let t = now_ms () in
     let dt = t -. !last_frame_time in
@@ -2797,14 +2801,7 @@ let event_loop ctx draw =
          - Wide FOV (Zoomed Out): Tau = 0.1s (Fast response)
          - Narrow FOV (Zoomed In): Tau = 0.5s (Slow, smooth response)
       *)
-      let tau =
-        let min_tau = 0.02 in
-        let max_tau = 0.15 in
-        let t = (log !zoom -. log min_zoom) /. (log max_zoom -. log min_zoom) in
-        let t = max 0. (min 1. t) in
-        let t = t *. t in
-        min_tau +. (t *. (max_tau -. min_tau))
-      in
+      let tau = calculate_tau () in
       let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
       current_orientation :=
         Quaternion.slerp !current_orientation !target_orientation alpha
@@ -2839,11 +2836,28 @@ let event_loop ctx draw =
       end
     end;
     if !input_mode = Manual then begin
-      (* Smooth "Righting Moment": pull current orientation towards upright.
-         Tau = 0.2s provides a smooth but firm correction. *)
-      let upright = snap_to_turntable !current_orientation in
-      let alpha = 1. -. exp (-.dt /. 200.0) in
-      current_orientation := Quaternion.slerp !current_orientation upright alpha
+      (* Gravity Stabilization: Lock Camera Inclination to Device Inclination
+         We align the screen-space vertical of the camera with that of the device. *)
+      let target_inclination = get_inclination_rad !sensor_orientation in
+      let curr_inclination = get_inclination_rad !current_orientation in
+
+      (* Compute Error with Angle Wrapping [-pi, pi] *)
+      let normalize_angle a =
+        let pi = Float.pi in
+        let a = mod_float (a +. pi) (2. *. pi) in
+        if a < 0. then a +. pi else a -. pi
+      in
+      let error = normalize_angle (target_inclination -. curr_inclination) in
+
+      (* Apply Correction (Rotation around Forward Axis) *)
+      let tau = calculate_tau () in
+      let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
+      let correction = error *. alpha in
+      let q_corr =
+        Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } correction
+      in
+      (* Apply correction in Camera Space (Post-multiply) *)
+      current_orientation := Quaternion.mult !current_orientation q_corr
     end;
     let orientation = !current_orientation in
     let z = !zoom in
@@ -3487,7 +3501,7 @@ let setup_events canvas =
           (Jv.call
              (Jv.get (Jv.get Jv.global "screen") "orientation")
              "lock"
-             [| Jv.of_jstr (Jstr.v "portrait") |]);
+             [| Jv.of_jstr (Jstr.v "natural") |]);
         Lwt.return ()
     | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
   in
@@ -3514,36 +3528,37 @@ let setup_events canvas =
     (Brr.Ev.listen deviceorientation
        (fun ev ->
          (* Bogus event on Chrome desktop *)
-         if not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha")) then
+         if not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha")) then (
            let screen =
              Jv.to_float
                (Jv.get
                   (Jv.get (Jv.get Jv.global "screen") "orientation")
                   "angle")
            in
+           let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
+           let alpha = angle "alpha" in
+           let beta = angle "beta" in
+           let gamma = angle "gamma" in
+           let q =
+             Quaternion.(
+               mult
+                 (from_axis_angle
+                    { x = 0.; y = 0.; z = 1.; w = 0. }
+                    (alpha *. pi /. 180.))
+                 (mult
+                    (from_axis_angle
+                       { x = 1.; y = 0.; z = 0.; w = 0. }
+                       (beta *. pi /. 180.))
+                    (mult
+                       (from_axis_angle
+                          { x = 0.; y = 1.; z = 0.; w = 0. }
+                          (gamma *. pi /. 180.))
+                       (from_axis_angle
+                          { x = 0.; y = 0.; z = 1.; w = 0. }
+                          (-.screen *. pi /. 180.)))))
+           in
+           sensor_orientation := q;
            if !input_mode = Sensor then begin
-             let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-             let alpha = angle "alpha" in
-             let beta = angle "beta" in
-             let gamma = angle "gamma" in
-             let q =
-               Quaternion.(
-                 mult
-                   (from_axis_angle
-                      { x = 0.; y = 0.; z = 1.; w = 0. }
-                      (alpha *. pi /. 180.))
-                   (mult
-                      (from_axis_angle
-                         { x = 1.; y = 0.; z = 0.; w = 0. }
-                         (beta *. pi /. 180.))
-                      (mult
-                         (from_axis_angle
-                            { x = 0.; y = 1.; z = 0.; w = 0. }
-                            (gamma *. pi /. 180.))
-                         (from_axis_angle
-                            { x = 0.; y = 0.; z = 1.; w = 0. }
-                            (-.screen *. pi /. 180.)))))
-             in
              target_orientation := q;
              match !state with
              | `Init -> current_orientation := q
@@ -3555,7 +3570,7 @@ let setup_events canvas =
                    display_temporary_message "Raise your phone!";
                    Lwt.return ())
              | `Started -> if beta >= 80. then remove_message ()
-           end)
+           end))
        (Brr.Window.as_target Brr.G.window));
 
   (* We set the device orientation listener early so that we have the
@@ -3643,10 +3658,7 @@ let setup_events canvas =
              let speed =
                2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
              in
-             let gamma =
-               0.
-               (* !current_orientation.screen *. Float.pi /. 180. *)
-             in
+             let gamma = -.get_inclination_rad !sensor_orientation in
              let c = cos gamma in
              let s = sin gamma in
              let dx_eff = (dx *. c) -. (dy *. s) in
@@ -3755,10 +3767,7 @@ let setup_events canvas =
                let speed =
                  2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
                in
-               let gamma =
-                 0.
-                 (* !current_orientation.screen *. Float.pi /. 180. *)
-               in
+               let gamma = -.get_inclination_rad !sensor_orientation in
                let c = cos gamma in
                let s = sin gamma in
                let dx_eff = (dx *. c) -. (dy *. s) in
