@@ -884,8 +884,9 @@ let terrain_program =
 
 
             // Apply specular and reflection to terrain color
-            vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val;
-            terrain_color += specColor * 0.3;
+            float specBoost = (waterMask > 0.01 || iceAmount > 0.5) ? 2.5 : 1.0;
+            vec3 specColor = vec3(1.0, 0.98, 0.95) * specular * (1.0 - material_roughness) * shadow_val * specBoost;
+            terrain_color += specColor * 0.4;
 
             // Fresnel for water
             if (waterMask > 0.01) {
@@ -907,12 +908,16 @@ let terrain_program =
 
           // Matched to Sky Shader: Horizon -> Zenith
           vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
-          vec3 ground_color = vec3(0.1, 0.08, 0.05); // Slightly darker ground bounce
-          float sky_factor = final_normal.z * 0.5 + 0.5;
-          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5; // Tuned intensity
+          vec3 ground_color = vec3(0.08, 0.07, 0.05); // Deeper ground bounce for contrast
+          float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
+          vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5;
+
+          // Normal-based Micro-AO: Darken steep crevices
+          float microAO = mix(0.85, 1.0, final_normal.z);
+          ambient *= microAO;
 
           vec3 sun_color = vec3(1.0, 0.95, 0.9);
-          vec3 direct = sun_color * final_l * shadow_val * 0.5; // Reduced direct intensity slightly to balance
+          vec3 direct = sun_color * final_l * shadow_val * 0.5;
           vec3 lighting = ambient + direct;
 
           // === AO (unchanged) ===
@@ -920,8 +925,10 @@ let terrain_program =
           terrain_color = terrain_color * occlusion;
 
 
-          // === Fog ===
-          float fog_coeff = exp(v_dist * -2e-5);
+          // === Fog & Haze ===
+          // Height-based Haze: exp(-h/H) where H=1500m
+          float haze_density = exp(-v_world_pos.z * 0.0006);
+          float fog_coeff = exp(v_dist * -0.8e-4 * haze_density);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
 
