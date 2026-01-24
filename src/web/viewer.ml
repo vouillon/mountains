@@ -361,7 +361,7 @@ let terrain_program =
         uniform mat4 transform;|}
       ^ radial_vertex_common
       ^ {|
-        out mediump float v_dist;
+        out highp float v_dist;
         out mediump float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
@@ -401,7 +401,7 @@ let terrain_program =
         uniform vec3 u_lightDir;                 // Pre-normalized on CPU
 
         in highp vec2 reliefCoord;               // Highp for texture coords
-        in mediump float v_dist;
+        in highp float v_dist;
         in mediump float v_h;
         in highp vec3 v_world_pos;               // Highp for world coords
 
