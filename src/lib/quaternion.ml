@@ -115,6 +115,12 @@ let to_matrix t =
     1.;
   |]
 
+let angle_between q1 q2 =
+  let d = dot q1 q2 in
+  let d = abs_float d in
+  let d = if d > 1.0 then 1.0 else d in
+  2.0 *. acos d
+
 let to_euler t =
   (* Roll (x-axis rotation) *)
   let sinr_cosp = 2.0 *. ((t.w *. t.x) +. (t.y *. t.z)) in

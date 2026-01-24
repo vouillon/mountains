@@ -2757,6 +2757,49 @@ let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
 
+(* Current position state for URL updates *)
+let current_lat = ref 0.0
+let current_lon = ref 0.0
+let last_url_update_orientation = ref Quaternion.identity
+let last_url_update_time = ref 0.
+
+let format_float f =
+  let s = Printf.sprintf "%.5f" f in
+  let s =
+    if String.contains s '.' then
+      let len = String.length s in
+      let rec loop i =
+        if i < 0 then s
+        else if s.[i] = '0' then loop (i - 1)
+        else if s.[i] = '.' then String.sub s 0 i
+        else String.sub s 0 (i + 1)
+      in
+      loop (len - 1)
+    else s
+  in
+  s
+
+let update_url_params () =
+  let lat = !current_lat in
+  let lon = !current_lon in
+  let alpha_deg = compute_azimuth !current_orientation *. 180. /. Float.pi in
+  let roll, _, _ = Quaternion.to_euler !current_orientation in
+  let beta_deg = roll *. 180. /. Float.pi in
+  let search =
+    Jstr.v
+      (Printf.sprintf "?lat=%s&lon=%s&alpha=%.0f&beta=%.0f" (format_float lat)
+         (format_float lon) alpha_deg beta_deg)
+  in
+  let uri =
+    Brr.Uri.with_query_params
+      (Brr.Window.location Brr.G.window)
+      (Brr.Uri.Params.of_jstr search)
+  in
+  let history = Jv.get Jv.global "history" in
+  ignore
+    (Jv.call history "replaceState"
+       [| Jv.null; Jv.of_string ""; Jv.of_jstr (Brr.Uri.to_jstr uri) |])
+
 (* Mouse state *)
 let mouse_dragging = ref false
 let mouse_start_x = ref 0.
@@ -2864,6 +2907,24 @@ let event_loop ctx draw =
     if orientation <> prev_orientation || z <> prev_zoom || !force_redraw then (
       force_redraw := false;
       draw ~orientation ctx);
+
+    (* URL Update Logic: Check for stability *)
+    let diff = Quaternion.angle_between orientation prev_orientation in
+    if diff < 0.0001 then (
+      (* Camera is effectively stable *)
+      let change_since_update =
+        Quaternion.angle_between orientation !last_url_update_orientation
+      in
+      (* Only update if orientation changed significantly (> ~0.1 deg) and enough time passed *)
+      if
+        change_since_update > 0.002
+        && now_ms () -. !last_url_update_time > 1000.
+      then (
+        update_url_params ();
+        last_url_update_orientation := orientation;
+        last_url_update_time := now_ms ()))
+    else last_url_update_time := now_ms ();
+    (* Reset timer while moving *)
     let* () = request_animation_frame () in
     loop orientation z
   in
@@ -3061,35 +3122,35 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
 let featured_locations =
   [
-    ("Col Girardin", 44.6078064, 6.8210935, 220.);
-    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50.);
-    ("Col du Blainon", 44.209067, 6.9423065, 0.);
-    ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40.);
-    ("Vallon de la Braïssa", 44.280097, 6.793942, 0.);
-    ("Lacs de Morgon", 44.336516, 6.913906, 0.);
-    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0.);
-    ("Col Fromage", 44.6896583, 6.8061028, 180.);
-    ("La Mortice Sud", 44.573885, 6.7694, 0.);
-    ("Le Sommet Rouge", 44.5740068, 6.7954285, 0.);
-    ("Col de la Braïssa", 44.278358, 6.790589, 0.);
-    ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0.);
-    ("Pic de Morgon", 44.4920, 6.3975, 0.);
-    ("Lac de Roburent", 44.424680, 6.93430, 220.);
-    ("Mont Ténibre", 44.2839, 6.9719, 0.);
-    ("Baisse de Druos", 44.191930, 7.19195, 0.);
+    ("Col Girardin", 44.6078064, 6.8210935, 220., 90.);
+    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50., 90.);
+    ("Col du Blainon", 44.209067, 6.9423065, 0., 90.);
+    ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40., 90.);
+    ("Vallon de la Braïssa", 44.280097, 6.793942, 0., 90.);
+    ("Lacs de Morgon", 44.336516, 6.913906, 0., 90.);
+    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0., 90.);
+    ("Col Fromage", 44.6896583, 6.8061028, 180., 90.);
+    ("La Mortice Sud", 44.573885, 6.7694, 0., 90.);
+    ("Le Sommet Rouge", 44.5740068, 6.7954285, 0., 90.);
+    ("Col de la Braïssa", 44.278358, 6.790589, 0., 90.);
+    ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0., 90.);
+    ("Pic de Morgon", 44.4920, 6.3975, 0., 90.);
+    ("Lac de Roburent", 44.424680, 6.93430, 220., 90.);
+    ("Mont Ténibre", 44.2839, 6.9719, 0., 90.);
+    ("Baisse de Druos", 44.191930, 7.19195, 0., 90.);
   ]
 
 let get_preset_position () =
   match featured_locations with
-  | (_, lat, lon, alpha) :: _ -> (lat, lon, alpha)
-  | [] -> (44.3950846, 6.7669714, 170.)
+  | (_, lat, lon, alpha, beta) :: _ -> (lat, lon, alpha, beta)
+  | [] -> (44.3950846, 6.7669714, 170., 90.)
 
-let set_orientation_from_yaw alpha =
+let set_orientation alpha beta =
   let alpha_rad = alpha *. pi /. 180. in
   let q_yaw =
     Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
   in
-  let pitch_rad = pi /. 2. in
+  let pitch_rad = beta *. pi /. 180. in
   let q_pitch =
     Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
   in
@@ -3194,7 +3255,8 @@ let get_url_position ~size =
           ~lat ~lon
       then
         let alpha = Option.value (get_float "alpha") ~default:0. in
-        Some (lat, lon, alpha)
+        let beta = Option.value (get_float "beta") ~default:90. in
+        Some (lat, lon, alpha, beta)
       else None
   | _ -> None
 
@@ -3210,7 +3272,7 @@ let get_current_position ~size =
       if
         Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
           ~lat ~lon
-      then Some (lat, lon, 0.)
+      then Some (lat, lon, 0., 90.)
       else None
   | Error _ -> None
 
@@ -3358,8 +3420,12 @@ let create_location_ui ~size =
            let open Fut.Syntax in
            let* res = get_current_position ~size in
            match res with
-           | Some (lat, lon, _) ->
-               let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
+           | Some (lat, lon, _, _) ->
+               let search =
+                 Jstr.v
+                   (Printf.sprintf "?lat=%s&lon=%s" (format_float lat)
+                      (format_float lon))
+               in
                let uri =
                  Brr.Uri.with_query_params
                    (Brr.Window.location Brr.G.window)
@@ -3382,7 +3448,7 @@ let create_location_ui ~size =
   in
   let featured_items =
     List.map
-      (fun (name, lat, lon, alpha) ->
+      (fun (name, lat, lon, alpha, beta) ->
         let item =
           Brr.El.li
             ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
@@ -3397,7 +3463,9 @@ let create_location_ui ~size =
           (Brr.Ev.listen Brr.Ev.click
              (fun _ ->
                let search =
-                 Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon alpha)
+                 Jstr.v
+                   (Printf.sprintf "?lat=%f&lon=%f&alpha=%f&beta=%f" lat lon
+                      alpha beta)
                in
                let uri =
                  Brr.Uri.with_query_params
@@ -3911,7 +3979,11 @@ let main () =
 
   update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
-  let* source, (lat, lon, angle) = to_lwt (get_position ~size:tile_width) in
+  let* source, (lat, lon, angle, pitch) =
+    to_lwt (get_position ~size:tile_width)
+  in
+  current_lat := lat;
+  current_lon := lon;
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with
@@ -3921,7 +3993,9 @@ let main () =
       let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
       if Brr.Uri.Params.mem (Jstr.v "lat") params then
         let search =
-          Jstr.v (Printf.sprintf "?lat=%f&lon=%f&alpha=%f" lat lon angle)
+          Jstr.v
+            (Printf.sprintf "?lat=%s&lon=%s&alpha=%s&beta=%s" (format_float lat)
+               (format_float lon) (format_float angle) (format_float pitch))
         in
         let uri =
           Brr.Uri.with_query_params
@@ -3930,7 +4004,7 @@ let main () =
         in
         navigate_to uri);
   (* current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. }; *)
-  set_orientation_from_yaw angle;
+  set_orientation angle pitch;
 
   let start = setup_events canvas in
   update_startup_status "Loading Terrain..." true;
