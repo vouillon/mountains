@@ -504,7 +504,7 @@ let terrain_program =
         // Modify detail weights based on slope (steep = more rock)
         void applySlopeModification(inout Surface s, float slope) {
           // Steep slopes increase rock weight, decrease others
-          float rockForce = smoothstep(0.15, 0.5, slope);
+          float rockForce = smoothstep(0.4, 0.6, slope);
 
           if (rockForce > 0.01) {
             // Blend albedo and roughness towards Bare Rock (ID 31)
@@ -3261,7 +3261,7 @@ let get_url_position ~size =
   match (get_float "lat", get_float "lon") with
   | Some lat, Some lon ->
       if
-        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
+        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9
           ~lat ~lon
       then
         let alpha = Option.value (get_float "alpha") ~default:0. in
@@ -3280,7 +3280,7 @@ let get_current_position ~size =
       let lat = Pos.latitude pos in
       let lon = Pos.longitude pos in
       if
-        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5 ~max_lon:9
+        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9
           ~lat ~lon
       then Some (lat, lon, 0., 90.)
       else None
@@ -3376,7 +3376,7 @@ let create_location_ui ~size =
     match parse_input_coordinates text with
     | Some (lat, lon) ->
         if
-          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:46 ~min_lon:5
+          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5
             ~max_lon:9 ~lat ~lon
         then
           let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
