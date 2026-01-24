@@ -2916,8 +2916,9 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
   let index_count = Bigarray.Array1.dim indices in
 
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+
   let ao_texture =
-    let _, deltay, _ = Render_state.compute_deltas ~lat in
     time_gpu ctx "compute_ao" (fun () ->
         compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
           ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
@@ -2990,9 +2991,15 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     let off_y = Render_state.compute_sub_arcsec_offset lat in
     List.filter
       (fun (_, (dst_x, dst_y)) ->
-        Visibility.test_precise
-          (Dem_loader.get_height tile)
-          ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+        let dx = float (dst_x - x) *. deltax in
+        let dy = float (dst_y - y) *. deltay in
+        let dist_sq = (dx *. dx) +. (dy *. dy) in
+        if dist_sq > 4900000000. then false
+        else
+          Visibility.test_precise
+            (Dem_loader.get_height tile)
+            ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y
+            ())
       points
   in
   let points =
