@@ -232,6 +232,7 @@ let input_mode = ref Sensor
 let zoom = ref 1.0
 let min_zoom = 0.5
 let max_zoom = 3.0
+let clamp_zoom z = max min_zoom (min max_zoom z)
 
 (* Math Helpers *)
 
@@ -2761,6 +2762,7 @@ let last_input_time = ref 0.
 let current_lat = ref 0.0
 let current_lon = ref 0.0
 let last_url_update_orientation = ref Quaternion.identity
+let last_url_update_zoom = ref 1.0
 let last_url_update_time = ref 0.
 
 let format_float f =
@@ -2785,10 +2787,11 @@ let update_url_params () =
   let alpha_deg = compute_azimuth !current_orientation *. 180. /. Float.pi in
   let roll, _, _ = Quaternion.to_euler !current_orientation in
   let beta_deg = roll *. 180. /. Float.pi in
+  let z = !zoom in
   let search =
     Jstr.v
-      (Printf.sprintf "?lat=%s&lon=%s&alpha=%.0f&beta=%.0f" (format_float lat)
-         (format_float lon) alpha_deg beta_deg)
+      (Printf.sprintf "?lat=%s&lon=%s&alpha=%.0f&beta=%.0f&zoom=%.2f"
+         (format_float lat) (format_float lon) alpha_deg beta_deg z)
   in
   let uri =
     Brr.Uri.with_query_params
@@ -2918,18 +2921,21 @@ let event_loop ctx draw =
 
     (* URL Update Logic: Check for stability (using current orientation vs previous frame) *)
     (* Note: We use the actual current orientation for stability check, even if we didn't draw *)
-    if angle_diff < 0.0001 then (
+    if angle_diff < 0.0001 && zoom_diff < 0.00001 then (
       (* Camera is effectively stable *)
-      let change_since_update =
+      let change_since_update_angle =
         Quaternion.angle_between orientation !last_url_update_orientation
       in
-      (* Only update if orientation changed significantly (> ~0.1 deg) and enough time passed *)
+      let change_since_update_zoom = abs_float (z -. !last_url_update_zoom) in
+
+      (* Only update if orientation changed significantly (> ~0.1 deg) OR zoom changed, and enough time passed *)
       if
-        change_since_update > 0.002
+        (change_since_update_angle > 0.002 || change_since_update_zoom > 0.01)
         && now_ms () -. !last_url_update_time > 1000.
       then (
         update_url_params ();
         last_url_update_orientation := orientation;
+        last_url_update_zoom := z;
         last_url_update_time := now_ms ()))
     else last_url_update_time := now_ms ();
     (* Reset timer while moving *)
@@ -3131,29 +3137,32 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 (* Location & UI *)
 
 let featured_locations =
+  (* http://localhost:8000/?lat=45.8078&lon=6.245&alpha=44&beta=86 *)
+  (*ZZZ Plateau d'Emparis http://localhost:8000/?lat=45.0501&lon=6.2278&alpha=-151&beta=94 *)
   [
-    ("Col Girardin", 44.6078064, 6.8210935, 220., 90.);
-    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50., 90.);
-    ("Col du Blainon", 44.209067, 6.9423065, 0., 90.);
-    ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40., 90.);
-    ("Vallon de la Braïssa", 44.280097, 6.793942, 0., 90.);
-    ("Lacs de Morgon", 44.336516, 6.913906, 0., 90.);
-    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0., 90.);
-    ("Col Fromage", 44.6896583, 6.8061028, 180., 90.);
-    ("La Mortice Sud", 44.573885, 6.7694, 0., 90.);
-    ("Le Sommet Rouge", 44.5740068, 6.7954285, 0., 90.);
-    ("Col de la Braïssa", 44.278358, 6.790589, 0., 90.);
-    ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0., 90.);
-    ("Pic de Morgon", 44.4920, 6.3975, 0., 90.);
-    ("Lac de Roburent", 44.424680, 6.93430, 220., 90.);
-    ("Mont Ténibre", 44.2839, 6.9719, 0., 90.);
-    ("Baisse de Druos", 44.191930, 7.19195, 0., 90.);
+    ("Col Girardin", 44.6078064, 6.8210935, 220., 90., 1.0);
+    ("La Chalannette, Jausiers", 44.3950846, 6.7669714, 50., 90., 1.0);
+    ("Col du Blainon", 44.209067, 6.9423065, 0., 90., 1.0);
+    ("Auron (Vallée de la Tinée)", 44.207447, 6.906400, 40., 90., 1.0);
+    ("Vallon de la Braïssa", 44.280097, 6.793942, 0., 90., 1.0);
+    ("Lacs de Morgon", 44.336516, 6.913906, 0., 90., 1.0);
+    ("Roc Diolon (Orcières)", 44.73360, 6.363068, 0., 90., 1.0);
+    ("Col Fromage", 44.6896583, 6.8061028, 180., 90., 1.0);
+    ("La Mortice Sud", 44.573885, 6.7694, 0., 90., 1.0);
+    ("Le Sommet Rouge", 44.5740068, 6.7954285, 0., 90., 1.0);
+    ("Col de la Braïssa", 44.278358, 6.790589, 0., 90., 1.0);
+    ("Montée vers Lac des Neufs Couleurs", 44.536194, 6.804142, 0., 90., 1.0);
+    ("Pic de Morgon", 44.4920, 6.3975, 0., 90., 1.0);
+    ("Lac de Roburent", 44.424680, 6.93430, 220., 90., 1.0);
+    ("Mont Ténibre", 44.2839, 6.9719, 0., 90., 1.0);
+    ("Baisse de Druos", 44.191930, 7.19195, 0., 90., 1.0);
   ]
 
 let get_preset_position () =
   match featured_locations with
-  | (_, lat, lon, alpha, beta) :: _ -> (lat, lon, alpha, beta)
-  | [] -> (44.3950846, 6.7669714, 170., 90.)
+  | (_, lat, lon, alpha, beta, zoom) :: _ ->
+      (lat, lon, alpha, beta, clamp_zoom zoom)
+  | [] -> (44.3950846, 6.7669714, 170., 90., 1.0)
 
 let set_orientation alpha beta =
   let alpha_rad = alpha *. pi /. 180. in
@@ -3266,7 +3275,8 @@ let get_url_position ~size =
       then
         let alpha = Option.value (get_float "alpha") ~default:0. in
         let beta = Option.value (get_float "beta") ~default:90. in
-        Some (lat, lon, alpha, beta)
+        let z = Option.value (get_float "zoom") ~default:1.0 in
+        Some (lat, lon, alpha, beta, clamp_zoom z)
       else None
   | _ -> None
 
@@ -3282,7 +3292,7 @@ let get_current_position ~size =
       if
         Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9
           ~lat ~lon
-      then Some (lat, lon, 0., 90.)
+      then Some (lat, lon, 0., 90., 1.0)
       else None
   | Error _ -> None
 
@@ -3430,7 +3440,7 @@ let create_location_ui ~size =
            let open Fut.Syntax in
            let* res = get_current_position ~size in
            match res with
-           | Some (lat, lon, _, _) ->
+           | Some (lat, lon, _, _, _) ->
                let search =
                  Jstr.v
                    (Printf.sprintf "?lat=%s&lon=%s" (format_float lat)
@@ -3458,7 +3468,7 @@ let create_location_ui ~size =
   in
   let featured_items =
     List.map
-      (fun (name, lat, lon, alpha, beta) ->
+      (fun (name, lat, lon, alpha, beta, z) ->
         let item =
           Brr.El.li
             ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
@@ -3474,8 +3484,8 @@ let create_location_ui ~size =
              (fun _ ->
                let search =
                  Jstr.v
-                   (Printf.sprintf "?lat=%f&lon=%f&alpha=%f&beta=%f" lat lon
-                      alpha beta)
+                   (Printf.sprintf "?lat=%f&lon=%f&alpha=%f&beta=%f&zoom=%.2f"
+                      lat lon alpha beta z)
                in
                let uri =
                  Brr.Uri.with_query_params
@@ -3692,8 +3702,8 @@ let setup_events canvas =
                input_mode := Manual;
                current_orientation :=
                  apply_manual_rotation !current_orientation 0. (5. *. pi /. 180.)
-           | "Equal" | "NumpadAdd" -> zoom := min max_zoom (!zoom *. 1.1)
-           | "Minus" | "NumpadSubtract" -> zoom := max min_zoom (!zoom /. 1.1)
+           | "Equal" | "NumpadAdd" -> zoom := clamp_zoom (!zoom *. 1.1)
+           | "Minus" | "NumpadSubtract" -> zoom := clamp_zoom (!zoom /. 1.1)
            | _ -> ())
          (Brr.Window.as_target Brr.G.window));
 
@@ -3708,7 +3718,7 @@ let setup_events canvas =
            let wheel = Brr.Ev.as_type ev in
            let delta_y = Brr.Ev.Wheel.delta_y wheel in
            let factor = (if delta_y > 0. then 0.9 else 1.1) ** 0.25 in
-           zoom := max min_zoom (min max_zoom (!zoom *. factor)))
+           zoom := clamp_zoom (!zoom *. factor))
          target);
 
     (* Mouse drag for rotation *)
@@ -3886,7 +3896,7 @@ let setup_events canvas =
              match touch_distance touches with
              | Some d when !pinch_distance > 0. ->
                  let factor = d /. !pinch_distance in
-                 zoom := max min_zoom (min max_zoom (!zoom *. factor));
+                 zoom := clamp_zoom (!zoom *. factor);
                  pinch_distance := d
              | _ -> ()
            end)
@@ -3989,11 +3999,12 @@ let main () =
 
   update_startup_status "Getting current location..." false;
   let* () = to_lwt wait_for_service_worker in
-  let* source, (lat, lon, angle, pitch) =
+  let* source, (lat, lon, angle, pitch, z) =
     to_lwt (get_position ~size:tile_width)
   in
   current_lat := lat;
   current_lon := lon;
+  zoom := z;
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with
@@ -4004,8 +4015,9 @@ let main () =
       if Brr.Uri.Params.mem (Jstr.v "lat") params then
         let search =
           Jstr.v
-            (Printf.sprintf "?lat=%s&lon=%s&alpha=%s&beta=%s" (format_float lat)
-               (format_float lon) (format_float angle) (format_float pitch))
+            (Printf.sprintf "?lat=%s&lon=%s&alpha=%s&beta=%s&zoom=%.2f"
+               (format_float lat) (format_float lon) (format_float angle)
+               (format_float pitch) z)
         in
         let uri =
           Brr.Uri.with_query_params
