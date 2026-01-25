@@ -28,12 +28,22 @@ let compute_sub_arcsec_offset coord = (coord *. 3600.) -. floor (coord *. 3600.)
 
 (** Compute center offset in meters from tile origin. [x] and [y] are
     tile-relative indices, [lat] and [lon] are geographic coords. *)
-let compute_center_offset ~lat ~lon ~x ~y =
+let compute_center_offset ~lat ~lon ~x:_ ~y:_ =
   let deltax, deltay, _ = compute_deltas ~lat in
   let off_x = compute_sub_arcsec_offset lon in
   let off_y = compute_sub_arcsec_offset lat in
-  let center_offset_x = deltax *. (float x +. off_x) in
-  let center_offset_y = deltay *. (float y +. off_y) in
+  let center_offset_x =
+    deltax
+    *.
+    (*float x +.*)
+    off_x
+  in
+  let center_offset_y =
+    deltay
+    *.
+    (*float y +.*)
+    off_y
+  in
   (center_offset_x, center_offset_y)
 
 type radial_params = {
@@ -57,6 +67,7 @@ type terrain_uniforms = {
   snapped_alpha : Gl.uniform_location;
   (* Tile parameters *)
   center_offset : Gl.uniform_location;
+  center_height : Gl.uniform_location;
   w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
@@ -74,8 +85,6 @@ type terrain_uniforms = {
   (* CLC *)
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;
-  u_cameraOffset : Gl.uniform_location;
-  u_baseExtent : Gl.uniform_location;
   u_numLevels : Gl.uniform_location;
   u_fogColor : Gl.uniform_location;
   u_zenithColor : Gl.uniform_location;
@@ -198,6 +207,7 @@ let init_terrain_uniforms ctx pid =
     grid_scale = u "grid_scale";
     snapped_alpha = u "snapped_alpha";
     center_offset = u "center_offset";
+    center_height = u "center_height";
     w = u "w";
     inv_w = u "inv_w";
     max_lod = u "max_lod";
@@ -211,8 +221,6 @@ let init_terrain_uniforms ctx pid =
     u_lightDir = u "u_lightDir";
     u_coverMap = u "u_coverMap";
     u_paletteTex = u "u_paletteTex";
-    u_cameraOffset = u "u_cameraOffset";
-    u_baseExtent = u "u_baseExtent";
     u_numLevels = u "u_numLevels";
     u_fogColor = u "u_fogColor";
     u_zenithColor = u "u_zenithColor";
@@ -364,8 +372,6 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y;
 
   (* CLC clipmap parameters *)
-  Gl.uniform2f ctx u.u_cameraOffset center_offset_x center_offset_y;
-  Gl.uniform1f ctx u.u_baseExtent 2048.0;
   Gl.uniform1i ctx u.u_numLevels 7;
 
   (* Light direction *)

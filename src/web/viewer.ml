@@ -320,7 +320,7 @@ let radial_vertex_common =
     ivec2 tex_size = textureSize(relief, lod);
 
     // Normalized coordinate (Y flipped: row 0 is north)
-    v.norm_coord = vec2(coord.x, coord.y) * inv_w;
+    v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
 
     // Texel position for manual bilinear interpolation
     highp vec2 lod_pos = v.norm_coord * vec2(tex_size);
@@ -358,6 +358,7 @@ let terrain_program =
       {|#version 300 es
         precision highp float;
         precision highp int;
+        uniform highp float center_height;
         uniform mat4 proj;
         uniform mat4 transform;|}
       ^ radial_vertex_common
@@ -366,15 +367,18 @@ let terrain_program =
         out mediump float v_h;
         out highp vec2 reliefCoord;
         out highp vec3 v_world_pos;
+        out highp vec3 v_view_dir;
 
         void main() {
           RadialVertex rv = computeRadialVertex();
 
           reliefCoord = rv.norm_coord + (0.5 * inv_w);
-          v_world_pos = vec3(rv.coord_meters, rv.height);
+          v_world_pos = vec3(rv.coord_meters, rv.height - center_height);
 
           highp vec4 pos = transform * vec4(rv.pos_plane, rv.height, 1.0);
-          v_dist = length(pos.xyz);
+          v_dist = length(vec3(center_offset, 0) - v_world_pos);
+          v_view_dir =
+            normalize(vec3(center_offset, 0) - v_world_pos);
           v_h = rv.height;
           gl_Position = proj * pos;
         }
@@ -393,16 +397,15 @@ let terrain_program =
         // CLC Material System Uniforms
         uniform mediump usampler2DArray u_coverMap;  // CLC ID clipmap (layers)
         uniform mediump sampler2D u_paletteTex;  // 128x1 RGBA palette
-        uniform highp vec2 u_cameraOffset;       // Camera world position (center of clipmap)
-        uniform highp float u_baseExtent;       // Extent of level 0 in meters (highp for coord math)
         uniform int u_numLevels;                 // Number of clipmap levels
-
         uniform highp mat4 shadow_matrices[3];   // Must be highp for projection
         uniform mediump float shadow_splits[3];
         uniform vec3 u_lightDir;                 // Pre-normalized on CPU
+        uniform highp float center_height;
 
         in highp vec2 reliefCoord;               // Highp for texture coords
         in highp float v_dist;
+        in highp vec3 v_view_dir;
         in mediump float v_h;
         in highp vec3 v_world_pos;               // Highp for world coords
 
@@ -441,32 +444,38 @@ let terrain_program =
         }
 
         // Manual bilinear filtering of CLC IDs (blend Surface properties)
-        Surface sampleCLCBilinear(highp vec2 worldPos) {
-          // Calculate distance from center (camera) for LOD selection
-          highp vec2 relPos = worldPos - u_cameraOffset;
+        Surface sampleCLCBilinear(highp vec2 uv) {
+          // Distance-based LOD (Coverage Constraint)
+          // The concentric clipmaps have limited extent. Level L covers radius 0.5 / 2^(6-L).
+          // We must choose a level large enough to cover the current UV.
+          vec2 dist_from_center = abs(uv - 0.5);
+          float d_center = max(dist_from_center.x, dist_from_center.y);
+          // Avoid log2(0)
+          d_center = max(d_center, 0.000001);
+          
+          // Formula: Level > 7 + log2(d)   (Assumes u_numLevels=7)
+          float level_pos = ceil(float(u_numLevels) + log2(d_center));
+          
+          int level = clamp(int(level_pos), 0, u_numLevels - 1);
 
-          // Select clipmap level based on distance
-          // Level L covers extent = u_baseExtent * 2^L
-          // We want the finest level that covers this point
-          highp float desiredLevel = max(0.0, 1.0 + log2(v_dist / u_baseExtent));
-          int level = clamp(int(ceil(desiredLevel)), 0, u_numLevels - 1);
-
-          // Calculate texture coordinates for this level
-          highp float levelExtent = u_baseExtent * pow(2.0, float(level));
-          highp vec2 texCoord = (relPos / levelExtent) + 0.5;
+          // Calculate texture coordinates for this concentric level
+          // Level 6 covers the whole tile (scale 1x)
+          // Level 0 covers 1/64th (scale 64x)
+          float scale = exp2(float((u_numLevels - 1) - level));
+          vec2 levelUV = (uv - 0.5) * scale + 0.5;
 
           vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
-          highp vec2 texelPos = texCoord * texSize - 0.5;
+          highp vec2 texelPos = levelUV * texSize - 0.5;
 
-          ivec2 p00 = ivec2(floor(texelPos));
+          ivec2 p00_raw = ivec2(floor(texelPos));
           vec2 frac = fract(texelPos);
 
           // Clamp to valid range
           ivec2 maxCoord = ivec2(texSize) - 1;
-          p00 = clamp(p00, ivec2(0), maxCoord);
-          ivec2 p10 = clamp(p00 + ivec2(1,0), ivec2(0), maxCoord);
-          ivec2 p01 = clamp(p00 + ivec2(0,1), ivec2(0), maxCoord);
-          ivec2 p11 = clamp(p00 + ivec2(1,1), ivec2(0), maxCoord);
+          ivec2 p00 = clamp(p00_raw, ivec2(0), maxCoord);
+          ivec2 p10 = clamp(p00_raw + ivec2(1,0), ivec2(0), maxCoord);
+          ivec2 p01 = clamp(p00_raw + ivec2(0,1), ivec2(0), maxCoord);
+          ivec2 p11 = clamp(p00_raw + ivec2(1,1), ivec2(0), maxCoord);
 
           // Sample 4 neighbors from selected array layer
           // usampler2DArray fetch returns uvec4, we take .r component
@@ -531,8 +540,8 @@ let terrain_program =
 
         // Triplanar sampling for packed RGBA detail map
         // Returns blended detail weights from all projection planes
-        vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal) {
-          highp float scale = 0.002;  // ~500m per texture repeat (matches validated debug scale)
+        vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal,
+                                     float scale) {
           highp vec2 uv_xz = worldPos.xz * scale;
           highp vec2 uv_xy = worldPos.xy * scale;
           highp vec2 uv_yz = worldPos.yz * scale;
@@ -541,9 +550,10 @@ let terrain_program =
           blend /= (blend.x + blend.y + blend.z + 0.0001);
 
           // Sample packed RGBA detail map from each projection plane
-          vec4 d_xz = texture(u_detailMap, uv_xz);
-          vec4 d_xy = texture(u_detailMap, uv_xy);
-          vec4 d_yz = texture(u_detailMap, uv_yz);
+float bias = 1.;
+          vec4 d_xz = texture(u_detailMap, uv_xz, bias);
+          vec4 d_xy = texture(u_detailMap, uv_xy, bias);
+          vec4 d_yz = texture(u_detailMap, uv_yz, bias);
 
           // Blend based on surface orientation (Corrected for Z-up)
           // Top/Bottom (blend.z) -> XY projection
@@ -552,46 +562,73 @@ let terrain_program =
           return d_xy * blend.z + d_xz * blend.y + d_yz * blend.x;
         }
 
+        float computeHeight(vec4 noise, vec4 weights) {
+            float rockH   = (noise.r - 0.5) * 1.5;
+            float grassH  = (noise.g - 0.5) * 0.3;
+            float forestH = (noise.b - 0.5) * 1.6;
+            float iceH    = (noise.a - 0.5) * 1.0;
+            return rockH * weights.r +
+                   grassH * weights.g +
+                   forestH * weights.b +
+                   iceH * weights.a;
+        }
+
+        vec3 surfaceGradient(vec3 geomNormal, vec4 texNoise, vec4 detailWeights) {
+          float compositeHeight = computeHeight(texNoise, detailWeights);
+          float dHdx = dFdx(compositeHeight);
+          float dHdy = dFdy(compositeHeight);
+
+          vec3 dPdx = dFdx(v_world_pos);
+          vec3 dPdy = dFdy(v_world_pos);
+
+          // 3. Solve the surface gradient (The math magic)
+          // This projects the screen-space height slope onto the 3D surface
+          vec3 r1 = cross(dPdy, geomNormal);
+          vec3 r2 = cross(geomNormal, dPdx);
+          float det = dot(dPdx, r1);
+
+          // Safety to prevent divide-by-zero on degenerate geometry
+          float epsilon = 1e-12;
+          float signDet = (det > 0.0) ? 1.0 : -1.0;
+
+          // This is the true 3D direction of the slope
+          return signDet * (dHdx * r1 + dHdy * r2) / (abs(det) + epsilon);
+        }
+
         // Procedural normal perturbation based on detail noise
         // Uses screen-space derivatives for directional bump mapping
         vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness, vec4 detailWeights) {
-            // 1. Define the "Bump Shape" for each material
-            // We subtract 0.5 to center the noise [-0.5 to +0.5]
 
-            // ROCK (Red): Strong, sharp cracks
-            float rockBump = (texNoise.r - 0.5) * 0.5;
+    // Determine Roughness
+    float targetRoughness = 0.6 * detailWeights.r + 0.9 * detailWeights.g +
+                            0.85 * detailWeights.b + 0.2 * detailWeights.a;
+    float material_roughness = mix(roughness, targetRoughness, 0.8);
 
-            // GRASS (Green): Soft, rolling mounds (Multiplied by 0.4 to be gentle)
-            float grassBump = (texNoise.g - 0.5) * 0.4;
+    // Water/Ice gloss fix
+    if (detailWeights.a > 0.1) {
+        material_roughness = min(material_roughness, 0.3);
+    }
 
-            // FOREST (Blue): Medium canopy lumps
-            float forestBump = (texNoise.b - 0.5) * 0.6;
+    // 3. Apply the Perturbation
+    // We adjust the strength based on roughness (smooth surfaces = flatter)
+    float bumpStrength = 4.0 * (1.0 + detailWeights.r); // Rocks need more depth
+    bumpStrength *= material_roughness; // Smooth mud fills in the cracks
 
-            // ICE (Alpha): Sharp crystalline facets
-            float iceBump = (texNoise.a - 0.5) * 1.2;
+    vec3 surfGrad = surfaceGradient(geomNormal, texNoise, detailWeights);
 
-            // 2. Mix them based on the current material weights
-            float compositeBump = rockBump * detailWeights.r +
-                                  grassBump * detailWeights.g +
-                                  forestBump * detailWeights.b +
-                                  iceBump * detailWeights.a;
+    vec4 texNoise2 = sampleTriplanarCombined(v_world_pos, geomNormal, 0.1); // 10m
+    vec3 surfGrad2 = surfaceGradient(geomNormal, texNoise2, detailWeights);
 
-            // 3. Scale by Roughness
-            // Very smooth surfaces (mud/puddles) fill in cracks -> Less Bump.
-            // However, Ice (shiny) is an exception; it needs to stay sharp.
-            float intensity = 1.5 * roughness;
+    // Distance-based attenuation: reduce bump strength close to camera
+    // to avoid "crunchy" low-res noise artifacts
+    float fadeStart = 75.0;
+    float fadeEnd = 150.0;
+    float distFactor = smoothstep(fadeStart, fadeEnd, v_dist);
+    float strengthScale = mix(0.03, 1.0, distFactor);
 
-            // Hack: If it's mostly Ice or Water, force high sharpness despite low roughness
-            if (detailWeights.a > 0.5) intensity = 1.0;
-
-            // 4. Apply the Perturbation
-            // We modify the X and Y components of the normal (assuming Z is up).
-            // This tilts the normal vector based on the noise slope.
-            vec3 pNormal = geomNormal;
-            pNormal.xy += compositeBump * intensity;
-
-            // 5. Re-normalize to ensure lighting remains correct
-            return normalize(pNormal);
+    // 4. Apply the slope to the normal
+    // "strength" scales the height effect
+    return normalize(geomNormal - (surfGrad * strengthScale + surfGrad2 / 40.) * bumpStrength);
         }
 
         // Procedural water with organic shoreline
@@ -664,7 +701,8 @@ let terrain_program =
           float slopeScale = 1.0 - cosTheta;
           float texelSz = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
           float normalOffset = texelSz * slopeScale;
-          vec3 offset_pos = v_world_pos + normal * normalOffset;
+          vec3 offset_pos =
+            v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
 
           vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
           vec3 proj_coords = s_pos.xyz / s_pos.w;
@@ -681,12 +719,13 @@ let terrain_program =
           vec3 final_normal = normal;
 
             // === CLC-Based Material ===
-            Surface surface = sampleCLCBilinear(v_world_pos.xy);
+            Surface surface = sampleCLCBilinear(reliefCoord);
 
             applySlopeModification(surface, slope);
 
             // Sample packed detail map via triplanar projection
-            vec4 texNoise = sampleTriplanarCombined(v_world_pos, normal);
+            highp float scale = 0.002; // ~500m per texture repeat
+            vec4 texNoise = sampleTriplanarCombined(v_world_pos, normal, scale);
 
             // -----------------------------------------------------------------------
             // STEP A: HEIGHT-BASED BLENDING ("Clumping")
@@ -856,8 +895,7 @@ let terrain_program =
             }
 
             // === Specular & Environment Reflection ===
-            vec3 viewDir = normalize(-v_world_pos);  // Approximate view direction
-            vec3 halfVec = normalize(lightDir + viewDir);
+            vec3 halfVec = normalize(lightDir + v_view_dir);
 
             // GGX-inspired specular (simplified)
             float NdotH = max(0.0, dot(final_normal, halfVec));
@@ -867,7 +905,7 @@ let terrain_program =
             float specular = D * max(0.0, dot(final_normal, lightDir));
 
             // Environment reflection (sky color for glossy surfaces)
-            vec3 reflectDir = reflect(-viewDir, final_normal);
+            vec3 reflectDir = reflect(-v_view_dir, final_normal);
             float skyReflect = max(0.0, reflectDir.z);
             // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
             // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
@@ -883,7 +921,7 @@ let terrain_program =
 
             // Fresnel for water
             if (waterMask > 0.01) {
-               float n_dot_v = max(0.0, dot(final_normal, viewDir));
+               float n_dot_v = max(0.0, dot(final_normal, v_view_dir));
                // Schlick's approximation
                float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
                reflectivity = mix(reflectivity, fresnel, waterMask);
@@ -905,9 +943,32 @@ let terrain_program =
           float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
           vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5;
 
+          // Rectified Geometric Normal for Micro-AO comparison
+          // Use flat normal (0,0,1) for water to avoid dark artifacts at shorelines
+          vec3 geoNormal = mix(normal, vec3(0.0, 0.0, 1.0), waterMask);
+
           // Normal-based Micro-AO: Darken steep crevices
-          float microAO = mix(0.85, 1.0, final_normal.z);
-          ambient *= microAO;
+          // Compare final normal (with detail) against the underlying geometric shape
+          float normalAO = mix(0.85, 1.0, max(0.0, dot(final_normal, geoNormal)));
+
+          // Noise-based Micro-AO: Darken crevasses/gaps (low noise values)
+          // 1. Compute per-material AO factors (Low noise = Darker)
+          float rockAO = smoothstep(0.0, 0.6, texNoise.r);
+          float forestAO = smoothstep(0.0, 0.5, texNoise.b);
+          float iceAO = smoothstep(0.0, 0.6, texNoise.a);
+
+          // 2. Combine based on weights (Grass/Green channel gets 1.0 = no darkening)
+          float combinedNoiseAO = rockAO * finalWeights.r + 
+                                  1.0 * finalWeights.g + 
+                                  forestAO * finalWeights.b + 
+                                  iceAO * finalWeights.a;
+
+          // 3. Remap to valid range (0.5 to 1.0) so it doesn't get too dark
+          float noiseAO = mix(0.5, 1.0, combinedNoiseAO);
+
+          // Combine both AO terms
+          float finalMicroAO = normalAO * noiseAO;
+          ambient *= finalMicroAO;
 
           vec3 sun_color = vec3(1.0, 0.95, 0.9);
           vec3 direct = sun_color * final_l * shadow_val * 0.5;
@@ -920,7 +981,7 @@ let terrain_program =
 
           // === Fog & Haze ===
           // Height-based Haze: exp(-h/H) where H=1500m
-          float haze_density = exp(-v_world_pos.z * 0.0006);
+          float haze_density = exp((-center_height-v_world_pos.z) * 0.0006);
           float fog_coeff = exp(v_dist * -0.8e-4 * haze_density);
 
           vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
@@ -1300,25 +1361,27 @@ let mipmap_program =
           vec4 h01_v = texelFetch(source_texture, c01, 0);
           vec4 h11_v = texelFetch(source_texture, c11, 0);
 
-          float h00 = h00_v.r + h00_v.g / 256.0;
-          float h10 = h10_v.r + h10_v.g / 256.0;
-          float h01 = h01_v.r + h01_v.g / 256.0;
-          float h11 = h11_v.r + h11_v.g / 256.0;
+          float h00 = h00_v.r * 256. + h00_v.g;
+          float h10 = h10_v.r * 256. + h10_v.g;
+          float h01 = h01_v.r * 256. + h01_v.g;
+          float h11 = h11_v.r * 256. + h11_v.g;
 
           float max_h = max(max(h00, h10), max(h01, h11));
-          float h_scale = 10000.0;
+          float h_scale = (1.0/257.0) * 9500.0;
 
           float w00 = exp(k * (h00 - max_h) * h_scale);
           float w10 = exp(k * (h10 - max_h) * h_scale);
           float w01 = exp(k * (h01 - max_h) * h_scale);
           float w11 = exp(k * (h11 - max_h) * h_scale);
 
-          float sum_w = w00 + w10 + w01 + w11;
-          float h_avg = (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / sum_w;
+          float sum_exp = w00 + w10 + w01 + w11;
+          float avg_exp = sum_exp / 4.;
+          float h_avg = max_h + (log(avg_exp) / k / h_scale) + 0.5 / 255.;
+
           vec2 n_avg = (h00_v.ba + h10_v.ba + h01_v.ba + h11_v.ba) * 0.25;
 
-          float r = floor(h_avg * 255.0) / 255.0;
-          float g = (h_avg - r) * 256.0;
+          float r = floor(h_avg * (255. / 256.)) / 255.;
+          float g = mod(h_avg * 255., 256.0) / 255.0;
 
           frag_color = vec4(r, g, n_avg);
         }|};
@@ -1392,10 +1455,9 @@ let normal_program =
           vec2 encN = n.xy * 0.5 + 0.5;
 
           // Encode Height (-500 to 9000 -> 0 to 1)
-          float h_norm = clamp((c - (-500.0)) / 9500.0, 0.0, 1.0);
-          float h_val = floor(h_norm * 65535.0 + 0.5);
+          float h_val = (c + 500.0) / 9500.0 * 65535.0;
           float h_high = floor(h_val / 256.0) / 255.0;
-          float h_low = floor(mod(h_val, 256.0)) / 255.0;
+          float h_low = mod(h_val, 256.0) / 255.0;
 
           color = vec4(h_high, h_low, encN.x, encN.y);
         }
@@ -1635,7 +1697,6 @@ let calculate_shadow_matrices ~light_dir ~world_center =
     in
     let shadow_radius = split_radius *. 1.5 in
 
-    (* Use world_center with z=0 (terrain uses absolute heights) *)
     let center = world_center in
 
     (* Ortho Proj: scale depth range with shadow radius *)
@@ -2075,7 +2136,7 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
   tid
 
-let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
+let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
   (* CLC GPU Rasterization setup *)
@@ -2133,21 +2194,38 @@ let rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
   let ebo = Gl.create_buffer ctx in
 
   (* Conversion factors *)
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-  let meters_per_deg_lat = deltay *. 3600. in
-  let meters_per_deg_lon = deltax *. 3600. in
+  (* Center calculus from User requirements *)
+  (* The point at (w/2, h/2) is at truncate(lat/lon). *)
+  (* This corresponds to the center of the pixel at index w/2. *)
+  (* Pixel centers are at integral arcseconds. *)
+  (* Therefore, the geometric center of the tile (w x h area) is offset by -0.5 arcsec from the truncate coordinate. *)
+  let half_arcsec = 0.5 /. 3600. in
+  let center_lat_deg =
+    (float (truncate (lat *. 3600.)) /. 3600.) -. half_arcsec
+  in
+  let center_lon_deg =
+    (float (truncate (lon *. 3600.)) /. 3600.) -. half_arcsec
+  in
+
+  (* Largest level (Index 6) matches DEM extent exactly *)
+  let dem_extent_deg = float w /. 3600. in
 
   (* Pre-calculate view bounds for each level *)
+  (* Level 6: extent = dem_extent. Scale = 1. *)
+  (* Level 0: extent = dem_extent / 64. Scale = 64. *)
   let level_bounds =
     Array.init 7 (fun level ->
-        let extent_meters = 2048.0 *. (2.0 ** float level) in
-        let extent_lat = extent_meters /. meters_per_deg_lat in
-        let extent_lon = extent_meters /. meters_per_deg_lon in
-        let min_lat = lat -. (extent_lat /. 2.) in
-        let min_lon = lon -. (extent_lon /. 2.) in
-        let max_lat = min_lat +. extent_lat in
-        let max_lon = min_lon +. extent_lon in
-        (min_lon, min_lat, extent_lon, extent_lat, max_lon, max_lat))
+        (* level 0 is smallest, level 6 is largest *)
+        (* scale factor relative to DEM: 1.0 for level 6, 1/64 for level 0 *)
+        let factor = 2.0 ** float (level - 6) in
+        let extent = dem_extent_deg *. factor in
+
+        let min_lat = center_lat_deg -. (extent /. 2.) in
+        let min_lon = center_lon_deg -. (extent /. 2.) in
+        let max_lat = min_lat +. extent in
+        let max_lon = min_lon +. extent in
+
+        (min_lon, min_lat, extent, extent, max_lon, max_lat))
   in
 
   (* Pre-upload all tile geometry to GPU buffers *)
@@ -2682,6 +2760,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Matrix.blit transform transform_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
   Gl.bind_vertex_array ctx (Some terrain_geo);
+  Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
   Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
@@ -3018,11 +3097,12 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     Matrix.{ x = sx; y = sy; z = sz; w = 0. }
   in
   let splits_dist = [| 2000.; 8000.; 25000. |] in
-  let center_offset_x, center_offset_y =
-    Render_state.compute_center_offset ~lat ~lon ~x ~y:(h - y)
-  in
   let world_center =
-    Matrix.{ x = center_offset_x; y = center_offset_y; z = 0.; w = 1. }
+    let center_offset_x, center_offset_y =
+      Render_state.compute_center_offset ~lat ~lon ~x ~y
+    in
+    Matrix.
+      { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
   in
   let shadow_matrices =
     (* view_proj is ignored in calculate_shadow_matrices *)
@@ -3031,14 +3111,14 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
 
   (* Upload all session-static uniforms *)
   Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
-    terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y:(h - y) ~lon
-    ~light_dir ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
+    terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon ~light_dir
+    ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
     ~zenith_color:zenith_linear;
 
   (* GPU rasterize CLC tiles to FBO *)
   let cover_map_texture =
     time_gpu ctx "rasterize_clc_tiles" (fun () ->
-        rasterize_clc_tiles ctx ~lat ~lon ~clc_tiles ~clc_raster_pid
+        rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
           ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
   in
 

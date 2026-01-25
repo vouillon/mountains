@@ -38,6 +38,7 @@ type terrain_uniforms = {
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
   center_offset : Gl.uniform_location;
+  center_height : Gl.uniform_location;
   w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
@@ -51,8 +52,6 @@ type terrain_uniforms = {
   u_lightDir : Gl.uniform_location;
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;
-  u_cameraOffset : Gl.uniform_location;
-  u_baseExtent : Gl.uniform_location;
   u_numLevels : Gl.uniform_location;
   u_fogColor : Gl.uniform_location;
   u_zenithColor : Gl.uniform_location;
