@@ -320,7 +320,7 @@ let radial_vertex_common =
     ivec2 tex_size = textureSize(relief, lod);
 
     // Normalized coordinate (Y flipped: row 0 is north)
-    v.norm_coord = vec2(coord.x, float(w) - coord.y) * inv_w;
+    v.norm_coord = vec2(coord.x, coord.y) * inv_w;
 
     // Texel position for manual bilinear interpolation
     highp vec2 lod_pos = v.norm_coord * vec2(tex_size);
@@ -2630,7 +2630,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
         let off_x = Render_state.compute_sub_arcsec_offset lon in
         let off_y = Render_state.compute_sub_arcsec_offset lat in
         let px = deltax *. (float (x' - x) -. off_x) in
-        let py = deltay *. (float (y - y') -. off_y) in
+        let py = deltay *. (float (y' - y) -. off_y) in
         let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let r = { r with z = -.r.z } in
@@ -3001,7 +3001,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
           ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
   in
 
-  let light_dir_shader =
+  let light_dir =
     let date_ctor = Jv.get Jv.global "Date" in
     let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
     let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
@@ -3015,16 +3015,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         Sun.position ~lat ~lon ~time:t
       else (sx, sy, sz)
     in
-    Matrix.{ x = sx; y = -.sy; z = sz; w = 0. }
-  in
-  let light_dir_shadows =
-    Matrix.
-      {
-        x = light_dir_shader.x;
-        y = -.light_dir_shader.y;
-        z = light_dir_shader.z;
-        w = 0.;
-      }
+    Matrix.{ x = sx; y = sy; z = sz; w = 0. }
   in
   let splits_dist = [| 2000.; 8000.; 25000. |] in
   let center_offset_x, center_offset_y =
@@ -3035,14 +3026,14 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   in
   let shadow_matrices =
     (* view_proj is ignored in calculate_shadow_matrices *)
-    calculate_shadow_matrices ~light_dir:light_dir_shadows ~world_center
+    calculate_shadow_matrices ~light_dir ~world_center
   in
 
   (* Upload all session-static uniforms *)
   Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
     terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y:(h - y) ~lon
-    ~light_dir:light_dir_shader ~shadow_matrices ~shadow_splits:splits_dist
-    ~fog_color:fog_linear ~zenith_color:zenith_linear;
+    ~light_dir ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
+    ~zenith_color:zenith_linear;
 
   (* GPU rasterize CLC tiles to FBO *)
   let cover_map_texture =
@@ -4044,7 +4035,7 @@ let main () =
     Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
     Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
   let x = tile_width / 2 in
-  let y = (tile_height / 2) - 1 in
+  let y = tile_height / 2 in
   let d = float x /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
@@ -4083,15 +4074,15 @@ let main () =
             let center_lon_int = truncate (lon *. 3600.) in
             let center_lat_int = truncate (lat *. 3600.) in
             let min_lon_int = center_lon_int - (size / 2) in
-            (* Top row index in arcseconds. See Clc_loader/Dem_loader bounds logic *)
-            let max_lat_int = center_lat_int + (size / 2) - 1 in
+            let min_lat_int = center_lat_int - (size / 2) in
+
             fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
               (* POI coords are already rounded to arcseconds in previous step, so simple truncate is safe *)
               let pt_lon_int = truncate (pt_lon *. 3600.) in
               let pt_lat_int = truncate (pt_lat *. 3600.) in
               let x = max 0 (min (tile_width - 1) (pt_lon_int - min_lon_int)) in
               let y =
-                max 0 (min (tile_height - 1) (max_lat_int - pt_lat_int))
+                max 0 (min (tile_height - 1) (pt_lat_int - min_lat_int))
               in
               (pt, (x, y))))
   in
@@ -4160,8 +4151,8 @@ let main () =
   let off_y = Render_state.compute_sub_arcsec_offset lat in
   let h00 = get_h y x in
   let h10 = get_h y (x + 1) in
-  let h01 = get_h (y - 1) x in
-  let h11 = get_h (y - 1) (x + 1) in
+  let h01 = get_h (y + 1) x in
+  let h11 = get_h (y + 1) (x + 1) in
   let h0 = h00 +. (off_x *. (h10 -. h00)) in
   let h1 = h01 +. (off_x *. (h11 -. h01)) in
   let height = h0 +. (off_y *. (h1 -. h0)) in

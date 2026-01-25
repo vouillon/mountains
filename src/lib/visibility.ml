@@ -51,7 +51,7 @@ let test (get_height : int -> int -> float) ?src_h ~src_x ~src_y ~dst_x ~dst_y
 
 (** Bilinear interpolation of height at fractional coordinates.
     [get_height row col] returns height at integer grid coordinates. Note: Y
-    axis follows array convention where y-1 is "up" (increasing lat). *)
+    axis follows OpenGL convention where y+1 is "up" (increasing lat). *)
 let bilinear_height (get_height : int -> int -> float) ~x ~y =
   let x0 = int_of_float (floor x) in
   let y0 = int_of_float (floor y) in
@@ -88,7 +88,7 @@ let debug = false
 let test_precise (get_height : int -> int -> float) ?src_h ~off_x ~off_y ~src_x
     ~src_y ~dst_x ~dst_y () =
   let src_x_f = float src_x +. off_x in
-  let src_y_f = float src_y -. off_y in
+  let src_y_f = float src_y +. off_y in
   let dst_x_f = float dst_x in
   let dst_y_f = float dst_y in
   let dx = dst_x_f -. src_x_f in

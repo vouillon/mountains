@@ -406,7 +406,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
 
   (* Sky Uniforms *)
   Gl.use_program ctx sky_pid;
-  Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x (-.light_dir.Matrix.y)
+  Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x light_dir.Matrix.y
     light_dir.Matrix.z;
   Gl.uniform3f ctx sky_u.u_fogColor r g b;
   Gl.uniform3f ctx sky_u.u_zenithColor zr zg zb

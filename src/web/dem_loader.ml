@@ -153,7 +153,7 @@ let load ~lat ~lon ~size =
                   for r = 0 to overlap_h - 1 do
                     (* Convert South-to-North iterator 'r' to Top-Down row indices *)
                     let src_row = sub_width - 1 - (src_start_row + r) in
-                    let dst_row = size - 1 - (dst_start_row + r) in
+                    let dst_row = dst_start_row + r in
 
                     let src_idx =
                       (src_row * sub_width * 2) + (src_start_col * 2)
