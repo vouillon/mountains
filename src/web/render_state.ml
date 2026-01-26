@@ -129,22 +129,17 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
+  uv_scale : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
-type mipmap_uniforms = {
+type downsample_uniforms = {
   k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
-}
-(** Cached uniform locations for the mipmap shader. *)
-
-type copy_uniforms = {
-  source : Gl.uniform_location;
   level : Gl.uniform_location;
-  source_size : Gl.uniform_location;
 }
-(** Cached uniform locations for the copy shader. *)
+(** Cached uniform locations for the downsample shader. *)
 
 type ao_bake_uniforms = {
   relief : Gl.uniform_location;
@@ -264,21 +259,18 @@ let init_sky_uniforms ctx pid =
 (** Initialize relief uniform locations. Call once after program creation. *)
 let init_relief_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
-  { size = u "size"; delta = u "delta" }
+  { size = u "size"; delta = u "delta"; uv_scale = u "uv_scale" }
 
-(** Initialize mipmap uniform locations. Call once after program creation. *)
-let init_mipmap_uniforms ctx pid =
+(** Initialize downsample uniform locations. Call once after program creation.
+*)
+let init_downsample_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   {
     k = u "k";
     source_texture = u "source_texture";
     source_size = u "source_size";
+    level = u "level";
   }
-
-(** Initialize copy uniform locations. Call once after program creation. *)
-let init_copy_uniforms ctx pid =
-  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
-  { source = u "source"; level = u "level"; source_size = u "source_size" }
 
 (** Initialize AO bake uniform locations. Call once after program creation. *)
 let init_ao_bake_uniforms ctx pid =

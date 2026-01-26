@@ -92,22 +92,17 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
+  uv_scale : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
-type mipmap_uniforms = {
+type downsample_uniforms = {
   k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
-}
-(** Cached uniform locations for the mipmap shader. *)
-
-type copy_uniforms = {
-  source : Gl.uniform_location;
   level : Gl.uniform_location;
-  source_size : Gl.uniform_location;
 }
-(** Cached uniform locations for the copy shader. *)
+(** Cached uniform locations for the downsample shader. *)
 
 type ao_bake_uniforms = {
   relief : Gl.uniform_location;
@@ -147,8 +142,7 @@ val init_terrain_uniforms : Gl.t -> Gl.program -> terrain_uniforms
 val init_shadow_uniforms : Gl.t -> Gl.program -> shadow_uniforms
 val init_sky_uniforms : Gl.t -> Gl.program -> sky_uniforms
 val init_relief_uniforms : Gl.t -> Gl.program -> relief_uniforms
-val init_mipmap_uniforms : Gl.t -> Gl.program -> mipmap_uniforms
-val init_copy_uniforms : Gl.t -> Gl.program -> copy_uniforms
+val init_downsample_uniforms : Gl.t -> Gl.program -> downsample_uniforms
 val init_ao_bake_uniforms : Gl.t -> Gl.program -> ao_bake_uniforms
 val init_ao_blur_uniforms : Gl.t -> Gl.program -> ao_blur_uniforms
 val init_clc_raster_uniforms : Gl.t -> Gl.program -> clc_raster_uniforms

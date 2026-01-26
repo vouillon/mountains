@@ -81,6 +81,24 @@ let create_palette_texture () =
     raw_palette;
   buf
 
+let create_viewer_palette_texture () =
+  let buf = Array1.create int8_unsigned c_layout (256 * 3) in
+  Array1.fill buf 0;
+  List.iteri
+    (fun i (code_str, _, _, _) ->
+      let code = try int_of_string code_str with _ -> 0 in
+      let r, g, b =
+        let idx = Clc_palette.get_index code in
+        let mat = Clc_palette.materials.(idx) in
+        mat.albedo
+      in
+      let idx = i * 3 in
+      Array1.set buf idx r;
+      Array1.set buf (idx + 1) g;
+      Array1.set buf (idx + 2) b)
+    raw_palette;
+  buf
+
 (* --- 2. Shaders --- *)
 let vertex_shader_src =
   "\n\
@@ -712,14 +730,23 @@ let () =
           let w_u_palette = Gl.get_uniform_location w_prog "u_palette" in
 
           let palette_data = create_palette_texture () in
-          let texs = Array1.create int32 c_layout 1 in
-          Gl.gen_textures 1 texs;
+          let viewer_palette_data = create_viewer_palette_texture () in
+          let texs = Array1.create int32 c_layout 2 in
+          Gl.gen_textures 2 texs;
+
+          let setup_texture tid data =
+            Gl.bind_texture Gl.texture_2d tid;
+            Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+            Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+            Gl.tex_image2d Gl.texture_2d 0 Gl.rgb8 256 1 0 Gl.rgb
+              Gl.unsigned_byte (`Data data)
+          in
+
+          setup_texture (Int32.to_int (Array1.get texs 0)) palette_data;
+          setup_texture (Int32.to_int (Array1.get texs 1)) viewer_palette_data;
+
           Gl.active_texture Gl.texture0;
           Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
-          Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-          Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-          Gl.tex_image2d Gl.texture_2d 0 Gl.rgb8 256 1 0 Gl.rgb Gl.unsigned_byte
-            (`Data palette_data);
           Gl.uniform1i u_palette 0;
 
           (* CLC VAO/VBOs *)
@@ -784,6 +811,7 @@ let () =
           let cx = ref (t_min_x +. (range_x /. 2.0)) in
           let cy = ref (t_min_y +. (range_y /. 2.0)) in
           let drag = ref false in
+          let use_viewer_palette = ref false in
           let w_width, w_height = (1000, 800) in
 
           Gl.enable Gl.depth_test;
@@ -796,8 +824,10 @@ let () =
                 (match Sdl.Event.(enum (get e typ)) with
                 | `Quit -> exit 0
                 | `Key_down ->
-                    if Sdl.Event.(get e keyboard_keycode) = Sdl.K.escape then
-                      exit 0
+                    let key = Sdl.Event.(get e keyboard_keycode) in
+                    if key = Sdl.K.escape then exit 0
+                    else if key = Sdl.K.p then
+                      use_viewer_palette := not !use_viewer_palette
                 | `Mouse_wheel ->
                     let y = Sdl.Event.(get e mouse_wheel_y) in
                     zoom := !zoom *. if y > 0 then 1.1 else 0.9
@@ -832,7 +862,11 @@ let () =
             (* Setup shader uniforms once *)
             Gl.use_program prog;
             Gl.active_texture Gl.texture0;
-            Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
+            let current_tex =
+              Int32.to_int
+                (Array1.get texs (if !use_viewer_palette then 1 else 0))
+            in
+            Gl.bind_texture Gl.texture_2d current_tex;
             Gl.uniform1i u_palette 0;
             Gl.uniform2f u_range range_x range_y;
             Gl.uniform2f u_min t_min_x t_min_y;
@@ -843,7 +877,7 @@ let () =
             if water_index_count > 0 then begin
               Gl.use_program w_prog;
               Gl.active_texture Gl.texture0;
-              Gl.bind_texture Gl.texture_2d (Int32.to_int (Array1.get texs 0));
+              Gl.bind_texture Gl.texture_2d current_tex;
               Gl.uniform1i w_u_palette 0;
               Gl.uniform2f w_u_range range_x range_y;
               Gl.uniform1f w_u_scale 220000.0;

@@ -1,0 +1,17 @@
+(rule
+ (target dune.inc.gen)
+ (deps
+  (glob_files *.vert)
+  (glob_files *.frag)
+  gen_dune.ml)
+ (action
+  (with-stdout-to
+   %{target}
+   (run ocaml gen_dune.ml))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff dune.inc dune.inc.gen)))
+
+(include dune.inc)

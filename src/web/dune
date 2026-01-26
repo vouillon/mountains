@@ -8,6 +8,10 @@
 (executables
  (names viewer)
  (libraries mountains yojson brr lwt)
+ (preprocess
+  (pps ppx_blob))
+ (preprocessor_deps
+  (glob_files shaders/*))
  (modes js wasm)
  (js_of_ocaml
   (javascript_files inflate.js))

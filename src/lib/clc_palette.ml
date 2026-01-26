@@ -494,15 +494,21 @@ let generate_palette () =
   let data = Array1.create int8_unsigned c_layout (128 * 4) in
   Array1.fill data 0;
   let n_materials = Array.length materials in
+  (* sRGB to linear using gamma 2.2, consistent with terrain fragment shader
+     which uses pow(color, 1.0/2.2) for encoding *)
+  let srgb_to_linear v =
+    let x = float_of_int v /. 255.0 in
+    int_of_float (((x ** 2.2) *. 255.0) +. 0.5)
+  in
   for idx = 0 to n_materials - 1 do
     let m = materials.(idx) in
     let base = idx * 2 * 4 in
     (* 2 pixels per material, 4 bytes each *)
     let r, g, b = m.albedo in
-    (* Pixel A: Albedo + Roughness *)
-    Array1.set data (base + 0) r;
-    Array1.set data (base + 1) g;
-    Array1.set data (base + 2) b;
+    (* Pixel A: Albedo (gamma decoded to linear) + Roughness *)
+    Array1.set data (base + 0) (srgb_to_linear r);
+    Array1.set data (base + 1) (srgb_to_linear g);
+    Array1.set data (base + 2) (srgb_to_linear b);
     Array1.set data (base + 3) (int_of_float (m.roughness *. 255.));
     (* Pixel B: Detail Weights + Water Factor *)
     Array1.set data (base + 4) (int_of_float (m.detail_rock *. 255.));
