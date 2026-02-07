@@ -1737,6 +1737,8 @@ let target_orientation = ref Quaternion.identity
 let sensor_orientation = ref Quaternion.identity
 let last_screen_angle = ref 0.
 let locked_inclination = ref 0.
+let fab_orientation = ref 0.
+let fab_el : Brr.El.t option ref = ref None
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -2293,6 +2295,7 @@ let create_location_ui ~size =
     Jv.set (Brr.El.to_jv el) "innerHTML"
       (Jv.of_string
          {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>|});
+    fab_el := Some el;
     el
   in
   let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
@@ -2539,6 +2542,17 @@ let create_location_ui ~size =
     Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
     Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
+let update_fab_orientation angle =
+  match !fab_el with
+  | None -> ()
+  | Some fab ->
+    let is_rot90 = Float.abs (angle -. (-.Float.pi /. 2.)) < 0.01 in
+    let is_rot180 = Float.abs (Float.abs angle -. Float.pi) < 0.01 in
+    let is_rot270 = Float.abs (angle -. Float.pi /. 2.) < 0.01 in
+    Brr.El.set_class (Jstr.v "rot90") is_rot90 fab;
+    Brr.El.set_class (Jstr.v "rot180") is_rot180 fab;
+    Brr.El.set_class (Jstr.v "rot270") is_rot270 fab
+
 let setup_events canvas =
   let deviceorientation =
     Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
@@ -2638,9 +2652,18 @@ let setup_events canvas =
                  { x = 0.; y = 0.; z = 1.; w = 0. }
                  (-.screen_delta *. Float.pi /. 180.)
              in
-             current_orientation := Quaternion.mult !current_orientation q_delta
+             current_orientation := Quaternion.mult !current_orientation q_delta;
+             fab_orientation := 0.;
+             update_fab_orientation 0.
            end;
            last_screen_angle := screen;
+           let new_fab_angle =
+             snap_inclination ~current_locked:!fab_orientation !sensor_orientation
+           in
+           if new_fab_angle <> !fab_orientation then begin
+             fab_orientation := new_fab_angle;
+             update_fab_orientation new_fab_angle
+           end;
            if !input_mode = Sensor then begin
              target_orientation := q;
              match !state with

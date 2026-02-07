@@ -76,6 +76,25 @@
       stroke: #4f46e5;
     }
 
+    .fab.rot90 {
+      bottom: auto;
+      top: calc(24px + env(safe-area-inset-top));
+    }
+    .fab.rot90 svg { transform: rotate(90deg); }
+
+    .fab.rot180 {
+      bottom: auto; right: auto;
+      top: calc(24px + env(safe-area-inset-top));
+      left: calc(24px + env(safe-area-inset-left));
+    }
+    .fab.rot180 svg { transform: rotate(180deg); }
+
+    .fab.rot270 {
+      right: auto;
+      left: calc(24px + env(safe-area-inset-left));
+    }
+    .fab.rot270 svg { transform: rotate(270deg); }
+
     .menu-overlay {
       position: fixed;
       top: 0;
