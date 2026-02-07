@@ -1489,6 +1489,28 @@ let get_inclination_rad q =
   in
   atan2 up_cam.x up_cam.y
 
+let snap_inclination ~current_locked sensor_q =
+  let q_inv = Quaternion.conjugate sensor_q in
+  let up =
+    Quaternion.transform_vector q_inv { x = 0.; y = 0.; z = 1.; w = 0. }
+  in
+  let screen_mag = sqrt ((up.x *. up.x) +. (up.y *. up.y)) in
+  if screen_mag < 0.5 then current_locked
+  else
+    let raw = atan2 up.x up.y in
+    let orientations = [ 0.; Float.pi /. 2.; -.Float.pi /. 2.; Float.pi ] in
+    let angle_dist a b =
+      let d = mod_float (a -. b +. Float.pi) (2. *. Float.pi) in
+      abs_float (if d < 0. then d +. Float.pi else d -. Float.pi)
+    in
+    let dist_to_current = angle_dist raw current_locked in
+    if dist_to_current < Float.pi /. 3. then current_locked
+    else
+      List.fold_left
+        (fun best o ->
+          if angle_dist raw o < angle_dist raw best then o else best)
+        (List.hd orientations) orientations
+
 let screen_inclination q =
   let angle = get_inclination_rad q in
   -.angle *. 180. /. Float.pi
@@ -1702,6 +1724,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 let current_orientation = ref Quaternion.identity
 let target_orientation = ref Quaternion.identity
 let sensor_orientation = ref Quaternion.identity
+let locked_inclination = ref 0.
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -1832,7 +1855,9 @@ let event_loop ctx draw =
     if !input_mode = Manual then begin
       (* Gravity Stabilization: Lock Camera Inclination to Device Inclination
          We align the screen-space vertical of the camera with that of the device. *)
-      let target_inclination = get_inclination_rad !sensor_orientation in
+      locked_inclination :=
+        snap_inclination ~current_locked:!locked_inclination !sensor_orientation;
+      let target_inclination = !locked_inclination in
       let curr_inclination = get_inclination_rad !current_orientation in
 
       (* Compute Error with Angle Wrapping [-pi, pi] *)
@@ -2683,6 +2708,11 @@ let setup_events canvas =
       (Brr.Ev.listen Brr.Ev.mousemove
          (fun ev ->
            if !mouse_dragging then begin
+             if !input_mode = Sensor then
+               locked_inclination :=
+                 snap_inclination
+                   ~current_locked:(get_inclination_rad !sensor_orientation)
+                   !sensor_orientation;
              input_mode := Manual;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
@@ -2694,7 +2724,7 @@ let setup_events canvas =
              let speed =
                2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
              in
-             let gamma = -.get_inclination_rad !sensor_orientation in
+             let gamma = -. !locked_inclination in
              let c = cos gamma in
              let s = sin gamma in
              let dx_eff = (dx *. c) -. (dy *. s) in
@@ -2792,6 +2822,10 @@ let setup_events canvas =
                touch_dragging := true;
                (* Switch to manual mode when user starts dragging *)
                if !input_mode = Sensor then begin
+                 locked_inclination :=
+                   snap_inclination
+                     ~current_locked:(get_inclination_rad !sensor_orientation)
+                     !sensor_orientation;
                  input_mode := Manual;
                  display_temporary_message "Manual mode"
                end;
@@ -2803,7 +2837,7 @@ let setup_events canvas =
                let speed =
                  2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
                in
-               let gamma = -.get_inclination_rad !sensor_orientation in
+               let gamma = -. !locked_inclination in
                let c = cos gamma in
                let s = sin gamma in
                let dx_eff = (dx *. c) -. (dy *. s) in
