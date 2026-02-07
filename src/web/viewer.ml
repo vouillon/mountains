@@ -1511,6 +1511,17 @@ let snap_inclination ~current_locked sensor_q =
           if angle_dist raw o < angle_dist raw best then o else best)
         (List.hd orientations) orientations
 
+let nearest_inclination sensor_q =
+  let raw = get_inclination_rad sensor_q in
+  let orientations = [ 0.; Float.pi /. 2.; -.Float.pi /. 2.; Float.pi ] in
+  let angle_dist a b =
+    let d = mod_float (a -. b +. Float.pi) (2. *. Float.pi) in
+    abs_float (if d < 0. then d +. Float.pi else d -. Float.pi)
+  in
+  List.fold_left
+    (fun best o -> if angle_dist raw o < angle_dist raw best then o else best)
+    (List.hd orientations) orientations
+
 let screen_inclination q =
   let angle = get_inclination_rad q in
   -.angle *. 180. /. Float.pi
@@ -1869,7 +1880,7 @@ let event_loop ctx draw =
       let error = normalize_angle (target_inclination -. curr_inclination) in
 
       (* Apply Correction (Rotation around Forward Axis) *)
-      let tau = calculate_tau () in
+      let tau = 0.5 in
       let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
       let correction = error *. alpha in
       let q_corr =
@@ -2709,10 +2720,7 @@ let setup_events canvas =
          (fun ev ->
            if !mouse_dragging then begin
              if !input_mode = Sensor then
-               locked_inclination :=
-                 snap_inclination
-                   ~current_locked:(get_inclination_rad !sensor_orientation)
-                   !sensor_orientation;
+               locked_inclination := nearest_inclination !sensor_orientation;
              input_mode := Manual;
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
@@ -2822,10 +2830,7 @@ let setup_events canvas =
                touch_dragging := true;
                (* Switch to manual mode when user starts dragging *)
                if !input_mode = Sensor then begin
-                 locked_inclination :=
-                   snap_inclination
-                     ~current_locked:(get_inclination_rad !sensor_orientation)
-                     !sensor_orientation;
+                 locked_inclination := nearest_inclination !sensor_orientation;
                  input_mode := Manual;
                  display_temporary_message "Manual mode"
                end;
