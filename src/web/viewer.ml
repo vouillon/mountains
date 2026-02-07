@@ -1735,6 +1735,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 let current_orientation = ref Quaternion.identity
 let target_orientation = ref Quaternion.identity
 let sensor_orientation = ref Quaternion.identity
+let last_screen_angle = ref 0.
 let locked_inclination = ref 0.
 let is_dragging = ref false
 let velocity = ref (0., 0.)
@@ -1880,7 +1881,7 @@ let event_loop ctx draw =
       let error = normalize_angle (target_inclination -. curr_inclination) in
 
       (* Apply Correction (Rotation around Forward Axis) *)
-      let tau = 0.5 in
+      let tau = 0.2 in
       let alpha = 1. -. exp (-.dt /. (tau *. 1000.)) in
       let correction = error *. alpha in
       let q_corr =
@@ -2557,7 +2558,7 @@ let setup_events canvas =
     else None
   in
 
-  let toggle_fullscreen () =
+  let switch_to_fullscreen () =
     match Brr.Document.fullscreen_element Brr.G.document with
     | None ->
         Lwt.async @@ fun () ->
@@ -2575,7 +2576,7 @@ let setup_events canvas =
              "lock"
              [| Jv.of_jstr (Jstr.v "natural") |]);
         Lwt.return ()
-    | Some _ -> ignore (Brr.Document.exit_fullscreen Brr.G.document)
+    | Some _ -> ()
   in
 
   let handle_tap () =
@@ -2590,7 +2591,7 @@ let setup_events canvas =
     end
     else begin
       (* First tap - toggle fullscreen only in Sensor mode *)
-      if !input_mode = Sensor then toggle_fullscreen ();
+      if !input_mode = Sensor then switch_to_fullscreen ();
       last_tap_time := now
     end
   in
@@ -2630,6 +2631,16 @@ let setup_events canvas =
                           (-.screen *. pi /. 180.)))))
            in
            sensor_orientation := q;
+           let screen_delta = screen -. !last_screen_angle in
+           if abs_float screen_delta > 1. then begin
+             let q_delta =
+               Quaternion.from_axis_angle
+                 { x = 0.; y = 0.; z = 1.; w = 0. }
+                 (-.screen_delta *. Float.pi /. 180.)
+             in
+             current_orientation := Quaternion.mult !current_orientation q_delta
+           end;
+           last_screen_angle := screen;
            if !input_mode = Sensor then begin
              target_orientation := q;
              match !state with
