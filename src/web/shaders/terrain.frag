@@ -153,6 +153,8 @@ void applySlopeModification(inout Surface s, float slope) {
 
 // Triplanar sampling for packed RGBA detail map
 // Returns blended detail weights from all projection planes
+// Triplanar sampling for packed RGBA detail map
+// Returns blended detail weights from all projection planes
 vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal, float scale) {
   highp vec2 uv_xz = worldPos.xz * scale;
   highp vec2 uv_xy = worldPos.xy * scale;
@@ -180,28 +182,6 @@ float computeHeight(vec4 noise, vec4 weights) {
   return dot((noise - 0.5) * heightWeight, weights);
 }
 
-vec3 surfaceGradient(vec3 geomNormal, vec4 texNoise, vec4 detailWeights) {
-  float compositeHeight = computeHeight(texNoise, detailWeights);
-  highp float dHdx = dFdx(compositeHeight);
-  highp float dHdy = dFdy(compositeHeight);
-
-  highp vec3 dPdx = dFdx(v_world_pos);
-  highp vec3 dPdy = dFdy(v_world_pos);
-
-  // 3. Solve the surface gradient (The math magic)
-  // This projects the screen-space height slope onto the 3D surface
-  highp vec3 r1 = cross(dPdy, geomNormal);
-  highp vec3 r2 = cross(geomNormal, dPdx);
-  highp float det = dot(dPdx, r1);
-
-  // Safety to prevent divide-by-zero on degenerate geometry
-  highp float epsilon = 1e-12;
-  float signDet = (det > 0.0) ? 1.0 : -1.0;
-
-  // This is the true 3D direction of the slope
-  return signDet * (dHdx * r1 + dHdy * r2) / (abs(det) + epsilon);
-}
-
 // Procedural normal perturbation based on detail noise
 // Uses screen-space derivatives for directional bump mapping
 vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
@@ -217,28 +197,41 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
     material_roughness = min(material_roughness, 0.3);
   }
 
-  // 3. Apply the Perturbation
-  // We adjust the strength based on roughness (smooth surfaces = flatter)
   float bumpStrength = 4.0 * material_roughness;
 
-  vec3 surfGrad = surfaceGradient(geomNormal, texNoise, detailWeights);
+  // Single XY-plane samples for gradient-only noise (no triplanar needed)
+  vec4 texNoise2 = texture(u_detailMap, v_world_pos.xy * 0.014, 1.); // 70m
+  vec4 texNoise3 = texture(u_detailMap, v_world_pos.xy * 0.1, 1.);   // 10m
 
-  vec4 texNoise2 =
-      sampleTriplanarCombined(v_world_pos, geomNormal, 0.014); // 70m
-  vec3 surfGrad2 = surfaceGradient(geomNormal, texNoise2, detailWeights);
+  // Compute projection basis once
+  highp vec3 dPdx = dFdx(v_world_pos);
+  highp vec3 dPdy = dFdy(v_world_pos);
+  highp vec3 r1 = cross(dPdy, geomNormal);
+  highp vec3 r2 = cross(geomNormal, dPdx);
+  highp float det = dot(dPdx, r1);
+  float signDet = (det > 0.0) ? 1.0 : -1.0;
+  highp float invDet = signDet / (abs(det) + 1e-12);
 
-  vec4 texNoise3 = sampleTriplanarCombined(v_world_pos, geomNormal, 0.1); // 10m
-  vec3 surfGrad3 = surfaceGradient(geomNormal, texNoise3, detailWeights);
+  // Per-scale: compute scalar height derivatives
+  highp float dHdx1 = dFdx(computeHeight(texNoise, detailWeights));
+  highp float dHdy1 = dFdy(computeHeight(texNoise, detailWeights));
+  highp float dHdx2 = dFdx(computeHeight(texNoise2, detailWeights));
+  highp float dHdy2 = dFdy(computeHeight(texNoise2, detailWeights));
+  highp float dHdx3 = dFdx(computeHeight(texNoise3, detailWeights));
+  highp float dHdy3 = dFdy(computeHeight(texNoise3, detailWeights));
 
-  // Distance-based attenuation: reduce bump strength close to camera
-  // to avoid "crunchy" low-res noise artifacts
+  // Distance-based attenuation masks
   float mask_macro = smoothstep(175., 280., v_dist);
   float mask_mid = smoothstep(25., 40., v_dist);
 
-  // 4. Apply the slope to the normal
-  // "strength" scales the height effect
-  return normalize(geomNormal - (surfGrad * mask_macro +
-                                 surfGrad2 * mask_mid / 8. + surfGrad3 / 60.) *
+  // Combine in scalar space, then project once
+  highp float combinedDHdx =
+      dHdx1 * mask_macro + dHdx2 * mask_mid / 8. + dHdx3 / 60.;
+  highp float combinedDHdy =
+      dHdy1 * mask_macro + dHdy2 * mask_mid / 8. + dHdy3 / 60.;
+
+  return normalize(geomNormal - invDet *
+                                    (combinedDHdx * r1 + combinedDHdy * r2) *
                                     bumpStrength);
 }
 
