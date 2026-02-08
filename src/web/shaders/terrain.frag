@@ -427,14 +427,12 @@ void main() {
   float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
   terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
 
-  if (waterMask <= 0.01) {
-    // Procedural normal perturbation (replaces rock_normal_map)
-    final_normal =
-        perturbNormal(normal, texNoise, surface.roughness, finalWeights);
+  // Procedural normal perturbation (replaces rock_normal_map)
+  final_normal =
+      perturbNormal(normal, texNoise, surface.roughness, finalWeights);
 
-  } else {
-    // Water Wave Logic
-
+  // Water Wave Logic
+  if (waterMask > 0.01) {
     // Distance-based fade: waves visible up to 2km, fully calm by 5km
     float waveFade = 1.0 - smoothstep(2000.0, 5000.0, v_dist);
 
