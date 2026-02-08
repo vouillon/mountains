@@ -25,9 +25,20 @@ let linearize3 a =
 let on_gpu_finished ctx =
   let t, u = Lwt.task () in
   let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
+  let start_time = Brr.(Performance.now_ms G.performance) in
+  let first = ref true in
   let rec check () =
-    let status = Gl.client_wait_sync ctx sync 0 0 in
+    let flags = if !first then Gl.sync_flush_commands_bit else 0 in
+    first := false;
+    let status = Gl.client_wait_sync ctx sync flags 0 in
     if status = Gl.already_signaled || status = Gl.condition_satisfied then begin
+      Gl.delete_sync ctx sync;
+      Lwt.wakeup u ()
+    end
+    else if
+      status = Gl.wait_failed
+      || Brr.(Performance.now_ms G.performance) -. start_time > 3000.
+    then begin
       Gl.delete_sync ctx sync;
       Lwt.wakeup u ()
     end

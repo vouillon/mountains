@@ -119,13 +119,7 @@ let time_gpu ctx name f =
       let result = f () in
       Gpu_timer.end_query ctx pq;
       result
-  | None ->
-      let t0 = now_ms () in
-      let result = f () in
-      Gl.finish ctx;
-      let t1 = now_ms () in
-      Brr.Console.(log [ Jstr.v (Printf.sprintf "%s: %.1fms" name (t1 -. t0)) ]);
-      result
+  | None -> f ()
 
 let request_animation_frame () =
   let t, u = Lwt.task () in
