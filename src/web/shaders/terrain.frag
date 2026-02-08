@@ -202,9 +202,17 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
 
   float bumpStrength = 4.0 * material_roughness;
 
-  // Single XY-plane samples for gradient-only noise (no triplanar needed)
-  vec4 texNoise2 = texture(u_detailMap, v_world_pos.xy * 0.014, 1.); // 70m
-  vec4 texNoise3 = texture(u_detailMap, v_world_pos.xy * 0.1, 1.);   // 10m
+  // Distance fade-outs for detail noise (invisible at range, saves texture fetches)
+  float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist);  // 10m noise
+  float fade_mid  = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
+
+  // Only sample when contribution is visible at this distance
+  vec4 texNoise2 = vec4(0.5);
+  vec4 texNoise3 = vec4(0.5);
+  if (fade_mid > 0.0)
+    texNoise2 = texture(u_detailMap, v_world_pos.xy * 0.014, 1.);
+  if (fade_fine > 0.0)
+    texNoise3 = texture(u_detailMap, v_world_pos.xy * 0.1, 1.);
 
   // Compute projection basis once
   highp vec3 dPdx = dFdx(v_world_pos);
@@ -229,9 +237,9 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
 
   // Combine in scalar space, then project once
   highp float combinedDHdx =
-      dHdx1 * mask_macro + dHdx2 * mask_mid / 8. + dHdx3 / 60.;
+      dHdx1 * mask_macro + dHdx2 * mask_mid * fade_mid / 8. + dHdx3 * fade_fine / 60.;
   highp float combinedDHdy =
-      dHdy1 * mask_macro + dHdy2 * mask_mid / 8. + dHdy3 / 60.;
+      dHdy1 * mask_macro + dHdy2 * mask_mid * fade_mid / 8. + dHdy3 * fade_fine / 60.;
 
   return normalize(geomNormal - invDet *
                                     (combinedDHdx * r1 + combinedDHdy * r2) *
