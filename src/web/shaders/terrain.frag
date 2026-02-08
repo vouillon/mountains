@@ -34,7 +34,7 @@ struct Surface {
 };
 
 // Lookup surface properties from palette by material ID
-Surface getSurfaceFromID(float id) {
+Surface getSurfaceFromID(uint id) {
   Surface s;
   // Use texelFetch for direct integer addressing (no filtering overhead)
   ivec2 coord = ivec2(int(id) * 2, 0);
@@ -92,10 +92,15 @@ Surface sampleCLCBilinear(highp vec2 uv) {
 
   // Sample 4 neighbors from selected array layer
   // usampler2DArray fetch returns uvec4, we take .r component
-  float id00 = float(texelFetch(u_coverMap, ivec3(p00, level), 0).r);
-  float id10 = float(texelFetch(u_coverMap, ivec3(p10, level), 0).r);
-  float id01 = float(texelFetch(u_coverMap, ivec3(p01, level), 0).r);
-  float id11 = float(texelFetch(u_coverMap, ivec3(p11, level), 0).r);
+  uint id00 = texelFetch(u_coverMap, ivec3(p00, level), 0).r;
+  uint id10 = texelFetch(u_coverMap, ivec3(p10, level), 0).r;
+  uint id01 = texelFetch(u_coverMap, ivec3(p01, level), 0).r;
+  uint id11 = texelFetch(u_coverMap, ivec3(p11, level), 0).r;
+
+  // Fast path: skip bilinear blend when all 4 texels have the same ID
+  if (id00 == id10 && id00 == id01 && id00 == id11) {
+    return getSurfaceFromID(id00);
+  }
 
   // Get surfaces for each neighbor
   Surface s00 = getSurfaceFromID(id00);
@@ -131,7 +136,7 @@ void applySlopeModification(inout Surface s, float slope) {
 
   if (rockForce > 0.01) {
     // Blend albedo and roughness towards Bare Rock (ID 31)
-    Surface rock = getSurfaceFromID(31.0);
+    Surface rock = getSurfaceFromID(31u);
     s.albedo = mix(s.albedo, rock.albedo, rockForce);
     s.roughness = mix(s.roughness, rock.roughness, rockForce);
 
@@ -151,8 +156,6 @@ void applySlopeModification(inout Surface s, float slope) {
   }
 }
 
-// Triplanar sampling for packed RGBA detail map
-// Returns blended detail weights from all projection planes
 // Triplanar sampling for packed RGBA detail map
 // Returns blended detail weights from all projection planes
 vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal, float scale) {
@@ -344,15 +347,14 @@ void main() {
   // Solves "Ghosting" in sparse areas (e.g. 50% Rock / 50% Grass).
   // Boosts the channel that matches the texture noise (High noise = Top layer).
 
-  float heightSharpness = 2.0;
-
   // Attenuate grass noise to simulate low height variation (flatness)
   // Rock (r) stays full strength. Grass (g) is compressed towards 0.5.
   vec4 blendNoise = texNoise;
   blendNoise.g = mix(0.5, texNoise.g, 0.3);
 
   vec4 heightWeights = surface.detailWeights * (blendNoise + 0.2);
-  heightWeights = pow(heightWeights, vec4(heightSharpness));
+  // Optimize pow(x, 2.0) -> x * x
+  heightWeights = heightWeights * heightWeights;
 
   // Re-normalize
   float weightSum = dot(heightWeights, vec4(1.0));
@@ -521,7 +523,8 @@ void main() {
   float roughSq = material_roughness * material_roughness;
   float denom = NdotH * NdotH * (roughSq - 1.0) + 1.0;
   float D = roughSq / (3.14159 * denom * denom + 0.0001);
-  float specular = D * max(0.0, dot(final_normal, lightDir));
+  float final_l = max(0.0, dot(final_normal, lightDir));
+  float specular = D * final_l;
 
   // Environment reflection (sky color for glossy surfaces)
   vec3 reflectDir = reflect(-v_view_dir, final_normal);
@@ -553,7 +556,6 @@ void main() {
   terrain_color = mix(terrain_color, envColor, reflectivity * reflectDamp);
 
   // === Lighting ===
-  float final_l = max(0.0, dot(final_normal, lightDir));
 
   // Matched to Sky Shader: Horizon -> Zenith
   vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
