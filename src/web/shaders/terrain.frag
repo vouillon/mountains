@@ -276,13 +276,13 @@ vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
 
 float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
   float result = 0.0;
-  for (int x = -1; x <= 1; ++x) {
-    for (int y = -1; y <= 1; ++y) {
-      result += texture(shadow_map, vec4(coords + vec2(x, y) * texel_size,
-                                         float(layer), compare));
-    }
-  }
-  return result / 9.0;
+  // 5-tap Cross Pattern (Center + 4 neighbors) - Faster than 9-tap box
+  result += texture(shadow_map, vec4(coords, float(layer), compare));
+  result += texture(shadow_map, vec4(coords + vec2(texel_size.x, 0), float(layer), compare));
+  result += texture(shadow_map, vec4(coords - vec2(texel_size.x, 0), float(layer), compare));
+  result += texture(shadow_map, vec4(coords + vec2(0, texel_size.y), float(layer), compare));
+  result += texture(shadow_map, vec4(coords - vec2(0, texel_size.y), float(layer), compare));
+  return result / 5.0;
 }
 
 // ========== Main ==========
