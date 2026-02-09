@@ -136,9 +136,13 @@ void applySlopeModification(inout Surface s, float slope) {
 
   if (rockForce > 0.01) {
     // Blend albedo and roughness towards Bare Rock (ID 31)
-    Surface rock = getSurfaceFromID(31u);
-    s.albedo = mix(s.albedo, rock.albedo, rockForce);
-    s.roughness = mix(s.roughness, rock.roughness, rockForce);
+    // Optimization: Hardcoded values to avoid texture fetch & unpacking setup
+    // Albedo (125, 120, 115) -> Linear ~ (0.21, 0.19, 0.17)
+    const vec3 rockAlbedo = vec3(0.21, 0.19, 0.17);
+    const float rockRoughness = 0.65;
+    
+    s.albedo = mix(s.albedo, rockAlbedo, rockForce);
+    s.roughness = mix(s.roughness, rockRoughness, rockForce);
 
     // Scale down non-rock weights
     s.detailWeights.g *= (1.0 - rockForce); // Reduce grass
@@ -148,11 +152,8 @@ void applySlopeModification(inout Surface s, float slope) {
     // Increase rock weight
     s.detailWeights.r += rockForce;
 
-    // Normalize weights
-    float total = dot(s.detailWeights, vec4(1.0));
-    if (total > 0.01) {
-      s.detailWeights /= total;
-    }
+    // Optimization: Removed intermediate normalization. 
+    // Weights are renormalized in main() after height blending.
   }
 }
 
