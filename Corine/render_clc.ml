@@ -101,8 +101,7 @@ let create_viewer_palette_texture () =
 
 (* --- 2. Shaders --- *)
 let vertex_shader_src =
-  "\n\
-   #version 300 es\n\
+  "#version 300 es\n\
    layout(location = 0) in vec2 in_norm_pos; // 0..1 from u16 0..65535\n\
    layout(location = 1) in int in_color_idx;\n\
    uniform vec2 u_range; // tile dim in deg\n\
@@ -121,8 +120,7 @@ let vertex_shader_src =
    }\n"
 
 let fragment_shader_src =
-  "\n\
-   #version 300 es\n\
+  "#version 300 es\n\
    precision mediump float;\n\
    flat in int v_idx;\n\
    uniform mediump sampler2D u_palette;\n\
@@ -131,8 +129,7 @@ let fragment_shader_src =
 
 (* --- Marker Shaders --- *)
 let marker_vs_src =
-  "\n\
-   #version 300 es\n\
+  "#version 300 es\n\
    uniform vec2 u_pos;\n\
    uniform vec2 u_view_scale;\n\
    uniform vec2 u_view_offset;\n\
@@ -143,8 +140,7 @@ let marker_vs_src =
    }\n"
 
 let marker_fs_src =
-  "\n\
-   #version 300 es\n\
+  "#version 300 es\n\
    precision mediump float;\n\
    uniform vec3 u_color;\n\
    out vec4 out_color;\n\
@@ -152,8 +148,7 @@ let marker_fs_src =
 
 (* --- Water Shaders (32-bit integer positions) --- *)
 let water_vs_src =
-  "\n\
-   #version 300 es\n\
+  "#version 300 es\n\
    layout(location = 0) in ivec2 in_pos; // 24-bit quantized as int32\n\
    layout(location = 1) in int in_color_idx;\n\
    uniform vec2 u_water_range; // range in degrees\n\
@@ -647,6 +642,18 @@ let () =
           in
           ignore (Sdl.gl_set_swap_interval 1);
 
+          (* Compile Shaders *)
+          let vs = compile_shader Gl.vertex_shader vertex_shader_src in
+          let fs = compile_shader Gl.fragment_shader fragment_shader_src in
+          let prog = create_program vs fs in
+
+          let m_vs = compile_shader Gl.vertex_shader marker_vs_src in
+          let m_fs = compile_shader Gl.fragment_shader marker_fs_src in
+          let m_prog = create_program m_vs m_fs in
+
+          let w_vs = compile_shader Gl.vertex_shader water_vs_src in
+          let w_prog = create_program w_vs fs in
+
           (* Parse Args *)
           let file_ref = ref "data/clc/N45E006.clc" in
           let mark_pos = ref None in
@@ -680,7 +687,7 @@ let () =
                 water_data_pos,
                 water_data_col,
                 water_data_ebo,
-                _,
+                water_scale_x,
                 _,
                 pois ) =
             load_clc file
@@ -689,18 +696,6 @@ let () =
           (* Calculate range from scale: scale = 65535 / range => range = 65535 / scale *)
           let range_x = 65535.0 /. t_scale_x in
           let range_y = 65535.0 /. t_scale_y in
-
-          (* Compile Shaders *)
-          let vs = compile_shader Gl.vertex_shader vertex_shader_src in
-          let fs = compile_shader Gl.fragment_shader fragment_shader_src in
-          let prog = create_program vs fs in
-
-          let m_vs = compile_shader Gl.vertex_shader marker_vs_src in
-          let m_fs = compile_shader Gl.fragment_shader marker_fs_src in
-          let m_prog = create_program m_vs m_fs in
-
-          let w_vs = compile_shader Gl.vertex_shader water_vs_src in
-          let w_prog = create_program w_vs fs in
 
           (* CLC Uniforms - also used for water since coords are scaled to same range *)
           Gl.use_program prog;
@@ -880,7 +875,7 @@ let () =
               Gl.bind_texture Gl.texture_2d current_tex;
               Gl.uniform1i w_u_palette 0;
               Gl.uniform2f w_u_range range_x range_y;
-              Gl.uniform1f w_u_scale 220000.0;
+              Gl.uniform1f w_u_scale water_scale_x;
               Gl.uniform2f w_u_min t_min_x t_min_y;
               Gl.uniform2f w_u_view_scale sx sy;
               Gl.uniform2f w_u_view_offset !cx !cy;
