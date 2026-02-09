@@ -342,7 +342,7 @@ let process_tile db_path output_dir tile_name =
 
   (* Select Table and Projection *)
   let table_name, (module P : PROJ) =
-    if lat < -20.0 && lat > -22.0 && lon > 54.0 && lon < 57.0 then
+    if lat < -20.0 && lat > -23.0 && lon > 54.0 && lon < 57.0 then
       ("CLC2018_CLC2018_V2018_20_FR_REU", (module Proj_2975 : PROJ))
     else
       ( "CLC2018_CLC2018_V2018_20",
@@ -507,9 +507,7 @@ let process_tile db_path output_dir tile_name =
                               List.concat
                                 (List.map
                                    (fun (p : Wkb_decode.point) ->
-                                     let lon, lat =
-                                       P.to_wgs84 p.x p.y
-                                     in
+                                     let lon, lat = P.to_wgs84 p.x p.y in
                                      [ lon; lat ])
                                    (List.hd rings))
                             in

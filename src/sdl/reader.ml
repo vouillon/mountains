@@ -3,10 +3,12 @@ let ( let* ) = Lwt.bind
 type t = in_channel
 
 let select ~lat ~lon f =
+  let lat_c = if lat >= 0 then 'N' else 'S' in
+  let lon_c = if lon >= 0 then 'E' else 'W' in
   let ch =
     open_in
-      (Printf.sprintf "data/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif" lat
-         lon)
+      (Printf.sprintf "data/Copernicus_DSM_COG_10_%c%02d_00_%c%03d_00_DEM.tif"
+         lat_c (abs lat) lon_c (abs lon))
   in
   let* res = f ch in
   close_in ch;

@@ -39,7 +39,10 @@ let to_lwt f =
 
 (* Path to a sub-tile file *)
 let path ~lat ~lon ~row ~col =
-  Printf.sprintf "data/dem/N%02d_E%03d_%d_%d.dem" lat lon row col
+  let lat_c = if lat >= 0 then 'N' else 'S' in
+  let lon_c = if lon >= 0 then 'E' else 'W' in
+  Printf.sprintf "data/dem/%c%02d_%c%03d_%d_%d.dem" lat_c (abs lat) lon_c
+    (abs lon) row col
 
 let load ~lat ~lon ~size =
   Worker_pool.init ();

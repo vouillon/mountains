@@ -330,29 +330,45 @@ let parse_lat_lon filename =
   let basename = Filename.basename filename in
   (* Match pattern: N{lat}_00_E{lon}_00 or similar *)
   try
-    let re = Str.regexp "N\\([0-9]+\\)_[0-9]+_E\\([0-9]+\\)_[0-9]+" in
+    let re =
+      Str.regexp "\\([NS]\\)\\([0-9]+\\)_[0-9]+_\\([EW]\\)\\([0-9]+\\)_[0-9]+"
+    in
     let _ = Str.search_forward re basename 0 in
-    let lat = int_of_string (Str.matched_group 1 basename) in
-    let lon = int_of_string (Str.matched_group 2 basename) in
+    let lat_sign = if Str.matched_group 1 basename = "S" then -1 else 1 in
+    let lat = lat_sign * int_of_string (Str.matched_group 2 basename) in
+    let lon_sign = if Str.matched_group 3 basename = "W" then -1 else 1 in
+    let lon = lon_sign * int_of_string (Str.matched_group 4 basename) in
     Some (lat, lon)
   with Not_found -> None
 
+type fetch_result = Ok | NotFound | Error
+
 (* Fetch TIFF from AWS using curl *)
 let fetch_from_aws lat lon dest =
+  let lat_c = if lat >= 0 then 'N' else 'S' in
+  let lon_c = if lon >= 0 then 'E' else 'W' in
   let url =
     Printf.sprintf
-      "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM/Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif"
-      lat lon lat lon
+      "https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_%c%02d_00_%c%03d_00_DEM/Copernicus_DSM_COG_10_%c%02d_00_%c%03d_00_DEM.tif"
+      lat_c (abs lat) lon_c (abs lon) lat_c (abs lat) lon_c (abs lon)
   in
   Printf.eprintf "Fetching %s...\n%!" url;
   let cmd =
-    Printf.sprintf "curl -f -s -L -o %s %s" (Filename.quote dest)
-      (Filename.quote url)
+    Printf.sprintf "curl -s -L -w \"%%{http_code}\" -o %s %s"
+      (Filename.quote dest) (Filename.quote url)
   in
-  if Sys.command cmd <> 0 then (
-    Printf.eprintf "Error: Failed to fetch %s\n" url;
-    false)
-  else true
+  let ic = Unix.open_process_in cmd in
+  let http_code = try input_line ic with _ -> "" in
+  let _status = Unix.close_process_in ic in
+  if http_code = "200" then Ok
+  else (
+    if Sys.file_exists dest then Sys.remove dest;
+    if http_code = "404" then (
+      Printf.eprintf "Warning: 404 Not Found for %s\n" url;
+      NotFound)
+    else (
+      Printf.eprintf "Error: Failed to fetch %s (HTTP %s)\n" url http_code;
+      Error))
 
 let () =
   if Array.length Sys.argv < 3 then begin
@@ -374,8 +390,11 @@ let () =
       let lat = int_of_string Sys.argv.(1) in
       let lon = int_of_string Sys.argv.(2) in
       let output_dir = Sys.argv.(3) in
+      let lat_c = if lat >= 0 then 'N' else 'S' in
+      let lon_c = if lon >= 0 then 'E' else 'W' in
       let path =
-        Printf.sprintf "Copernicus_DSM_COG_10_N%02d_00_E%03d_00_DEM.tif" lat lon
+        Printf.sprintf "Copernicus_DSM_COG_10_%c%02d_00_%c%03d_00_DEM.tif" lat_c
+          (abs lat) lon_c (abs lon)
       in
       (path, output_dir, lat, lon)
     else
@@ -390,12 +409,26 @@ let () =
   in
 
   let is_temp = ref false in
-  if not (Sys.file_exists input_path) then
-    if fetch_from_aws lat lon input_path then is_temp := true else exit 1;
 
-  Printf.eprintf "Processing %s (Coordinates: N%02d E%03d)...\n%!" input_path
-    lat lon;
-  let heights, width, height = read_dem input_path in
+  let lat_c = if lat >= 0 then 'N' else 'S' in
+  let lon_c = if lon >= 0 then 'E' else 'W' in
+  Printf.eprintf "Processing %s (Coordinates: %c%02d %c%03d)...\n%!" input_path
+    lat_c (abs lat) lon_c (abs lon);
+
+  let heights, width, height =
+    if not (Sys.file_exists input_path) then
+      match fetch_from_aws lat lon input_path with
+      | Ok ->
+          is_temp := true;
+          read_dem input_path
+      | NotFound ->
+          let w, h = (3600, 3600) in
+          let heights = Bigarray.(Array2.create Float32 C_layout) h w in
+          Bigarray.Array2.fill heights 0.0;
+          (heights, w, h)
+      | Error -> exit 1
+    else read_dem input_path
+  in
 
   if !is_temp then Sys.remove input_path;
 
@@ -414,9 +447,11 @@ let () =
     for tile_col = 0 to 2 do
       let src_row = (2 - tile_row) * sub_tile_size in
       let src_col = tile_col * sub_tile_size in
+      let lat_c = if lat >= 0 then 'N' else 'S' in
+      let lon_c = if lon >= 0 then 'E' else 'W' in
       let output_path =
-        Printf.sprintf "%s/dem/N%02d_E%03d_%d_%d.dem" output_dir lat lon
-          tile_row tile_col
+        Printf.sprintf "%s/dem/%c%02d_%c%03d_%d_%d.dem" output_dir lat_c
+          (abs lat) lon_c (abs lon) tile_row tile_col
       in
       process_tile heights ~src_row ~src_col ~tile_width:sub_tile_size
         ~tile_height:sub_tile_size output_path

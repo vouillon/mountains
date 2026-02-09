@@ -2233,6 +2233,12 @@ let parse_input_coordinates input =
         | _ -> None)
     | _ -> None
 
+let in_range ~size ~lat ~lon =
+  Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9 ~lat
+    ~lon
+  || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-21) ~min_lon:55
+       ~max_lon:56 ~lat ~lon
+
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in
   let params = Brr.Uri.query_params uri in
@@ -2243,10 +2249,7 @@ let get_url_position ~size =
   in
   match (get_float "lat", get_float "lon") with
   | Some lat, Some lon ->
-      if
-        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9
-          ~lat ~lon
-      then
+      if in_range ~size ~lat ~lon then
         let alpha = Option.value (get_float "alpha") ~default:0. in
         let beta = Option.value (get_float "beta") ~default:90. in
         let z = Option.value (get_float "zoom") ~default:1.0 in
@@ -2263,11 +2266,7 @@ let get_current_position ~size =
   | Ok pos ->
       let lat = Pos.latitude pos in
       let lon = Pos.longitude pos in
-      if
-        Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9
-          ~lat ~lon
-      then Some (lat, lon, 0., 90., 1.0)
-      else None
+      if in_range ~size ~lat ~lon then Some (lat, lon, 0., 90., 1.0) else None
   | Error _ -> None
 
 type location_source = Url | Geolocation | Preset
@@ -2360,10 +2359,7 @@ let create_location_ui ~size =
     let text = Jstr.to_string (Brr.El.prop Brr.El.Prop.value input) in
     match parse_input_coordinates text with
     | Some (lat, lon) ->
-        if
-          Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5
-            ~max_lon:9 ~lat ~lon
-        then
+        if in_range ~size ~lat ~lon then
           let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
           let uri =
             Brr.Uri.with_query_params
