@@ -1013,17 +1013,11 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   let cover_map_texture = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
-  (* Initialize with grass (index 26 = Natural grasslands) *)
-  let init_data =
-    Bigarray.(
-      Array1.create int8_unsigned c_layout
-        (cover_map_size * cover_map_size * clc_levels))
-  in
-  Bigarray.Array1.fill init_data 26;
-  Gl.tex_image3d ctx Gl.texture_2d_array 0 Gl.r8ui cover_map_size cover_map_size
-    clc_levels 0 Gl.red_integer Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 init_data))
-    0;
+  Gl.tex_storage3d ctx Gl.texture_2d_array 1 Gl.r8ui cover_map_size
+    cover_map_size clc_levels;
+  (* Sea clear value (index 44 = Sea and ocean) — clearBufferuiv requires 4 components *)
+  let sea_clear_val = Brr.Tarray.create Brr.Tarray.Uint32 4 in
+  (Brr.Tarray.to_bigarray1 sea_clear_val).{0} <- 44l;
 
   (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
   (* Separate depth buffer for each level to prevent conflicts when batching tiles *)
@@ -1197,7 +1191,8 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
       Gl.renderbuffer clc_depth_rbs.(level);
 
-    (* Clear depth buffer *)
+    (* Clear color to sea and depth buffer *)
+    Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val;
     Gl.clear_depth ctx 1.0;
     Gl.clear ctx Gl.depth_buffer_bit;
     Gl.depth_mask ctx true;
@@ -2236,7 +2231,7 @@ let parse_input_coordinates input =
 let in_range ~size ~lat ~lon =
   Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9 ~lat
     ~lon
-  || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-21) ~min_lon:55
+  || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:55
        ~max_lon:56 ~lat ~lon
 
 let get_url_position ~size =
