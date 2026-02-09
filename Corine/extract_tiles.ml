@@ -328,12 +328,29 @@ module Poi_encoder = struct
   let write_block out_ch buf = Encoder.write_block out_ch buf
 end
 
+module type PROJ = sig
+  val of_wgs84 : float -> float -> float * float
+  val to_wgs84 : float -> float -> float * float
+end
+
 (* --- Main Pipeline --- *)
 
 let process_tile db_path output_dir tile_name =
   let lat, lon = parse_tile_string tile_name in
   Printf.printf "Processing Tile: %s (Lat: %.2f, Lon: %.2f)\n%!" tile_name lat
     lon;
+
+  (* Select Table and Projection *)
+  let table_name, (module P : PROJ) =
+    if lat < -20.0 && lat > -22.0 && lon > 54.0 && lon < 57.0 then
+      ("CLC2018_CLC2018_V2018_20_FR_REU", (module Proj_2975 : PROJ))
+    else
+      ( "CLC2018_CLC2018_V2018_20",
+        (module struct
+          let of_wgs84 = Proj_3035.wgs84_to_laea
+          let to_wgs84 = Proj_3035.laea_to_wgs84
+        end : PROJ) )
+  in
 
   (* Define Bounds with Margin *)
   let margin_deg = 0.05 in
@@ -362,15 +379,15 @@ let process_tile db_path output_dir tile_name =
 
   let laea_pts =
     [
-      Proj_3035.wgs84_to_laea min_lon min_lat;
-      Proj_3035.wgs84_to_laea max_lon min_lat;
-      Proj_3035.wgs84_to_laea max_lon max_lat;
-      Proj_3035.wgs84_to_laea min_lon max_lat;
+      P.of_wgs84 min_lon min_lat;
+      P.of_wgs84 max_lon min_lat;
+      P.of_wgs84 max_lon max_lat;
+      P.of_wgs84 min_lon max_lat;
       (* Sample Edge Midpoints to handle curvature *)
-      Proj_3035.wgs84_to_laea ((min_lon +. max_lon) /. 2.0) min_lat;
-      Proj_3035.wgs84_to_laea ((min_lon +. max_lon) /. 2.0) max_lat;
-      Proj_3035.wgs84_to_laea min_lon ((min_lat +. max_lat) /. 2.0);
-      Proj_3035.wgs84_to_laea max_lon ((min_lat +. max_lat) /. 2.0);
+      P.of_wgs84 ((min_lon +. max_lon) /. 2.0) min_lat;
+      P.of_wgs84 ((min_lon +. max_lon) /. 2.0) max_lat;
+      P.of_wgs84 min_lon ((min_lat +. max_lat) /. 2.0);
+      P.of_wgs84 max_lon ((min_lat +. max_lat) /. 2.0);
     ]
   in
 
@@ -393,11 +410,11 @@ let process_tile db_path output_dir tile_name =
   let sql =
     Printf.sprintf
       "SELECT c.Shape, c.Code_18 \n\
-      \       FROM CLC2018_CLC2018_V2018_20 c \n\
-      \       JOIN rtree_CLC2018_CLC2018_V2018_20_Shape r ON c.OBJECTID = r.id \n\
+      \       FROM %s c \n\
+      \       JOIN rtree_%s_Shape r ON c.OBJECTID = r.id \n\
       \       WHERE r.maxx >= %f AND r.minx <= %f AND r.maxy >= %f AND r.miny \
        <= %f"
-      min_laea_x max_laea_x min_laea_y max_laea_y
+      table_name table_name min_laea_x max_laea_x min_laea_y max_laea_y
   in
   let stmt = Sqlite3.prepare db sql in
 
@@ -491,7 +508,7 @@ let process_tile db_path output_dir tile_name =
                                 (List.map
                                    (fun (p : Wkb_decode.point) ->
                                      let lon, lat =
-                                       Proj_3035.laea_to_wgs84 p.x p.y
+                                       P.to_wgs84 p.x p.y
                                      in
                                      [ lon; lat ])
                                    (List.hd rings))
@@ -507,7 +524,7 @@ let process_tile db_path output_dir tile_name =
                                          (List.map
                                             (fun (p : Wkb_decode.point) ->
                                               let lon, lat =
-                                                Proj_3035.laea_to_wgs84 p.x p.y
+                                                P.to_wgs84 p.x p.y
                                               in
                                               [ lon; lat ])
                                             ring)
