@@ -140,7 +140,7 @@ void applySlopeModification(inout Surface s, float slope) {
     // Albedo (125, 120, 115) -> Linear ~ (0.21, 0.19, 0.17)
     const vec3 rockAlbedo = vec3(0.21, 0.19, 0.17);
     const float rockRoughness = 0.65;
-    
+
     s.albedo = mix(s.albedo, rockAlbedo, rockForce);
     s.roughness = mix(s.roughness, rockRoughness, rockForce);
 
@@ -152,7 +152,7 @@ void applySlopeModification(inout Surface s, float slope) {
     // Increase rock weight
     s.detailWeights.r += rockForce;
 
-    // Optimization: Removed intermediate normalization. 
+    // Optimization: Removed intermediate normalization.
     // Weights are renormalized in main() after height blending.
   }
 }
@@ -203,9 +203,10 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
 
   float bumpStrength = 4.0 * material_roughness;
 
-  // Distance fade-outs for detail noise (invisible at range, saves texture fetches)
-  float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist);  // 10m noise
-  float fade_mid  = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
+  // Distance fade-outs for detail noise (invisible at range, saves texture
+  // fetches)
+  float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist); // 10m noise
+  float fade_mid = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
 
   // Only sample when contribution is visible at this distance
   vec4 texNoise2 = vec4(0.5);
@@ -237,10 +238,12 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
   float mask_mid = smoothstep(25., 40., v_dist);
 
   // Combine in scalar space, then project once
-  highp float combinedDHdx =
-      dHdx1 * mask_macro + dHdx2 * mask_mid * fade_mid / 8. + dHdx3 * fade_fine / 60.;
-  highp float combinedDHdy =
-      dHdy1 * mask_macro + dHdy2 * mask_mid * fade_mid / 8. + dHdy3 * fade_fine / 60.;
+  highp float combinedDHdx = dHdx1 * mask_macro +
+                             dHdx2 * mask_mid * fade_mid / 8. +
+                             dHdx3 * fade_fine / 60.;
+  highp float combinedDHdy = dHdy1 * mask_macro +
+                             dHdy2 * mask_mid * fade_mid / 8. +
+                             dHdy3 * fade_fine / 60.;
 
   return normalize(geomNormal - invDet *
                                     (combinedDHdx * r1 + combinedDHdy * r2) *
@@ -287,10 +290,14 @@ float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
   float result = 0.0;
   // 5-tap Cross Pattern (Center + 4 neighbors) - Faster than 9-tap box
   result += texture(shadow_map, vec4(coords, float(layer), compare));
-  result += texture(shadow_map, vec4(coords + vec2(texel_size.x, 0), float(layer), compare));
-  result += texture(shadow_map, vec4(coords - vec2(texel_size.x, 0), float(layer), compare));
-  result += texture(shadow_map, vec4(coords + vec2(0, texel_size.y), float(layer), compare));
-  result += texture(shadow_map, vec4(coords - vec2(0, texel_size.y), float(layer), compare));
+  result += texture(
+      shadow_map, vec4(coords + vec2(texel_size.x, 0), float(layer), compare));
+  result += texture(
+      shadow_map, vec4(coords - vec2(texel_size.x, 0), float(layer), compare));
+  result += texture(
+      shadow_map, vec4(coords + vec2(0, texel_size.y), float(layer), compare));
+  result += texture(
+      shadow_map, vec4(coords - vec2(0, texel_size.y), float(layer), compare));
   return result / 5.0;
 }
 

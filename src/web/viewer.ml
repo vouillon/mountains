@@ -2540,12 +2540,12 @@ let update_fab_orientation angle =
   match !fab_el with
   | None -> ()
   | Some fab ->
-    let is_rot90 = Float.abs (angle -. (-.Float.pi /. 2.)) < 0.01 in
-    let is_rot180 = Float.abs (Float.abs angle -. Float.pi) < 0.01 in
-    let is_rot270 = Float.abs (angle -. Float.pi /. 2.) < 0.01 in
-    Brr.El.set_class (Jstr.v "rot90") is_rot90 fab;
-    Brr.El.set_class (Jstr.v "rot180") is_rot180 fab;
-    Brr.El.set_class (Jstr.v "rot270") is_rot270 fab
+      let is_rot90 = Float.abs (angle -. (-.Float.pi /. 2.)) < 0.01 in
+      let is_rot180 = Float.abs (Float.abs angle -. Float.pi) < 0.01 in
+      let is_rot270 = Float.abs (angle -. (Float.pi /. 2.)) < 0.01 in
+      Brr.El.set_class (Jstr.v "rot90") is_rot90 fab;
+      Brr.El.set_class (Jstr.v "rot180") is_rot180 fab;
+      Brr.El.set_class (Jstr.v "rot270") is_rot270 fab
 
 let setup_events canvas =
   let deviceorientation =
@@ -2652,7 +2652,8 @@ let setup_events canvas =
            end;
            last_screen_angle := screen;
            let new_fab_angle =
-             snap_inclination ~current_locked:!fab_orientation !sensor_orientation
+             snap_inclination ~current_locked:!fab_orientation
+               !sensor_orientation
            in
            if new_fab_angle <> !fab_orientation then begin
              fab_orientation := new_fab_angle;
