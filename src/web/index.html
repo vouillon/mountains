@@ -19,6 +19,11 @@
   <meta name="twitter:image" content="https://vouillon.github.io/mountains/assets/Roburent.jpg">
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon192.png" />
+  <!-- iOS: Safari ignores the manifest for these; needs dedicated tags. -->
+  <link rel="apple-touch-icon" href="icon192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mountain Skyline">
   <script src="viewer.bc.wasm.js" defer></script>
   <style>
     html,
