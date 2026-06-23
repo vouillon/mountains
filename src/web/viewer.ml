@@ -2601,6 +2601,17 @@ let maybe_show_compass_button () =
   if needs_orientation_permission () && not !orientation_permission_granted then
     show_compass_button ()
 
+(* Mode transitions. Entering Sensor mode (re-)prompts for permission when it is
+   still missing; leaving it drops the prompt so it never lingers over the
+   canvas while sensor input is unused. *)
+let enter_sensor_mode () =
+  input_mode := Sensor;
+  maybe_show_compass_button ()
+
+let enter_manual_mode () =
+  input_mode := Manual;
+  remove_compass_button ()
+
 let setup_events canvas =
   (* Chrome/Android deliver absolute orientation through
      [deviceorientationabsolute]. iOS Safari never fires that event: it only
@@ -2652,10 +2663,8 @@ let setup_events canvas =
     if now -. !last_tap_time < double_tap_threshold then begin
       (* Double tap - switch back to sensor mode *)
       if !input_mode = Manual then begin
-        input_mode := Sensor;
-        display_temporary_message "Sensor mode";
-        (* Re-prompt for motion permission on iOS if it is still missing. *)
-        maybe_show_compass_button ()
+        enter_sensor_mode ();
+        display_temporary_message "Sensor mode"
       end;
       last_tap_time := 0.
     end
@@ -2673,16 +2682,27 @@ let setup_events canvas =
   let got_absolute = ref false in
   let handle_orientation ~absolute ev =
     if absolute then got_absolute := true;
-    if absolute || not !got_absolute then begin
-      let evt = Brr.Ev.as_type ev in
-      (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
-         heading is in [webkitCompassHeading], measured clockwise from north.
-         Convert it to the W3C absolute-alpha convention (counter-clockwise from
-         north) so the rest of the math is unchanged. *)
-      let compass = Jv.get evt "webkitCompassHeading" in
-      let has_compass = not (Jv.is_none compass) in
+    let evt = Brr.Ev.as_type ev in
+    (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
+       heading is in [webkitCompassHeading], measured clockwise from north.
+       Convert it to the W3C absolute-alpha convention (counter-clockwise from
+       north) so the rest of the math is unchanged. *)
+    let compass = Jv.get evt "webkitCompassHeading" in
+    let has_compass = not (Jv.is_none compass) in
+    (* A plain [deviceorientation] event may carry only relative data, whose
+       [alpha] is measured from an arbitrary startup frame rather than north.
+       Trust it only when it is flagged [absolute] or exposes the iOS compass
+       heading; otherwise Sensor mode would point at a wrong but plausible
+       heading. *)
+    let evt_absolute =
+      let a = Jv.get evt "absolute" in
+      (not (Jv.is_none a)) && Jv.to_bool a
+    in
+    let is_absolute = absolute || has_compass || evt_absolute in
+    (* Ignore relative events once a dedicated absolute source is available. *)
+    if is_absolute && (absolute || not !got_absolute) then
       (* Bogus event on Chrome desktop *)
-      if has_compass || not (Jv.is_null (Jv.get evt "alpha")) then (
+      begin if has_compass || not (Jv.is_null (Jv.get evt "alpha")) then (
         let screen =
           Jv.to_float
             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
@@ -2744,7 +2764,7 @@ let setup_events canvas =
                 Lwt.return ())
           | `Started -> if beta >= 80. then remove_message ()
         end)
-    end
+      end
   in
   (* Device orientation listeners - only active in Sensor mode *)
   ignore
@@ -2767,27 +2787,27 @@ let setup_events canvas =
            match Jstr.to_string (Brr.Ev.Keyboard.code (Brr.Ev.as_type ev)) with
            | "ArrowLeft" ->
                (* Yaw Left: 5 degrees *)
-               input_mode := Manual;
+               enter_manual_mode ();
                current_orientation :=
                  apply_manual_rotation !current_orientation
                    (5. *. pi /. 180.)
                    0.
            | "ArrowRight" ->
                (* Yaw Right: -5 degrees *)
-               input_mode := Manual;
+               enter_manual_mode ();
                current_orientation :=
                  apply_manual_rotation !current_orientation
                    (-5. *. pi /. 180.)
                    0.
            | "ArrowDown" ->
                (* Pitch Down: -5 degrees *)
-               input_mode := Manual;
+               enter_manual_mode ();
                current_orientation :=
                  apply_manual_rotation !current_orientation 0.
                    (-5. *. pi /. 180.)
            | "ArrowUp" ->
                (* Pitch Up: 5 degrees *)
-               input_mode := Manual;
+               enter_manual_mode ();
                current_orientation :=
                  apply_manual_rotation !current_orientation 0. (5. *. pi /. 180.)
            | "Equal" | "NumpadAdd" -> zoom := clamp_zoom (!zoom *. 1.1)
@@ -2832,7 +2852,7 @@ let setup_events canvas =
            if !mouse_dragging then begin
              if !input_mode = Sensor then
                locked_inclination := nearest_inclination !sensor_orientation;
-             input_mode := Manual;
+             enter_manual_mode ();
              let mouse = Brr.Ev.as_type ev in
              let x = Brr.Ev.Mouse.client_x mouse in
              let y = Brr.Ev.Mouse.client_y mouse in
@@ -2942,7 +2962,7 @@ let setup_events canvas =
                (* Switch to manual mode when user starts dragging *)
                if !input_mode = Sensor then begin
                  locked_inclination := nearest_inclination !sensor_orientation;
-                 input_mode := Manual;
+                 enter_manual_mode ();
                  display_temporary_message "Manual mode"
                end;
                Brr.Ev.prevent_default ev
