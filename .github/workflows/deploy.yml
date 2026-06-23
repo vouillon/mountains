@@ -29,7 +29,6 @@ jobs:
       - name: Install dependencies
         run: |
           opam pin add -n https://github.com/dbuenzli/brr.git
-          opam pin add -n https://github.com/ocsigen/js_of_ocaml.git#fun-param-unboxing
           opam install brr lwt yojson wasm_of_ocaml-compiler ppx_blob
 
       - name: Build
