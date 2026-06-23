@@ -3059,9 +3059,22 @@ let main () =
   in
   let ctx =
     Option.get
-      (Brr_canvas.Gl.get_context ~attrs:(Gl.Attrs.v ())
+      (Brr_canvas.Gl.get_context
+         ~attrs:(Gl.Attrs.v ~alpha:false ())
          (Brr_canvas.Canvas.of_el canvas))
   in
+  (* iOS/Safari color-manage the canvas to the display's wide (Display-P3)
+     gamut, while many Android devices send the raw sRGB values straight to a
+     saturated panel, looking more vivid. Opt into the wide gamut so both render
+     consistently and saturated rather than washed out on iOS. Safari and Chrome
+     honour this; browsers that don't simply ignore the assignment.
+     [Brr_canvas.Gl] does not expose the context as a [Jv.t], so re-fetch it
+     from the canvas ([getContext] returns the same context object). *)
+  Jv.set
+    (Jv.call (Brr.El.to_jv canvas) "getContext"
+       [| Jv.of_jstr (Jstr.v "webgl2") |])
+    "drawingBufferColorSpace"
+    (Jv.of_jstr (Jstr.v "display-p3"));
   (* Initialize anisotropic filtering early for the detail map *)
   init_anisotropic_filtering ctx;
   (* Start loading detail map immediately *)
