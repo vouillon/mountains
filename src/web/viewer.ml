@@ -2538,10 +2538,79 @@ let update_fab_orientation angle =
       Brr.El.set_class (Jstr.v "rot180") is_rot180 fab;
       Brr.El.set_class (Jstr.v "rot270") is_rot270 fab
 
+(* iOS 13+ does not deliver any orientation event until permission is granted
+   via [DeviceOrientationEvent.requestPermission ()], which must be called from
+   a user gesture. The method is absent on other browsers (Android/desktop),
+   where orientation events flow without any prompt. *)
+let needs_orientation_permission () =
+  let doe = Jv.get Jv.global "DeviceOrientationEvent" in
+  (not (Jv.is_none doe))
+  && Jstr.equal (Jv.typeof (Jv.get doe "requestPermission")) (Jstr.v "function")
+
+(* Requests permission; resolves to [true] when granted. Must be called
+   synchronously from within a user-gesture handler. *)
+let request_orientation_permission () =
+  let doe = Jv.get Jv.global "DeviceOrientationEvent" in
+  let p = Jv.call doe "requestPermission" [||] in
+  Lwt.catch
+    (fun () ->
+      let* res = to_lwt (Fut.of_promise ~ok:Jv.to_jstr p) in
+      Lwt.return (Jstr.equal res (Jstr.v "granted")))
+    (fun _ -> Lwt.return false)
+
+let compass_button = ref None
+let orientation_permission_granted = ref false
+
+let remove_compass_button () =
+  match !compass_button with
+  | Some b ->
+      Brr.El.remove b;
+      compass_button := None
+  | None -> ()
+
+(* Shows the explicit "Enable compass" button (iOS only). Tapping it requests
+   motion permission from within the gesture; on grant the orientation events
+   start flowing and the normal sensor flow takes over, on denial we fall back
+   to Manual (touch/drag) mode. *)
+let show_compass_button () =
+  remove_compass_button ();
+  let btn =
+    Brr.El.button
+      ~at:Brr.At.[ class' (Jstr.v "btn-compass") ]
+      [ Brr.El.txt (Jstr.v "\u{1F9ED} Enable compass") ]
+  in
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ ->
+         Lwt.async (fun () ->
+             let* granted = request_orientation_permission () in
+             remove_compass_button ();
+             if granted then orientation_permission_granted := true
+             else begin
+               input_mode := Manual;
+               display_temporary_message
+                 "Sensor unavailable \u{2014} drag to look around"
+             end;
+             Lwt.return ()))
+       (Brr.El.as_target btn));
+  Brr.El.append_children (Brr.Document.body Brr.G.document) [ btn ];
+  compass_button := Some btn
+
+(* Shows the button only on iOS and only while permission is still missing. *)
+let maybe_show_compass_button () =
+  if needs_orientation_permission () && not !orientation_permission_granted then
+    show_compass_button ()
+
 let setup_events canvas =
-  let deviceorientation =
+  (* Chrome/Android deliver absolute orientation through
+     [deviceorientationabsolute]. iOS Safari never fires that event: it only
+     fires the plain [deviceorientation] event and exposes the absolute heading
+     through the non-standard [webkitCompassHeading] property. We listen to
+     both. *)
+  let deviceorientationabsolute =
     Brr.Ev.Type.create (Jstr.v "deviceorientationabsolute")
   in
+  let deviceorientation = Brr.Ev.Type.create (Jstr.v "deviceorientation") in
   let state = ref `Init in
 
   (* Helper: calculate distance between two touches *)
@@ -2584,7 +2653,9 @@ let setup_events canvas =
       (* Double tap - switch back to sensor mode *)
       if !input_mode = Manual then begin
         input_mode := Sensor;
-        display_temporary_message "Sensor mode"
+        display_temporary_message "Sensor mode";
+        (* Re-prompt for motion permission on iOS if it is still missing. *)
+        maybe_show_compass_button ()
       end;
       last_tap_time := 0.
     end
@@ -2595,74 +2666,94 @@ let setup_events canvas =
     end
   in
 
-  (* Device orientation listener - only active in Sensor mode *)
-  ignore
-    (Brr.Ev.listen deviceorientation
-       (fun ev ->
-         (* Bogus event on Chrome desktop *)
-         if not (Jv.is_null (Jv.get (Brr.Ev.as_type ev) "alpha")) then (
-           let screen =
-             Jv.to_float
-               (Jv.get
-                  (Jv.get (Jv.get Jv.global "screen") "orientation")
-                  "angle")
-           in
-           let angle nm = Jv.to_float (Jv.get (Brr.Ev.as_type ev) nm) in
-           let alpha = angle "alpha" in
-           let beta = angle "beta" in
-           let gamma = angle "gamma" in
-           let q =
-             Quaternion.(
-               mult
+  (* Device orientation handler. [absolute] is true for events coming from the
+     [deviceorientationabsolute] event (Chrome/Android). When that event is
+     available we ignore the relative [deviceorientation] event to avoid
+     double-handling; iOS only delivers the latter. *)
+  let got_absolute = ref false in
+  let handle_orientation ~absolute ev =
+    if absolute then got_absolute := true;
+    if absolute || not !got_absolute then begin
+      let evt = Brr.Ev.as_type ev in
+      (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
+         heading is in [webkitCompassHeading], measured clockwise from north.
+         Convert it to the W3C absolute-alpha convention (counter-clockwise from
+         north) so the rest of the math is unchanged. *)
+      let compass = Jv.get evt "webkitCompassHeading" in
+      let has_compass = not (Jv.is_none compass) in
+      (* Bogus event on Chrome desktop *)
+      if has_compass || not (Jv.is_null (Jv.get evt "alpha")) then (
+        let screen =
+          Jv.to_float
+            (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
+        in
+        let angle nm = Jv.to_float (Jv.get evt nm) in
+        let alpha =
+          if has_compass then 360. -. Jv.to_float compass else angle "alpha"
+        in
+        let beta = angle "beta" in
+        let gamma = angle "gamma" in
+        let q =
+          Quaternion.(
+            mult
+              (from_axis_angle
+                 { x = 0.; y = 0.; z = 1.; w = 0. }
+                 (alpha *. pi /. 180.))
+              (mult
                  (from_axis_angle
-                    { x = 0.; y = 0.; z = 1.; w = 0. }
-                    (alpha *. pi /. 180.))
+                    { x = 1.; y = 0.; z = 0.; w = 0. }
+                    (beta *. pi /. 180.))
                  (mult
                     (from_axis_angle
-                       { x = 1.; y = 0.; z = 0.; w = 0. }
-                       (beta *. pi /. 180.))
-                    (mult
-                       (from_axis_angle
-                          { x = 0.; y = 1.; z = 0.; w = 0. }
-                          (gamma *. pi /. 180.))
-                       (from_axis_angle
-                          { x = 0.; y = 0.; z = 1.; w = 0. }
-                          (-.screen *. pi /. 180.)))))
-           in
-           sensor_orientation := q;
-           let screen_delta = screen -. !last_screen_angle in
-           if abs_float screen_delta > 1. then begin
-             let q_delta =
-               Quaternion.from_axis_angle
-                 { x = 0.; y = 0.; z = 1.; w = 0. }
-                 (-.screen_delta *. Float.pi /. 180.)
-             in
-             current_orientation := Quaternion.mult !current_orientation q_delta;
-             fab_orientation := 0.;
-             update_fab_orientation 0.
-           end;
-           last_screen_angle := screen;
-           let new_fab_angle =
-             snap_inclination ~current_locked:!fab_orientation
-               !sensor_orientation
-           in
-           if new_fab_angle <> !fab_orientation then begin
-             fab_orientation := new_fab_angle;
-             update_fab_orientation new_fab_angle
-           end;
-           if !input_mode = Sensor then begin
-             target_orientation := q;
-             match !state with
-             | `Init -> current_orientation := q
-             | `Starting ->
-                 state := `Started;
-                 if beta < 80. then (
-                   Lwt.async @@ fun () ->
-                   let* () = sleep 1.1 in
-                   display_temporary_message "Raise your phone!";
-                   Lwt.return ())
-             | `Started -> if beta >= 80. then remove_message ()
-           end))
+                       { x = 0.; y = 1.; z = 0.; w = 0. }
+                       (gamma *. pi /. 180.))
+                    (from_axis_angle
+                       { x = 0.; y = 0.; z = 1.; w = 0. }
+                       (-.screen *. pi /. 180.)))))
+        in
+        sensor_orientation := q;
+        let screen_delta = screen -. !last_screen_angle in
+        if abs_float screen_delta > 1. then begin
+          let q_delta =
+            Quaternion.from_axis_angle
+              { x = 0.; y = 0.; z = 1.; w = 0. }
+              (-.screen_delta *. Float.pi /. 180.)
+          in
+          current_orientation := Quaternion.mult !current_orientation q_delta;
+          fab_orientation := 0.;
+          update_fab_orientation 0.
+        end;
+        last_screen_angle := screen;
+        let new_fab_angle =
+          snap_inclination ~current_locked:!fab_orientation !sensor_orientation
+        in
+        if new_fab_angle <> !fab_orientation then begin
+          fab_orientation := new_fab_angle;
+          update_fab_orientation new_fab_angle
+        end;
+        if !input_mode = Sensor then begin
+          target_orientation := q;
+          match !state with
+          | `Init -> current_orientation := q
+          | `Starting ->
+              state := `Started;
+              if beta < 80. then (
+                Lwt.async @@ fun () ->
+                let* () = sleep 1.1 in
+                display_temporary_message "Raise your phone!";
+                Lwt.return ())
+          | `Started -> if beta >= 80. then remove_message ()
+        end)
+    end
+  in
+  (* Device orientation listeners - only active in Sensor mode *)
+  ignore
+    (Brr.Ev.listen deviceorientationabsolute
+       (handle_orientation ~absolute:true)
+       (Brr.Window.as_target Brr.G.window));
+  ignore
+    (Brr.Ev.listen deviceorientation
+       (handle_orientation ~absolute:false)
        (Brr.Window.as_target Brr.G.window));
 
   (* We set the device orientation listener early so that we have the
@@ -2935,7 +3026,10 @@ let setup_events canvas =
            end)
          target);
 
-    state := `Starting
+    state := `Starting;
+    (* On iOS, sensor input is blocked until the user grants motion permission;
+       surface an explicit button to request it. *)
+    if !input_mode = Sensor then maybe_show_compass_button ()
 
 let wait_for_service_worker =
   let open Fut.Result_syntax in

@@ -177,6 +177,29 @@
       background: #4f46e5;
     }
 
+    .btn-compass {
+      position: absolute;
+      z-index: 1000;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 28px;
+      border: none;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+      color: #1f2937;
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .btn-compass:active {
+      background: rgba(230, 230, 230, 0.92);
+    }
+
     .section-title {
       font-weight: bold;
       color: #666;
