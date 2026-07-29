@@ -9,6 +9,10 @@ type vector = { x : float; y : float; z : float; w : float }
 val ( * ) : t -> t -> t
 (** Matrix multiplication *)
 
+val mult_into : t -> t -> t -> unit
+(** [mult_into dst m1 m2] stores the product [m1 * m2] into [dst], which must
+    not alias [m1] or [m2]. Allocation-free variant for the render loop. *)
+
 val ( *< ) : vector -> t -> vector
 (** Vector-matrix multiplication (row vector) *)
 

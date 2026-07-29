@@ -173,8 +173,8 @@ let prefetch_tile ~lat ~lon =
       to_lwt (Brr_io.Fetch.Cache.add cache request)
 
 let prefetch ~size ~lat ~lon =
-  let min_lat = truncate (lat *. 3600.) - (size / 2) in
-  let min_lon = truncate (lon *. 3600.) - (size / 2) in
+  let min_lat = Web_utils.arcsec_floor lat - (size / 2) in
+  let min_lon = Web_utils.arcsec_floor lon - (size / 2) in
   let max_lat = min_lat + size - 1 in
   let max_lon = min_lon + size - 1 in
   let* () =

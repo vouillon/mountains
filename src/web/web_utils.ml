@@ -10,6 +10,10 @@ let log2 n =
   let rec loop x acc = if x <= 1 then acc else loop (x / 2) (acc + 1) in
   loop n 0
 
+(* Rounds towards -infinity, unlike [truncate], so that tile anchoring agrees
+   with [Render_state.compute_sub_arcsec_offset] south of the equator. *)
+let arcsec_floor coord = int_of_float (floor (coord *. 3600.))
+
 type buffer = Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer
 
 let linearize2 a =

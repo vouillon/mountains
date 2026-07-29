@@ -55,8 +55,8 @@ let load ~lat ~lon ~size =
   Array1.fill full_ba 0;
 
   (* Convert center to arcseconds and compute bounds *)
-  let center_lat_arcsec = truncate (lat *. 3600.) in
-  let center_lon_arcsec = truncate (lon *. 3600.) in
+  let center_lat_arcsec = Web_utils.arcsec_floor lat in
+  let center_lon_arcsec = Web_utils.arcsec_floor lon in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
   let min_lon_arcsec = center_lon_arcsec - (size / 2) in
   let max_lat_arcsec = min_lat_arcsec + size - 1 in
@@ -222,8 +222,8 @@ let load ~lat ~lon ~size =
 
 let prefetch ~lat ~lon ~size =
   (* Simple prefetch to warm browser cache *)
-  let center_lat_arcsec = truncate (lat *. 3600.) in
-  let center_lon_arcsec = truncate (lon *. 3600.) in
+  let center_lat_arcsec = Web_utils.arcsec_floor lat in
+  let center_lon_arcsec = Web_utils.arcsec_floor lon in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
   let min_lon_arcsec = center_lon_arcsec - (size / 2) in
   let max_lat_arcsec = min_lat_arcsec + size - 1 in
@@ -309,9 +309,9 @@ let prefetch ~lat ~lon ~size =
 (* Check if position is within available data range: the whole extent requested
    by [load], not just its center. *)
 let in_range ~size ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =
-  (* Same bounds as in [load]. *)
-  let center_lat_arcsec = truncate (lat *. 3600.) in
-  let center_lon_arcsec = truncate (lon *. 3600.) in
+  (* Same bounds as in [load]: [arcsec_floor] here and there must match. *)
+  let center_lat_arcsec = Web_utils.arcsec_floor lat in
+  let center_lon_arcsec = Web_utils.arcsec_floor lon in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
   let min_lon_arcsec = center_lon_arcsec - (size / 2) in
   let max_lat_arcsec = min_lat_arcsec + size - 1 in

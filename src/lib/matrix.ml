@@ -16,6 +16,17 @@ let mult m1 m2 =
 
 let ( * ) = mult
 
+(* Same product as [mult], stored into [dst] instead of a fresh matrix. *)
+let mult_into dst m1 m2 =
+  for p = 0 to 15 do
+    let i, j = o p in
+    dst.(p) <-
+      (m1.(c i 0) *. m2.(c 0 j))
+      +. (m1.(c i 1) *. m2.(c 1 j))
+      +. (m1.(c i 2) *. m2.(c 2 j))
+      +. (m1.(c i 3) *. m2.(c 3 j))
+  done
+
 let mult v m =
   let s j =
     (v.x *. m.(c 0 j))

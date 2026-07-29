@@ -1052,16 +1052,16 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 
   (* Conversion factors *)
   (* Center calculus from User requirements *)
-  (* The point at (w/2, h/2) is at truncate(lat/lon). *)
+  (* The point at (w/2, h/2) is at arcsec_floor(lat/lon). *)
   (* This corresponds to the center of the pixel at index w/2. *)
   (* Pixel centers are at integral arcseconds. *)
-  (* Therefore, the geometric center of the tile (w x h area) is offset by -0.5 arcsec from the truncate coordinate. *)
+  (* Therefore, the geometric center of the tile (w x h area) is offset by -0.5 arcsec from the anchor coordinate. *)
   let half_arcsec = 0.5 /. 3600. in
   let center_lat_deg =
-    (float (truncate (lat *. 3600.)) /. 3600.) -. half_arcsec
+    (float (Web_utils.arcsec_floor lat) /. 3600.) -. half_arcsec
   in
   let center_lon_deg =
-    (float (truncate (lon *. 3600.)) /. 3600.) -. half_arcsec
+    (float (Web_utils.arcsec_floor lon) /. 3600.) -. half_arcsec
   in
 
   (* Largest level (Index 6) matches DEM extent exactly *)
@@ -1447,6 +1447,10 @@ let prepare_text_immediate ctx text =
 
 let prepare_text _ctx text = { text; texture = None }
 
+(* Scratch matrix, reused across frames to avoid allocating in the render loop.
+   Must not be passed as [transform] to [draw_text]. *)
+let text_transform : Matrix.t = Array.make 16 0.
+
 let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
     (lazy_text : lazy_text) =
   let tid, w, h =
@@ -1458,9 +1462,11 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
         t
   in
   let open Brr_canvas in
-  let transform = Matrix.(scale (float w /. float h) 1. 1. * transform) in
+  Matrix.mult_into text_transform
+    (Matrix.scale (float w /. float h) 1. 1.)
+    transform;
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Matrix.blit transform buffer;
+  Matrix.blit text_transform buffer;
   Gl.uniform_matrix4fv ctx uniforms.transform false view;
   Gl.draw_elements ctx Gl.triangle_strip 4 Gl.unsigned_byte 0
 (* Texture unbind removed - next draw_text or terrain pass rebinds anyway *)
@@ -1469,6 +1475,9 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
+
+(* Scratch matrix for the per-POI transforms (see [text_transform]). *)
+let poi_transform : Matrix.t = Array.make 16 0.
 
 (* Helper functions for orientation control *)
 let get_inclination_rad q =
@@ -1594,23 +1603,26 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let text_scale = scale *. !zoom in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
+    (* Constant for the session, but the tile origin is only known here. *)
+    let off_x = Render_state.compute_sub_arcsec_offset lon in
+    let off_y = Render_state.compute_sub_arcsec_offset lat in
     List.filter_map
       (fun (pt, (x', y')) ->
-        let off_x = Render_state.compute_sub_arcsec_offset lon in
-        let off_y = Render_state.compute_sub_arcsec_offset lat in
         let px = deltax *. (float (x' - x) -. off_x) in
         let py = deltay *. (float (y' - y) -. off_y) in
         let z = Dem_loader.get_height tile y' x' in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
-        let r = { r with z = -.r.z } in
-        if r.z > 1. && abs_float (r.x /. r.z) < 1. then
-          Some (pt, r.x /. r.z, r.y /. r.z)
+        let rz = -.r.z in
+        if rz > 1. && abs_float (r.x /. rz) < 1. then
+          Some (pt, r.x /. rz, r.y /. rz)
         else None)
       points
   in
+  (* Constant per frame: hoisted out of the POI loops below. *)
+  let inclination = screen_inclination orientation *. pi /. 180. in
   let points =
     let pos = ref [] in
-    let angle = (screen_inclination orientation *. pi /. 180.) +. (pi /. 4.) in
+    let angle = inclination +. (pi /. 4.) in
     let ca = cos angle in
     let sa = sin angle in
     List.filter_map
@@ -1678,19 +1690,23 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 
   (* 1. Triangles *)
   Gl.use_program ctx triangle_pid;
+  (* Everything but the final translation is constant per frame. *)
+  let triangle_prefix shown =
+    let sx = 0.6 *. text_height *. x_scale /. text_scale in
+    let sy = 0.6 *. text_height *. y_scale /. text_scale in
+    let angle = if shown then -.pi /. 4. else 0. in
+    Matrix.(rotate_z (angle +. inclination) * scale sx sy 1.)
+  in
+  let triangle_prefix_shown = triangle_prefix true in
+  let triangle_prefix_hidden = triangle_prefix false in
   List.iter
     (fun (_, x, y, shown) ->
       let x = x *. x_scale in
       let y = y *. y_scale in
-      let angle = if shown then -.pi /. 4. else 0. in
-      let transform =
-        let sx = 0.6 *. text_height *. x_scale /. text_scale in
-        let sy = 0.6 *. text_height *. y_scale /. text_scale in
-        Matrix.(
-          rotate_z (angle +. (screen_inclination orientation *. pi /. 180.))
-          * scale sx sy 1. * translate x y 0.)
-      in
-      Matrix.blit transform transform_ba;
+      Matrix.mult_into poi_transform
+        (if shown then triangle_prefix_shown else triangle_prefix_hidden)
+        (Matrix.translate x y 0.);
+      Matrix.blit poi_transform transform_ba;
       Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
       if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
       else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
@@ -1699,21 +1715,23 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
 
   (* 2. Text *)
   Gl.use_program ctx text_pid;
+  let text_prefix =
+    let sx = text_height *. x_scale /. text_scale in
+    let sy = text_height *. y_scale /. text_scale in
+    Matrix.(
+      translate 0.7 (-0.5) 0.
+      * rotate_z ((pi /. 4.) +. inclination)
+      * scale sx sy 1.)
+  in
   List.iter
     (fun (texture, x, y, shown) ->
-      if shown then
+      if shown then begin
         let x = x *. x_scale in
         let y = y *. y_scale in
-        let transform =
-          let sx = text_height *. x_scale /. text_scale in
-          let sy = text_height *. y_scale /. text_scale in
-          Matrix.(
-            translate 0.7 (-0.5) 0.
-            * rotate_z
-                ((pi /. 4.) +. (screen_inclination orientation *. pi /. 180.))
-            * scale sx sy 1. * translate x y 0.)
-        in
-        draw_text ctx text_uniforms transform transform_ba transform_ta texture)
+        Matrix.mult_into poi_transform text_prefix (Matrix.translate x y 0.);
+        draw_text ctx text_uniforms poi_transform transform_ba transform_ta
+          texture
+      end)
     points;
 
   Gl.disable ctx Gl.blend;
@@ -2139,7 +2157,13 @@ let set_orientation alpha beta =
   (current_orientation := Quaternion.(q_yaw * q_pitch));
   target_orientation := !current_orientation
 
-let parse_float_safe s = try Some (float_of_string s) with _ -> None
+(* Rejects "nan" and overflowing literals such as "1e999": a non-finite
+   coordinate, angle or zoom would propagate through the whole render state and
+   permanently defeat the change detection in [should_draw]. *)
+let parse_float_safe s =
+  match float_of_string_opt s with
+  | Some f when Float.is_finite f -> Some f
+  | _ -> None
 
 let parse_input_coordinates input =
   let input = String.trim input in
@@ -3252,15 +3276,18 @@ let main () =
       (filtered
       |> List.map
            (let size = tile_width in
-            let center_lon_int = truncate (lon *. 3600.) in
-            let center_lat_int = truncate (lat *. 3600.) in
+            let center_lon_int = Web_utils.arcsec_floor lon in
+            let center_lat_int = Web_utils.arcsec_floor lat in
             let min_lon_int = center_lon_int - (size / 2) in
             let min_lat_int = center_lat_int - (size / 2) in
 
             fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
-              (* POI coords are already rounded to arcseconds in previous step, so simple truncate is safe *)
-              let pt_lon_int = truncate (pt_lon *. 3600.) in
-              let pt_lat_int = truncate (pt_lat *. 3600.) in
+              (* POI coords are already rounded to arcseconds in the previous
+                 step, but the division by 3600 is not exact: round back rather
+                 than truncate or floor, which would both be off by one on the
+                 coordinates that fall just below an integer. *)
+              let pt_lon_int = int_of_float (Float.round (pt_lon *. 3600.)) in
+              let pt_lat_int = int_of_float (Float.round (pt_lat *. 3600.)) in
               let x = max 0 (min (tile_width - 1) (pt_lon_int - min_lon_int)) in
               let y =
                 max 0 (min (tile_height - 1) (pt_lat_int - min_lat_int))
