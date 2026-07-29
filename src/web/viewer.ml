@@ -217,6 +217,15 @@ type program = Web_utils.program_spec = {
 let n_sectors = 512
 let n_rings = 1024
 
+(* The index buffer built by [build_indices] is block-major: [n_index_blocks]
+   contiguous runs of equal size, block [b] covering the sector range
+   [b * index_block_size, (b + 1) * index_block_size] (blocks share their
+   boundary column, so consecutive blocks are watertight). A contiguous block
+   range is therefore a single [draw_elements] offset/count, which is what the
+   per-frame azimuth culling in [draw] uses. *)
+let index_block_size = 32
+let n_index_blocks = n_sectors / index_block_size
+
 (* type orientation = Quaternion.t *)
 
 (* Input mode: Sensor (device orientation) vs Manual (touch/mouse drag) *)
@@ -331,7 +340,7 @@ module Gl = Brr_canvas.Gl
 
 let build_indices w w' h =
   let t = Unix.gettimeofday () in
-  let block_size = 32 in
+  let block_size = index_block_size in
   let rec count_indices total jb =
     if jb >= w - 1 then total
     else
@@ -1669,11 +1678,46 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
   Gl.enable ctx Gl.cull_face';
-  (* Determine snapped alpha - changes with camera orientation *)
+  (* Determine snapped alpha - changes with camera orientation.
+     [grid_k] is both the angular width of one sector and the snapping step. *)
   let grid_k = radial_params.Render_state.grid_k in
-  let current_azimuth = compute_azimuth orientation in
+  let fwd =
+    Quaternion.transform_vector orientation { x = 0.; y = 0.; z = -1.; w = 0. }
+  in
+  let current_azimuth = atan2 (-.fwd.Matrix.x) fwd.Matrix.y in
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
+  (* Azimuth culling: the grid spans a fixed 90° wedge centred on
+     [snapped_alpha], but the frustum needs much less. The frustum is contained
+     in the cone of half-angle β about the view axis, tan β = hypot (1/x_scale,
+     1/y_scale) (the view-axis-to-corner angle; roll-independent). A cone of
+     half-angle β whose axis sits at elevation ε spans azimuths within
+     Δ = asin (sin β / cos ε) of the axis azimuth, provided sin β < cos ε (else
+     it swallows the zenith and every azimuth is needed). Add two sectors of
+     margin — one for the azimuth span of a single triangle, one for the
+     [snapped_alpha] quantisation — then round outward to whole index blocks. *)
+  let half_blocks =
+    let tx = 1. /. x_scale and ty = 1. /. y_scale in
+    let tan_beta = sqrt ((tx *. tx) +. (ty *. ty)) in
+    let sin_beta = tan_beta /. sqrt (1. +. (tan_beta *. tan_beta)) in
+    let fx = fwd.Matrix.x and fy = fwd.Matrix.y and fz = fwd.Matrix.z in
+    let horiz2 = (fx *. fx) +. (fy *. fy) in
+    let cos_eps = sqrt (horiz2 /. (horiz2 +. (fz *. fz))) in
+    let max_blocks = n_index_blocks / 2 in
+    (* [not (<)] so a degenerate orientation (NaN) falls back to the full wedge *)
+    if not (sin_beta < cos_eps) then max_blocks
+    else
+      let delta = asin (sin_beta /. cos_eps) +. (2. *. grid_k) in
+      let n =
+        int_of_float (ceil (delta /. (float index_block_size *. grid_k)))
+      in
+      if n < 1 then 1 else if n > max_blocks then max_blocks else n
+  in
+  let indices_per_block = index_count / n_index_blocks in
+  let terrain_index_count = 2 * half_blocks * indices_per_block in
+  let terrain_index_offset =
+    ((n_index_blocks / 2) - half_blocks) * indices_per_block * 4
+  in
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
@@ -1681,7 +1725,8 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
   Gl.bind_vertex_array ctx (Some terrain_geo);
   Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
-  Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0;
+  Gl.draw_elements ctx Gl.triangle_strip terrain_index_count Gl.unsigned_int
+    terrain_index_offset;
   Gl.bind_vertex_array ctx None;
   Gl.bind_texture ctx Gl.texture_2d None;
   Gl.disable ctx Gl.cull_face';
