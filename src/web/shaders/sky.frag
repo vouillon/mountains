@@ -1,11 +1,11 @@
 #version 300 es
 precision mediump float;
-uniform mat4 inv_view;
-uniform vec3 u_lightDir;
+uniform highp mat4 inv_view;
+uniform highp vec3 u_lightDir;
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 uniform vec2 sky_params; // x_scale, y_scale
-in vec2 v_uv;
+in highp vec2 v_uv;
 out vec4 color;
 
 void main() {
@@ -13,9 +13,9 @@ void main() {
   // Clip space: (x, y, -1.0) for forward direction (RH)
   // View Ray = (clip.x / x_scale, clip.y / y_scale, -1.0)
 
-  float x = (v_uv.x * 2.0 - 1.0) / sky_params.x;
-  float y = (v_uv.y * 2.0 - 1.0) / sky_params.y;
-  vec3 view_ray = normalize(vec3(x, y, -1.0));
+  highp float x = (v_uv.x * 2.0 - 1.0) / sky_params.x;
+  highp float y = (v_uv.y * 2.0 - 1.0) / sky_params.y;
+  highp vec3 view_ray = normalize(vec3(x, y, -1.0));
 
   // Transform to World Space (Rotation only)
   highp vec3 view_dir = mat3(inv_view) * view_ray;

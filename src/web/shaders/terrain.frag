@@ -1,7 +1,7 @@
 precision mediump float; // Default mediump for mobile performance
 precision highp sampler2DArray;
 
-uniform mediump sampler2D relief;
+uniform highp sampler2D relief;
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice

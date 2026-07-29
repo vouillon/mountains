@@ -13,7 +13,7 @@ uniform highp vec2 inv_delta;
 uniform highp float inv_w;
 uniform highp float inv_avg_delta;
 uniform highp int max_lod;
-uniform mediump sampler2D relief;
+uniform highp sampler2D relief;
 
 // Output structure for radial vertex computation
 struct RadialVertex {

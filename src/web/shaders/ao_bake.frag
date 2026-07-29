@@ -4,8 +4,8 @@ uniform mediump float scale;
 in vec2 uv;
 out mediump float occlusion;
 
-mediump float IGN(mediump vec2 p) {
-  mediump vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+float IGN(vec2 p) {
+  vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
   return fract(magic.z * fract(dot(p, magic.xy)));
 }
 
@@ -18,7 +18,7 @@ void main() {
 
   float h_center = decode_height(texture(relief, uv).rg);
 
-  mediump float noise = IGN(gl_FragCoord.xy);
+  float noise = IGN(gl_FragCoord.xy);
   mediump float totalOcclusion = 0.0;
 
   for (mediump float d = 0.0; d < DIRECTIONS; d++) {

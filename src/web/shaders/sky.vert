@@ -1,5 +1,5 @@
 #version 300 es
-out mediump vec2 v_uv;
+out highp vec2 v_uv;
 void main() {
   float x = float(gl_VertexID & 1);
   float y = float(gl_VertexID >> 1);
