@@ -245,6 +245,46 @@ let compute_azimuth q =
   let fwd = Quaternion.transform_vector q { x = 0.; y = 0.; z = -1.; w = 0. } in
   atan2 (-.fwd.x) fwd.y
 
+(* Compass heading implied by a W3C [deviceorientation] triplet, in radians
+   measured clockwise from north; [None] in the degenerate zone below.
+
+   Conventions ("Device Orientation and Motion", W3C): the device frame has
+   x = right, y = top of the screen, z = out of the screen; the world frame has
+   X = east, Y = north, Z = up; and (alpha, beta, gamma) are intrinsic Z-X'-Y''
+   Tait-Bryan angles, so the device-to-world rotation is
+   [R = Rz alpha * Rx beta * Ry gamma], with alpha in [0,360),
+   beta in [-180,180), gamma in [-90,90).
+
+   The spec's worked example ([compassHeading]) takes the heading of the
+   horizontal component of the vector orthogonal to the screen and pointing out
+   of its back, that is of [R * (0, 0, -1)], minus the third column of R:
+
+     vx (east)  = -cos a sin g - sin a sin b cos g
+     vy (north) = -sin a sin g + cos a sin b cos g
+
+   and returns [atan2 vx vy], an azimuth clockwise from north because vx is the
+   east component. We assume iOS's [webkitCompassHeading] is the heading of that
+   same physical direction: only then does the difference between the two
+   headings isolate the offset between the two reference frames. (If a device
+   test ever contradicts this, the other plausible reference is the device top,
+   [R * (0, 1, 0)], whose degenerate zone is the upright pose instead of the flat
+   one.)
+
+   Degenerate zone: vx^2 + vy^2 = 1 - (cos beta cos gamma)^2, so the heading is
+   undefined exactly when the screen normal is vertical, i.e. the device lies
+   flat (beta = gamma = 0, or beta = +/-180 and gamma = 0). We reject the whole
+   neighbourhood where the horizontal component is shorter than 0.1 (about 5.7
+   degrees from flat) and the heading, though defined, amplifies sensor noise.
+   The app's primary pose (upright, beta near 90) is as far from that zone as a
+   pose can be. *)
+let implied_compass_heading ~alpha ~beta ~gamma =
+  let a = alpha *. pi /. 180.
+  and b = beta *. pi /. 180.
+  and g = gamma *. pi /. 180. in
+  let vx = (-.cos a *. sin g) -. (sin a *. sin b *. cos g)
+  and vy = (-.sin a *. sin g) +. (cos a *. sin b *. cos g) in
+  if (vx *. vx) +. (vy *. vy) < 0.01 then None else Some (atan2 vx vy)
+
 (* GLSL Common *)
 
 let quad_vertex_shader = [%blob "shaders/quad.vert"]
@@ -2193,6 +2233,22 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
 let current_orientation = ref Quaternion.identity
 let target_orientation = ref Quaternion.identity
 let sensor_orientation = ref Quaternion.identity
+
+(* iOS heading offset. [webkitCompassHeading] is north-referenced but [alpha] is
+   measured from an arbitrary startup frame; the two frames differ by a fixed
+   rotation about the world vertical, recovered as
+   [implied_compass_heading - webkitCompassHeading]. The estimate is smoothed as
+   a vector ([cos], [sin]) rather than an angle so the average wraps correctly
+   across 360 degrees; [atan2] on the smoothed pair needs no renormalisation. *)
+let compass_delta_cos = ref 0.
+let compass_delta_sin = ref 0.
+let compass_delta_valid = ref false
+
+(* One-pole smoothing coefficient for the heading offset. Sensor events arrive at
+   50-60 Hz, so 0.012 is a time constant of roughly 1 / (60 x 0.012) = 1.4 s:
+   slow enough to reject compass noise, fast enough to follow a recalibration.
+   The first valid sample is taken as-is instead of converging from zero. *)
+let compass_delta_smoothing = 0.012
 let last_screen_angle = ref 0.
 let locked_inclination = ref 0.
 let fab_orientation = ref 0.
@@ -4483,9 +4539,13 @@ let setup_events canvas =
     if absolute then got_absolute := true;
     let evt = Brr.Ev.as_type ev in
     (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
-       heading is in [webkitCompassHeading], measured clockwise from north.
-       Convert it to the W3C absolute-alpha convention (counter-clockwise from
-       north) so the rest of the math is unchanged. *)
+       heading is in [webkitCompassHeading], measured clockwise from north. The
+       two frames differ by a rotation about the world vertical, so rather than
+       substituting the heading for [alpha] -- which mixes two frames and only
+       happens to be right when the device is flat -- we build the quaternion
+       from the raw, self-consistent triplet (smooth through the beta = 90
+       singularity, where [alpha] and [gamma] are individually ill-defined) and
+       rotate the result by that frame offset. *)
     let compass = Jv.get evt "webkitCompassHeading" in
     let has_compass = not (Jv.is_none compass) in
     (* A plain [deviceorientation] event may carry only relative data, whose
@@ -4507,11 +4567,56 @@ let setup_events canvas =
             (Jv.get (Jv.get (Jv.get Jv.global "screen") "orientation") "angle")
         in
         let angle nm = Jv.to_float (Jv.get evt nm) in
-        let alpha =
-          if has_compass then 360. -. Jv.to_float compass else angle "alpha"
-        in
         let beta = angle "beta" in
         let gamma = angle "gamma" in
+        let raw_alpha =
+          let a = Jv.get evt "alpha" in
+          if Jv.is_none a || Jv.is_null a then None else Some (Jv.to_float a)
+        in
+        (* Re-estimate the frame offset. Updates are skipped -- the last estimate
+           keeps being applied, so the view stays smooth -- when the compass
+           reading is flagged invalid, when it is too inaccurate, or when the
+           pose puts the implied heading in its degenerate zone. *)
+        (if has_compass then
+           match raw_alpha with
+           | None -> ()
+           | Some alpha -> (
+               let heading = Jv.to_float compass in
+               let accuracy =
+                 let a = Jv.get evt "webkitCompassAccuracy" in
+                 if Jv.is_none a || Jv.is_null a then 0. else Jv.to_float a
+               in
+               if heading >= 0. && accuracy >= 0. && accuracy <= 30. then
+                 match implied_compass_heading ~alpha ~beta ~gamma with
+                 | None -> ()
+                 | Some implied ->
+                     let d = implied -. (heading *. pi /. 180.) in
+                     let c = cos d and s = sin d in
+                     if !compass_delta_valid then begin
+                       let k = compass_delta_smoothing in
+                       compass_delta_cos :=
+                         !compass_delta_cos +. (k *. (c -. !compass_delta_cos));
+                       compass_delta_sin :=
+                         !compass_delta_sin +. (k *. (s -. !compass_delta_sin))
+                     end
+                     else begin
+                       compass_delta_cos := c;
+                       compass_delta_sin := s;
+                       compass_delta_valid := true
+                     end));
+        (* The [alpha] to compose with, plus an optional world-Z rotation to
+           apply afterwards. Before the first valid compass sample -- or if the
+           event carries no [alpha] at all -- fall back to the old substitution,
+           which is correct near the flat pose, i.e. precisely the pose in which
+           the offset cannot be estimated. *)
+        let alpha, correction =
+          if not has_compass then (angle "alpha", None)
+          else
+            match raw_alpha with
+            | Some a when !compass_delta_valid ->
+                (a, Some (atan2 !compass_delta_sin !compass_delta_cos))
+            | Some _ | None -> (360. -. Jv.to_float compass, None)
+        in
         let q =
           Quaternion.(
             mult
@@ -4529,6 +4634,18 @@ let setup_events canvas =
                     (from_axis_angle
                        { x = 0.; y = 0.; z = 1.; w = 0. }
                        (-.screen *. pi /. 180.)))))
+        in
+        (* Left multiplication rotates about the world vertical, so it changes
+           the heading and nothing else. *)
+        let q =
+          match correction with
+          | None -> q
+          | Some d ->
+              Quaternion.mult
+                (Quaternion.from_axis_angle
+                   { x = 0.; y = 0.; z = 1.; w = 0. }
+                   d)
+                q
         in
         sensor_orientation := q;
         let screen_delta = screen -. !last_screen_angle in
