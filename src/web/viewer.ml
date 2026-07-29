@@ -773,12 +773,21 @@ let init_graphics ctx =
 let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
     ao_blur_pid (bake_u : Render_state.ao_bake_uniforms)
     (blur_u : Render_state.ao_blur_uniforms) =
-  (* Helper to create FBO and R8 Texture *)
-  let create_r8_target w h =
+  (* Helper to create FBO and R8 Texture. [mipmap] allocates the full mip chain
+     and enables trilinear + anisotropic filtering; only the texture sampled
+     every frame by the terrain shader needs it (the intermediate bake target is
+     read once, texel-for-texel, by the blur pass). *)
+  let create_r8_target ?(mipmap = false) w h =
     let tid = Gl.create_texture ctx in
     Gl.bind_texture ctx Gl.texture_2d (Some tid);
-    Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 w h;
+    let levels = if mipmap then Web_utils.log2 (max w h) + 1 else 1 in
+    Gl.tex_storage2d ctx Gl.texture_2d levels Gl.r8 w h;
     Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
+    if mipmap then begin
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+        Gl.linear_mipmap_linear;
+      apply_anisotropic_filtering ctx
+    end;
     tid
   in
 
@@ -787,7 +796,7 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
   let ao_height = height / 2 in
 
   let ao_bake_tex = create_r8_target ao_width ao_height in
-  let ao_final_tex = create_r8_target ao_width ao_height in
+  let ao_final_tex = create_r8_target ~mipmap:true ao_width ao_height in
 
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
@@ -844,6 +853,11 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
 
   (* Restore State *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
+
+  (* Fill the mip chain: rendering through the FBO only wrote level 0. Must run
+     after the framebuffer is unbound. *)
+  Gl.bind_texture ctx Gl.texture_2d (Some ao_final_tex);
+  Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
 
   ao_final_tex

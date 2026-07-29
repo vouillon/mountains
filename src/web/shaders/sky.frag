@@ -8,6 +8,14 @@ uniform vec2 sky_params; // x_scale, y_scale
 in highp vec2 v_uv;
 out vec4 color;
 
+// Interleaved gradient noise. Must be highp: at mediump (fp16 on mobile) the
+// gl_FragCoord products lose the low bits and the hash collapses to a handful
+// of values.
+highp float IGN(highp vec2 p) {
+  highp vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+  return fract(magic.z * fract(dot(p, magic.xy)));
+}
+
 void main() {
   // Reconstruct View Ray in View Space
   // Clip space: (x, y, -1.0) for forward direction (RH)
@@ -31,8 +39,14 @@ void main() {
   float horizon_factor = smoothstep(0.0, 0.35, cos_theta);
   vec3 sky_base = mix(horizon, u_zenithColor, horizon_factor);
 
-  float mie = pow(max(0.0, cos_gamma), 400.0) * 0.8;
-  float halo = pow(max(0.0, cos_gamma), 20.0) * 0.2;
+  // Gated: pow(0.0, y) is 0.0 for y > 0, so this is bit-identical while
+  // skipping two pows over the (large) half of the sky away from the sun.
+  float mie = 0.0;
+  float halo = 0.0;
+  if (cos_gamma > 0.0) {
+    mie = pow(cos_gamma, 400.0) * 0.8;
+    halo = pow(cos_gamma, 20.0) * 0.2;
+  }
 
   vec3 sun_color = vec3(1.0, 0.9, 0.7);
   vec3 sky = sky_base + sun_color * (mie + halo);
@@ -41,11 +55,9 @@ void main() {
     sky = vec3(1.0, 0.95, 0.8) * 20.0;
   }
 
-  // Dither to prevent banding
-  float noise =
-      fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-  sky += (noise - 0.5) / 255.0;
-
-  // Gamma Correction (Linear -> sRGB)
-  color = vec4(pow(sky, vec3(1.0 / 2.2)), 1.0);
+  // Gamma Correction (Linear -> sRGB), then a +/-0.5/255 dither to prevent
+  // banding. The dither must come after the pow: in linear space one output LSB
+  // is worth 2-5x more noise in the dark blue zenith and ~2x less near the sun.
+  highp float noise = IGN(gl_FragCoord.xy);
+  color = vec4(pow(sky, vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
 }

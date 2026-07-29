@@ -21,7 +21,7 @@ in highp float v_dist;
 in highp vec3 v_view_dir;
 in highp vec3 v_world_pos; // Highp for world coords
 
-out lowp vec4 color;
+out mediump vec4 color;
 
 // ========== CLC Material System ==========
 
@@ -300,6 +300,16 @@ float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
   return result / 5.0;
 }
 
+// ========== Output Dither ==========
+
+// Interleaved gradient noise. Must be highp: at mediump (fp16 on mobile) the
+// gl_FragCoord products lose the low bits and the hash collapses to a handful
+// of values.
+highp float IGN(highp vec2 p) {
+  highp vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+  return fract(magic.z * fract(dot(p, magic.xy)));
+}
+
 // ========== Main ==========
 
 uniform vec3 u_fogColor;
@@ -317,30 +327,6 @@ void main() {
 
   vec3 lightDir = u_lightDir; // Pre-normalized on CPU
   float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);
-
-  // === Shadow Calculation (unchanged) ===
-  int cascade = 2;
-  if (v_dist < shadow_splits[0])
-    cascade = 0;
-  else if (v_dist < shadow_splits[1])
-    cascade = 1;
-
-  float slopeScale = 1.0 - cosTheta;
-  float texelSz = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
-  float normalOffset = texelSz * slopeScale;
-  vec3 offset_pos =
-      v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
-
-  vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
-  vec3 proj_coords = s_pos.xyz / s_pos.w;
-  proj_coords = proj_coords * 0.5 + 0.5;
-
-  float current_depth = proj_coords.z;
-  float bias = 0.0015;
-  float shadow_val =
-      pcf_shadow(cascade, proj_coords.xy, current_depth - bias, vec2(0.000488));
-  if (proj_coords.z > 1.0)
-    shadow_val = 1.0;
 
   // === Material System ===
   float slope = 1.0 - normal.z;
@@ -541,6 +527,36 @@ void main() {
   float final_l = max(0.0, dot(final_normal, lightDir));
   float specular = D * final_l;
 
+  // === Shadow Calculation ===
+  // Both consumers of shadow_val (specular below, direct light further down)
+  // are multiplied by final_l, so the 5-tap PCF is pure waste on unlit
+  // fragments. The branch is quad-coherent (whole slopes face away).
+  float shadow_val = 1.0;
+  if (final_l > 0.0) {
+    int cascade = 2;
+    if (v_dist < shadow_splits[0])
+      cascade = 0;
+    else if (v_dist < shadow_splits[1])
+      cascade = 1;
+
+    float slopeScale = 1.0 - cosTheta;
+    float texelSz = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
+    float normalOffset = texelSz * slopeScale;
+    vec3 offset_pos =
+        v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
+
+    vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
+    vec3 proj_coords = s_pos.xyz / s_pos.w;
+    proj_coords = proj_coords * 0.5 + 0.5;
+
+    float current_depth = proj_coords.z;
+    float bias = 0.0015;
+    shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
+                            vec2(0.000488));
+    if (proj_coords.z > 1.0)
+      shadow_val = 1.0;
+  }
+
   // Environment reflection (sky color for glossy surfaces)
   vec3 reflectDir = reflect(-v_view_dir, final_normal);
   float skyReflect = max(0.0, reflectDir.z);
@@ -619,6 +635,8 @@ void main() {
 
   vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
 
-  // Gamma correction
-  color = vec4(pow(final_color, vec3(1.0 / 2.2)), 1.0);
+  // Gamma correction, then a +/-0.5/255 dither in output space to break up
+  // banding
+  highp float noise = IGN(gl_FragCoord.xy);
+  color = vec4(pow(final_color, vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
 }
