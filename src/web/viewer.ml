@@ -2228,11 +2228,13 @@ let parse_input_coordinates input =
         | _ -> None)
     | _ -> None
 
+(* Bounds of the available DEM tiles: latitudes (min_lat, max_lat], longitudes
+   [min_lon, max_lon). *)
 let in_range ~size ~lat ~lon =
-  Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:9 ~lat
+  Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:10 ~lat
     ~lon
-  || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:55
-       ~max_lon:56 ~lat ~lon
+  || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:54
+       ~max_lon:57 ~lat ~lon
 
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in

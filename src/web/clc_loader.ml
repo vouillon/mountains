@@ -8,7 +8,9 @@ let ( let* ) = Lwt.bind
 let to_lwt f =
   let t, u = Lwt.task () in
   ( Fut.await f @@ fun v ->
-    match v with Ok v -> Lwt.wakeup u v | Error err -> raise (Jv.Error err) );
+    match v with
+    | Ok v -> Lwt.wakeup u v
+    | Error err -> Lwt.wakeup_exn u (Jv.Error err) );
   t
 
 (* CLC tile header info *)
@@ -257,6 +259,15 @@ let parse_pois header names_jv coords_jv elevs_jv types_jv =
 let load_full_clc_tile path_str =
   let open Lwt.Syntax in
   let* resp = to_lwt (Brr_io.Fetch.url (Jstr.v path_str)) in
+  let* () =
+    if Brr_io.Fetch.Response.ok resp then Lwt.return ()
+    else
+      Lwt.fail
+        (Failure
+           (Printf.sprintf "HTTP %d for %s"
+              (Brr_io.Fetch.Response.status resp)
+              path_str))
+  in
   let* buf =
     to_lwt (Brr_io.Fetch.Body.array_buffer (Brr_io.Fetch.Response.as_body resp))
   in

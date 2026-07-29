@@ -68,6 +68,8 @@ let load ~lat ~lon ~size =
   let max_deg_lon = max_lon_arcsec // 3600 in
 
   let tasks = ref [] in
+  let loaded = ref 0 in
+  let failed = ref 0 in
   for deg_lat = min_deg_lat to max_deg_lat do
     let tile_base_lat_arcsec = (deg_lat * 3600) + 1 in
     for deg_lon = min_deg_lon to max_deg_lon do
@@ -118,6 +120,11 @@ let load ~lat ~lon ~size =
                 match res with
                 | Error e ->
                     Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
+                | Ok resp when not (Response.ok resp) ->
+                    Lwt.fail
+                      (Failure
+                         (Printf.sprintf "HTTP %d for %s" (Response.status resp)
+                            p))
                 | Ok resp -> (
                     let* res_buf =
                       to_lwt (Body.array_buffer (Response.as_body resp))
@@ -176,7 +183,25 @@ let load ~lat ~lon ~size =
                   Lwt.return ()
               | _ -> Lwt.fail (Failure "Unexpected worker response for DEM")
             in
-            tasks := task () :: !tasks
+            (* A missing or broken sub-tile must not abort the whole heightmap:
+               its region is simply left at the zero-initialized value. *)
+            let task =
+              Lwt.catch
+                (fun () ->
+                  let* () = task () in
+                  incr loaded;
+                  Lwt.return ())
+                (fun exn ->
+                  incr failed;
+                  Brr.Console.error
+                    [
+                      Jstr.v
+                        (Printf.sprintf "DEM sub-tile %s not loaded: %s" p
+                           (Printexc.to_string exn));
+                    ];
+                  Lwt.return ())
+            in
+            tasks := task :: !tasks
           end
         done
       done
@@ -185,6 +210,11 @@ let load ~lat ~lon ~size =
 
   (* Run all tasks in parallel *)
   let* () = Lwt.join !tasks in
+  let* () =
+    if !loaded = 0 && !failed > 0 then
+      Lwt.fail (Failure "Could not load any DEM sub-tile")
+    else Lwt.return ()
+  in
 
   (* Reshape to 2D *)
   let heights = reshape_2 (genarray_of_array1 full_ba) size (size * 2) in
@@ -249,7 +279,7 @@ let prefetch ~lat ~lon ~size =
                 ( Fut.await f @@ fun v ->
                   match v with
                   | Ok v -> Lwt.wakeup u v
-                  | Error err -> raise (Jv.Error err) );
+                  | Error err -> Lwt.wakeup_exn u (Jv.Error err) );
                 t
               in
               to_lwt
@@ -276,9 +306,20 @@ let prefetch ~lat ~lon ~size =
   done;
   Lwt.join !prefetch_tasks
 
-(* Check if position is within available data range *)
-let in_range ~size:_ ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =
-  lat >= float min_lat
-  && lat <= float max_lat
-  && lon >= float min_lon
-  && lon <= float max_lon
+(* Check if position is within available data range: the whole extent requested
+   by [load], not just its center. *)
+let in_range ~size ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =
+  (* Same bounds as in [load]. *)
+  let center_lat_arcsec = truncate (lat *. 3600.) in
+  let center_lon_arcsec = truncate (lon *. 3600.) in
+  let min_lat_arcsec = center_lat_arcsec - (size / 2) in
+  let min_lon_arcsec = center_lon_arcsec - (size / 2) in
+  let max_lat_arcsec = min_lat_arcsec + size - 1 in
+  let max_lon_arcsec = min_lon_arcsec + size - 1 in
+  (* Tile rows cover latitudes (deg, deg + 1] in arcseconds (see the +1 in
+     [load]) while tile columns cover longitudes [deg, deg + 1): the available
+     data spans (min_lat, max_lat] by [min_lon, max_lon) degrees. *)
+  min_lat_arcsec > min_lat * 3600
+  && max_lat_arcsec <= max_lat * 3600
+  && min_lon_arcsec >= min_lon * 3600
+  && max_lon_arcsec < max_lon * 3600
