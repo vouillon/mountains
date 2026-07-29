@@ -21,24 +21,31 @@ let rec iter_rev min max f =
     let* () = f max in
     iter_rev min (max - 1) f
 
+(* Rounds towards -infinity, unlike [truncate], so that the tile anchoring is
+   also correct south of the equator. *)
+let arcsec_floor coord = int_of_float (floor (coord *. 3600.))
+
+(* The extent covered by a tile of [size] arcseconds anchored at [lat]/[lon],
+   in arcseconds: [(min_lat, min_lon, max_lat, max_lon)], bounds included. *)
+let extent ~size ~lat ~lon =
+  let min_lat = arcsec_floor lat - (size / 2) in
+  let min_lon = arcsec_floor lon - (size / 2) in
+  (min_lat, min_lon, min_lat + size - 1, min_lon + size - 1)
+
 module Make (R : Tiff.READER) = struct
   module Tiff = Tiff.Make (R)
 
   let in_range ~size ~min_lat ~max_lat ~min_lon ~max_lon ~lat ~lon =
-    let min_lat' = truncate (lat *. 3600.) - (size / 2) in
-    let min_lon' = truncate (lon *. 3600.) - (size / 2) in
-    let max_lat' = min_lat + size - 1 in
-    let max_lon' = min_lon + size - 1 in
+    let min_lat', min_lon', max_lat', max_lon' = extent ~size ~lat ~lon in
+    (* Same tile indices as the loops in [f]: rows cover the latitudes
+       (deg, deg + 1] in arcseconds, columns the longitudes [deg, deg + 1). *)
     min_lat <= (min_lat' - 1) // 3600
     && (max_lat' - 1) // 3600 <= max_lat
     && min_lon <= min_lon' // 3600
     && max_lon' // 3600 <= max_lon
 
   let prefetch ~size ~lat ~lon =
-    let min_lat = truncate (lat *. 3600.) - (size / 2) in
-    let min_lon = truncate (lon *. 3600.) - (size / 2) in
-    let max_lat = min_lat + size - 1 in
-    let max_lon = min_lon + size - 1 in
+    let min_lat, min_lon, max_lat, max_lon = extent ~size ~lat ~lon in
     Format.eprintf "PREFETCH RANGE: %d %d %d %d@."
       ((min_lat - 1) // 3600)
       ((max_lat - 1) // 3600)
@@ -49,10 +56,7 @@ module Make (R : Tiff.READER) = struct
 
   let f ~size ~lat ~lon =
     let tile_count = (3600 + 1024) / 1024 in
-    let min_lat = truncate (lat *. 3600.) - (size / 2) in
-    let min_lon = truncate (lon *. 3600.) - (size / 2) in
-    let max_lat = min_lat + size - 1 in
-    let max_lon = min_lon + size - 1 in
+    let min_lat, min_lon, max_lat, max_lon = extent ~size ~lat ~lon in
     let heights = Bigarray.(Array2.create Float32 C_layout) size size in
 
     Format.eprintf "RANGE: %d %d %d %d@."

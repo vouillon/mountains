@@ -392,7 +392,19 @@ let load_tiles ~lat ~lon ~size =
             let tile_range_lon = 65535. /. tile.header.scale_x in
             let tile_range_lat = 65535. /. tile.header.scale_y in
             Lwt.return (Some (tile, tile_range_lon, tile_range_lat)))
-          (fun _exn -> Lwt.return None)
+          (fun exn ->
+            (* Not every 1°×1° cell is published, so a 404 is expected and
+               stays silent; a decode or worker failure must be visible. *)
+            (match exn with
+            | Failure msg when String.starts_with ~prefix:"HTTP 404 " msg -> ()
+            | _ ->
+                Brr.Console.error
+                  [
+                    Jstr.v
+                      (Printf.sprintf "CLC tile %s not loaded: %s" path
+                         (Printexc.to_string exn));
+                  ]);
+            Lwt.return None)
       in
       tasks := task :: !tasks
     done

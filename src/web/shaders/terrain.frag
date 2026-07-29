@@ -19,7 +19,6 @@ uniform highp float center_height;
 in highp vec2 reliefCoord; // Highp for texture coords
 in highp float v_dist;
 in highp vec3 v_view_dir;
-in mediump float v_h;
 in highp vec3 v_world_pos; // Highp for world coords
 
 out lowp vec4 color;

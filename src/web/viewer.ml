@@ -1319,6 +1319,9 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   Gl.delete_buffer ctx ebo;
   Gl.disable ctx Gl.depth_test;
   Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.bind_renderbuffer ctx Gl.renderbuffer None;
+  Gl.delete_framebuffer ctx clc_fbo;
+  Array.iter (Gl.delete_renderbuffer ctx) clc_depth_rbs;
 
   cover_map_texture
 
@@ -2663,24 +2666,39 @@ let setup_events canvas =
     else None
   in
 
+  (* Going fullscreen is best effort: [requestFullscreen] is absent on iPhone
+     Safari (a synchronous [TypeError]) and rejects when the request is denied,
+     and [screen.orientation.lock] is missing or rejects on the same browsers.
+     Both are wrapped, or every tap in Sensor mode raises uncaught. *)
   let switch_to_fullscreen () =
     match Brr.Document.fullscreen_element Brr.G.document with
     | None ->
         Lwt.async @@ fun () ->
-        let* () =
-          to_lwt
-            (Brr.El.request_fullscreen
-               ~opts:
-                 (Brr.El.fullscreen_opts
-                    ~navigation_ui:Brr.El.Navigation_ui.hide ())
-               (Brr.Document.body Brr.G.document))
-        in
-        ignore
-          (Jv.call
-             (Jv.get (Jv.get Jv.global "screen") "orientation")
-             "lock"
-             [| Jv.of_jstr (Jstr.v "natural") |]);
-        Lwt.return ()
+        Lwt.catch
+          (fun () ->
+            let* () =
+              to_lwt
+                (Brr.El.request_fullscreen
+                   ~opts:
+                     (Brr.El.fullscreen_opts
+                        ~navigation_ui:Brr.El.Navigation_ui.hide ())
+                   (Brr.Document.body Brr.G.document))
+            in
+            to_lwt
+              (Fut.of_promise ~ok:ignore
+                 (Jv.call
+                    (Jv.get (Jv.get Jv.global "screen") "orientation")
+                    "lock"
+                    [| Jv.of_jstr (Jstr.v "natural") |])))
+          (fun exn ->
+            Brr.Console.(
+              warn
+                [
+                  Jstr.v
+                    (Printf.sprintf "Cannot switch to fullscreen: %s"
+                       (Printexc.to_string exn));
+                ]);
+            Lwt.return ())
     | Some _ -> ()
   in
 

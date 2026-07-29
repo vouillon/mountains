@@ -24,7 +24,6 @@ type radial_params = {
   w_shift : int;
   inv_sectors_div : float;
   grid_k : float;
-  grid_base : float;
   grid_scale : float;
 }
 (** Pre-computed radial grid parameters. These are constant for the session. *)
@@ -34,12 +33,10 @@ type terrain_uniforms = {
   w_mask : Gl.uniform_location;
   inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
-  grid_base : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
   center_offset : Gl.uniform_location;
   center_height : Gl.uniform_location;
-  w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
@@ -66,11 +63,9 @@ type shadow_uniforms = {
   w_mask : Gl.uniform_location;
   inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
-  grid_base : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
   center_offset : Gl.uniform_location;
-  w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;

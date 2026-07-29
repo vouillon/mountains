@@ -51,7 +51,6 @@ type radial_params = {
   w_shift : int;
   inv_sectors_div : float;
   grid_k : float;
-  grid_base : float;
   grid_scale : float;
 }
 (** Pre-computed radial grid parameters. These are constant for the session. *)
@@ -62,13 +61,11 @@ type terrain_uniforms = {
   w_mask : Gl.uniform_location;
   inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
-  grid_base : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
   (* Tile parameters *)
   center_offset : Gl.uniform_location;
   center_height : Gl.uniform_location;
-  w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
@@ -101,12 +98,10 @@ type shadow_uniforms = {
   w_mask : Gl.uniform_location;
   inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
-  grid_base : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
   (* Tile parameters *)
   center_offset : Gl.uniform_location;
-  w : Gl.uniform_location;
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
@@ -179,14 +174,12 @@ let compute_radial_params ~n_sectors ~n_rings =
   let w_shift = Web_utils.log2 w_stride in
   let grid_k = Web_utils.pi /. 2. /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
-  let grid_base = exp grid_k in
   let grid_scale = 70000. /. (height_term -. 1.) in
   {
     w_mask;
     w_shift;
     inv_sectors_div = 1. /. float n_sectors;
     grid_k;
-    grid_base;
     grid_scale;
   }
 
@@ -198,12 +191,10 @@ let init_terrain_uniforms ctx pid =
     w_mask = u "w_mask";
     inv_sectors_div = u "inv_sectors_div";
     grid_k = u "grid_k";
-    grid_base = u "grid_base";
     grid_scale = u "grid_scale";
     snapped_alpha = u "snapped_alpha";
     center_offset = u "center_offset";
     center_height = u "center_height";
-    w = u "w";
     inv_w = u "inv_w";
     max_lod = u "max_lod";
     inv_delta = u "inv_delta";
@@ -232,11 +223,9 @@ let init_shadow_uniforms ctx pid =
     w_mask = u "w_mask";
     inv_sectors_div = u "inv_sectors_div";
     grid_k = u "grid_k";
-    grid_base = u "grid_base";
     grid_scale = u "grid_scale";
     snapped_alpha = u "snapped_alpha";
     center_offset = u "center_offset";
-    w = u "w";
     inv_w = u "inv_w";
     max_lod = u "max_lod";
     inv_delta = u "inv_delta";
@@ -311,7 +300,6 @@ let upload_radial_static ctx (u : terrain_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.w_mask p.w_mask;
   Gl.uniform1f ctx u.inv_sectors_div p.inv_sectors_div;
   Gl.uniform1f ctx u.grid_k p.grid_k;
-  Gl.uniform1f ctx u.grid_base p.grid_base;
   Gl.uniform1f ctx u.grid_scale p.grid_scale
 
 (** Upload static radial grid uniforms for the shadow shader. *)
@@ -320,7 +308,6 @@ let upload_radial_static_shadow ctx (u : shadow_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.w_mask p.w_mask;
   Gl.uniform1f ctx u.inv_sectors_div p.inv_sectors_div;
   Gl.uniform1f ctx u.grid_k p.grid_k;
-  Gl.uniform1f ctx u.grid_base p.grid_base;
   Gl.uniform1f ctx u.grid_scale p.grid_scale
 
 (** Upload static texture unit bindings. Call once at initialization. *)
@@ -338,8 +325,7 @@ let upload_texture_units_shadow ctx (u : shadow_uniforms) =
 
 (** Upload session-static uniforms. Call once after computing initial values.
     These uniforms don't change during the session:
-    - Tile parameters (w, inv_w, max_lod, inv_delta, inv_avg_delta,
-      center_offset)
+    - Tile parameters (inv_w, max_lod, inv_delta, inv_avg_delta, center_offset)
     - CLC parameters (u_cameraOffset, u_baseExtent, u_numLevels)
     - Light direction (u_lightDir)
     - Shadow matrices and splits
@@ -356,7 +342,6 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
 
   (* Terrain shader uniforms *)
   Gl.use_program ctx terrain_pid;
-  Gl.uniform1i ctx u.w w;
   Gl.uniform1f ctx u.inv_w (1. /. float w);
   Gl.uniform1i ctx u.max_lod max_lod;
   Gl.uniform2f ctx u.inv_delta (1. /. deltax) (1. /. deltay);
@@ -395,7 +380,6 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
 
   (* Shadow shader uniforms *)
   Gl.use_program ctx shadow_pid;
-  Gl.uniform1i ctx shadow_u.w w;
   Gl.uniform1f ctx shadow_u.inv_w (1. /. float w);
   Gl.uniform1i ctx shadow_u.max_lod max_lod;
   Gl.uniform2f ctx shadow_u.inv_delta (1. /. deltax) (1. /. deltay);

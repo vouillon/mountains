@@ -50,7 +50,11 @@ let create_worker () =
       | "error" ->
           let msg = Jv.get data "message" |> Jv.to_string in
           Lwt.wakeup resolver (Error msg)
-      | _ -> ()
+      | _ ->
+          (* The resolver has been popped: dropping it here would leave the
+             request pending for ever and shift every later reply by one. *)
+          Lwt.wakeup resolver
+            (Error (Printf.sprintf "Unexpected worker message %S" type_))
   in
   ignore
     (Brr.Ev.listen Brr_io.Message.Ev.message on_msg
@@ -86,8 +90,6 @@ let release w =
   else w.in_use <- false
 
 let post w req =
-  let t, u = Lwt.task () in
-  Queue.push u w.pending;
   let msg, transfer =
     let open Jv in
     match req with
@@ -98,6 +100,12 @@ let post w req =
         ( obj [| ("type", of_string "decode_clc"); ("data", data) |],
           [ Obj.magic data ] )
   in
+  (* Replies are matched to requests by order, so the resolver is enqueued only
+     once the message is on its way: a synchronous post failure (a
+     [DataCloneError], say) would otherwise leave an orphan at the head of the
+     queue and shift every later reply by one. *)
   Brr_webworkers.Worker.post w.worker msg
     ~opts:(Brr_io.Message.opts ~transfer ());
+  let t, u = Lwt.task () in
+  Queue.push u w.pending;
   t

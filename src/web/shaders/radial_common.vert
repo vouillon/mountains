@@ -1,13 +1,11 @@
 
 // Radial grid uniforms (shared between terrain and shadow shaders)
-uniform highp int w;
 uniform highp int w_mask;
 uniform highp int w_shift;
 uniform highp vec2 center_offset;
 uniform highp float snapped_alpha;
 uniform highp float inv_sectors_div;
 uniform highp float grid_k;
-uniform highp float grid_base;
 uniform highp float grid_scale;
 uniform highp vec2 inv_delta;
 uniform highp float inv_w;
@@ -49,7 +47,7 @@ RadialVertex computeRadialVertex() {
   // Texture size at this LOD
   ivec2 tex_size = textureSize(relief, lod);
 
-  // Normalized coordinate (Y flipped: row 0 is north)
+  // Normalized coordinate (no flip: row 0 is south, see [Dem_loader.load])
   v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
 
   // Texel position for manual bilinear interpolation

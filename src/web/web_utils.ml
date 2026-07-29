@@ -74,10 +74,15 @@ let create_geometry ctx ~indices ~buffers =
   Gl.bind_buffer ctx Gl.element_array_buffer None;
   gid
 
+(* A compile or link failure is otherwise invisible: the draw calls are simply
+   ignored and the canvas stays black. Report it and carry on. *)
 let compile_shader ctx src typ =
   let sid = Gl.create_shader ctx typ in
   Gl.shader_source ctx sid (Jstr.v src);
   Gl.compile_shader ctx sid;
+  if not (Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status)) then
+    Brr.Console.error
+      [ Jstr.v "Shader compilation failed:"; Gl.get_shader_info_log ctx sid ];
   sid
 
 type program_spec = {
@@ -98,6 +103,9 @@ let create_program ctx p =
     (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
     p.attributes;
   Gl.link_program ctx pid;
+  if not (Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status)) then
+    Brr.Console.error
+      [ Jstr.v "Shader program link failed:"; Gl.get_program_info_log ctx pid ];
   pid
 
 let intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
