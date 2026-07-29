@@ -486,8 +486,8 @@ let process_tile db_path output_dir tile_name =
         | Sqlite3.Data.BLOB b ->
             let wkb_opt = Some b in
             begin match wkb_opt with
-            | Some raw -> begin
-                match Wkb_decode.decode_wkb raw with
+            | Some raw ->
+                begin match Wkb_decode.decode_wkb raw with
                 | Some geom ->
                     (* 1. Convert Geometry to float array (MultiPolygon) *)
                     let polys =
@@ -675,7 +675,7 @@ let process_tile db_path output_dir tile_name =
                             clipped_pieces)
                         float_polys
                 | None -> ()
-              end
+                end
             | None -> ()
             end
         | _ -> ()

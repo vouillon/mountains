@@ -876,8 +876,8 @@ module Triangulator = struct
       let vi_curr = vert_idx.(i) in
       let vi_next = vert_idx.(node_next) in
       (* Note: caller guarantees cross_product >= epsilon, so no need to check here *)
-      if reflex_count = 0 then true
-        (* No reflex vertices = any convex is an ear *)
+      if reflex_count = 0 then
+        true (* No reflex vertices = any convex is an ear *)
       else
         let check_node r_node =
           if active.(r_node) then
@@ -1136,8 +1136,8 @@ module Triangulator = struct
           let vi_n = vert_idx.(n) in
           let cp = cross_product verts vi_p vi_i vi_n in
           (* Only emit triangle if it has correct orientation *)
-          if cp > epsilon then begin
-            if !out_idx + 2 < Array.length out_buffer then (
+          if cp > epsilon then
+            begin if !out_idx + 2 < Array.length out_buffer then (
               (* Bounds check for debugging *)
               let max_vert = (Array.length verts / 2) - 1 in
               if vi_p > max_vert || vi_i > max_vert || vi_n > max_vert then
@@ -1150,7 +1150,7 @@ module Triangulator = struct
               out_buffer.(!out_idx + 1) <- vi_i;
               out_buffer.(!out_idx + 2) <- vi_n;
               out_idx := !out_idx + 3)
-          end
+            end
           else incr skipped;
           next.(p) <- n;
           prev.(n) <- p;
