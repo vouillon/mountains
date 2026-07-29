@@ -1,4 +1,4 @@
-uniform sampler2D relief;
+uniform highp sampler2D relief;
 uniform int width;
 uniform mediump float scale;
 in vec2 uv;

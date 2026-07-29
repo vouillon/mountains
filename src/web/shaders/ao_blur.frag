@@ -1,6 +1,6 @@
 
 uniform sampler2D ao_tex;
-uniform sampler2D relief;
+uniform highp sampler2D relief;
 uniform vec2 inv_res;
 in vec2 uv;
 out float color;
