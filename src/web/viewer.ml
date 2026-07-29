@@ -3053,21 +3053,64 @@ let setup_events canvas =
        surface an explicit button to request it. *)
     if !input_mode = Sensor then maybe_show_compass_button ()
 
-let wait_for_service_worker =
-  let open Fut.Result_syntax in
+(* Offline support is a bonus: [navigator.serviceWorker] is undefined on
+   insecure origins (plain http, e.g. LAN testing) and registration fails in
+   Firefox private browsing or when the script is missing. Registering must
+   thus not raise at initialization time. *)
+let service_worker_registration =
   let open Brr_webworkers.Service_worker in
-  let* r = Container.ready (Container.of_navigator Brr.G.navigator) in
-  match Registration.active r with
-  | None -> assert false
-  | Some r ->
-      if state r = State.activated then Fut.return (Ok ())
-      else
-        let fut, set = Fut.create () in
-        ignore
-          (Brr.Ev.listen Brr.Ev.statechange
-             (fun _ -> if state r = State.activated then set (Ok ()))
-             (as_target r));
-        fut
+  let container = Container.of_navigator Brr.G.navigator in
+  if Jv.is_none (Container.to_jv container) then None
+  else
+    match Container.register container (Jstr.v "service_worker.bc.js") with
+    | registration -> Some (container, registration)
+    | exception Jv.Error _ -> None
+
+(* Wait for the service worker to control the page, so that the tiles loaded at
+   startup do get cached. Never fails and never waits for ever: a missing or
+   broken service worker must not keep the app on the loading screen. *)
+let wait_for_service_worker =
+  let open Brr_webworkers.Service_worker in
+  let fut, set = Fut.create () in
+  let settled = ref false in
+  let proceed () =
+    if not !settled then begin
+      settled := true;
+      set (Ok ())
+    end
+  in
+  (match service_worker_registration with
+  | None ->
+      Brr.Console.(
+        warn [ Jstr.v "Service workers unavailable: running without cache" ]);
+      proceed ()
+  | Some (container, registration) ->
+      Fut.await
+        (let open Fut.Result_syntax in
+         let* _ = registration in
+         Container.ready container)
+        (function
+          | Error e ->
+              Brr.Console.error [ e ];
+              proceed ()
+          | Ok r -> (
+              match Registration.active r with
+              | None -> proceed ()
+              | Some w ->
+                  if state w = State.activated then proceed ()
+                  else
+                    ignore
+                      (Brr.Ev.listen Brr.Ev.statechange
+                         (fun _ -> if state w = State.activated then proceed ())
+                         (as_target w))));
+      (* Backstop: [Container.ready] never resolves if activation stalls. *)
+      Fut.await (Fut.tick ~ms:10_000) (fun () ->
+          (if not !settled then
+             Brr.Console.(
+               warn [ Jstr.v "Service worker not ready: proceeding without it" ]));
+          proceed ()));
+  fut
+
 (* Main *)
 
 let main () =
@@ -3300,13 +3343,6 @@ let main () =
       canvas ctx ~detail_map ~clc_tiles:tiles ~graphics ~start
   in
   Lwt.return_unit
-
-let () =
-  let open Brr_webworkers.Service_worker in
-  ignore
-    (Container.register
-       (Container.of_navigator Brr.G.navigator)
-       (Jstr.v "service_worker.bc.js"))
 
 let () =
   Lwt.async (fun () ->

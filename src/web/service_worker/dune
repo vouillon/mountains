@@ -5,5 +5,30 @@
 
 (executables
  (names service_worker)
+ (modules service_worker sw_version)
  (libraries mountains yojson brr lwt)
  (modes js))
+
+; Build identifier for the service worker cache: a digest of the precached
+; assets, plus the content-hashed names of the Wasm code modules.
+
+(executable
+ (name gen_sw_version)
+ (modules gen_sw_version)
+ (modes exe))
+
+(rule
+ (target sw_version.ml)
+ (deps ../viewer.bc.wasm.assets)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{exe:gen_sw_version.exe}
+    ../viewer.bc.wasm.assets
+    %{dep:../index.html}
+    %{dep:../viewer.bc.js}
+    %{dep:../viewer.bc.wasm.js}
+    %{dep:../worker.bc.js}
+    %{dep:../decompress_tile.wasm}
+    %{dep:../decode_clc.wasm}))))
