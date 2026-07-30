@@ -166,11 +166,20 @@ vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal, float scale) {
   vec3 blend = abs(normal);
   blend /= (blend.x + blend.y + blend.z + 0.0001);
 
-  // Sample packed RGBA detail map from each projection plane
+  // Sample packed RGBA detail map from each projection plane. The side
+  // projections contribute nothing on near-horizontal terrain: fade them in
+  // with their blend weight (quad-coherent, like the distance gates in
+  // perturbNormal) and default to the neutral 0.5.
   float bias = 1.;
-  vec4 d_xz = texture(u_detailMap, uv_xz, bias);
   vec4 d_xy = texture(u_detailMap, uv_xy, bias);
-  vec4 d_yz = texture(u_detailMap, uv_yz, bias);
+  vec4 d_xz = vec4(0.5);
+  float fade_y = smoothstep(0.003, 0.01, blend.y);
+  if (fade_y > 0.0)
+    d_xz = mix(vec4(0.5), texture(u_detailMap, uv_xz, bias), fade_y);
+  vec4 d_yz = vec4(0.5);
+  float fade_x = smoothstep(0.003, 0.01, blend.x);
+  if (fade_x > 0.0)
+    d_yz = mix(vec4(0.5), texture(u_detailMap, uv_yz, bias), fade_x);
 
   // Blend based on surface orientation (Corrected for Z-up)
   // Top/Bottom (blend.z) -> XY projection
@@ -523,7 +532,7 @@ void main() {
   }
 
   // === Specular & Environment Reflection ===
-  vec3 halfVec = normalize(lightDir + v_view_dir);
+  vec3 halfVec = normalize(lightDir + view_dir_n);
 
   // GGX-inspired specular (simplified)
   float NdotH = max(0.0, dot(final_normal, halfVec));
@@ -568,7 +577,7 @@ void main() {
   }
 
   // Environment reflection (sky color for glossy surfaces)
-  vec3 reflectDir = reflect(-v_view_dir, final_normal);
+  vec3 reflectDir = reflect(-view_dir_n, final_normal);
   float skyReflect = max(0.0, reflectDir.z);
   // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
   // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
@@ -576,15 +585,15 @@ void main() {
   float sky_mix = smoothstep(0.0, 0.35, skyReflect);
   vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
 
-  // Apply specular and reflection to terrain color
+  // Specular and reflection are incident light: they are added after the
+  // diffuse lighting multiply at the end, not folded into the albedo.
   float specBoost = (waterMask > 0.01 || iceAmount > 0.5) ? 2.5 : 1.0;
   vec3 specColor = vec3(1.0, 0.98, 0.95) * specular *
                    (1.0 - material_roughness) * shadow_val * specBoost;
-  terrain_color += specColor * 0.4;
 
   // Fresnel for water
   if (waterMask > 0.01) {
-    float n_dot_v = max(0.0, dot(final_normal, v_view_dir));
+    float n_dot_v = max(0.0, dot(final_normal, view_dir_n));
     // Schlick's approximation
     float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
     reflectivity = mix(reflectivity, fresnel, waterMask);
@@ -592,9 +601,8 @@ void main() {
     // envColor = mix(envColor, fog_color, waterMask);
   }
 
-  // Apply reflection (remove damping for water)
+  // Reflection strength (remove damping for water); applied at the end
   float reflectDamp = (waterMask > 0.01) ? 1.0 : 0.3;
-  terrain_color = mix(terrain_color, envColor, reflectivity * reflectDamp);
 
   // === Lighting ===
 
@@ -632,18 +640,29 @@ void main() {
 
   vec3 sun_color = vec3(1.0, 0.95, 0.9);
   vec3 direct = sun_color * final_l * shadow_val * 0.5;
-  vec3 lighting = ambient + direct;
-
-  // === AO (unchanged) ===
+  // Baked AO measures sky visibility: it attenuates the ambient term and the
+  // sky reflection, not the direct sun, which the shadow map already handles
+  // (multiplying the whole color darkened sunlit couloirs twice).
   float occlusion = texture(ao, reliefCoord).r;
-  terrain_color = terrain_color * occlusion;
+  vec3 lighting = (ambient * occlusion) + direct;
+
+  // Diffuse lighting scales the albedo; reflected light is added on top.
+  // Applying the reflection before the lighting multiply darkened the sky
+  // reflection by the diffuse term, turning grazing lakes muddy, and applied
+  // the (already shadowed) specular through the shadowed direct term twice.
+  vec3 lit = lighting * terrain_color;
+  lit = mix(lit, envColor * occlusion, reflectivity * reflectDamp);
+  lit += specColor * 0.4;
 
   // === Fog & Haze ===
-  // Height-based Haze: exp(-h/H) where H=1500m
-  float haze_density = exp((-center_height - v_world_pos.z) * 0.0006);
+  // Height-based haze, exp(-h/H) with H~1667m, taken at the mean altitude of
+  // the camera-to-fragment path rather than the fragment's own: with the
+  // fragment altitude alone, a low valley seen from a summit was over-hazed
+  // by the dense air it does not actually lie under.
+  float haze_density = exp((-center_height - (0.5 * v_world_pos.z)) * 0.0006);
   float fog_coeff = exp(v_dist * -0.4e-4 * haze_density);
 
-  vec3 final_color = mix(fog_color, lighting * terrain_color, fog_coeff);
+  vec3 final_color = mix(fog_color, lit, fog_coeff);
 
   // Gamma correction, then a +/-0.5/255 dither in output space to break up
   // banding
