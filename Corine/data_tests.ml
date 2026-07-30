@@ -100,6 +100,37 @@ let () =
         fail "GPKG MultiPolygonZM: wrong coordinates"
   | _ -> fail "GPKG MultiPolygonZM: decode failed"
 
+(* --- Projections, against PROJ (cs2cs) reference coordinates --- *)
+
+let () =
+  let close tol a b = abs_float (a -. b) < tol in
+  (* EPSG:3035: IOGP Guidance Note 7-2 worked example (5E, 50N) *)
+  let x, y = Proj_3035.wgs84_to_laea 5.0 50.0 in
+  if not (close 0.001 x 3962799.4510 && close 0.001 y 2999718.8532) then
+    fail "proj_3035 forward: got (%.4f, %.4f)" x y;
+  let lon, lat = Proj_3035.laea_to_wgs84 3962799.4510 2999718.8532 in
+  if not (close 1e-8 lon 5.0 && close 1e-8 lat 50.0) then
+    fail "proj_3035 inverse: got (%.8f, %.8f)" lon lat;
+  (* Projection origin maps back to (10E, 52N) *)
+  let lon, lat = Proj_3035.laea_to_wgs84 4321000.0 3210000.0 in
+  if not (close 1e-9 lon 10.0 && close 1e-9 lat 52.0) then
+    fail "proj_3035 origin: got (%.8f, %.8f)" lon lat;
+  (* Round trip in the Alps *)
+  let x, y = Proj_3035.wgs84_to_laea 6.5 45.5 in
+  let lon, lat = Proj_3035.laea_to_wgs84 x y in
+  if not (close 1e-8 lon 6.5 && close 1e-8 lat 45.5) then
+    fail "proj_3035 round trip: got (%.8f, %.8f)" lon lat
+
+let () =
+  let close tol a b = abs_float (a -. b) < tol in
+  (* EPSG:2975 (UTM 40S): cs2cs reference for (55.5E, 21S) *)
+  let x, y = Proj_2975.of_wgs84 55.5 (-21.0) in
+  if not (close 0.001 x 344093.4543 && close 0.001 y 7677120.8840) then
+    fail "proj_2975 forward: got (%.4f, %.4f)" x y;
+  let lon, lat = Proj_2975.to_wgs84 344093.4543 7677120.8840 in
+  if not (close 1e-8 lon 55.5 && close 1e-8 lat (-21.0)) then
+    fail "proj_2975 inverse: got (%.8f, %.8f)" lon lat
+
 (* --- osm_fetch: two inner rings sharing exactly one edge merge into one
    hole (the minimal touching-inner-rings case) --- *)
 

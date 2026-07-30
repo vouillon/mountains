@@ -122,21 +122,3 @@ let wgs84_to_laea lon lat =
           -. (sin_beta0 *. cos_beta *. cos (lam -. lon0)))
   in
   (x, y)
-
-(* Tests *)
-let test () =
-  Printf.printf "Testing EPSG:3035 Projections...\n";
-  let tx, ty = (fe, fn) in
-  let l, p = laea_to_wgs84 tx ty in
-  Printf.printf
-    "Origin (%.1f, %.1f) -> Lon: %.6f Lat: %.6f (Expected: 10.0, 52.0)\n" tx ty
-    l p;
-
-  (* Test round trip *)
-  let rx, ry = wgs84_to_laea l p in
-  Printf.printf "Round Trip -> X: %.2f Y: %.2f\n" rx ry;
-  if abs_float (rx -. fe) < 0.01 && abs_float (ry -. fn) < 0.01 then
-    Printf.printf "Integration Test: PASSED\n"
-  else Printf.printf "Integration Test: FAILED\n"
-
-let () = if Array.length Sys.argv > 1 && Sys.argv.(1) = "test" then test ()

@@ -48,27 +48,49 @@ let fetch_overpass_data_once query =
   let url = "https://overpass-api.de/api/interpreter" in
   (* Replace newlines with spaces for cleaner query *)
   let clean_query = String.concat " " (String.split_on_char '\n' query) in
-  let cmd =
-    Printf.sprintf
-      "curl -f -s --connect-timeout 30 --max-time 120 -X POST -d 'data=%s' '%s'"
-      clean_query url
+  (* argv-style spawning and --data-urlencode keep the query intact whatever
+     characters it contains: no shell quoting, no form-encoding corruption *)
+  let args =
+    [|
+      "curl";
+      "-f";
+      "-s";
+      "--connect-timeout";
+      "30";
+      "--max-time";
+      "120";
+      "-X";
+      "POST";
+      "--data-urlencode";
+      "data=" ^ clean_query;
+      url;
+    |]
   in
-
-  let ic = Unix.open_process_in cmd in
+  let ic = Unix.open_process_args_in "curl" args in
   let buf = Buffer.create 65536 in
-  (try
-     while true do
-       Buffer.add_channel buf ic 1
-     done
-   with End_of_file -> ());
-  match Unix.close_process_in ic with
-  | Unix.WEXITED 0 -> Some (Buffer.contents buf)
-  | Unix.WEXITED code ->
-      Printf.eprintf "curl failed with exit code %d\n%!" code;
-      None
-  | Unix.WSIGNALED _ | Unix.WSTOPPED _ ->
-      Printf.eprintf "curl was killed by signal\n%!";
-      None
+  let read_result =
+    try
+      while true do
+        Buffer.add_channel buf ic 1
+      done;
+      Ok ()
+    with
+    | End_of_file -> Ok ()
+    | e -> Error e
+  in
+  (* Always reap the process, even if reading failed *)
+  let status = Unix.close_process_in ic in
+  match read_result with
+  | Error e -> raise e
+  | Ok () -> (
+      match status with
+      | Unix.WEXITED 0 -> Some (Buffer.contents buf)
+      | Unix.WEXITED code ->
+          Printf.eprintf "curl failed with exit code %d\n%!" code;
+          None
+      | Unix.WSIGNALED _ | Unix.WSTOPPED _ ->
+          Printf.eprintf "curl was killed by signal\n%!";
+          None)
 
 (* Overpass reports server-side failures (query timeout, memory exhaustion)
    as HTTP 200 JSON with a top-level "remark" field and truncated or empty
@@ -366,12 +388,31 @@ let parse_overpass_elements json_str =
                   done;
 
                   (* Check if chain is closed *)
-                  if !curr_end = !chain_start then
+                  if !curr_end = !chain_start then begin
                     (* Combine all node arrays into one ring *)
-                    let all_nodes =
-                      Array.concat (List.map (fun arr -> arr) !chain)
-                    in
+                    let all_nodes = Array.concat !chain in
+                    (* Diagnostic: greedy chaining at a node shared by two
+                       rings can fuse them into one self-touching "figure
+                       eight". That closes successfully, so it would
+                       otherwise be silent. *)
+                    let n = Array.length all_nodes in
+                    let seen = Hashtbl.create n in
+                    (try
+                       for i = 0 to n - 2 do
+                         let nid = all_nodes.(i) in
+                         if Hashtbl.mem seen nid then begin
+                           Printf.printf
+                             "Warning: Ring in relation %d passes through node \
+                              %d twice (rings fused at a shared node?)\n\
+                              %!"
+                             rel_id nid;
+                           raise Exit
+                         end;
+                         Hashtbl.add seen nid ()
+                       done
+                     with Exit -> ());
                     rings := all_nodes :: !rings
+                  end
                   else
                     Printf.printf
                       "Warning: Unclosed chain in relation %d, ways: [%s]\n%!"

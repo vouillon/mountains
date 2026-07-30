@@ -133,19 +133,3 @@ let to_wgs84 x y =
        /. cos_phi1
   in
   (lon *. rad_to_deg, lat *. rad_to_deg)
-
-(* Tests *)
-let test () =
-  Printf.printf "Testing EPSG:2975 Projections...\n";
-  (* Réunion origin (approx) *)
-  let lon, lat = (55.5, -21.0) in
-  let x, y = of_wgs84 lon lat in
-  Printf.printf "Lon: %.6f Lat: %.6f -> X: %.2f Y: %.2f\n" lon lat x y;
-
-  let rl, rp = to_wgs84 x y in
-  Printf.printf "Round Trip -> Lon: %.6f Lat: %.6f\n" rl rp;
-  if abs_float (rl -. lon) < 0.00001 && abs_float (rp -. lat) < 0.00001 then
-    Printf.printf "Integration Test: PASSED\n"
-  else Printf.printf "Integration Test: FAILED\n"
-
-let () = if Array.length Sys.argv > 1 && Sys.argv.(1) = "test" then test ()
