@@ -29,6 +29,7 @@
 ; Only what the client actually fetches: the raw Copernicus .tif sources
 ; (~940 MB) are pipeline inputs for compress_dem and would push the Pages
 ; artifact over its 1 GB limit.
+
 (rule
  (target
   (dir data))
