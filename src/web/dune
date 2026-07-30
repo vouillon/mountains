@@ -26,15 +26,23 @@
  (js_of_ocaml
   (javascript_files inflate.js)))
 
+; Only what the client actually fetches: the raw Copernicus .tif sources
+; (~940 MB) are pipeline inputs for compress_dem and would push the Pages
+; artifact over its 1 GB limit.
 (rule
  (target
   (dir data))
  (alias all)
  (deps
-  (glob_files_rec ../../data/**))
+  (glob_files_rec ../../data/dem/**)
+  (glob_files_rec ../../data/clc/**)
+  ../../data/points.geojson)
  (action
   (progn
-   (run cp -r ../../data %{target}))))
+   (run mkdir -p %{target})
+   (run cp -r ../../data/dem %{target}/dem)
+   (run cp -r ../../data/clc %{target}/clc)
+   (run cp ../../data/points.geojson %{target}/points.geojson))))
 
 (rule
  (target
