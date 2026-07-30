@@ -1753,7 +1753,12 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
       (fun (pt, (x', y')) ->
         let px = deltax *. (float (x' - x) -. off_x) in
         let py = deltay *. (float (y' - y) -. off_y) in
-        let z = Dem_loader.get_height tile y' x' in
+        (* Same Earth-curvature drop as the terrain mesh, so the labels stay
+           anchored to the rendered summits *)
+        let z =
+          Dem_loader.get_height tile y' x'
+          -. Visibility.curvature_drop ((px *. px) +. (py *. py))
+        in
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let rz = -.r.z in
         if rz > 1. && abs_float (r.x /. rz) < 1. then
@@ -2451,8 +2456,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           else
             Visibility.test_precise
               (Dem_loader.get_height tile)
-              ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x
-              ~dst_y ())
+              ~src_h:(height +. 2.) ~curvature:(deltax, deltay) ~off_x ~off_y
+              ~src_x:x ~src_y:y ~dst_x ~dst_y ())
         points
     in
     let points =
@@ -2467,10 +2472,15 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                   Printf.sprintf "%s (%dm)" name elevation)
           in
           let h =
-            let height' = Dem_loader.get_height tile y' x' in
+            let dx = float (x' - x) in
+            let dy = float (y' - y) in
+            let height' =
+              Dem_loader.get_height tile y' x'
+              -. Visibility.curvature_drop
+                   ((dx *. deltax *. (dx *. deltax))
+                   +. (dy *. deltay *. (dy *. deltay)))
+            in
             let dist =
-              let dx = float (x' - x) in
-              let dy = float (y' - y) in
               let dz = height' -. height in
               sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
             in

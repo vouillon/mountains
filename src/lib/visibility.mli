@@ -16,9 +16,15 @@ val test :
     @param dst_y destination row
     @return true if destination is visible from source *)
 
+val curvature_drop : float -> float
+(** [curvature_drop d2] is the drop of the Earth's surface below the observer's
+    tangent plane, [d2] square metres from the observer, with standard
+    atmospheric refraction folded in (effective radius ~7320 km). *)
+
 val test_precise :
   (int -> int -> float) ->
   ?src_h:float ->
+  ?curvature:float * float ->
   off_x:float ->
   off_y:float ->
   src_x:int ->

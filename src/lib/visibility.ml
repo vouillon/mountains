@@ -1,3 +1,11 @@
+(* Drop of the Earth's surface below the observer's tangent plane, [d2]
+   square metres from the observer, with standard atmospheric refraction
+   folded in: sight lines bend back towards the ground by ~13%, equivalent to
+   an effective radius R / (1 - 0.13) ~ 7320 km. In the observer-anchored
+   frame the renderer works in (terrain lowered by this drop), light rays are
+   straight lines. Must match the constant in radial_common.vert. *)
+let curvature_drop d2 = 6.8306e-8 *. d2
+
 let follow_line plot x0 y0 x1 y1 =
   let dx = abs (x1 - x0) in
   let sx = if x0 < x1 then 1 else -1 in
@@ -85,10 +93,25 @@ let debug = false
     @param dst_x destination column
     @param dst_y destination row
     @return true if destination is visible from source *)
-let test_precise (get_height : int -> int -> float) ?src_h ~off_x ~off_y ~src_x
-    ~src_y ~dst_x ~dst_y () =
+let test_precise (get_height : int -> int -> float) ?src_h ?curvature ~off_x
+    ~off_y ~src_x ~src_y ~dst_x ~dst_y () =
   let src_x_f = float src_x +. off_x in
   let src_y_f = float src_y +. off_y in
+  (* With [curvature] = (metres per pixel in x, in y), work in the
+     observer-anchored frame: every height is lowered by the curvature drop at
+     its distance from the source, and the straight sight line of the flat
+     algorithm below is then exactly the refracted ray over the sphere. The
+     wrapped [get_height] also feeds the Bresenham fallback, whose sub-segment
+     of the ray stays straight in this frame. *)
+  let get_height =
+    match curvature with
+    | None -> get_height
+    | Some (mx, my) ->
+        fun row col ->
+          let dxm = (float col -. src_x_f) *. mx in
+          let dym = (float row -. src_y_f) *. my in
+          get_height row col -. curvature_drop ((dxm *. dxm) +. (dym *. dym))
+  in
   let dst_x_f = float dst_x in
   let dst_y_f = float dst_y in
   let dx = dst_x_f -. src_x_f in

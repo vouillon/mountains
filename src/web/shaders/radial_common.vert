@@ -74,5 +74,12 @@ RadialVertex computeRadialVertex() {
 
   v.height = mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 
+  // Earth curvature with standard atmospheric refraction folded in
+  // (effective radius R / (1 - 0.13) ~ 7320 km). The grid is centred on the
+  // observer, so the drop is a pure function of the ring radius; without it
+  // the skyline at the 70 km edge renders ~335 m too high. Must match
+  // [Visibility.curvature_drop].
+  v.height -= r * r * 6.8306e-8;
+
   return v;
 }
