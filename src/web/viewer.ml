@@ -2874,7 +2874,9 @@ let create_location_ui ~size =
     if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
     else begin
       Brr.El.set_class visible true overlay;
-      Brr.El.set_has_focus true input
+      Brr.El.set_has_focus true input;
+      (* Select the previous contents so typing replaces them directly *)
+      ignore (Jv.call (Brr.El.to_jv input) "select" [||])
     end
   in
 
@@ -2902,22 +2904,35 @@ let create_location_ui ~size =
     Brr.El.div ~at:Brr.At.[ class' (Jstr.v "input-group") ] [ input; btn_go ]
   in
 
+  (* Errors go in a line of their own rather than into the input's value: the
+     typed text stays (selected, so it can be replaced in one keystroke) and
+     nothing has to be deleted before retrying. *)
+  let input_error = Brr.El.p ~at:Brr.At.[ class' (Jstr.v "input-error") ] [] in
+  let clear_input_error () =
+    Brr.El.set_class (Jstr.v "visible") false input_error
+  in
+  let show_input_error msg =
+    Brr.El.set_children input_error [ Brr.El.txt (Jstr.v msg) ];
+    Brr.El.set_class (Jstr.v "visible") true input_error;
+    Brr.El.set_has_focus true input;
+    ignore (Jv.call (Brr.El.to_jv input) "select" [||])
+  in
+  ignore
+    (Brr.Ev.listen Brr.Ev.input
+       (fun _ -> clear_input_error ())
+       (Brr.El.as_target input));
+
   let go () =
     let text = Jstr.to_string (Brr.El.prop Brr.El.Prop.value input) in
     match parse_input_coordinates text with
     | Some (lat, lon) ->
         if in_range ~size ~lat ~lon then begin
+          clear_input_error ();
           close_menu ();
           !switch_location ~camera:None ~lat ~lon
         end
-        else
-          Brr.El.set_prop Brr.El.Prop.value
-            (Jstr.of_string "Location out of range")
-            input
-    | None ->
-        Brr.El.set_prop Brr.El.Prop.value
-          (Jstr.of_string "Invalid coordinates")
-          input
+        else show_input_error "Location out of range"
+    | None -> show_input_error "Invalid coordinates"
   in
 
   ignore
@@ -2959,9 +2974,7 @@ let create_location_ui ~size =
                !switch_location ~camera:None ~lat ~lon;
                Fut.return ()
            | None ->
-               Brr.El.set_prop Brr.El.Prop.value
-                 (Jstr.of_string "Location out of range or unavailable")
-                 input;
+               show_input_error "Location out of range or unavailable";
                Fut.return ()
          in
          ())
@@ -3045,6 +3058,7 @@ let create_location_ui ~size =
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
         [ Brr.El.txt (Jstr.v "Coordinates") ];
       input_group;
+      input_error;
       quick_select_header;
       current_loc_btn;
       Brr.El.div
