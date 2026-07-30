@@ -566,10 +566,19 @@ void main() {
     proj_coords = proj_coords * 0.5 + 0.5;
 
     float current_depth = proj_coords.z;
-    // Constant 8 m world-space depth bias expressed in each cascade's [0,1]
-    // depth range (20/48/150 km). A single NDC constant was worth 30/72/225 m
-    // and detached shadows from their casters by that much.
-    float bias = (cascade == 0) ? 4.0e-4 : ((cascade == 1) ? 1.67e-4 : 5.3e-5);
+    // World-space depth bias, expressed in this cascade's [0,1] depth range
+    // (20/48/150 km): a small constant for sun-facing surfaces plus a
+    // slope-proportional term covering the depth a shadow texel
+    // (2.93/11.7/36.6 m) spans on surfaces tilted toward the light's
+    // direction. Too little and the texel rows band such slopes (acne); a
+    // large constant (the previous 30/72/225 m) detaches every shadow from
+    // its caster instead.
+    float texelWorld = (cascade == 0) ? 2.93 : ((cascade == 1) ? 11.7 : 36.6);
+    float depthSpan =
+        (cascade == 0) ? 20000.0 : ((cascade == 1) ? 48000.0 : 150000.0);
+    float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
+                                  max(cosTheta, 0.1));
+    float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;
     shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
                             vec2(0.000488));
     if (proj_coords.z > 1.0)
