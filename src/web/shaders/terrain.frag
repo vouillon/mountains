@@ -316,8 +316,14 @@ uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 
 void main() {
-  // Define fog color early for use in water reflection
-  vec3 fog_color = u_fogColor;
+  // Define fog color early for use in water reflection.
+  // Blend toward the zenith colour above the eye line exactly as sky.frag
+  // does (-view.z is the sky's cos_theta), so fogged ridges meet the sky
+  // without a tonal step. At or below the eye line the smoothstep is 0 and
+  // this is exactly u_fogColor.
+  highp vec3 view_dir_n = normalize(v_view_dir);
+  vec3 fog_color =
+      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_n.z));
 
   // Decode normal from relief texture
   mediump vec2 encodedN = texture(relief, reliefCoord).ba;
@@ -540,7 +546,8 @@ void main() {
       cascade = 1;
 
     float slopeScale = 1.0 - cosTheta;
-    float texelSz = (cascade == 0) ? 1.0 : ((cascade == 1) ? 4.0 : 12.0);
+    // One shadow texel in world units per cascade (ortho width / 2048).
+    float texelSz = (cascade == 0) ? 3.0 : ((cascade == 1) ? 12.0 : 37.0);
     float normalOffset = texelSz * slopeScale;
     vec3 offset_pos =
         v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
@@ -550,7 +557,10 @@ void main() {
     proj_coords = proj_coords * 0.5 + 0.5;
 
     float current_depth = proj_coords.z;
-    float bias = 0.0015;
+    // Constant 8 m world-space depth bias expressed in each cascade's [0,1]
+    // depth range (20/48/150 km). A single NDC constant was worth 30/72/225 m
+    // and detached shadows from their casters by that much.
+    float bias = (cascade == 0) ? 4.0e-4 : ((cascade == 1) ? 1.67e-4 : 5.3e-5);
     shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
                             vec2(0.000488));
     if (proj_coords.z > 1.0)

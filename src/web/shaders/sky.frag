@@ -51,9 +51,14 @@ void main() {
   vec3 sun_color = vec3(1.0, 0.9, 0.7);
   vec3 sky = sky_base + sun_color * (mie + halo);
 
-  if (cos_gamma > 0.9995) {
-    sky = vec3(1.0, 0.95, 0.8) * 20.0;
-  }
+  // Sun disc, ~0.53 degrees across with a soft limb (the real angular size;
+  // the previous hard cutoff at 0.9995 made a jagged disc 3.6 degrees wide).
+  // The thresholds must be highp: mediump cannot represent values this close
+  // to 1 (fp16 ulp near 1 is ~5e-4).
+  const highp float disc_outer = 0.9999870; // cos(0.29 deg)
+  const highp float disc_inner = 0.9999910; // cos(0.24 deg)
+  sky = mix(sky, vec3(1.0, 0.95, 0.8) * 20.0,
+            smoothstep(disc_outer, disc_inner, cos_gamma));
 
   // Gamma Correction (Linear -> sRGB), then a +/-0.5/255 dither to prevent
   // banding. The dither must come after the pow: in linear space one output LSB
