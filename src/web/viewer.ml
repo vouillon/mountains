@@ -1669,16 +1669,62 @@ let apply_manual_rotation q da_rad db_rad =
   (* Apply Pitch Globally (Left Multiply) since axis is in World Space *)
   Quaternion.mult q_pitch q_yawed
 
-let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
-    text_pid text_geo ~(terrain_uniforms : Render_state.terrain_uniforms)
+(* Everything that depends on the current location. [load_location] bakes a
+   whole record and publishes it in [session] in a single assignment, so a frame
+   sees either the previous location in full or the new one in full. The
+   textures listed here are owned by the location: they are deleted when it is
+   replaced. The session-wide resources (programs, geometry, detail map,
+   palette, shadow map) outlive every location and live in
+   [graphics_resources]. *)
+type location = {
+  x : int;
+  y : int;
+  height : float;
+  lat : float;
+  lon : float;
+  tile : Dem_loader.t;
+  points : (lazy_text * (int * int)) list;
+  tile_texture : Gl.texture;
+  relief_texture : Gl.texture;
+  relief_normal_texture : Gl.texture;
+  ao_texture : Gl.texture;
+  cover_map_texture : Gl.texture;
+}
+
+let session : location option ref = ref None
+
+(* The POI textures are created lazily by [draw_text], hence the option. *)
+let delete_location ctx
+    {
+      tile_texture;
+      relief_texture;
+      relief_normal_texture;
+      ao_texture;
+      cover_map_texture;
+      points;
+      _;
+    } =
+  Gl.delete_texture ctx tile_texture;
+  Gl.delete_texture ctx relief_texture;
+  Gl.delete_texture ctx relief_normal_texture;
+  Gl.delete_texture ctx ao_texture;
+  Gl.delete_texture ctx cover_map_texture;
+  List.iter
+    (fun ({ texture; _ }, _) ->
+      match texture with
+      | Some (tid, _, _) -> Gl.delete_texture ctx tid
+      | None -> ())
+    points
+
+let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
+    ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
     ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
-    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~_shadow_matrices:_ ~_w:_
-    ~x ~y ~height ~lat ~lon ~orientation ~points ~tile ~index_count
-    ~_ao_texture:_ ~_detail_map:_ ~_shadow_pid:_ ~_shadow_fbo:_ ~_shadow_map:_
-    ~(_shadow_uniforms : Render_state.shadow_uniforms) ~_palette_texture:_
-    ~_cover_map_texture:_ ~sky_pid ~sky_uniforms
+    ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~location ~orientation
+    ~index_count ~sky_pid ~sky_uniforms
     ~(radial_params : Render_state.radial_params) canvas ctx =
+  (* Field reads only: the location record must not be rebuilt per frame. *)
+  let { x; y; height; lat; lon; points; tile; _ } = location in
   (* Poll for completed GPU timer queries *)
   Gpu_timer.poll_results ctx;
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1740,7 +1786,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
       points
   in
 
-  (* Clear color (the fog colour) is session-static, set once in [tri] *)
+  (* Clear color (the fog colour) is static, set once in [load_location] *)
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
   Gl.depth_mask ctx true;
@@ -2113,22 +2159,147 @@ let event_loop ctx draw =
   last_frame_time := now_ms ();
   loop !current_orientation (!zoom -. 1.)
 
-let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
-    ~clc_tiles ~graphics ~start =
+(* Set by [run_renderer] once there is a scene to replace; switches the
+   viewpoint in place. A no-op until then: the startup overlay covers the
+   location UI while the first location is loading. *)
+let switch_location : (lat:float -> lon:float -> unit) ref =
+  ref (fun ~lat:_ ~lon:_ -> ())
+
+(* Bumped by every [load_location]. Lwt cancellation is awkward, so instead a
+   load that finds itself no longer at the current epoch when it comes back from
+   the network has been superseded by a later switch, and silently drops out:
+   the last switch wins. *)
+let location_epoch = ref 0
+
+(* POIs of the loaded CLC tiles, restricted to the DEM tile and positioned in
+   DEM pixel coordinates. *)
+let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
+  let d = float (w / 2) /. 3600. in
+  let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
+  let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
+  (* Extract POIs from all loaded tiles and convert to Points.t format *)
+  let pois =
+    List.concat_map
+      (fun (tile, _, _) ->
+        List.map
+          (fun (poi : Clc_loader.poi) ->
+            {
+              Points.name = poi.name;
+              coord =
+                {
+                  Points.lat = floor ((poi.lat *. 3600.) +. 0.5) /. 3600.;
+                  lon = floor ((poi.lon *. 3600.) +. 0.5) /. 3600.;
+                };
+              elevation =
+                (if poi.elevation = 0 then None else Some poi.elevation);
+            })
+          tile.Clc_loader.pois)
+      clc_tiles
+  in
+  (* Filter POIs within the visible tile bounds *)
+  let filtered =
+    List.filter
+      (fun { Points.coord = { lat = pt_lat; lon = pt_lon }; _ } ->
+        tile_coord.lat < pt_lat && pt_lat < tile_coord'.lat
+        && tile_coord.lon < pt_lon && pt_lon < tile_coord'.lon)
+      pois
+  in
+  let points =
+    filtered
+    |> List.map
+         (let size = w in
+          let center_lon_int = Web_utils.arcsec_floor lon in
+          let center_lat_int = Web_utils.arcsec_floor lat in
+          let min_lon_int = center_lon_int - (size / 2) in
+          let min_lat_int = center_lat_int - (size / 2) in
+
+          fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
+            (* POI coords are already rounded to arcseconds in the previous
+               step, but the division by 3600 is not exact: round back rather
+               than truncate or floor, which would both be off by one on the
+               coordinates that fall just below an integer. *)
+            let pt_lon_int = int_of_float (Float.round (pt_lon *. 3600.)) in
+            let pt_lat_int = int_of_float (Float.round (pt_lat *. 3600.)) in
+            let x = max 0 (min (w - 1) (pt_lon_int - min_lon_int)) in
+            let y = max 0 (min (h - 1) (pt_lat_int - min_lat_int)) in
+            (pt, (x, y)))
+  in
+  if false then (
+    let r = 4 in
+    let a = Array.make (((2 * r) + 1) * ((2 * r) + 1)) 0 in
+    let count = ref 0 in
+    let dxs = ref 0 in
+    let dys = ref 0 in
+    List.iter
+      (fun (_, (x, y)) ->
+        if x > r && y > r && x < w - r - 1 && y < h - r - 1 then (
+          let get_h = Dem_loader.get_height tile in
+          let max_h = ref (get_h y x) in
+          let dx = ref 0 in
+          let dy = ref 0 in
+          for i = -r to r do
+            for j = -r to r do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < w && y' < h);
+              let h = get_h y' x' in
+              if h > !max_h then (
+                max_h := h;
+                dy := i;
+                dx := j)
+            done
+          done;
+          let x = x + !dx in
+          let y = y + !dy in
+          let is_peak = ref true in
+          for i = -1 to 1 do
+            for j = -1 to 1 do
+              let y' = y + i in
+              let x' = x + j in
+              assert (x' >= 0 && y' >= 0 && x' < w && y' < h);
+              let h = get_h y' x' in
+              if h > !max_h then is_peak := false
+            done
+          done;
+          if !is_peak then (
+            let p = (((2 * r) + 1) * (r + !dy)) + r + !dx in
+            a.(p) <- a.(p) + 1;
+            incr count;
+            dxs := !dxs + !dx;
+            dys := !dys + !dy)))
+      points;
+    Format.eprintf "Mean offsets: %f %f (%d)@."
+      (float !dxs /. float !count)
+      (float !dys /. float !count)
+      !count;
+    for i = 0 to 2 * r do
+      for j = 0 to 2 * r do
+        Format.eprintf "%d " a.((((2 * r) + 1) * i) + j)
+      done;
+      Format.eprintf "@."
+    done);
+  points
+
+(* Fetch the DEM and CLC tiles for [lat]/[lon], rebake every piece of
+   location-dependent state and publish it in [session]. Resolves to whether
+   this load is the one now on screen.
+
+   The network part comes first and nothing is touched before it has succeeded:
+   a load that fails or gets superseded leaves the previous location entirely
+   intact and rendering. From the epoch check to the [session] assignment there
+   is no await, so no frame observes a half-replaced location. *)
+let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
+  incr location_epoch;
+  let epoch = !location_epoch in
   let {
     terrain_geo;
     indices;
-    text_geo;
     triangle_geo;
     terrain_pid;
-    triangle_pid;
-    text_pid;
     shadow_pid;
     sky_pid;
     sky_uniforms;
     terrain_uniforms;
-    triangle_uniforms;
-    text_uniforms;
     shadow_map;
     shadow_fbo;
     shadow_uniforms;
@@ -2146,136 +2317,237 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     water_raster_uniforms;
     radial_params;
     nearest_sampler;
+    _;
   } =
     graphics
   in
-  let tile_texture = make_tile_texture ctx tile in
-  let relief_texture, relief_normal_texture =
-    time_gpu ctx "compute_relief" (fun () ->
-        compute_relief ctx w h lat triangle_geo tile_texture normal_pid
-          downsample_pid relief_uniforms downsample_uniforms)
+  (* Load DEM and CLC (for POIs) in parallel *)
+  let* tile, (_, _, _, _, clc_tiles) =
+    Lwt.both
+      (Dem_loader.load ~size:w ~lat ~lon)
+      (Clc_loader.load_tiles ~lat ~lon ~size:w)
+  in
+  if !location_epoch <> epoch then Lwt.return false
+  else begin
+    let x = w / 2 in
+    let y = h / 2 in
+    let points = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
+    (* Bilinear interpolation for height *)
+    let height =
+      let get_h = Dem_loader.get_height tile in
+      let off_x = Render_state.compute_sub_arcsec_offset lon in
+      let off_y = Render_state.compute_sub_arcsec_offset lat in
+      let h00 = get_h y x in
+      let h10 = get_h y (x + 1) in
+      let h01 = get_h (y + 1) x in
+      let h11 = get_h (y + 1) (x + 1) in
+      let h0 = h00 +. (off_x *. (h10 -. h00)) in
+      let h1 = h01 +. (off_x *. (h11 -. h01)) in
+      h0 +. (off_y *. (h1 -. h0))
+    in
+    (* The previous location's textures are dead from here on: the bakes below
+       overwrite every unit they were bound to. Deleting first keeps the peak
+       footprint at one location's worth of DEM-sized textures. *)
+    Option.iter (delete_location ctx) !session;
+    let tile_texture = make_tile_texture ctx tile in
+    let relief_texture, relief_normal_texture =
+      time_gpu ctx "compute_relief" (fun () ->
+          compute_relief ctx w h lat triangle_geo tile_texture normal_pid
+            downsample_pid relief_uniforms downsample_uniforms)
+    in
+    let index_count = Bigarray.Array1.dim indices in
+
+    let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+
+    let ao_texture =
+      time_gpu ctx "compute_ao" (fun () ->
+          compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
+            ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+    in
+
+    let light_dir =
+      let date_ctor = Jv.get Jv.global "Date" in
+      let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
+      let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
+      let sx, sy, sz =
+        if sz < 0.2 then
+          let date = Jv.new' date_ctor [||] in
+          let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
+          let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
+          let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
+          let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
+          Sun.position ~lat ~lon ~time:t
+        else (sx, sy, sz)
+      in
+      Matrix.{ x = sx; y = sy; z = sz; w = 0. }
+    in
+    let splits_dist = [| 2000.; 8000.; 25000. |] in
+    let world_center =
+      let center_offset_x, center_offset_y =
+        Render_state.compute_center_offset ~lat ~lon ~x ~y
+      in
+      Matrix.
+        { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
+    in
+    let shadow_matrices =
+      (* view_proj is ignored in calculate_shadow_matrices *)
+      calculate_shadow_matrices ~light_dir ~world_center
+    in
+
+    (* Upload all location-static uniforms *)
+    Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
+      terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
+      ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
+      ~fog_color:fog_linear ~zenith_color:zenith_linear;
+
+    (* GPU rasterize CLC tiles to FBO *)
+    let cover_map_texture =
+      time_gpu ctx "rasterize_clc_tiles" (fun () ->
+          rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
+            ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
+    in
+
+    (* Render shadows into the session-wide shadow map (fixed 2048x2048x3) *)
+    time_gpu ctx "draw_shadows" (fun () ->
+        draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+          ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
+          ~relief_texture ctx);
+
+    (* Bind all terrain textures - after all textures are created *)
+    bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
+      ~detail_map ~shadow_map ~cover_map_texture ~palette_texture;
+
+    (* Location-static state that was needlessly re-set every frame. Must come
+       after the bake passes above, which set their own clear colours. *)
+    Gl.use_program ctx terrain_pid;
+    Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
+    (let r, g, b = fog_linear in
+     Gl.clear_color ctx r g b 1.);
+
+    let points =
+      let off_x = Render_state.compute_sub_arcsec_offset lon in
+      let off_y = Render_state.compute_sub_arcsec_offset lat in
+      List.filter
+        (fun (_, (dst_x, dst_y)) ->
+          let dx = float (dst_x - x) *. deltax in
+          let dy = float (dst_y - y) *. deltay in
+          let dist_sq = (dx *. dx) +. (dy *. dy) in
+          if dist_sq > 4900000000. then false
+          else
+            Visibility.test_precise
+              (Dem_loader.get_height tile)
+              ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x
+              ~dst_y ())
+        points
+    in
+    let points =
+      List.map
+        (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
+          let texture =
+            prepare_text ctx
+              (match elevation with
+              | None -> name
+              | Some elevation ->
+                  (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
+                  Printf.sprintf "%s (%dm)" name elevation)
+          in
+          let h =
+            let height' = Dem_loader.get_height tile y' x' in
+            let dist =
+              let dx = float (x' - x) in
+              let dy = float (y' - y) in
+              let dz = height' -. height in
+              sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
+            in
+            (height' -. height) /. dist
+          in
+          ((texture, pos), h))
+        points
+    in
+    let points =
+      points
+      |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
+      |> List.map fst
+    in
+    (* Publish the new location: from the epoch check above to here there is no
+       await, so the swap is atomic as far as [draw] is concerned. *)
+    session :=
+      Some
+        {
+          x;
+          y;
+          height;
+          lat;
+          lon;
+          tile;
+          points;
+          tile_texture;
+          relief_texture;
+          relief_normal_texture;
+          ao_texture;
+          cover_map_texture;
+        };
+    let* () = Web_utils.on_gpu_finished ctx in
+    force_redraw := true;
+    (* A switch started while the GPU was draining owns the screen now. *)
+    Lwt.return (!location_epoch = epoch)
+  end
+
+(* One-time renderer setup: session-wide resources, the first location load,
+   then the render loop, which never returns. *)
+let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
+  let {
+    terrain_geo;
+    indices;
+    text_geo;
+    terrain_pid;
+    triangle_pid;
+    text_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    triangle_uniforms;
+    text_uniforms;
+    radial_params;
+    _;
+  } =
+    graphics
   in
   let index_count = Bigarray.Array1.dim indices in
-
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-
-  let ao_texture =
-    time_gpu ctx "compute_ao" (fun () ->
-        compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
-          ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
-  in
-
-  let light_dir =
-    let date_ctor = Jv.get Jv.global "Date" in
-    let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
-    let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
-    let sx, sy, sz =
-      if sz < 0.2 then
-        let date = Jv.new' date_ctor [||] in
-        let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
-        let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
-        let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
-        let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
-        Sun.position ~lat ~lon ~time:t
-      else (sx, sy, sz)
-    in
-    Matrix.{ x = sx; y = sy; z = sz; w = 0. }
-  in
-  let splits_dist = [| 2000.; 8000.; 25000. |] in
-  let world_center =
-    let center_offset_x, center_offset_y =
-      Render_state.compute_center_offset ~lat ~lon ~x ~y
-    in
-    Matrix.
-      { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
-  in
-  let shadow_matrices =
-    (* view_proj is ignored in calculate_shadow_matrices *)
-    calculate_shadow_matrices ~light_dir ~world_center
-  in
-
-  (* Upload all session-static uniforms *)
-  Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
-    terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon ~light_dir
-    ~shadow_matrices ~shadow_splits:splits_dist ~fog_color:fog_linear
-    ~zenith_color:zenith_linear;
-
-  (* GPU rasterize CLC tiles to FBO *)
-  let cover_map_texture =
-    time_gpu ctx "rasterize_clc_tiles" (fun () ->
-        rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
-          ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
-  in
-
-  (* CLC Textures *)
+  (* The CLC palette is the fixed material table: location-independent. *)
   let palette_texture = make_palette_texture ctx in
-
-  (* Render shadows *)
-  time_gpu ctx "draw_shadows" (fun () ->
-      draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-        ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
-        ~relief_texture ctx);
-
-  (* Bind all terrain textures at init - after all textures are created *)
-  bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
-    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture;
-
-  (* Session-static state that was needlessly re-set every frame. Must come
-     after the bake passes above, which set their own clear colours. *)
-  Gl.use_program ctx terrain_pid;
-  Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
-  (let r, g, b = fog_linear in
-   Gl.clear_color ctx r g b 1.);
-
-  let points =
-    let off_x = Render_state.compute_sub_arcsec_offset lon in
-    let off_y = Render_state.compute_sub_arcsec_offset lat in
-    List.filter
-      (fun (_, (dst_x, dst_y)) ->
-        let dx = float (dst_x - x) *. deltax in
-        let dy = float (dst_y - y) *. deltay in
-        let dist_sq = (dx *. dx) +. (dy *. dy) in
-        if dist_sq > 4900000000. then false
-        else
-          Visibility.test_precise
-            (Dem_loader.get_height tile)
-            ~src_h:(height +. 2.) ~off_x ~off_y ~src_x:x ~src_y:y ~dst_x ~dst_y
-            ())
-      points
+  let load ~lat ~lon =
+    load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon
   in
-  let points =
-    List.map
-      (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
-        let texture =
-          prepare_text ctx
-            (match elevation with
-            | None -> name
-            | Some elevation ->
-                (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
-                Printf.sprintf "%s (%dm)" name elevation)
-        in
-        let h =
-          let height' = Dem_loader.get_height tile y' x' in
-          let dist =
-            let dx = float (x' - x) in
-            let dy = float (y' - y) in
-            let dz = height' -. height in
-            sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
-          in
-          (height' -. height) /. dist
-        in
-        ((texture, pos), h))
-      points
-  in
-  let points =
-    points
-    |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
-    |> List.map fst
-  in
-
-  let* () = Web_utils.on_gpu_finished ctx in
+  let* _applied = load ~lat ~lon in
   start ();
   hide_startup_overlay ();
+
+  (* From now on, locations are switched in place: the camera orientation, the
+     zoom and every session-wide GPU resource are deliberately kept, so that
+     heading continuity across a switch is preserved. *)
+  (switch_location :=
+     fun ~lat ~lon ->
+       Lwt.async (fun () ->
+           Lwt.catch
+             (fun () ->
+               let* () = show_startup_overlay "Loading Terrain..." true in
+               let* applied = load ~lat ~lon in
+               if applied then begin
+                 current_lat := lat;
+                 current_lon := lon;
+                 (* Reload and sharing must land on the new location. *)
+                 update_url_params ();
+                 hide_startup_overlay ()
+               end;
+               Lwt.return_unit)
+             (fun e ->
+               (match e with Jv.Error e -> Brr.Console.error [ e ] | _ -> ());
+               hide_startup_overlay ();
+               display_temporary_message
+                 (Printf.sprintf "Could not load location: %s"
+                    (Printexc.to_string e));
+               Lwt.return_unit)));
 
   let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
   let transform_ba =
@@ -2289,15 +2561,16 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
 
   event_loop ctx (fun ~orientation ctx ->
-      draw terrain_pid terrain_geo tile_texture relief_texture triangle_pid
-        text_pid text_geo ~terrain_uniforms ~triangle_uniforms ~text_uniforms
-        ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
-        ~_shadow_matrices:shadow_matrices ~_w:w ~x ~y ~lat ~lon ~orientation
-        ~height ~tile ~points ~index_count ~_ao_texture:ao_texture
-        ~_detail_map:detail_map ~_shadow_pid:shadow_pid ~_shadow_fbo:shadow_fbo
-        ~_shadow_map:shadow_map ~_shadow_uniforms:shadow_uniforms
-        ~_palette_texture:palette_texture ~_cover_map_texture:cover_map_texture
-        ~sky_pid ~sky_uniforms ~radial_params canvas ctx)
+      (* [None] only before the first location is baked, and the loop starts
+         after it. *)
+      match !session with
+      | None -> ()
+      | Some location ->
+          draw terrain_pid terrain_geo triangle_pid text_pid text_geo
+            ~terrain_uniforms ~triangle_uniforms ~text_uniforms ~proj_ba
+            ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
+            ~location ~orientation ~index_count ~sky_pid ~sky_uniforms
+            ~radial_params canvas ctx)
 (* Location & UI *)
 
 let featured_locations =
@@ -2489,6 +2762,9 @@ let get_position ~size =
   match get_url_position ~size with
   | Some loc -> Fut.return (Ok (Url, loc))
   | None -> (
+      (* Only this branch queries the device: an explicit position must never
+         make the overlay claim it is locating the user. *)
+      update_startup_status "Getting current location..." false;
       let+ loc = get_current_position ~size in
       match loc with
       | Some loc -> Ok (Geolocation, loc)
@@ -2535,6 +2811,7 @@ let create_location_ui ~size =
       ()
   in
 
+  let close_menu () = Brr.El.set_class (Jstr.v "visible") false overlay in
   let toggle_menu () =
     let visible = Jstr.v "visible" in
     if Brr.El.class' visible overlay then Brr.El.set_class visible false overlay
@@ -2572,14 +2849,10 @@ let create_location_ui ~size =
     let text = Jstr.to_string (Brr.El.prop Brr.El.Prop.value input) in
     match parse_input_coordinates text with
     | Some (lat, lon) ->
-        if in_range ~size ~lat ~lon then
-          let search = Jstr.v (Printf.sprintf "?lat=%f&lon=%f" lat lon) in
-          let uri =
-            Brr.Uri.with_query_params
-              (Brr.Window.location Brr.G.window)
-              (Brr.Uri.Params.of_jstr search)
-          in
-          navigate_to uri
+        if in_range ~size ~lat ~lon then begin
+          close_menu ();
+          !switch_location ~lat ~lon
+        end
         else
           Brr.El.set_prop Brr.El.Prop.value
             (Jstr.of_string "Location out of range")
@@ -2625,17 +2898,8 @@ let create_location_ui ~size =
            let* res = get_current_position ~size in
            match res with
            | Some (lat, lon, _, _, _) ->
-               let search =
-                 Jstr.v
-                   (Printf.sprintf "?lat=%s&lon=%s" (format_float lat)
-                      (format_float lon))
-               in
-               let uri =
-                 Brr.Uri.with_query_params
-                   (Brr.Window.location Brr.G.window)
-                   (Brr.Uri.Params.of_jstr search)
-               in
-               navigate_to uri;
+               close_menu ();
+               !switch_location ~lat ~lon;
                Fut.return ()
            | None ->
                Brr.El.set_prop Brr.El.Prop.value
@@ -3400,7 +3664,9 @@ let main () =
   in
   ignore (Jv.call observer "observe" [| Brr.El.to_jv canvas |]);
 
-  update_startup_status "Getting current location..." false;
+  (* [get_position] switches to "Getting current location..." only if it has to
+     fall back to the device position. *)
+  update_startup_status "Loading Terrain..." true;
   let* () = to_lwt wait_for_service_worker in
   let* source, (lat, lon, angle, pitch, z) =
     to_lwt (get_position ~size:tile_width)
@@ -3431,150 +3697,22 @@ let main () =
   (* current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. }; *)
   set_orientation angle pitch;
 
-  let start = setup_events canvas in
+  let start =
+    let start = setup_events canvas in
+    fun () ->
+      start ();
+      (* Warming the surroundings must not compete with the tiles of the view
+         being displayed: only start once the first location is up. *)
+      if source = Geolocation then begin
+        Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
+        Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon)
+      end
+  in
   update_startup_status "Loading Terrain..." true;
 
-  (* Load DEM and CLC (for POIs) in parallel *)
-  (* Load DEM, CLC, and init graphics in parallel *)
-  let tile_loaders =
-    Lwt.both
-      (Dem_loader.load ~size:tile_width ~lat ~lon)
-      (Clc_loader.load_tiles ~lat ~lon ~size:tile_width)
-  in
-  let* tile, (_, _, _, _, tiles) = tile_loaders in
-
-  if source = Geolocation then (
-    Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
-    Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon));
-  let x = tile_width / 2 in
-  let y = tile_height / 2 in
-  let d = float x /. 3600. in
-  let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
-  let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
-  let* points =
-    (* Extract POIs from all loaded tiles and convert to Points.t format *)
-    let pois =
-      List.concat_map
-        (fun (tile, _, _) ->
-          List.map
-            (fun (poi : Clc_loader.poi) ->
-              {
-                Points.name = poi.name;
-                coord =
-                  {
-                    Points.lat = floor ((poi.lat *. 3600.) +. 0.5) /. 3600.;
-                    lon = floor ((poi.lon *. 3600.) +. 0.5) /. 3600.;
-                  };
-                elevation =
-                  (if poi.elevation = 0 then None else Some poi.elevation);
-              })
-            tile.Clc_loader.pois)
-        tiles
-    in
-    (* Filter POIs within the visible tile bounds *)
-    let filtered =
-      List.filter
-        (fun { Points.coord = { lat = pt_lat; lon = pt_lon }; _ } ->
-          tile_coord.lat < pt_lat && pt_lat < tile_coord'.lat
-          && tile_coord.lon < pt_lon && pt_lon < tile_coord'.lon)
-        pois
-    in
-    Lwt.return
-      (filtered
-      |> List.map
-           (let size = tile_width in
-            let center_lon_int = Web_utils.arcsec_floor lon in
-            let center_lat_int = Web_utils.arcsec_floor lat in
-            let min_lon_int = center_lon_int - (size / 2) in
-            let min_lat_int = center_lat_int - (size / 2) in
-
-            fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
-              (* POI coords are already rounded to arcseconds in the previous
-                 step, but the division by 3600 is not exact: round back rather
-                 than truncate or floor, which would both be off by one on the
-                 coordinates that fall just below an integer. *)
-              let pt_lon_int = int_of_float (Float.round (pt_lon *. 3600.)) in
-              let pt_lat_int = int_of_float (Float.round (pt_lat *. 3600.)) in
-              let x = max 0 (min (tile_width - 1) (pt_lon_int - min_lon_int)) in
-              let y =
-                max 0 (min (tile_height - 1) (pt_lat_int - min_lat_int))
-              in
-              (pt, (x, y))))
-  in
-  if false then (
-    let w = 4 in
-    let a = Array.make (((2 * w) + 1) * ((2 * w) + 1)) 0 in
-    let count = ref 0 in
-    let dxs = ref 0 in
-    let dys = ref 0 in
-    List.iter
-      (fun (_, (x, y)) ->
-        if x > w && y > w && x < tile_width - w - 1 && y < tile_height - w - 1
-        then (
-          let get_h = Dem_loader.get_height tile in
-          let max_h = ref (get_h y x) in
-          let dx = ref 0 in
-          let dy = ref 0 in
-          for i = -w to w do
-            for j = -w to w do
-              let y' = y + i in
-              let x' = x + j in
-              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
-              let h = get_h y' x' in
-              if h > !max_h then (
-                max_h := h;
-                dy := i;
-                dx := j)
-            done
-          done;
-          let x = x + !dx in
-          let y = y + !dy in
-          let is_peak = ref true in
-          for i = -1 to 1 do
-            for j = -1 to 1 do
-              let y' = y + i in
-              let x' = x + j in
-              assert (x' >= 0 && y' >= 0 && x' < tile_width && y' < tile_width);
-              let h = get_h y' x' in
-              if h > !max_h then is_peak := false
-            done
-          done;
-          if !is_peak then (
-            let p = (((2 * w) + 1) * (w + !dy)) + w + !dx in
-            a.(p) <- a.(p) + 1;
-            incr count;
-            (*
-            Format.eprintf "- %d %d@." !dx !dy;
-*)
-            dxs := !dxs + !dx;
-            dys := !dys + !dy)))
-      points;
-    Format.eprintf "Mean offsets: %f %f (%d)@."
-      (float !dxs /. float !count)
-      (float !dys /. float !count)
-      !count;
-    for i = 0 to 2 * w do
-      for j = 0 to 2 * w do
-        Format.eprintf "%d " a.((((2 * w) + 1) * i) + j)
-      done;
-      Format.eprintf "@."
-    done);
-
-  (* Bilinear interpolation for height *)
-  let get_h = Dem_loader.get_height tile in
-  let off_x = Render_state.compute_sub_arcsec_offset lon in
-  let off_y = Render_state.compute_sub_arcsec_offset lat in
-  let h00 = get_h y x in
-  let h10 = get_h y (x + 1) in
-  let h01 = get_h (y + 1) x in
-  let h11 = get_h (y + 1) (x + 1) in
-  let h0 = h00 +. (off_x *. (h10 -. h00)) in
-  let h1 = h01 +. (off_x *. (h11 -. h01)) in
-  let height = h0 +. (off_y *. (h1 -. h0)) in
-
   let* () =
-    tri ~w:tile_width ~h:tile_height ~x ~y ~height ~lat ~lon ~points ~tile
-      canvas ctx ~detail_map ~clc_tiles:tiles ~graphics ~start
+    run_renderer ~w:tile_width ~h:tile_height ~lat ~lon canvas ctx ~detail_map
+      ~graphics ~start
   in
   Lwt.return_unit
 
