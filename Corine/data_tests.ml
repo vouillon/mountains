@@ -148,6 +148,112 @@ let () =
       | ps -> fail "merge: expected 1 polygon, got %d" (List.length ps))
   | l -> fail "merge: expected 1 feature, got %d" (List.length l)
 
+(* --- osm_fetch: nested outer/inner/outer/inner (pond on an island in a
+   lake): each hole must attach only to its innermost enclosing outer --- *)
+
+let nested_json =
+  {|{
+  "elements": [
+    {"type": "node", "id": 1, "lat": 0.0, "lon": 0.0},
+    {"type": "node", "id": 2, "lat": 0.0, "lon": 30.0},
+    {"type": "node", "id": 3, "lat": 30.0, "lon": 30.0},
+    {"type": "node", "id": 4, "lat": 30.0, "lon": 0.0},
+    {"type": "node", "id": 21, "lat": 5.0, "lon": 5.0},
+    {"type": "node", "id": 22, "lat": 5.0, "lon": 25.0},
+    {"type": "node", "id": 23, "lat": 25.0, "lon": 25.0},
+    {"type": "node", "id": 24, "lat": 25.0, "lon": 5.0},
+    {"type": "node", "id": 31, "lat": 10.0, "lon": 10.0},
+    {"type": "node", "id": 32, "lat": 10.0, "lon": 20.0},
+    {"type": "node", "id": 33, "lat": 20.0, "lon": 20.0},
+    {"type": "node", "id": 34, "lat": 20.0, "lon": 10.0},
+    {"type": "node", "id": 41, "lat": 13.0, "lon": 13.0},
+    {"type": "node", "id": 42, "lat": 13.0, "lon": 17.0},
+    {"type": "node", "id": 43, "lat": 17.0, "lon": 17.0},
+    {"type": "node", "id": 44, "lat": 17.0, "lon": 13.0},
+    {"type": "way", "id": 100, "nodes": [1, 2, 3, 4, 1]},
+    {"type": "way", "id": 101, "nodes": [21, 22, 23, 24, 21]},
+    {"type": "way", "id": 102, "nodes": [31, 32, 33, 34, 31]},
+    {"type": "way", "id": 103, "nodes": [41, 42, 43, 44, 41]},
+    {"type": "relation", "id": 600,
+     "members": [
+       {"type": "way", "ref": 100, "role": "outer"},
+       {"type": "way", "ref": 102, "role": "outer"},
+       {"type": "way", "ref": 101, "role": "inner"},
+       {"type": "way", "ref": 103, "role": "inner"}
+     ],
+     "tags": {"natural": "water"}}
+  ]
+}|}
+
+let () =
+  match Osm_fetch.parse_overpass_elements nested_json with
+  | [ f ] ->
+      List.iter
+        (fun polygon ->
+          match polygon with
+          | outer :: holes -> (
+              let p0 = List.hd outer in
+              match (p0.Osm_fetch.x, p0.Osm_fetch.y) with
+              | 0.0, 0.0 ->
+                  (* Lake: exactly the island hole (first point (5,5)) *)
+                  if List.length holes <> 1 then
+                    fail "nested: lake should have 1 hole, got %d"
+                      (List.length holes);
+                  let h0 = List.hd (List.hd holes) in
+                  if h0.Osm_fetch.x <> 5.0 || h0.Osm_fetch.y <> 5.0 then
+                    fail "nested: lake got the wrong hole (%.1f, %.1f)"
+                      h0.Osm_fetch.x h0.Osm_fetch.y
+              | 10.0, 10.0 ->
+                  (* Pond: exactly the islet hole (first point (13,13)) *)
+                  if List.length holes <> 1 then
+                    fail "nested: pond should have 1 hole, got %d"
+                      (List.length holes);
+                  let h0 = List.hd (List.hd holes) in
+                  if h0.Osm_fetch.x <> 13.0 || h0.Osm_fetch.y <> 13.0 then
+                    fail "nested: pond got the wrong hole (%.1f, %.1f)"
+                      h0.Osm_fetch.x h0.Osm_fetch.y
+              | x, y -> fail "nested: unexpected outer start (%.1f, %.1f)" x y)
+          | [] -> fail "nested: empty polygon")
+        f.Osm_fetch.polygons
+  | l -> fail "nested: expected 1 feature, got %d" (List.length l)
+
+(* --- osm_fetch: a hole whose first vertex lies exactly on the outer
+   boundary must still be assigned (single-point ray cast is unreliable
+   there) --- *)
+
+let touching_hole_json =
+  {|{
+  "elements": [
+    {"type": "node", "id": 1, "lat": 0.0, "lon": 0.0},
+    {"type": "node", "id": 2, "lat": 0.0, "lon": 10.0},
+    {"type": "node", "id": 3, "lat": 10.0, "lon": 10.0},
+    {"type": "node", "id": 4, "lat": 10.0, "lon": 0.0},
+    {"type": "node", "id": 11, "lat": 5.0, "lon": 10.0},
+    {"type": "node", "id": 12, "lat": 4.0, "lon": 8.0},
+    {"type": "node", "id": 13, "lat": 5.0, "lon": 6.0},
+    {"type": "node", "id": 14, "lat": 6.0, "lon": 8.0},
+    {"type": "way", "id": 100, "nodes": [1, 2, 3, 4, 1]},
+    {"type": "way", "id": 101, "nodes": [11, 12, 13, 14, 11]},
+    {"type": "relation", "id": 700,
+     "members": [
+       {"type": "way", "ref": 100, "role": "outer"},
+       {"type": "way", "ref": 101, "role": "inner"}
+     ],
+     "tags": {"natural": "water"}}
+  ]
+}|}
+
+let () =
+  match Osm_fetch.parse_overpass_elements touching_hole_json with
+  | [ f ] -> (
+      match f.Osm_fetch.polygons with
+      | [ [ _outer; hole ] ] ->
+          if List.length hole <> 5 then
+            fail "touching hole: expected 5 pts, got %d" (List.length hole)
+      | [ [ _outer ] ] -> fail "touching hole: hole was dropped"
+      | _ -> fail "touching hole: unexpected polygon structure")
+  | l -> fail "touching hole: expected 1 feature, got %d" (List.length l)
+
 (* --- osm_fetch: a ring referencing a node absent from the response is
    dropped (with a warning), not emitted with vertices deleted --- *)
 

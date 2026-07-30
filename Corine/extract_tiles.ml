@@ -104,9 +104,9 @@ module Encoder = struct
       let x = verts.(i * 2) in
       let y = verts.((i * 2) + 1) in
 
-      (* Quantize *)
-      let qx = int_of_float ((x -. min_x) *. scale_x) in
-      let qy = int_of_float ((y -. min_y) *. scale_y) in
+      (* Quantize, rounding to nearest grid point *)
+      let qx = int_of_float (((x -. min_x) *. scale_x) +. 0.5) in
+      let qy = int_of_float (((y -. min_y) *. scale_y) +. 0.5) in
 
       (* Clamp to u16 range just in case *)
       let qx = max 0 (min 65535 qx) in
@@ -248,9 +248,10 @@ module Water_encoder = struct
       let x = verts.(i * 2) in
       let y = verts.((i * 2) + 1) in
 
-      (* Quantize to 24-bit range but use limited scale for ~40cm precision *)
-      let qx = int_of_float ((x -. min_x) *. scale_x) in
-      let qy = int_of_float ((y -. min_y) *. scale_y) in
+      (* Quantize to 24-bit range (rounding to nearest) but use limited
+         scale for ~40cm precision *)
+      let qx = int_of_float (((x -. min_x) *. scale_x) +. 0.5) in
+      let qy = int_of_float (((y -. min_y) *. scale_y) +. 0.5) in
 
       (* Clamp to 24-bit range (0 to 16777215) *)
       let qx = max 0 (min 0xFFFFFF qx) in
@@ -342,9 +343,10 @@ module Poi_encoder = struct
     write_u8 t.names name_len;
     Buffer.add_substring t.names name 0 name_len;
 
-    (* Encode coordinates (3-byte quantized, same as water) *)
-    let qx = int_of_float ((poi.lon -. min_lon) *. scale_x) in
-    let qy = int_of_float ((poi.lat -. min_lat) *. scale_y) in
+    (* Encode coordinates (3-byte quantized, rounded to nearest, same as
+       water) *)
+    let qx = int_of_float (((poi.lon -. min_lon) *. scale_x) +. 0.5) in
+    let qy = int_of_float (((poi.lat -. min_lat) *. scale_y) +. 0.5) in
     let qx = max 0 (min 0xFFFFFF qx) in
     let qy = max 0 (min 0xFFFFFF qy) in
     write_u8 t.coords (qx land 0xFF);
@@ -392,9 +394,13 @@ let process_tile db_path output_dir tile_name =
         end : PROJ) )
   in
 
-  (* Define Bounds with Margin *)
-  let margin_deg = 0.05 in
-  (* 1 pixel margin *)
+  (* Define Bounds with Margin.
+     The margin only provides overlap with the neighboring tiles so that
+     rasterization seams stay covered: it needs to exceed one texel of the
+     viewer's coarsest cover-map level (2 deg / 1024 = 0.002 deg) plus
+     quantization slack. 0.005 deg leaves headroom for a larger DEM extent
+     or a finer cover map. *)
+  let margin_deg = 0.005 in
   let min_lat = lat -. margin_deg in
   let max_lat = lat +. 1.0 +. margin_deg in
   let min_lon = lon -. margin_deg in

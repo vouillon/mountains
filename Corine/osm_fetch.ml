@@ -636,17 +636,76 @@ let parse_overpass_elements json_str =
               List.filter_map (nodes_to_points rel.rel_id) inner_rings
             in
 
-            (* Assign holes to outer rings *)
+            (* Assign each hole to the smallest outer ring containing it:
+               with nested structures (pond on an island in a lake) a hole
+               lies inside every enclosing outer ring but belongs only to
+               the innermost one. A touching hole can have vertices exactly
+               on the outer boundary, where the ray cast is unreliable, so
+               use a majority vote over several sampled vertices instead of
+               a single point. *)
+            let ring_area ring =
+              match ring with
+              | [] -> 0.0
+              | { x = ref_x; y = ref_y } :: _ ->
+                  let arr = Array.of_list ring in
+                  let n = Array.length arr in
+                  let acc = ref 0.0 in
+                  for i = 0 to n - 1 do
+                    let p1 = arr.(i) in
+                    let p2 = arr.((i + 1) mod n) in
+                    acc :=
+                      !acc
+                      +. ((p1.x -. ref_x) *. (p2.y -. ref_y))
+                      -. ((p2.x -. ref_x) *. (p1.y -. ref_y))
+                  done;
+                  abs_float (!acc *. 0.5)
+            in
+            let hole_in_outer hole outer =
+              let arr = Array.of_list hole in
+              let n = Array.length arr in
+              if n = 0 then false
+              else begin
+                let samples = min n 16 in
+                let inside = ref 0 in
+                for k = 0 to samples - 1 do
+                  if point_in_ring arr.(k * n / samples) outer then incr inside
+                done;
+                2 * !inside > samples
+              end
+            in
+            let outers_by_area =
+              List.sort
+                (fun (a1, _) (a2, _) -> Float.compare a1 a2)
+                (List.map (fun o -> (ring_area o, o)) outer_point_rings)
+            in
+            let assigned_holes =
+              List.map
+                (fun inner ->
+                  let rec find = function
+                    | [] ->
+                        Printf.printf
+                          "Warning: hole not contained in any outer ring of \
+                           relation %d\n\
+                           %!"
+                          rel.rel_id;
+                        None
+                    | (_, outer) :: rest ->
+                        if hole_in_outer inner outer then Some outer
+                        else find rest
+                  in
+                  (inner, find outers_by_area))
+                inner_point_rings
+            in
             let polygons =
               List.map
                 (fun outer ->
                   let holes =
-                    List.filter
-                      (fun inner ->
-                        match inner with
-                        | pt :: _ -> point_in_ring pt outer
-                        | [] -> false)
-                      inner_point_rings
+                    List.filter_map
+                      (fun (inner, owner) ->
+                        match owner with
+                        | Some o when o == outer -> Some inner
+                        | _ -> None)
+                      assigned_holes
                   in
                   outer :: holes)
                 outer_point_rings
