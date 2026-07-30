@@ -880,6 +880,15 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
 
   ao_final_tex
 
+(* Sharpness of the soft-max height downsampling at each mip level (see
+   downsample.frag): the deficit of a lone summit texel against a true max is
+   ln(4)/k per level, so a constant 0.25 keeps distant silhouettes within
+   ~5.5 m per level of the true summit heights (the previous halving
+   schedule, 0.1 * 0.5^(level-1), lost 28-110 m at the levels drawn at
+   40-70 km). Shared between the GPU bake and the CPU replica in
+   [rendered_height], which must agree exactly. *)
+let downsample_k _level = 0.25
+
 let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
     downsample_pid (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
@@ -997,7 +1006,7 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
       (* Use Downsample Program *)
       Gl.use_program ctx downsample_pid;
       Gl.uniform1i ctx downsample_u.level (level - 1);
-      Gl.uniform1f ctx downsample_u.k (0.1 *. (0.5 ** float (level - 1)));
+      Gl.uniform1f ctx downsample_u.k (downsample_k level);
 
       let source_w = float (w * 2) in
       let source_h = float (h * 2) in
@@ -2313,7 +2322,7 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
     let rec cell l cx cy =
       if l = 0 then get cy cx
       else
-        let k = 0.1 *. (0.5 ** float (l - 1)) in
+        let k = downsample_k l in
         let h00 = cell (l - 1) (2 * cx) (2 * cy)
         and h10 = cell (l - 1) ((2 * cx) + 1) (2 * cy)
         and h01 = cell (l - 1) (2 * cx) ((2 * cy) + 1)
