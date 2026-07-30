@@ -2162,8 +2162,23 @@ let event_loop ctx draw =
 (* Set by [run_renderer] once there is a scene to replace; switches the
    viewpoint in place. A no-op until then: the startup overlay covers the
    location UI while the first location is loading. *)
-let switch_location : (lat:float -> lon:float -> unit) ref =
-  ref (fun ~lat:_ ~lon:_ -> ())
+let set_orientation alpha beta =
+  let alpha_rad = alpha *. pi /. 180. in
+  let q_yaw =
+    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
+  in
+  let pitch_rad = beta *. pi /. 180. in
+  let q_pitch =
+    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
+  in
+  (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
+  (current_orientation := Quaternion.(q_yaw * q_pitch));
+  target_orientation := !current_orientation
+
+let switch_location :
+    (camera:(float * float * float) option -> lat:float -> lon:float -> unit)
+    ref =
+  ref (fun ~camera:_ ~lat:_ ~lon:_ -> ())
 
 (* Bumped by every [load_location]. Lwt cancellation is awkward, so instead a
    load that finds itself no longer at the current epoch when it comes back from
@@ -2527,7 +2542,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
      zoom and every session-wide GPU resource are deliberately kept, so that
      heading continuity across a switch is preserved. *)
   (switch_location :=
-     fun ~lat ~lon ->
+     fun ~camera ~lat ~lon ->
        Lwt.async (fun () ->
            Lwt.catch
              (fun () ->
@@ -2536,6 +2551,13 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
                if applied then begin
                  current_lat := lat;
                  current_lon := lon;
+                 (* A camera preset (featured locations) is applied only once
+                    its location owns the screen. *)
+                 (match camera with
+                 | Some (alpha, beta, z) ->
+                     set_orientation alpha beta;
+                     zoom := clamp_zoom z
+                 | None -> ());
                  (* Reload and sharing must land on the new location. *)
                  update_url_params ();
                  hide_startup_overlay ()
@@ -2596,19 +2618,6 @@ let get_preset_position () =
   | (_, lat, lon, alpha, beta, zoom) :: _ ->
       (lat, lon, alpha, beta, clamp_zoom zoom)
   | [] -> (44.3950846, 6.7669714, 170., 90., 1.0)
-
-let set_orientation alpha beta =
-  let alpha_rad = alpha *. pi /. 180. in
-  let q_yaw =
-    Quaternion.from_axis_angle { x = 0.; y = 0.; z = 1.; w = 0. } alpha_rad
-  in
-  let pitch_rad = beta *. pi /. 180. in
-  let q_pitch =
-    Quaternion.from_axis_angle { x = 1.; y = 0.; z = 0.; w = 0. } pitch_rad
-  in
-  (* Rotate around Z first (yaw), then around X (pitch) to maintain turntable *)
-  (current_orientation := Quaternion.(q_yaw * q_pitch));
-  target_orientation := !current_orientation
 
 (* Rejects "nan" and overflowing literals such as "1e999": a non-finite
    coordinate, angle or zoom would propagate through the whole render state and
@@ -2899,7 +2908,7 @@ let create_location_ui ~size =
     | Some (lat, lon) ->
         if in_range ~size ~lat ~lon then begin
           close_menu ();
-          !switch_location ~lat ~lon
+          !switch_location ~camera:None ~lat ~lon
         end
         else
           Brr.El.set_prop Brr.El.Prop.value
@@ -2947,7 +2956,7 @@ let create_location_ui ~size =
            match res with
            | Some (lat, lon, _, _, _) ->
                close_menu ();
-               !switch_location ~lat ~lon;
+               !switch_location ~camera:None ~lat ~lon;
                Fut.return ()
            | None ->
                Brr.El.set_prop Brr.El.Prop.value
@@ -2978,17 +2987,10 @@ let create_location_ui ~size =
         ignore
           (Brr.Ev.listen Brr.Ev.click
              (fun _ ->
-               let search =
-                 Jstr.v
-                   (Printf.sprintf "?lat=%f&lon=%f&alpha=%f&beta=%f&zoom=%.2f"
-                      lat lon alpha beta z)
-               in
-               let uri =
-                 Brr.Uri.with_query_params
-                   (Brr.Window.location Brr.G.window)
-                   (Brr.Uri.Params.of_jstr search)
-               in
-               navigate_to uri)
+               (* In place, with the camera preset: no navigation, so
+                  fullscreen mode survives the switch. *)
+               close_menu ();
+               !switch_location ~camera:(Some (alpha, beta, z)) ~lat ~lon)
              (Brr.El.as_target item));
         Brr.El.append_children location_list [ item ];
         item)
