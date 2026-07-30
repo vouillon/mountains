@@ -6,6 +6,29 @@ on:
       - main
 
 jobs:
+  # Test job: formatting + data-pipeline test suite.
+  # Only needs light dependencies (the Corine test executables are kept
+  # free of SDL/GLES/SQLite by the corine_core library split).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v4
+
+      - name: Set-up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3
+
+      - name: Install dependencies
+        run: opam install dune yojson ppx_inline_test ocamlformat.0.29.0
+
+      - name: Check formatting
+        run: opam exec -- dune build @fmt
+
+      - name: Run tests
+        run: opam exec -- dune runtest
+
   # Build job
   build:
     runs-on: ubuntu-latest
@@ -51,7 +74,7 @@ jobs:
 
   # Deploy job
   deploy:
-    needs: build
+    needs: [build, test]
 
     # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
     permissions:

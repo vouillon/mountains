@@ -5,6 +5,26 @@
   (pps ppx_inline_test))
  (inline_tests))
 
+; Non-graphics core: everything the test executables need, kept free of
+; SDL/GLES/SQLite so the CI test job only installs light dependencies.
+; earcut and debug_triangles are referenced by nothing and are not built.
+
+(library
+ (name corine_core)
+ (wrapped false)
+ (modules
+  geometry_types
+  polygon_validation
+  polygon_clipping
+  polygon_triangulation
+  polygon_test_utils
+  wkb_decode
+  osm_fetch
+  poi_fetch
+  proj_3035
+  proj_2975)
+ (libraries static_r_tree yojson unix))
+
 (executables
  (names
   corine
@@ -16,12 +36,20 @@
   render_dem
   triangulate_test
   polygon_to_svg
-  analyze_polygon
-  triangulation_tests
-  data_tests)
+  analyze_polygon)
  (modules
-  (:standard \ static_r_tree hilbert))
+  corine
+  draw_clc
+  render_clc
+  check_overlaps
+  extract_tiles
+  compress_dem
+  render_dem
+  triangulate_test
+  polygon_to_svg
+  analyze_polygon)
  (libraries
+  corine_core
   static_r_tree
   sqlite3
   str
@@ -33,6 +61,11 @@
   mountains)
  (ocamlopt_flags
   (-cclib -lGLESv2)))
+
+(executables
+ (names triangulation_tests data_tests)
+ (modules triangulation_tests data_tests)
+ (libraries corine_core static_r_tree))
 
 (rule
  (alias runtest)
