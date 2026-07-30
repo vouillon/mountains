@@ -101,13 +101,17 @@ let parse_type_info raw_type =
   (* let wkbSRID = 0x20000000 in - Unused *)
   (* Only in EWKB, but good to know *)
 
-  (* Handle ISO WKB Z/M values (1000 range) vs Extended WKB *)
+  (* Handle ISO WKB Z/M values (1000/2000/3000 ranges) vs Extended WKB *)
   let base_type = raw_type land 0xFFFF in
   let has_z =
-    raw_type land wkbZ <> 0 || (base_type >= 1000 && base_type < 2000)
+    raw_type land wkbZ <> 0
+    || (base_type >= 1000 && base_type < 2000)
+    || base_type >= 3000
   in
   let has_m =
-    raw_type land wkbM <> 0 || (base_type >= 2000 && base_type < 3000)
+    raw_type land wkbM <> 0
+    || (base_type >= 2000 && base_type < 3000)
+    || base_type >= 3000
   in
 
   (* Normalized base type (Point=1, Poly=3, etc.) *)

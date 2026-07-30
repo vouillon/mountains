@@ -1,0 +1,221 @@
+(* Regression tests for WKB decoding and Overpass response parsing.
+   Run via `dune runtest`. Silent on success; fails loudly otherwise. *)
+
+let fail fmt =
+  Printf.ksprintf
+    (fun s ->
+      prerr_endline ("FAIL: " ^ s);
+      exit 1)
+    fmt
+
+(* --- WKB building helpers --- *)
+
+let u8 b v = Buffer.add_char b (Char.chr (v land 0xFF))
+
+let u32 b v =
+  u8 b v;
+  u8 b (v lsr 8);
+  u8 b (v lsr 16);
+  u8 b (v lsr 24)
+
+let f64 b f =
+  let bits = Int64.bits_of_float f in
+  for i = 0 to 7 do
+    u8 b (Int64.to_int (Int64.shift_right_logical bits (i * 8)))
+  done
+
+(* --- WKB: plain 2D polygon --- *)
+
+let () =
+  let b = Buffer.create 256 in
+  u8 b 1 (* little endian *);
+  u32 b 3 (* Polygon *);
+  u32 b 1 (* 1 ring *);
+  u32 b 4 (* 4 points, closed *);
+  List.iter
+    (fun (x, y) ->
+      f64 b x;
+      f64 b y)
+    [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ];
+  match Wkb_decode.decode_wkb (Buffer.contents b) with
+  | Some (Wkb_decode.Polygon [ ring ]) ->
+      let coords = List.map (fun (p : Wkb_decode.point) -> (p.x, p.y)) ring in
+      if coords <> [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ] then
+        fail "2D polygon: wrong coordinates"
+  | _ -> fail "2D polygon: decode failed"
+
+(* --- WKB: ISO-coded PolygonZM (type 3003) with 4 doubles per point --- *)
+
+let () =
+  let b = Buffer.create 256 in
+  u8 b 1;
+  u32 b 3003 (* ISO PolygonZM *);
+  u32 b 1;
+  u32 b 4;
+  List.iter
+    (fun (x, y) ->
+      f64 b x;
+      f64 b y;
+      f64 b 42.0 (* z *);
+      f64 b nan (* m *))
+    [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ];
+  match Wkb_decode.decode_wkb (Buffer.contents b) with
+  | Some (Wkb_decode.Polygon [ ring ]) ->
+      let coords = List.map (fun (p : Wkb_decode.point) -> (p.x, p.y)) ring in
+      if coords <> [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ] then
+        fail "ISO PolygonZM: wrong coordinates (Z/M not skipped?)"
+  | _ -> fail "ISO PolygonZM: decode failed"
+
+(* --- WKB: GeoPackage-wrapped MultiPolygon, mirroring the structure of the
+   CLC2018 GeoPackage: GP header with 2D envelope, ISO-coded MultiPolygonZM
+   (3006) whose child polygon uses EWKB Z/M flag bits (0xC0000003) --- *)
+
+let () =
+  let b = Buffer.create 512 in
+  (* GPKG header *)
+  Buffer.add_string b "GP";
+  u8 b 0 (* version *);
+  u8 b 2 (* flags: envelope indicator 1 (32 bytes) *);
+  u32 b 3035 (* SRID *);
+  List.iter (f64 b) [ 0.; 1.; 0.; 1. ] (* minx maxx miny maxy *);
+  (* WKB body *)
+  u8 b 1;
+  u32 b 3006 (* ISO MultiPolygonZM *);
+  u32 b 1 (* 1 polygon *);
+  u8 b 1;
+  u32 b 0xC0000003 (* EWKB Polygon with Z and M flags *);
+  u32 b 1;
+  u32 b 4;
+  List.iter
+    (fun (x, y) ->
+      f64 b x;
+      f64 b y;
+      f64 b 0.0;
+      f64 b nan)
+    [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ];
+  match Wkb_decode.decode_wkb (Buffer.contents b) with
+  | Some (Wkb_decode.MultiPolygon [ [ ring ] ]) ->
+      let coords = List.map (fun (p : Wkb_decode.point) -> (p.x, p.y)) ring in
+      if coords <> [ (0., 0.); (1., 0.); (0., 1.); (0., 0.) ] then
+        fail "GPKG MultiPolygonZM: wrong coordinates"
+  | _ -> fail "GPKG MultiPolygonZM: decode failed"
+
+(* --- osm_fetch: two inner rings sharing exactly one edge merge into one
+   hole (the minimal touching-inner-rings case) --- *)
+
+let overpass_json =
+  {|{
+  "version": 0.6,
+  "elements": [
+    {"type": "node", "id": 1, "lat": 0.0, "lon": 0.0},
+    {"type": "node", "id": 2, "lat": 0.0, "lon": 10.0},
+    {"type": "node", "id": 3, "lat": 10.0, "lon": 10.0},
+    {"type": "node", "id": 4, "lat": 10.0, "lon": 0.0},
+    {"type": "node", "id": 11, "lat": 2.0, "lon": 2.0},
+    {"type": "node", "id": 12, "lat": 2.0, "lon": 4.0},
+    {"type": "node", "id": 13, "lat": 4.0, "lon": 4.0},
+    {"type": "node", "id": 14, "lat": 4.0, "lon": 2.0},
+    {"type": "node", "id": 15, "lat": 2.0, "lon": 6.0},
+    {"type": "node", "id": 16, "lat": 4.0, "lon": 6.0},
+    {"type": "way", "id": 100, "nodes": [1, 2, 3, 4, 1]},
+    {"type": "way", "id": 101, "nodes": [11, 12, 13, 14, 11]},
+    {"type": "way", "id": 102, "nodes": [12, 15, 16, 13, 12]},
+    {"type": "relation", "id": 500,
+     "members": [
+       {"type": "way", "ref": 100, "role": "outer"},
+       {"type": "way", "ref": 101, "role": "inner"},
+       {"type": "way", "ref": 102, "role": "inner"}
+     ],
+     "tags": {"natural": "water", "water": "lake"}}
+  ]
+}|}
+
+let () =
+  match Osm_fetch.parse_overpass_elements overpass_json with
+  | [ f ] -> (
+      if f.Osm_fetch.clc_code <> 512 then
+        fail "merge: wrong clc code %d" f.Osm_fetch.clc_code;
+      match f.Osm_fetch.polygons with
+      | [ [ _outer; hole ] ] ->
+          (* Two 4-node holes sharing one edge merge into a single 6-node
+             ring (+1 closing duplicate) *)
+          if List.length hole <> 7 then
+            fail "merge: expected merged hole of 7 pts (6+close), got %d"
+              (List.length hole)
+      | [ rings ] ->
+          fail "merge: expected outer + 1 merged hole, got %d rings"
+            (List.length rings)
+      | ps -> fail "merge: expected 1 polygon, got %d" (List.length ps))
+  | l -> fail "merge: expected 1 feature, got %d" (List.length l)
+
+(* --- osm_fetch: a ring referencing a node absent from the response is
+   dropped (with a warning), not emitted with vertices deleted --- *)
+
+let () =
+  let json =
+    {|{"elements": [
+      {"type": "node", "id": 1, "lat": 0.0, "lon": 0.0},
+      {"type": "node", "id": 2, "lat": 0.0, "lon": 10.0},
+      {"type": "node", "id": 3, "lat": 10.0, "lon": 10.0},
+      {"type": "way", "id": 100, "nodes": [1, 2, 3, 4, 1],
+       "tags": {"natural": "water"}}]}|}
+  in
+  match Osm_fetch.parse_overpass_elements json with
+  | [] -> ()
+  | l -> fail "missing node: feature should be dropped, got %d" (List.length l)
+
+(* --- osm_fetch: untagged member relations must not raise --- *)
+
+let () =
+  let json =
+    {|{"elements": [
+      {"type": "relation", "id": 900,
+       "members": [{"type": "relation", "ref": 901, "role": ""}],
+       "tags": {"natural": "water"}},
+      {"type": "relation", "id": 901, "members": []}]}|}
+  in
+  match Osm_fetch.parse_overpass_elements json with
+  | _ -> ()
+  | exception e -> fail "untagged relation raised: %s" (Printexc.to_string e)
+
+(* --- Overpass response validation --- *)
+
+let () =
+  let check_error name resp =
+    match Osm_fetch.response_error resp with
+    | Some _ -> ()
+    | None -> fail "response_error: %s should be rejected" name
+  in
+  check_error "remark" {|{"elements": [], "remark": "runtime error: timeout"}|};
+  check_error "non-JSON" "<html>rate limited</html>";
+  check_error "truncated" {|{"elements": [{"type": "no|};
+  (match Osm_fetch.response_error {|{"elements": []}|} with
+  | None -> ()
+  | Some e -> fail "response_error: clean response rejected: %s" e);
+  match Poi_fetch.response_error {|{"remark": "runtime error: timeout"}|} with
+  | Some _ -> ()
+  | None -> fail "poi response_error: remark should be rejected"
+
+(* --- poi_fetch: elevation and coordinate parsing --- *)
+
+let () =
+  let json =
+    {|{"elements": [
+      {"type": "node", "id": 1, "lat": 45.5, "lon": 6.5,
+       "tags": {"natural": "peak", "name": "Test", "ele": "3842"}},
+      {"type": "node", "id": 2, "lat": 45.6, "lon": 6.6,
+       "tags": {"natural": "peak", "name": "Bad ele", "ele": "ca. 3000"}},
+      {"type": "node", "id": 3, "lat": 46, "lon": 7,
+       "tags": {"natural": "saddle", "name": "Int coords", "ele": "2001.7"}}]}|}
+  in
+  match Poi_fetch.parse_overpass_elements json with
+  | [ a; b; c ] ->
+      if a.Poi_fetch.elevation <> Some 3842 then fail "poi: ele 3842 misparsed";
+      if b.Poi_fetch.elevation <> None then
+        fail "poi: unparseable ele should be None";
+      if c.Poi_fetch.elevation <> Some 2002 then
+        fail "poi: 2001.7 should round to 2002";
+      if c.Poi_fetch.lat <> 46.0 || c.Poi_fetch.lon <> 7.0 then
+        fail "poi: integer coordinates misread";
+      if c.Poi_fetch.poi_type <> Poi_fetch.Saddle then fail "poi: wrong type"
+  | l -> fail "poi: expected 3 POIs, got %d" (List.length l)

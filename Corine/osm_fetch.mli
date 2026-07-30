@@ -13,6 +13,14 @@ val fetch_water_polygons :
   water_feature list
 (** Fetch water polygons for the given bounding box from OpenStreetMap. *)
 
+val response_error : string -> string option
+(** [response_error body] returns a description of why an Overpass response is
+    unusable (not JSON, malformed, or carrying a server "remark"), or [None] if
+    it looks complete. Exposed for tests. *)
+
+val parse_overpass_elements : string -> water_feature list
+(** Parse an Overpass JSON response into water features. Exposed for tests. *)
+
 val feature_to_flat_arrays :
   water_feature -> (int * float array * float array array) list
 (** Convert water features to flat vertex arrays suitable for the tile pipeline.

@@ -25,9 +25,12 @@ type poi = {
 
 (* --- Overpass Query --- *)
 
+(* The explicit server-side timeout stays below curl's --max-time (120s), so
+   a slow query fails fast with a server "remark" (retried below) instead of
+   being repeatedly killed by curl at the default 180s server budget *)
 let build_overpass_query ~min_lat ~min_lon ~max_lat ~max_lon =
   Printf.sprintf
-    {|[out:json][bbox:%f,%f,%f,%f];
+    {|[out:json][timeout:110][bbox:%f,%f,%f,%f];
 (
   node["natural"="peak"];
   node["natural"="saddle"];
@@ -62,21 +65,43 @@ let fetch_overpass_data_once query =
       Printf.eprintf "curl was killed by signal\n%!";
       None
 
+(* Overpass reports server-side failures (query timeout, memory exhaustion)
+   as HTTP 200 JSON with a top-level "remark" field and truncated or empty
+   output; such responses must be retried, not parsed as complete data *)
+let response_error response =
+  if String.length response < 1 || response.[0] <> '{' then
+    Some "response is not JSON"
+  else
+    match Yojson.Safe.from_string response with
+    | exception _ -> Some "malformed JSON response"
+    | json -> (
+        match Yojson.Safe.Util.member "remark" json with
+        | `String remark -> Some ("server remark: " ^ remark)
+        | _ -> None)
+
 let fetch_overpass_data ?(max_retries = 10) query =
   let rec retry attempt =
     Printf.printf "POI Overpass API request (attempt %d/%d)...\n%!" attempt
       max_retries;
-    match fetch_overpass_data_once query with
-    | Some response
-      when String.length response >= 1 && String.sub response 0 1 = "{" ->
-        Some response
-    | (Some _ | None) when attempt < max_retries ->
+    let result =
+      match fetch_overpass_data_once query with
+      | None -> Error "curl failed"
+      | Some response -> (
+          match response_error response with
+          | None -> Ok response
+          | Some err -> Error err)
+    in
+    match result with
+    | Ok response -> Some response
+    | Error err when attempt < max_retries ->
         let delay = 2.0 *. (1.5 ** float (attempt - 1)) in
-        Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
-          delay;
+        Printf.printf "Request failed (%s), retrying in %.0fs...\n%!" err delay;
         Unix.sleepf delay;
         retry (attempt + 1)
-    | resp -> resp
+    | Error err ->
+        Printf.eprintf "POI Overpass request failed after %d attempts: %s\n%!"
+          max_retries err;
+        None
   in
   retry 1
 
@@ -89,7 +114,9 @@ let parse_overpass_elements json_str =
 
   List.filter_map
     (fun elem ->
-      let tags = elem |> member "tags" in
+      let tags =
+        match elem |> member "tags" with `Null -> `Assoc [] | t -> t
+      in
 
       (* Get name - prefer French name *)
       let name =
@@ -105,18 +132,25 @@ let parse_overpass_elements json_str =
       match name with
       | None -> None (* Skip POIs without names *)
       | Some name ->
-          let lat = elem |> member "lat" |> to_float in
-          let lon = elem |> member "lon" |> to_float in
+          let lat = elem |> member "lat" |> to_number in
+          let lon = elem |> member "lon" |> to_number in
 
-          (* Parse elevation *)
+          (* Parse elevation; an unparseable "ele" tag (e.g. "ca. 3000",
+             "1234;1236") means the elevation is unknown, not 0 *)
           let elevation =
-            tags |> member "ele" |> to_option to_string
-            |> Option.map (fun s ->
-                try truncate (float_of_string s +. 0.5) with Failure _ -> 0)
+            match tags |> member "ele" |> to_option to_string with
+            | None -> None
+            | Some s -> (
+                match float_of_string_opt s with
+                | Some e -> Some (truncate (Float.round e))
+                | None -> None)
           in
 
           (* Determine POI type *)
-          let natural = tags |> member "natural" |> to_string in
+          let natural =
+            tags |> member "natural" |> to_option to_string
+            |> Option.value ~default:""
+          in
           let poi_type =
             match natural with
             | "peak" -> Peak

@@ -17,7 +17,8 @@
   triangulate_test
   polygon_to_svg
   analyze_polygon
-  triangulation_tests)
+  triangulation_tests
+  data_tests)
  (modules
   (:standard \ static_r_tree hilbert))
  (libraries
@@ -48,3 +49,10 @@
  (alias runtest)
  (action
   (diff triangulation_tests.expected triangulation_tests.output)))
+
+(rule
+ (alias runtest)
+ (action
+  (with-stdout-to
+   data_tests.output
+   (run ./data_tests.exe))))

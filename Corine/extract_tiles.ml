@@ -16,6 +16,21 @@ let parse_tile_string str =
     (lat, lon)
   with _ -> failwith ("Invalid tile string format: " ^ str)
 
+(* WKB linear rings are closed (the last point repeats the first). Drop the
+   closing duplicate: downstream code treats rings as implicitly closed, and
+   the duplicate otherwise trips the duplicate-point validation. *)
+let strip_closing_point (ring : Wkb_decode.point list) =
+  match ring with
+  | [] -> []
+  | first :: _ ->
+      let rec drop_last = function
+        | [] -> []
+        | [ (last : Wkb_decode.point) ] ->
+            if last.x = first.x && last.y = first.y then [] else [ last ]
+        | p :: rest -> p :: drop_last rest
+      in
+      drop_last ring
+
 (* --- Encoding / Quantization --- *)
 
 module Encoder = struct
@@ -68,6 +83,14 @@ module Encoder = struct
   let zigzag_encode n = (n lsl 1) lxor (n asr 31)
 
   let encode_meta t code v_count t_count =
+    (* Counts are stored as u16 and indices are delta-encoded mod 2^16, so
+       larger features would be silently corrupted. The recursive splitting
+       in the pipeline is supposed to keep features below this limit. *)
+    if v_count > 0xFFFF || t_count > 0xFFFF then
+      failwith
+        (Printf.sprintf
+           "Feature exceeds 16-bit encoding limits: %d vertices, %d triangles"
+           v_count t_count);
     write_u16 t.meta code;
     write_u16 t.meta v_count;
     write_u16 t.meta t_count
@@ -204,6 +227,13 @@ module Water_encoder = struct
   let zigzag_encode n = (n lsl 1) lxor (n asr 31)
 
   let encode_meta t code v_count t_count =
+    (* Counts and indices are 16-bit here too (only coordinates are 3-byte) *)
+    if v_count > 0xFFFF || t_count > 0xFFFF then
+      failwith
+        (Printf.sprintf
+           "Water feature exceeds 16-bit encoding limits: %d vertices, %d \
+            triangles"
+           v_count t_count);
     write_u16 t.meta code;
     write_u16 t.meta v_count;
     write_u16 t.meta t_count
@@ -296,11 +326,21 @@ module Poi_encoder = struct
     write_u16 buf uv
 
   let encode_poi t (poi : Poi_fetch.poi) (min_lon, min_lat) (scale_x, scale_y) =
-    (* Encode name as length-prefixed UTF-8 *)
-    let name_bytes = Bytes.of_string poi.name in
-    let name_len = Bytes.length name_bytes in
+    (* Encode name as length-prefixed UTF-8. The prefix is a single byte, so
+       truncate longer names on a UTF-8 boundary to keep the stream framed. *)
+    let name = poi.name in
+    let name_len =
+      if String.length name <= 255 then String.length name
+      else begin
+        let n = ref 255 in
+        while !n > 0 && Char.code name.[!n] land 0xC0 = 0x80 do
+          decr n
+        done;
+        !n
+      end
+    in
     write_u8 t.names name_len;
-    Buffer.add_bytes t.names name_bytes;
+    Buffer.add_substring t.names name 0 name_len;
 
     (* Encode coordinates (3-byte quantized, same as water) *)
     let qx = int_of_float ((poi.lon -. min_lon) *. scale_x) in
@@ -431,10 +471,13 @@ let process_tile db_path output_dir tile_name =
   let entry_count = ref 0 in
   let total_vertices = ref 0 in
   let total_indices = ref 0 in
-  (* 
+  (*
      Recursive helper: clipped multipolygon handling.
+     The threshold keeps each piece within the encoder's 16-bit vertex and
+     triangle counts (with margin for triangulation bridges); the largest
+     CORINE features approach a million points.
   *)
-  let max_clipped_verts = 5000000 in
+  let max_clipped_verts = 60000 in
 
   let rec clip_with_split_fixed flat_verts proper_poly region depth =
     let clipped_verts, result_polys =
@@ -444,8 +487,9 @@ let process_tile db_path output_dir tile_name =
     if Array.length result_polys = 0 then []
     else
       let vert_count = Array.length clipped_verts / 2 in
-      (* Return if small enough OR if we've hit max recursion depth *)
-      if vert_count <= max_clipped_verts || depth > 3 then
+      (* Return if small enough OR if we've hit max recursion depth
+         (2^8 = 256 subregions is enough for the largest features) *)
+      if vert_count <= max_clipped_verts || depth > 8 then
         Array.to_list (Array.map (fun p -> (clipped_verts, p)) result_polys)
       else
         (* Split region either Horizontally or Vertically *)
@@ -492,8 +536,11 @@ let process_tile db_path output_dir tile_name =
                     (* 1. Convert Geometry to float array (MultiPolygon) *)
                     let polys =
                       match geom with
-                      | Wkb_decode.Polygon rings -> [| rings |]
-                      | Wkb_decode.MultiPolygon polys -> Array.of_list polys
+                      | Wkb_decode.Polygon rings ->
+                          if rings = [] then [||] else [| rings |]
+                      | Wkb_decode.MultiPolygon polys ->
+                          Array.of_list
+                            (List.filter (fun rings -> rings <> []) polys)
                       | _ -> [||]
                     in
 
@@ -509,7 +556,7 @@ let process_tile db_path output_dir tile_name =
                                    (fun (p : Wkb_decode.point) ->
                                      let lon, lat = P.to_wgs84 p.x p.y in
                                      [ lon; lat ])
-                                   (List.hd rings))
+                                   (strip_closing_point (List.hd rings)))
                             in
 
                             let hole_list = List.tl rings in
@@ -525,7 +572,7 @@ let process_tile db_path output_dir tile_name =
                                                 P.to_wgs84 p.x p.y
                                               in
                                               [ lon; lat ])
-                                            ring)
+                                            (strip_closing_point ring))
                                      in
                                      Array.of_list pts)
                                    hole_list)
@@ -674,7 +721,10 @@ let process_tile db_path output_dir tile_name =
                                   :: !batch_acc))
                             clipped_pieces)
                         float_polys
-                | None -> ()
+                | None ->
+                    Printf.printf
+                      "Warning: skipping undecodable geometry (code %d)\n%!"
+                      code
                 end
             | None -> ()
             end
@@ -686,11 +736,12 @@ let process_tile db_path output_dir tile_name =
   in
 
   let all_features = collect_features [] in
+  ignore (Sqlite3.finalize stmt);
 
   (* Sorting by Area Ascending (Smallest First) *)
   let sorted_features =
     List.sort
-      (fun (a1, _, _, _, _, _, _) (a2, _, _, _, _, _, _) -> compare a1 a2)
+      (fun (a1, _, _, _, _, _, _) (a2, _, _, _, _, _, _) -> Float.compare a1 a2)
       all_features
   in
 
@@ -862,8 +913,11 @@ let process_tile db_path output_dir tile_name =
   Printf.printf "Processed %d POIs\n%!" !poi_count;
 
   (* === FILE OUTPUT (CLC5 Format) === *)
+  (* Write to a temporary file and rename at the end, so an interrupted run
+     cannot leave a plausible-looking partial tile behind *)
   let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
-  let out_ch = open_out_bin output_file_path in
+  let tmp_file_path = output_file_path ^ ".tmp" in
+  let out_ch = open_out_bin tmp_file_path in
 
   (* Write Header (Magic + Counts + Bounds + Scales) *)
   output_string out_ch "CLC5";
@@ -931,6 +985,7 @@ let process_tile db_path output_dir tile_name =
   Printf.printf "Streams Written.\n%!";
 
   close_out out_ch;
+  Sys.rename tmp_file_path output_file_path;
   ignore (Sqlite3.db_close db);
   Printf.printf
     "Done. Extracted %d CLC features (%d verts, %d indices) + %d water \

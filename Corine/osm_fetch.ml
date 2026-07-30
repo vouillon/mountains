@@ -33,9 +33,12 @@ let water_tag_to_clc_code water_tag =
 
 (* --- Overpass Query --- *)
 
+(* The explicit server-side timeout stays below curl's --max-time (120s), so
+   a slow query fails fast with a server "remark" (retried below) instead of
+   being repeatedly killed by curl at the default 180s server budget *)
 let build_overpass_query ~min_lat ~min_lon ~max_lat ~max_lon =
   Printf.sprintf
-    {|[out:json][bbox:%f,%f,%f,%f];(wr[natural=water];wr[water];);(._;>>;);out body;|}
+    {|[out:json][timeout:110][bbox:%f,%f,%f,%f];(wr[natural=water];wr[water];);(._;>>;);out body;|}
     min_lat min_lon max_lat max_lon
 
 (* --- HTTP Fetch via curl with retry --- *)
@@ -67,21 +70,43 @@ let fetch_overpass_data_once query =
       Printf.eprintf "curl was killed by signal\n%!";
       None
 
+(* Overpass reports server-side failures (query timeout, memory exhaustion)
+   as HTTP 200 JSON with a top-level "remark" field and truncated or empty
+   output; such responses must be retried, not parsed as complete data *)
+let response_error response =
+  if String.length response < 1 || response.[0] <> '{' then
+    Some "response is not JSON"
+  else
+    match Yojson.Safe.from_string response with
+    | exception _ -> Some "malformed JSON response"
+    | json -> (
+        match Yojson.Safe.Util.member "remark" json with
+        | `String remark -> Some ("server remark: " ^ remark)
+        | _ -> None)
+
 let fetch_overpass_data ?(max_retries = 10) query =
   let rec retry attempt =
     Printf.printf "Overpass API request (attempt %d/%d)...\n%!" attempt
       max_retries;
-    match fetch_overpass_data_once query with
-    | Some response
-      when String.length response >= 1 && String.sub response 0 1 = "{" ->
-        Some response
-    | (Some _ | None) when attempt < max_retries ->
+    let result =
+      match fetch_overpass_data_once query with
+      | None -> Error "curl failed"
+      | Some response -> (
+          match response_error response with
+          | None -> Ok response
+          | Some err -> Error err)
+    in
+    match result with
+    | Ok response -> Some response
+    | Error err when attempt < max_retries ->
         let delay = 2.0 *. (1.5 ** float (attempt - 1)) in
-        Printf.printf "Request failed (rate limited?), retrying in %.0fs...\n%!"
-          delay;
+        Printf.printf "Request failed (%s), retrying in %.0fs...\n%!" err delay;
         Unix.sleepf delay;
         retry (attempt + 1)
-    | resp -> resp (* Return last response or None *)
+    | Error err ->
+        Printf.eprintf "Overpass request failed after %d attempts: %s\n%!"
+          max_retries err;
+        None
   in
   retry 1
 
@@ -113,17 +138,23 @@ let parse_overpass_elements json_str =
     (fun elem ->
       let elem_type = elem |> member "type" |> to_string in
       let elem_id = elem |> member "id" |> to_int in
+      (* Member ways/relations pulled in by the recursion may be untagged;
+         default to an empty object so tag lookups return None instead of
+         raising on `Null *)
+      let elem_tags () =
+        match elem |> member "tags" with `Null -> `Assoc [] | t -> t
+      in
       match elem_type with
       | "node" ->
-          let lat = elem |> member "lat" |> to_float in
-          let lon = elem |> member "lon" |> to_float in
+          let lat = elem |> member "lat" |> to_number in
+          let lon = elem |> member "lon" |> to_number in
           Hashtbl.add nodes elem_id (lon, lat)
       | "way" ->
           let node_ids =
             elem |> member "nodes" |> to_list |> List.map to_int
             |> Array.of_list
           in
-          let tags = elem |> member "tags" in
+          let tags = elem_tags () in
           Hashtbl.add ways elem_id { node_ids; tags }
       | "relation" ->
           let members =
@@ -135,7 +166,7 @@ let parse_overpass_elements json_str =
                   role = m |> member "role" |> to_string;
                 })
           in
-          let tags = elem |> member "tags" in
+          let tags = elem_tags () in
           Hashtbl.add relations elem_id { rel_id = elem_id; members; tags }
       | _ -> ())
     elements;
@@ -146,14 +177,29 @@ let parse_overpass_elements json_str =
     if n < 2 then None else Some (way.node_ids.(0), way.node_ids.(n - 1))
   in
 
-  (* Helper: convert node IDs to coordinate list *)
-  let nodes_to_points node_ids =
-    Array.fold_right
-      (fun nid acc ->
-        match Hashtbl.find_opt nodes nid with
-        | Some (lon, lat) -> { x = lon; y = lat } :: acc
-        | None -> acc)
-      node_ids []
+  (* Helper: convert node IDs to a coordinate list. If any node is missing
+     from the response, drop the whole ring with a warning (consistent with
+     the missing-ways handling below): silently deleting vertices would
+     replace part of the shoreline with a chord across the polygon. *)
+  let nodes_to_points owner_id node_ids =
+    let missing = ref 0 in
+    let pts =
+      Array.fold_right
+        (fun nid acc ->
+          match Hashtbl.find_opt nodes nid with
+          | Some (lon, lat) -> { x = lon; y = lat } :: acc
+          | None ->
+              incr missing;
+              acc)
+        node_ids []
+    in
+    if !missing = 0 then Some pts
+    else (
+      Printf.printf
+        "Warning: Dropping ring in %d: %d nodes not in dataset (outside bbox?)\n\
+         %!"
+        owner_id !missing;
+      None)
   in
 
   (* Chain ways by node ID into closed rings *)
@@ -523,101 +569,45 @@ let parse_overpass_elements json_str =
                                 used.(j) <- true;
                                 merged := true;
                                 found_match := true)
-                              else if !best_common >= 2 then (
-                                (* Only merge if there's at least one shared EDGE (2+ consecutive nodes) *)
-                                (* Rotate both rings to shared_nid to find the contiguous shared segment *)
+                              else if !best_common >= 2 then
+                                (* Merge along the shared segment (2+ shared
+                                   consecutive nodes = 1+ shared edges).
+                                   Rotate both rings so index 0 is the node
+                                   where the match was found: r2 walks the
+                                   shared segment forward at indices 0..c-1
+                                   while r1 walks it backward, i.e.
+                                   r2.(k) = r1.((len1 - k) mod len1). *)
+                                let c = !best_common in
                                 let r1 = rotate_to_nid shared_nid r1_arr in
                                 let r2 = rotate_to_nid shared_nid other_norm in
                                 let len1 = Array.length r1 - 1 in
                                 let len2 = Array.length r2 - 1 in
-
-                                (* Build shared_set from ONLY the contiguous match, not all shared nodes *)
-                                (* The match is: r1_rev[0..best_common-1] = r2[0..best_common-1] *)
-                                (* Which means: r1[len1-1], r1[len1-2], ..., r1[len1-best_common] = r2[0], r2[1], ..., r2[best_common-1] *)
-                                (* Only put INTERIOR shared nodes in shared_set, keeping first and last as splice endpoints *)
-                                let shared_set = Hashtbl.create 64 in
-                                if !best_common > 2 then
-                                  for k = 1 to !best_common - 2 do
-                                    Hashtbl.replace shared_set r2.(k) true
-                                  done;
-
-                                (* Splice endpoints are r2.(0) and r2.(best_common-1), NOT in shared_set *)
-
-                                (* Find where r1 exits shared region (first non-shared after shared) *)
-                                let r1_exit = ref (-1) in
-                                let r1_entry = ref (-1) in
-                                for i = 0 to len1 - 1 do
-                                  let curr_shared =
-                                    Hashtbl.mem shared_set r1.(i)
-                                  in
-                                  let next_shared =
-                                    Hashtbl.mem shared_set r1.((i + 1) mod len1)
-                                  in
-                                  if
-                                    curr_shared && (not next_shared)
-                                    && !r1_exit = -1
-                                  then r1_exit := (i + 1) mod len1;
-                                  if
-                                    (not curr_shared) && next_shared
-                                    && !r1_entry = -1
-                                  then r1_entry := (i + 1) mod len1
-                                done;
-
-                                (* Find where r2 exits shared region *)
-                                let r2_exit = ref (-1) in
-                                let r2_all_shared = ref true in
-                                for i = 0 to len2 - 1 do
-                                  let curr_shared =
-                                    Hashtbl.mem shared_set r2.(i)
-                                  in
-                                  if not curr_shared then r2_all_shared := false;
-                                  let next_shared =
-                                    Hashtbl.mem shared_set r2.((i + 1) mod len2)
-                                  in
-                                  if
-                                    curr_shared && (not next_shared)
-                                    && !r2_exit = -1
-                                  then r2_exit := (i + 1) mod len2
-                                done;
-
-                                (* Special case: r2 is entirely within r1 (all nodes shared) *)
-                                if !r2_all_shared then (
-                                  (* r2 is a subset of r1's boundary - absorb it *)
+                                if c >= len2 then (
+                                  (* All of r2's distinct nodes lie on the
+                                     shared segment - absorb it *)
                                   used.(j) <- true;
                                   merged := true;
                                   found_match := true)
-                                else if
-                                  !r1_exit >= 0 && !r1_entry >= 0
-                                  && !r2_exit >= 0
-                                then (
-                                  (* Splice: r1 from exit to entry + r2 from exit to end *)
-                                  let new_ring = ref [] in
-
-                                  (* Take r1 from exit point, going forward until entry point *)
-                                  let i = ref !r1_exit in
-                                  while !i <> !r1_entry do
-                                    new_ring := r1.(!i) :: !new_ring;
-                                    i := (!i + 1) mod len1
-                                  done;
-
-                                  (* Take r2 from exit point to the end (before closing) *)
-                                  let k2 = ref !r2_exit in
-                                  let r2_start = !r2_exit in
-                                  let first_iter = ref true in
-                                  while !first_iter || !k2 <> r2_start do
-                                    first_iter := false;
-                                    if not (Hashtbl.mem shared_set r2.(!k2))
-                                    then new_ring := r2.(!k2) :: !new_ring;
-                                    k2 := (!k2 + 1) mod len2
-                                  done;
-
-                                  let final = List.rev !new_ring in
-
-                                  if List.length final >= 3 then (
-                                    current := final @ [ List.hd final ];
-                                    used.(j) <- true;
-                                    merged := true;
-                                    found_match := true)))
+                                else if c < len1 then (
+                                  (* Splice: r1's non-shared path from the
+                                     shared node to the far end of the shared
+                                     segment (indices 0..len1-c+1), then r2's
+                                     non-shared path (indices c..len2-1). The
+                                     shared interior nodes appear in neither
+                                     part; the two segment endpoints appear
+                                     exactly once each. *)
+                                  let part1 =
+                                    Array.to_list
+                                      (Array.sub r1 0 (len1 - c + 2))
+                                  in
+                                  let part2 =
+                                    Array.to_list (Array.sub r2 c (len2 - c))
+                                  in
+                                  let final = part1 @ part2 in
+                                  current := final @ [ List.hd final ];
+                                  used.(j) <- true;
+                                  merged := true;
+                                  found_match := true)
                           | None -> ())
                       done
                     done;
@@ -640,10 +630,10 @@ let parse_overpass_elements json_str =
           else
             (* Convert node ID arrays to point lists *)
             let outer_point_rings =
-              List.map (fun node_arr -> nodes_to_points node_arr) outer_rings
+              List.filter_map (nodes_to_points rel.rel_id) outer_rings
             in
             let inner_point_rings =
-              List.map (fun node_arr -> nodes_to_points node_arr) inner_rings
+              List.filter_map (nodes_to_points rel.rel_id) inner_rings
             in
 
             (* Assign holes to outer rings *)
@@ -689,11 +679,11 @@ let parse_overpass_elements json_str =
             let clc_code = water_tag_to_clc_code water_tag in
             let n_nodes = Array.length w.node_ids in
             if n_nodes > 0 && w.node_ids.(0) = w.node_ids.(n_nodes - 1) then
-              let points = nodes_to_points w.node_ids in
+              match nodes_to_points wid w.node_ids with
               (* A valid polygon must have at least 4 points (A-B-C-A) *)
-              if List.length points >= 4 then
-                { id = wid; clc_code; polygons = [ [ points ] ] } :: acc
-              else acc
+              | Some points when List.length points >= 4 ->
+                  { id = wid; clc_code; polygons = [ [ points ] ] } :: acc
+              | _ -> acc
             else acc)
       ways []
   in
