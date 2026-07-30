@@ -1677,13 +1677,8 @@ let apply_manual_rotation q da_rad db_rad =
    palette, shadow map) outlive every location and live in
    [graphics_resources]. *)
 type location = {
-  x : int;
-  y : int;
   height : float;
-  lat : float;
-  lon : float;
-  tile : Dem_loader.t;
-  points : (lazy_text * (int * int)) list;
+  points : (lazy_text * (float * float * float)) list;
   tile_texture : Gl.texture;
   relief_texture : Gl.texture;
   relief_normal_texture : Gl.texture;
@@ -1724,7 +1719,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
     ~index_count ~sky_pid ~sky_uniforms
     ~(radial_params : Render_state.radial_params) canvas ctx =
   (* Field reads only: the location record must not be rebuilt per frame. *)
-  let { x; y; height; lat; lon; points; tile; _ } = location in
+  let { height; points; _ } = location in
   (* Poll for completed GPU timer queries *)
   Gpu_timer.poll_results ctx;
   let canvas = Brr_canvas.Canvas.of_el canvas in
@@ -1732,7 +1727,6 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   let canvas_height = Brr_canvas.Canvas.h canvas in
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let transform =
     Matrix.(
       translate 0. 0. (-.height -. 2.)
@@ -1746,27 +1740,10 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   let text_scale = scale *. !zoom in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
-    (* Constant for the session, but the tile origin is only known here. *)
-    let off_x = Render_state.compute_sub_arcsec_offset lon in
-    let off_y = Render_state.compute_sub_arcsec_offset lat in
-    let conv = Render_state.meridian_convergence ~lat in
+    (* Plane position and silhouette-anchored height are precomputed per
+       location (see [load_location]); only the projection is per frame. *)
     List.filter_map
-      (fun (pt, (x', y')) ->
-        (* Inverse of the grid mapping in radial_common.vert (meridian
-           convergence to second order), so the labels stay anchored to the
-           rendered summits; two fixed-point iterations converge to
-           millimetres at these magnitudes. *)
-        let ge = deltax *. (float (x' - x) -. off_x) in
-        let gn = deltay *. (float (y' - y) -. off_y) in
-        let px = ge /. (1. +. (gn *. conv)) in
-        let py = gn +. (px *. px *. conv /. 2.) in
-        let px = ge /. (1. +. (py *. conv)) in
-        let py = gn +. (px *. px *. conv /. 2.) in
-        (* Same Earth-curvature drop as the terrain mesh *)
-        let z =
-          Dem_loader.get_height tile y' x'
-          -. Visibility.curvature_drop ((px *. px) +. (py *. py))
-        in
+      (fun (pt, (px, py, z)) ->
         let r = Matrix.({ x = px; y = py; z; w = 1. } *< transform) in
         let rz = -.r.z in
         if rz > 1. && abs_float (r.x /. rz) < 1. then
@@ -2308,6 +2285,59 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
     done);
   points
 
+(* Height of the terrain as actually drawn at grid position (gx, gy) seen
+   from [r] metres away: replicates the vertex shader's LOD selection and
+   corner-convention bilinear fetch over the soft-max height pyramid that
+   [compute_relief] bakes (downsample.frag, per-level sharpness
+   k = 0.1 * 0.5^(level-1), +0.5/255 encode bias). Distant mip levels cannot
+   reach a sharp summit's full-resolution height, so a POI anchored there
+   would float above the rendered silhouette. *)
+let rendered_height tile ~(radial_params : Render_state.radial_params)
+    ~inv_avg_delta ~size ~r ~gx ~gy =
+  let grid_spacing =
+    radial_params.Render_state.grid_k
+    *. (r +. radial_params.Render_state.grid_scale)
+  in
+  let lod_f = Float.max 0. (Float.log2 (grid_spacing *. inv_avg_delta)) in
+  let lod = min (int_of_float lod_f) (Web_utils.log2 size) in
+  if lod = 0 then Dem_loader.get_height tile gy gx
+  else begin
+    let get row col =
+      Dem_loader.get_height tile
+        (max 0 (min (size - 1) row))
+        (max 0 (min (size - 1) col))
+    in
+    (* Value of the level-[l] pyramid cell (cx, cy); the soft-max is
+       shift-invariant, so working in metres matches the shader's encoded
+       units. *)
+    let rec cell l cx cy =
+      if l = 0 then get cy cx
+      else
+        let k = 0.1 *. (0.5 ** float (l - 1)) in
+        let h00 = cell (l - 1) (2 * cx) (2 * cy)
+        and h10 = cell (l - 1) ((2 * cx) + 1) (2 * cy)
+        and h01 = cell (l - 1) (2 * cx) ((2 * cy) + 1)
+        and h11 = cell (l - 1) ((2 * cx) + 1) ((2 * cy) + 1) in
+        let m = Float.max (Float.max h00 h10) (Float.max h01 h11) in
+        let w h = exp (k *. (h -. m)) in
+        let avg = (w h00 +. w h10 +. w h01 +. w h11) /. 4. in
+        m +. (log avg /. k) +. (0.5 /. 255. *. (9500. /. 257.))
+    in
+    let inv = 1. /. (2. ** float lod) in
+    let plx = float gx *. inv and ply = float gy *. inv in
+    let bx = int_of_float (floor plx) and by = int_of_float (floor ply) in
+    let fx = plx -. float bx and fy = ply -. float by in
+    let n = size lsr lod in
+    let c cx cy = cell lod (min cx (n - 1)) (min cy (n - 1)) in
+    let h00 = c bx by
+    and h10 = c (bx + 1) by
+    and h01 = c bx (by + 1)
+    and h11 = c (bx + 1) (by + 1) in
+    let h0 = h00 +. (fx *. (h10 -. h00)) in
+    let h1 = h01 +. (fx *. (h11 -. h01)) in
+    h0 +. (fy *. (h1 -. h0))
+  end
+
 (* Fetch the DEM and CLC tiles for [lat]/[lon], rebake every piece of
    location-dependent state and publish it in [session]. Resolves to whether
    this load is the one now on screen.
@@ -2469,32 +2499,41 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         points
     in
     let points =
+      let off_x = Render_state.compute_sub_arcsec_offset lon in
+      let off_y = Render_state.compute_sub_arcsec_offset lat in
+      let conv = Render_state.meridian_convergence ~lat in
+      let inv_avg_delta = 2. /. (deltax +. deltay) in
       List.map
-        (fun ({ Points.name; elevation; _ }, ((x', y') as pos)) ->
+        (fun ({ Points.name; elevation; _ }, (x', y')) ->
           let texture =
             prepare_text ctx
               (match elevation with
               | None -> name
-              | Some elevation ->
-                  (*                Format.eprintf "ZZZ %s %g %d@." name tile.{y', x'} elevation;*)
-                  Printf.sprintf "%s (%dm)" name elevation)
+              | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
+          in
+          (* Plane position: inverse of the grid mapping in
+             radial_common.vert (meridian convergence to second order); two
+             fixed-point iterations converge to millimetres. *)
+          let ge = deltax *. (float (x' - x) -. off_x) in
+          let gn = deltay *. (float (y' - y) -. off_y) in
+          let px = ge /. (1. +. (gn *. conv)) in
+          let py = gn +. (px *. px *. conv /. 2.) in
+          let px = ge /. (1. +. (py *. conv)) in
+          let py = gn +. (px *. px *. conv /. 2.) in
+          let r2 = (px *. px) +. (py *. py) in
+          (* Anchor at the silhouette as drawn (mip-level height at this
+             distance), with the same curvature drop as the mesh *)
+          let z =
+            rendered_height tile ~radial_params ~inv_avg_delta ~size:w
+              ~r:(sqrt r2) ~gx:x' ~gy:y'
+            -. Visibility.curvature_drop r2
           in
           let h =
-            let dx = float (x' - x) in
-            let dy = float (y' - y) in
-            let height' =
-              Dem_loader.get_height tile y' x'
-              -. Visibility.curvature_drop
-                   ((dx *. deltax *. (dx *. deltax))
-                   +. (dy *. deltay *. (dy *. deltay)))
-            in
-            let dist =
-              let dz = height' -. height in
-              sqrt ((dx *. dx) +. (dy *. dy) +. (dz *. dz))
-            in
-            (height' -. height) /. dist
+            let dz = z -. height in
+            (* Apparent elevation angle, for label priority *)
+            dz /. sqrt (r2 +. (dz *. dz))
           in
-          ((texture, pos), h))
+          ((texture, (px, py, z)), h))
         points
     in
     let points =
@@ -2507,12 +2546,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     session :=
       Some
         {
-          x;
-          y;
           height;
-          lat;
-          lon;
-          tile;
           points;
           tile_texture;
           relief_texture;
