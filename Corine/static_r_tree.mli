@@ -16,7 +16,14 @@ val build :
 (** [build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y] constructs a
     static R-tree. [verts] contains point coordinates, [vert_idx] maps item node
     indices to vertex indices in [verts], and [items] is the list of active item
-    node indices to index. *)
+    node indices to index.
+
+    Raises [Invalid_argument] if an item's vertex index is out of bounds for
+    [verts]. The tree keeps references to [verts] and [vert_idx]: the entries
+    reachable from [items] must not be mutated while the tree is in use. *)
 
 val lookup : t -> float -> float -> float -> float -> (int -> unit) -> unit
-(** [lookup t q_xmin q_ymin q_xmax q_ymax callback] searches the tree. *)
+(** [lookup t q_xmin q_ymin q_xmax q_ymax callback] calls [callback] on the
+    index of every item whose point lies within the query box. Bounds are
+    inclusive on all sides, and the tree performs the exact point-in-box test
+    itself, so [callback] only receives exact matches. *)

@@ -19,10 +19,10 @@ let get_level_info n m =
       calc_counts next_count (count :: acc)
   in
   let leaf_mbb_count = (n + m - 1) / m in
-  let counts = calc_counts leaf_mbb_count [] in
-  let offsets = Array.make (List.length counts) 0 in
+  let counts = Array.of_list (calc_counts leaf_mbb_count []) in
+  let offsets = Array.make (Array.length counts) 0 in
   let current_offset = ref 0 in
-  List.iteri
+  Array.iteri
     (fun i count ->
       offsets.(i) <- !current_offset;
       current_offset := !current_offset + (count * 4))
@@ -35,16 +35,23 @@ let get_y (verts : float array) i = Array.unsafe_get verts ((i * 2) + 1)
 let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
   let m = 8 in
   let n = Array.length items in
+  (* Validate up front so the unsafe reads in [get_x]/[get_y] are sound. *)
+  let vert_count = Array.length verts / 2 in
+  Array.iter
+    (fun idx ->
+      let v_idx = vert_idx.(idx) in
+      if v_idx < 0 || v_idx >= vert_count then
+        invalid_arg "Static_r_tree.build: vertex index out of bounds")
+    items;
   let scale_x =
     if max_x > min_x then float ((1 lsl 31) - 1) /. (max_x -. min_x) else 0.
   in
   let scale_y =
     if max_y > min_y then float ((1 lsl 31) - 1) /. (max_y -. min_y) else 0.
   in
-  let sorted_indices = Array.copy items in
   let hilbert_keys =
     Array.init n (fun i ->
-        let idx = sorted_indices.(i) in
+        let idx = items.(i) in
         let v_idx = vert_idx.(idx) in
         let px = get_x verts v_idx in
         let py = get_y verts v_idx in
@@ -53,17 +60,15 @@ let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
         Hilbert.transform ix iy)
   in
 
-  let keyed_items =
-    Array.init n (fun i -> (hilbert_keys.(i), sorted_indices.(i)))
-  in
-  Array.sort (fun (k1, _) (k2, _) -> compare k1 k2) keyed_items;
+  let keyed_items = Array.init n (fun i -> (hilbert_keys.(i), items.(i))) in
+  Array.sort (fun (k1, _) (k2, _) -> Int.compare k1 k2) keyed_items;
   let sorted_indices = Array.map snd keyed_items in
 
   let counts, offsets = get_level_info n m in
-  let height = List.length counts in
-  let total_mbbs = List.fold_left ( + ) 0 counts in
+  let height = Array.length counts in
+  let total_mbbs = Array.fold_left ( + ) 0 counts in
   let mbb_array = Array.make (total_mbbs * 4) 0. in
-  let n0 = List.hd counts in
+  let n0 = counts.(0) in
   for i = 0 to n0 - 1 do
     let start_point = i * m in
     let end_point = min (start_point + m) n in
@@ -86,8 +91,8 @@ let build ~verts ~vert_idx ~items ~min_x ~min_y ~max_x ~max_y =
     mbb_array.(base + 3) <- !ymax
   done;
   for h = 1 to height - 1 do
-    let curr_count = List.nth counts h in
-    let prev_count = List.nth counts (h - 1) in
+    let curr_count = counts.(h) in
+    let prev_count = counts.(h - 1) in
     for i = 0 to curr_count - 1 do
       let start_child = i * m in
       let end_child = min (start_child + m) prev_count in
@@ -162,6 +167,7 @@ let lookup t q_xmin q_ymin q_xmax q_ymax callback =
 (** {2 Inline Tests} *)
 
 let%test_unit "static_r_tree_range_query" =
+  Random.init 42;
   let n = 1000 in
   let verts = Array.make (n * 2) 0.0 in
   let vert_idx = Array.init n (fun i -> i) in
@@ -174,18 +180,39 @@ let%test_unit "static_r_tree_range_query" =
   let t =
     build ~verts ~vert_idx ~items ~min_x:0. ~min_y:0. ~max_x:1000. ~max_y:1000.
   in
-  let q_xmin, q_ymin, q_xmax, q_ymax = (100., 100., 200., 200.) in
+  let check q_xmin q_ymin q_xmax q_ymax =
+    let results = ref [] in
+    lookup t q_xmin q_ymin q_xmax q_ymax (fun idx -> results := idx :: !results);
+    let brute_force = ref [] in
+    for i = 0 to n - 1 do
+      let px = verts.(i * 2) in
+      let py = verts.((i * 2) + 1) in
+      if px >= q_xmin && px <= q_xmax && py >= q_ymin && py <= q_ymax then
+        brute_force := i :: !brute_force
+    done;
+    let sort l = List.sort compare l in
+    assert (sort !results = sort !brute_force)
+  in
+  check 100. 100. 200. 200.;
+  (* Box touching the domain edge *)
+  check 0. 0. 100. 100.;
+  (* Box covering the whole domain *)
+  check 0. 0. 1000. 1000.;
+  (* Box outside the domain: no results *)
+  check 2000. 2000. 3000. 3000.
+
+let%test_unit "static_r_tree_single_leaf" =
+  (* Fewer points than the node capacity m: the root is the only leaf *)
+  let n = 5 in
+  let verts = [| 1.; 1.; 2.; 2.; 3.; 3.; 4.; 4.; 5.; 5. |] in
+  let vert_idx = Array.init n (fun i -> i) in
+  let items = Array.init n (fun i -> i) in
+  let t =
+    build ~verts ~vert_idx ~items ~min_x:0. ~min_y:0. ~max_x:10. ~max_y:10.
+  in
   let results = ref [] in
-  lookup t q_xmin q_ymin q_xmax q_ymax (fun idx -> results := idx :: !results);
-  let brute_force = ref [] in
-  for i = 0 to n - 1 do
-    let px = verts.(i * 2) in
-    let py = verts.((i * 2) + 1) in
-    if px >= q_xmin && px <= q_xmax && py >= q_ymin && py <= q_ymax then
-      brute_force := i :: !brute_force
-  done;
-  let sort l = List.sort compare l in
-  assert (sort !results = sort !brute_force)
+  lookup t 2. 2. 4. 4. (fun idx -> results := idx :: !results);
+  assert (List.sort compare !results = [ 1; 2; 3 ])
 
 let%test_unit "hilbert_closeness" =
   let test_size = 32 in
