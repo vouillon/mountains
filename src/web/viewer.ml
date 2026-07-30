@@ -1359,7 +1359,8 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
-    ~index_count ~relief_texture ctx =
+    ~index_count ~(radial_params : Render_state.radial_params) ~relief_texture
+    ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
 
@@ -1407,10 +1408,38 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     Gl.uniform_matrix4fv ctx shadow_uniforms.shadow_view_proj false
       (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
 
+    (* A ring can only cast into this cascade's ortho box if it lies within
+       shadow_radius * sqrt 2 + depth_range of the centre (constants mirrored
+       from [calculate_shadow_matrices]); ring [r] sits at radius
+       grid_scale * (exp (grid_k * r) - 1), see radial_common.vert. Rings are
+       contiguous within each index block, so restrict every block to the
+       strips actually needed. *)
+    let ring_limit =
+      let split_radius =
+        if layer = 0 then 2000.0 else if layer = 1 then 8000.0 else 25000.0
+      in
+      let shadow_radius = split_radius *. 1.5 in
+      let depth_range = max 10000. (shadow_radius *. 2.) in
+      let reach = (shadow_radius *. sqrt 2.) +. depth_range in
+      let gk = radial_params.Render_state.grid_k in
+      let gs = radial_params.Render_state.grid_scale in
+      let r = int_of_float (ceil (log ((reach /. gs) +. 1.) /. gk)) + 1 in
+      min (n_rings - 1) (max 1 r)
+    in
+    let indices_per_block = index_count / n_index_blocks in
+    let strip_indices = indices_per_block / (n_rings - 1) in
+    let block_count = ring_limit * strip_indices in
+
     (* Render 4 rotations to cover full terrain *)
     for rotation = 0 to 3 do
       Gl.uniform1f ctx shadow_uniforms.snapped_alpha rotation_angles.(rotation);
-      Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+      if ring_limit = n_rings - 1 then
+        Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
+      else
+        for b = 0 to n_index_blocks - 1 do
+          Gl.draw_elements ctx Gl.triangle_strip block_count Gl.unsigned_int
+            (b * indices_per_block * 4)
+        done
     done;
 
     Gl.disable ctx Gl.scissor_test
@@ -1678,9 +1707,7 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
       points
   in
 
-  (* Prepare Clear Color matching fog *)
-  let r, g, b = fog_linear in
-  Gl.clear_color ctx r g b 1.;
+  (* Clear color (the fog colour) is session-static, set once in [tri] *)
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
   Gl.depth_mask ctx true;
@@ -1733,12 +1760,9 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   Matrix.blit transform transform_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
   Gl.bind_vertex_array ctx (Some terrain_geo);
-  Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
   Gl.draw_elements ctx Gl.triangle_strip terrain_index_count Gl.unsigned_int
     terrain_index_offset;
   Gl.bind_vertex_array ctx None;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  Gl.disable ctx Gl.cull_face';
 
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
   Gl.depth_mask ctx false;
@@ -1973,11 +1997,20 @@ let event_loop ctx draw =
     let orientation = !current_orientation in
     let z = !zoom in
 
-    (* Optimization: Only draw if change is visible (> ~1 pixel) *)
+    (* Optimization: Only draw if change is visible (> ~half a pixel).
+       One pixel spans ~2 / (scale * zoom * max_dim) radians whatever the
+       orientation of the canvas, so derive the threshold from the current
+       zoom instead of a constant tuned for max zoom. *)
+    let angle_threshold =
+      let max_dim =
+        max (Gl.drawing_buffer_width ctx) (Gl.drawing_buffer_height ctx)
+      in
+      1. /. (scale *. !zoom *. float (max 1 max_dim))
+    in
     let angle_diff = Quaternion.angle_between orientation prev_orientation in
     let zoom_diff = abs_float (z -. prev_zoom) in
     let should_draw =
-      angle_diff > 0.0001 || zoom_diff > 0.00001 || !force_redraw
+      angle_diff > angle_threshold || zoom_diff > 0.00001 || !force_redraw
     in
 
     if should_draw then (
@@ -2112,11 +2145,19 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
   (* Render shadows *)
   time_gpu ctx "draw_shadows" (fun () ->
       draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-        ~matrices:shadow_matrices ~terrain_geo ~index_count ~relief_texture ctx);
+        ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
+        ~relief_texture ctx);
 
   (* Bind all terrain textures at init - after all textures are created *)
   bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
     ~cover_map_texture ~palette_texture;
+
+  (* Session-static state that was needlessly re-set every frame. Must come
+     after the bake passes above, which set their own clear colours. *)
+  Gl.use_program ctx terrain_pid;
+  Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
+  (let r, g, b = fog_linear in
+   Gl.clear_color ctx r g b 1.);
 
   let points =
     let off_x = Render_state.compute_sub_arcsec_offset lon in
