@@ -2743,17 +2743,65 @@ let get_url_position ~size =
       else None
   | _ -> None
 
+(* Approximate distance in metres from a position to the covered area, 0
+   inside. Uses the raw dataset boxes (the per-tile extent handled by
+   [in_range] shrinks them by ~0.57 degrees, well under the margins used here)
+   and an equirectangular approximation, ample for a tens-of-kilometres
+   decision. *)
+let distance_to_coverage ~lat ~lon =
+  let box_dist (min_lat, max_lat, min_lon, max_lon) =
+    let clat = Float.max min_lat (Float.min max_lat lat) in
+    let clon = Float.max min_lon (Float.min max_lon lon) in
+    let dlat = (lat -. clat) *. 111320. in
+    let dlon = (lon -. clon) *. 111320. *. cos (lat *. pi /. 180.) in
+    sqrt ((dlat *. dlat) +. (dlon *. dlon))
+  in
+  Float.min (box_dist (42., 47., 4., 10.)) (box_dist (-22., -20., 54., 57.))
+
 let get_current_position ~size =
   let open Fut.Syntax in
   let open Brr_io.Geolocation in
-  let opts = opts ~high_accuracy:true () in
-  let+ pos = get ~opts (of_navigator Brr.G.navigator) in
-  match pos with
-  | Ok pos ->
-      let lat = Pos.latitude pos in
-      let lon = Pos.longitude pos in
-      if in_range ~size ~lat ~lon then Some (lat, lon, 0., 90., 1.0) else None
-  | Error _ -> None
+  let geo = of_navigator Brr.G.navigator in
+  let use pos =
+    let lat = Pos.latitude pos in
+    let lon = Pos.longitude pos in
+    if in_range ~size ~lat ~lon then Some (lat, lon, 0., 90., 1.0) else None
+  in
+  (* Coarse probe first: a cached or network-derived fix arrives nearly
+     instantly and lets a user far from the covered area fall back to the
+     preset without sitting out a GPS acquisition. Coarse fixes can be off by
+     tens of kilometres (IP geolocation), so this phase only ever decides
+     negatively, and only when the fix lies outside coverage by more than its
+     own reported accuracy plus a margin. *)
+  let* coarse =
+    get
+      ~opts:
+        (opts ~high_accuracy:false ~maximum_age_ms:600_000 ~timeout_ms:4_000 ())
+      geo
+  in
+  let clearly_outside =
+    match coarse with
+    | Ok pos ->
+        distance_to_coverage ~lat:(Pos.latitude pos) ~lon:(Pos.longitude pos)
+        > Pos.accuracy pos +. 10_000.
+    | Error _ -> false
+  in
+  if clearly_outside then Fut.return None
+  else
+    let+ precise =
+      get
+        ~opts:
+          (opts ~high_accuracy:true ~maximum_age_ms:30_000 ~timeout_ms:15_000 ())
+        geo
+    in
+    match precise with
+    | Ok pos -> use pos
+    | Error _ -> (
+        (* No precise fix within the timeout: a tight coarse fix (wifi-grade,
+           not an IP guess) inside the covered area still beats the preset. *)
+        match coarse with
+        | Ok pos when Pos.accuracy pos < 2_000. -> use pos
+        | Ok _ | Error _ -> None)
 
 type location_source = Url | Geolocation | Preset
 
