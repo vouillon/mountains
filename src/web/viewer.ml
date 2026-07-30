@@ -1724,26 +1724,61 @@ let draw terrain_pid terrain_geo _tile_texture _relief_texture triangle_pid
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
   (* Azimuth culling: the grid spans a fixed 90° wedge centred on
-     [snapped_alpha], but the frustum needs much less. The frustum is contained
-     in the cone of half-angle β about the view axis, tan β = hypot (1/x_scale,
-     1/y_scale) (the view-axis-to-corner angle; roll-independent). A cone of
-     half-angle β whose axis sits at elevation ε spans azimuths within
-     Δ = asin (sin β / cos ε) of the axis azimuth, provided sin β < cos ε (else
-     it swallows the zenith and every azimuth is needed). Add two sectors of
+     [snapped_alpha], but the frustum needs much less. The frustum is the cone
+     spanned by its four corner rays (±1/x_scale, ±1/y_scale, -1) in view
+     space. Along a frustum edge the direction is affine in the edge parameter,
+     so its horizontal projection sweeps a straight segment and the azimuth is
+     monotonic (d/dt atan2 has a constant numerator): the azimuth extremes of
+     the frustum are attained at the four corners, and Δ is exactly the largest
+     azimuth offset of a corner. This is roll-aware — the cone bound
+     tan β = hypot (1/x_scale, 1/y_scale) it replaces had to cover the corner
+     under the worst roll, which costs 2x at the portrait default. If the world
+     vertical axis lies inside the frustum every azimuth is spanned, so the
+     full wedge is needed; in view space the vertical is (r.z, u.z, ∓f.z) with
+     r, u the view X, Y axes in world space, so that test is
+     |r.z| ≤ |f.z|/x_scale and |u.z| ≤ |f.z|/y_scale (written with [not (>)] so
+     a degenerate orientation (NaN) falls back too). Add two sectors of
      margin — one for the azimuth span of a single triangle, one for the
      [snapped_alpha] quantisation — then round outward to whole index blocks. *)
   let half_blocks =
     let tx = 1. /. x_scale and ty = 1. /. y_scale in
-    let tan_beta = sqrt ((tx *. tx) +. (ty *. ty)) in
-    let sin_beta = tan_beta /. sqrt (1. +. (tan_beta *. tan_beta)) in
+    (* r and u are columns 0 and 1 of [orientation]'s rotation (column 2 is
+       -[fwd]), expanded as scalars — cf. [Quaternion.to_matrix] — so that no
+       vector is allocated here. *)
+    let qx = orientation.Quaternion.x
+    and qy = orientation.Quaternion.y
+    and qz = orientation.Quaternion.z
+    and qw = orientation.Quaternion.w in
+    let xx = qx *. qx and yy = qy *. qy and zz = qz *. qz in
+    let xy = qx *. qy and xz = qx *. qz and yz = qy *. qz in
+    let wx = qw *. qx and wy = qw *. qy and wz = qw *. qz in
+    let rx = 1. -. (2. *. (yy +. zz))
+    and ry = 2. *. (xy +. wz)
+    and rz = 2. *. (xz -. wy) in
+    let ux = 2. *. (xy -. wz)
+    and uy = 1. -. (2. *. (xx +. zz))
+    and uz = 2. *. (yz +. wx) in
     let fx = fwd.Matrix.x and fy = fwd.Matrix.y and fz = fwd.Matrix.z in
-    let horiz2 = (fx *. fx) +. (fy *. fy) in
-    let cos_eps = sqrt (horiz2 /. (horiz2 +. (fz *. fz))) in
+    let afz = abs_float fz in
     let max_blocks = n_index_blocks / 2 in
-    (* [not (<)] so a degenerate orientation (NaN) falls back to the full wedge *)
-    if not (sin_beta < cos_eps) then max_blocks
+    if (not (abs_float rz > tx *. afz)) && not (abs_float uz > ty *. afz) then
+      max_blocks
     else
-      let delta = asin (sin_beta /. cos_eps) +. (2. *. grid_k) in
+      (* Corner (sa, sb) points along d = sa·tx·r + sb·ty·u + f, at azimuth
+         offset atan2 (f × d, f · d) = atan2 (sa·ca + sb·cb, h + sa·da + sb·db)
+         from [current_azimuth] (horizontal components only). *)
+      let ax = tx *. rx and ay = tx *. ry in
+      let bx = ty *. ux and by = ty *. uy in
+      let ca = (fx *. ay) -. (fy *. ax) and cb = (fx *. by) -. (fy *. bx) in
+      let da = (fx *. ax) +. (fy *. ay) and db = (fx *. bx) +. (fy *. by) in
+      let h = (fx *. fx) +. (fy *. fy) in
+      let o1 = abs_float (atan2 (ca +. cb) (h +. da +. db)) in
+      let o2 = abs_float (atan2 (ca -. cb) (h +. da -. db)) in
+      let o3 = abs_float (atan2 (cb -. ca) (h -. da +. db)) in
+      let o4 = abs_float (atan2 (-.ca -. cb) (h -. da -. db)) in
+      let delta =
+        Float.max (Float.max o1 o2) (Float.max o3 o4) +. (2. *. grid_k)
+      in
       let n =
         int_of_float (ceil (delta /. (float index_block_size *. grid_k)))
       in
