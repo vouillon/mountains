@@ -51,8 +51,16 @@ let load ~lat ~lon ~size =
   let full_ba : (int, int8_unsigned_elt, c_layout) Array1.t =
     Array1.create int8_unsigned c_layout (size * size * 2)
   in
-  (* Zero out buffer *)
-  Array1.fill full_ba 0;
+  (* Pre-fill with the 16-bit encoding of 0 m (little-endian; see
+     [get_height]): sub-tiles that do not exist -- open sea, e.g. the
+     Mediterranean south of Marseille -- must read as sea level, not as the
+     -500 m that zero bytes decode to. 3449 = round (500 * 65535 / 9500). *)
+  let sea = 3449 in
+  let sea_low = sea land 0xff and sea_high = sea lsr 8 in
+  for i = 0 to (Array1.dim full_ba / 2) - 1 do
+    Array1.unsafe_set full_ba (2 * i) sea_low;
+    Array1.unsafe_set full_ba ((2 * i) + 1) sea_high
+  done;
 
   (* Convert center to arcseconds and compute bounds *)
   let center_lat_arcsec = Web_utils.arcsec_floor lat in

@@ -2433,9 +2433,10 @@ let parse_input_coordinates input =
     | _ -> None
 
 (* Bounds of the available DEM tiles: latitudes (min_lat, max_lat], longitudes
-   [min_lon, max_lon). *)
+   [min_lon, max_lon). Sea-only cells inside the box (the Mediterranean south
+   of Marseille) have no tiles; [Dem_loader.load] renders them at sea level. *)
 let in_range ~size ~lat ~lon =
-  Dem_loader.in_range ~size ~min_lat:43 ~max_lat:47 ~min_lon:5 ~max_lon:10 ~lat
+  Dem_loader.in_range ~size ~min_lat:42 ~max_lat:47 ~min_lon:4 ~max_lon:10 ~lat
     ~lon
   || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:54
        ~max_lon:57 ~lat ~lon
