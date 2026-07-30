@@ -7,7 +7,11 @@ val test :
   dst_y:int ->
   unit ->
   bool
-(** Test visibility between two points.
+(** Test visibility between two points by whole-pixel sampling along the line.
+    [src_h] is used as given, with no eye-height clamp ([test_precise] delegates
+    mid-ray with exact ray heights); it defaults to the source terrain + 2 m.
+    Terrain within min(10 pixels, 6% of the distance) of the destination does
+    not occlude, so a summit sticks out of its own massif.
     @param get_height function to get height at (row, col)
     @param src_h source elevation
     @param src_x source column
@@ -33,13 +37,17 @@ val test_precise :
   dst_y:int ->
   unit ->
   bool
-(** Precise visibility test for short distances using bilinear interpolation.
-    Tests visibility from (src_x + off_x, src_y + off_y) to (dst_x, dst_y). Uses
-    small fixed steps (1 pixel) for accurate sampling up to a few hundred
-    meters.
+(** Precise visibility test. Tests visibility from (src_x + off_x, src_y +
+    off_y) to (dst_x, dst_y). Walks the ray in 0.02-pixel steps (~0.6 m) with
+    bilinear interpolation for the first 6 pixels (~185 m), then delegates to
+    [test]. The source's 1-pixel neighbourhood must lie inside the height grid.
     @param get_height function to get height at (row, col)
     @param src_h
       optional override for source elevation (defaults to terrain + 2m)
+    @param curvature
+      metres per pixel (x, y): when given, heights are evaluated in the
+      observer-anchored frame lowered by the Earth-curvature drop, in which
+      sight lines are straight (see {!curvature_drop})
     @param off_x fractional X offset from src_x (in pixels/meters)
     @param off_y fractional Y offset from src_y (in pixels/meters)
     @param src_x source column (integer)
