@@ -2407,7 +2407,11 @@ let parse_input_coordinates input =
       in
       let jv_parts = Jv.call jv_coords "split" [| jv_re |] in
       let parts =
-        Jv.to_list Jv.to_string jv_parts |> List.filter (fun s -> s <> "")
+        (* A coordinate token must contain a digit: this drops empty tokens
+           and lone separators, so "44.13 , 5.21" parses (the comma between
+           two whitespace runs splits into a token of its own). *)
+        Jv.to_list Jv.to_string jv_parts
+        |> List.filter (String.exists (fun c -> c >= '0' && c <= '9'))
       in
       (* Handle "45.1,6.7" (no space, just comma separator) *)
       match parts with
@@ -2421,6 +2425,13 @@ let parse_input_coordinates input =
           let s =
             if String.length s > 0 && s.[String.length s - 1] = ',' then
               String.sub s 0 (String.length s - 1)
+            else s
+          in
+          (* Leading comma, symmetrically: "44.13 ,5.21" tokenizes the
+             longitude as ",5.21" *)
+          let s =
+            if String.length s > 0 && s.[0] = ',' then
+              String.sub s 1 (String.length s - 1)
             else s
           in
           String.map (fun c -> if c = ',' then '.' else c) s
