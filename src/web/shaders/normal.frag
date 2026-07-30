@@ -4,7 +4,13 @@ uniform vec2 delta;
 uniform vec2 uv_scale;
 uniform sampler2D tile;
 in vec2 uv;
-out mediump vec4 color;
+// Two render targets: heights (16-bit fixed point, little-endian) and the
+// encoded normal go to separate RG8 textures. Every consumer reads only one of
+// the two pairs (heights via texelFetch in the vertex shaders and the AO
+// passes' NEAREST sampler, normals only through terrain.frag's filtered fetch),
+// so splitting halves the bytes per tap at identical total memory.
+layout(location = 0) out mediump vec2 height_out;
+layout(location = 1) out mediump vec2 normal_out;
 
 float get_z(vec2 offset) {
   vec2 tileCoord = uv * (size - 1.0) + 0.5;
@@ -45,5 +51,6 @@ void main() {
   float h_low = mod(h_val, 256.0) / 255.0;
 
   // Little-Endian: R=Low, G=High
-  color = vec4(h_low, h_high, encN.x, encN.y);
+  height_out = vec2(h_low, h_high);
+  normal_out = encN;
 }

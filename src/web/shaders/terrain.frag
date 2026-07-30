@@ -1,7 +1,9 @@
 precision mediump float; // Default mediump for mobile performance
 precision highp sampler2DArray;
 
-uniform highp sampler2D relief;
+// Encoded normal only (RG8). The heights live in a separate RG8 texture that
+// the vertex stage declares as `relief`; this stage never reads them.
+uniform highp sampler2D relief_normal;
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
@@ -344,8 +346,8 @@ void main() {
   vec3 fog_color =
       mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_n.z));
 
-  // Decode normal from relief texture
-  mediump vec2 encodedN = texture(relief, reliefCoord).ba;
+  // Decode normal from the relief normal texture
+  mediump vec2 encodedN = texture(relief_normal, reliefCoord).rg;
   vec3 normal;
   normal.xy = encodedN * 2.0 - 1.0;
   normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));

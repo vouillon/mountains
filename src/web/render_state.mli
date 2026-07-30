@@ -44,6 +44,7 @@ type terrain_uniforms = {
   proj : Gl.uniform_location;
   transform : Gl.uniform_location;
   relief : Gl.uniform_location;
+  relief_normal : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;

@@ -889,28 +889,52 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   let max_level = Web_utils.log2 (max width height) in
   let levels = max_level + 1 in
 
-  let tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
-    Gl.linear_mipmap_linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
-  apply_anisotropic_filtering ctx;
+  (* Heights and encoded normals live in two RG8 pyramids instead of one RGBA8:
+     every consumer used to discard half of every texel. [filtered] tells them
+     apart — the normal texture is the only one sampled through [texture()]
+     (terrain.frag's fragment normal decode), while the height texture is only
+     ever read by [texelFetch] (the vertex LOD system, which still needs the
+     full mip chain) or through the AO passes' NEAREST sampler object. Total
+     memory is unchanged; bytes per tap are halved on both paths. *)
+  let create_rg8_pyramid ~filtered =
+    let id = Gl.create_texture ctx in
+    Gl.bind_texture ctx Gl.texture_2d (Some id);
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
+    if filtered then begin
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+        Gl.linear_mipmap_linear;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear
+    end
+    else begin
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+        Gl.nearest_mipmap_nearest;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest
+    end;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+    if filtered then apply_anisotropic_filtering ctx;
+    Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg8 width height;
+    id
+  in
+  let tid = create_rg8_pyramid ~filtered:false in
+  let nid = create_rg8_pyramid ~filtered:true in
 
-  (* Use RGBA8 (4 bytes per pixel) *)
-  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 width height;
-
+  (* normal.frag writes heights to attachment 0 and the encoded normal to
+     attachment 1, so both pyramids are filled by the same passes as before. *)
   let fb = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
-  let attachmentPoint = Gl.color_attachment0 in
-  Gl.framebuffer_texture2d ctx Gl.framebuffer attachmentPoint Gl.texture_2d tid
-    0;
+  let attach_level level =
+    Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+      Gl.texture_2d tid level;
+    Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment1
+      Gl.texture_2d nid level
+  in
+  attach_level 0;
+  Gl.draw_buffers ctx [ Gl.color_attachment0; Gl.color_attachment1 ];
   Gl.viewport ctx 0 0 width height;
 
-  (* Clear relief texture to zero first *)
+  (* Clear both relief textures to zero first *)
   Gl.clear_color ctx 0. 0. 0. 0.;
   Gl.clear ctx Gl.color_buffer_bit;
 
@@ -952,14 +976,19 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rg8 width height;
   Gl.bind_texture ctx Gl.texture_2d None;
 
+  (* Separate single-attachment framebuffer for the height downsample: [fb] has
+     a normal target bound to attachment 1 and downsample.frag writes no second
+     output, so reusing it would leave that attachment undefined. *)
+  let ds_fb = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    temp_tid 0;
+
   let rec loop level w h =
     if level > max_level || w < 1 || h < 1 then ()
     else (
       (* 1. Downsample Height: tid(Level N-1) -> temp_tid *)
-
-      (* Bind FBO to Temp Texture *)
-      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
-        Gl.texture_2d temp_tid 0;
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
 
       (* Bind Source: tid *)
       Gl.active_texture ctx Gl.texture0;
@@ -979,11 +1008,11 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
       (* Draw Quad *)
       Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
 
-      (* 2. Compute Normals: temp_tid -> tid(Level N) *)
+      (* 2. Compute Normals: temp_tid -> tid/nid(Level N) *)
 
-      (* Bind FBO to Dest: tid(Level N) *)
-      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
-        Gl.texture_2d tid level;
+      (* Bind FBO to Dest: tid and nid at Level N *)
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
+      attach_level level;
 
       (* Bind Source: temp_tid *)
       Gl.active_texture ctx Gl.texture0;
@@ -1026,10 +1055,12 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
   (* Restore Framebuffer *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.delete_framebuffer ctx ds_fb;
+  Gl.delete_framebuffer ctx fb;
 
   Gl.bind_vertex_array ctx None;
 
-  tid
+  (tid, nid)
 
 let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
@@ -1456,11 +1487,13 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
 
 (** Bind all terrain textures to their units. Call at init and after
     draw_shadows. *)
-let bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map
-    ~shadow_map ~cover_map_texture ~palette_texture =
+let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
+    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture =
   let open Brr_canvas in
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
+  Gl.active_texture ctx Gl.texture2;
+  Gl.bind_texture ctx Gl.texture_2d (Some relief_normal_texture);
   Gl.active_texture ctx Gl.texture3;
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
   Gl.active_texture ctx Gl.texture5;
@@ -2117,7 +2150,7 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
     graphics
   in
   let tile_texture = make_tile_texture ctx tile in
-  let relief_texture =
+  let relief_texture, relief_normal_texture =
     time_gpu ctx "compute_relief" (fun () ->
         compute_relief ctx w h lat triangle_geo tile_texture normal_pid
           downsample_pid relief_uniforms downsample_uniforms)
@@ -2184,8 +2217,8 @@ let tri ~w ~h ~x ~y ~height ~lat ~lon ~points ~tile canvas ctx ~detail_map
         ~relief_texture ctx);
 
   (* Bind all terrain textures at init - after all textures are created *)
-  bind_terrain_textures ctx ~relief_texture ~ao_texture ~detail_map ~shadow_map
-    ~cover_map_texture ~palette_texture;
+  bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
+    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture;
 
   (* Session-static state that was needlessly re-set every frame. Must come
      after the bake passes above, which set their own clear colours. *)
