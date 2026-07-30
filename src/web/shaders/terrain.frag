@@ -290,17 +290,25 @@ vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
   // Deep water color (linear space)
   vec3 waterColor = vec3(0.01, 0.04, 0.12);
 
+  // Shallow water reads greener: the mask's shore band doubles as a depth
+  // cue (lakes are coverage-rasterized, there is no bathymetry).
+  vec3 shallowColor = vec3(0.035, 0.10, 0.11);
+  waterColor = mix(shallowColor, waterColor, smoothstep(0.5, 0.95, waterMask));
+
   // Shoreline foam zone
   float shoreZone =
       smoothstep(0.2, 0.6, waterMask) * (1.0 - smoothstep(0.6, 1.0, waterMask));
   vec3 foamColor = vec3(0.35, 0.40, 0.45);
 
-  // Simple ripple pattern
-  float ripples = sin(worldPos.x * 0.3) * sin(worldPos.y * 0.3) * 0.5 + 0.5;
-
   vec3 result = mix(baseColor, waterColor, waterMask);
-  result = mix(result, foamColor, shoreZone * ripples * 0.4);
-
+  if (shoreZone > 0.01) {
+    // Patchy foam from the detail noise (was an axis-aligned sine grid);
+    // the fetch is gated on the continuous shore band, see the UB note
+    // above getWaterMask.
+    float foam =
+        smoothstep(0.35, 0.75, texture(u_detailMap, worldPos * 0.08).a);
+    result = mix(result, foamColor, shoreZone * foam * 0.5);
+  }
   return result;
 }
 
@@ -469,8 +477,13 @@ void main() {
     // Skip wave calculations if too far (optimization)
     if (waveFade > 0.01) {
       // 1. Low frequency waves (Swell) - Isotropic Interference Pattern
-      // Using 3 waves at 120-degree offsets to eliminate directional banding
+      // Using 3 waves at 120-degree offsets to eliminate directional banding.
+      // The domain is warped by the low-frequency noise so the interference
+      // lattice's phase drifts from patch to patch instead of staying
+      // aligned across the whole lake; the warp is near-constant at the
+      // 126 m wavelength, so the analytic derivatives below stay valid.
       highp vec2 waveCoord = v_world_pos.xy * 0.05;
+      waveCoord += (texNoise.rb + texNoise.ga - 2.0 * texNoise.gb) * 5.0;
 
       // Wave 1: 0 degrees, Freq 1.0
       float w1 = sin(waveCoord.x);
@@ -493,8 +506,16 @@ void main() {
       float dw3_dx = dw3_base * -0.5;
       float dw3_dy = dw3_base * -0.866;
 
-      vec3 waveNormal = normalize(vec3(-(dw1_dx + dw2_dx + dw3_dx),
-                                       -(dw1_dy + dw2_dy + dw3_dy),
+      // Wind patchiness: modulate the swell amplitude with two noise fields —
+      // the 500 m one already sampled for the terrain, and one at an
+      // incommensurate ~1.4 km scale so their product repeats only over tens
+      // of kilometres (texNoise alone tiles every 500 m). The product gives
+      // real calm/active contrast, like gusts on a lake.
+      vec4 gustTex =
+          texture(u_detailMap, v_world_pos.xy * 0.00073 + vec2(0.37, 0.71));
+      float gust = 0.25 + (2.6 * texNoise.g * gustTex.g);
+      vec3 waveNormal = normalize(vec3(-(dw1_dx + dw2_dx + dw3_dx) * gust,
+                                       -(dw1_dy + dw2_dy + dw3_dy) * gust,
                                        20.0 // Higher divisor = flatter waves
                                        ));
 
@@ -512,7 +533,7 @@ void main() {
       vec2 r2 = texture(u_detailMap, uv2).gb * 2.0 - 1.0;
 
       // Combine vectors
-      vec2 rippleXY = r1 + r2;
+      vec2 rippleXY = (r1 + r2) * (0.45 + (1.2 * gustTex.b));
 
       // Construct Normal
       // Z-component controls flatness (Higher = Flatter)
