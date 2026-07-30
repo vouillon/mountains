@@ -8,7 +8,8 @@ module Triangulator : sig
   (** Triangulate multiple polygons sharing a vertex array. *)
 
   val polygon_area : float array -> Geometry_types.polygon -> float
-  (** Compute the signed area of a polygon. *)
+  (** Compute the area of a polygon: the absolute area of the outer ring minus
+      the absolute areas of its holes, regardless of ring orientation. *)
 
   val verbose : bool ref
   (** Enable verbose logging for debugging triangulation issues. *)

@@ -244,20 +244,21 @@ module PolygonList = struct
     (* Safety for degenerate lists *)
     if t.next.(start_node) = start_node then 1 else loop t.next.(start_node) 1
 
-  (* Filter collinear and duplicate nodes *)
+  (* Filter duplicate nodes (collinear points are removed in the main
+     clipping loop) *)
   let filter_points (verts : float array) t start_node =
     let curr = ref start_node in
     let end_node = ref start_node in
     let again = ref true in
 
-    while !again || !curr != !end_node do
+    while !again || !curr <> !end_node do
       again := false;
       (* Check if valid ring (>=3) before simplifying *)
       let i = !curr in
       let prev_i = t.prev.(i) in
       let next_i = t.next.(i) in
 
-      if prev_i != i && next_i != i then
+      if prev_i <> i && next_i <> i then
         (* At least 3 nodes *)
         let p1 = t.vert_idx.(prev_i) in
         let p2 = t.vert_idx.(i) in
@@ -390,15 +391,12 @@ module Triangulator = struct
     map
 
   (* Find if any vertex in the hole touches (has same coordinates as) any vertex
-     in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
-     After checking, adds all hole vertices to outer_map for future lookups.
-     Two-pass approach handles holes with duplicate coordinates correctly. *)
+     in the current outer ring. Uses hash table for O(1) lookup per hole vertex. *)
   let find_touching_point (verts : float array) hole_start_node
       (outer_map : outer_vertex_map) poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let next = poly_list.next in
-    (* Pass 1: Find touching point *)
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
     let result = ref None in
@@ -411,7 +409,18 @@ module Triangulator = struct
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done;
-    (* Pass 2: Add all hole vertices to outer_map *)
+    !result
+
+  (* Add all hole vertices to outer_map for future touching-point lookups.
+     Must be called only once the hole is known to merge into the outer ring,
+     and before the merge rewires the hole's links: entries pointing at nodes
+     that never join the outer ring would let a later hole splice into a
+     disconnected loop. *)
+  let register_hole_vertices (verts : float array) hole_start_node
+      (outer_map : outer_vertex_map) poly_list =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let next = poly_list.next in
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
     while !hole_loop do
@@ -421,8 +430,7 @@ module Triangulator = struct
         Hashtbl.add outer_map key !hole_curr;
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
-    done;
-    !result
+    done
 
   (* Merge a touching hole directly at the shared vertex without creating bridges.
      The hole is spliced into the outer ring at the touching point. *)
@@ -486,7 +494,8 @@ module Triangulator = struct
     if straddles || horizontal then
       let x_int_opt =
         if horizontal then
-          if mx <= nx || mx <= vx then Some (fmax mx vx) else None
+          (* Nearest point of the segment at or beyond mx *)
+          if mx <= nx || mx <= vx then Some (fmax mx (fmin vx nx)) else None
         else
           (* Standard intersection *)
           let t_edge = (my -. vy) /. dy in
@@ -510,9 +519,9 @@ module Triangulator = struct
       ( get_x verts vert_idx.(current_vertex_node),
         get_y verts vert_idx.(current_vertex_node) )
     in
-    let best_len_sq =
-      ((best_nx -. best_px) ** 2.0) +. ((best_ny -. best_py) ** 2.0)
-    in
+    let dx = best_nx -. best_px in
+    let dy = best_ny -. best_py in
+    let best_len_sq = (dx *. dx) +. (dy *. dy) in
 
     if !verbose then
       Printf.eprintf
@@ -612,7 +621,9 @@ module Triangulator = struct
               let nx2, ny2 =
                 (get_x verts vert_idx.(n_node), get_y verts vert_idx.(n_node))
               in
-              let len_sq = ((nx2 -. px) ** 2.0) +. ((ny2 -. py) ** 2.0) in
+              let dx = nx2 -. px in
+              let dy = ny2 -. py in
+              let len_sq = (dx *. dx) +. (dy *. dy) in
 
               if
                 resolve_vertex_tie verts poly_list !best.vertex_node
@@ -637,10 +648,14 @@ module Triangulator = struct
               else best := { !best with is_vertex = true; vertex_node = n }
             else if not !best.is_vertex then
               (* Edge tie: Prefer shorter edge *)
-              let curr_len_sq = ((nx -. vx) ** 2.0) +. ((ny -. vy) ** 2.0) in
+              let dx = nx -. vx in
+              let dy = ny -. vy in
+              let curr_len_sq = (dx *. dx) +. (dy *. dy) in
               let bx, by = (get_x verts !best.vi_p, get_y verts !best.vi_p) in
               let bnx, bny = (get_x verts !best.vi_n, get_y verts !best.vi_n) in
-              let best_len_sq = ((bnx -. bx) ** 2.0) +. ((bny -. by) ** 2.0) in
+              let bdx = bnx -. bx in
+              let bdy = bny -. by in
+              let best_len_sq = (bdx *. bdx) +. (bdy *. bdy) in
 
               if curr_len_sq < best_len_sq then
                 best :=
@@ -714,7 +729,9 @@ module Triangulator = struct
       done;
 
       let sorted_reflex =
-        List.sort (fun (t1, _) (t2, _) -> compare t1 t2) !reflex_candidates
+        List.sort
+          (fun (t1, _) (t2, _) -> Float.compare t1 t2)
+          !reflex_candidates
       in
 
       let rec try_reflex = function
@@ -741,12 +758,13 @@ module Triangulator = struct
     match find_touching_point verts hole_start_node outer_map poly_list with
     | Some (hole_touch, outer_touch) ->
         (* Hole touches outer ring - merge directly without bridge *)
-        (* Note: find_touching_point already added hole vertices to outer_map *)
+        register_hole_vertices verts hole_start_node outer_map poly_list;
         Some (merge_touching_hole verts hole_touch outer_touch poly_list)
     | None -> (
         (* No touching point - use standard bridge-based merge *)
         match find_bridge_point verts hole_start_node outer_node poly_list with
         | Some target ->
+            register_hole_vertices verts hole_start_node outer_map poly_list;
             let open PolygonList in
             (* Record the bridge for visualization *)
             let h_idx = poly_list.vert_idx.(hole_start_node) in
@@ -841,6 +859,10 @@ module Triangulator = struct
 
     (* Build Static R-tree with only REFLEX vertices for Ear Clipping.
        In a simple polygon, only reflex vertices can intrude into an ear.
+       Clipping a true ear only shrinks interior angles at its neighbors, so
+       this initial reflex set stays a superset of all future reflex vertices.
+       Forced clips (stall recovery) can break that invariant, but by then the
+       geometry is already inconsistent.
        For small polygons, skip the R-tree and use brute-force iteration. *)
     let reflex_items =
       let acc = ref [] in
@@ -1122,9 +1144,10 @@ module Triangulator = struct
         Printf.printf "EMERGENCY: %d vertices remaining after main loop\n%!"
           !count;
       let i = ref !curr in
-      let stop = !curr in
       let loop = ref true in
       let skipped = ref 0 in
+      (* Every iteration unlinks a node, so the ring shrinks until the
+         two-node check fires *)
       while !loop do
         let n = next.(!i) in
         let p = prev.(!i) in
@@ -1154,8 +1177,7 @@ module Triangulator = struct
           else incr skipped;
           next.(p) <- n;
           prev.(n) <- p;
-          i := n;
-          if !i = stop then loop := false
+          i := n
       done;
       if !verbose && !skipped > 0 then
         Printf.printf "EMERGENCY: Skipped %d inverted triangles\n%!" !skipped
@@ -1238,8 +1260,8 @@ module Triangulator = struct
         (* Sort holes by max X desc, then max Y desc (Step 1 of Eberly) *)
         Array.sort
           (fun (_, x1, y1) (_, x2, y2) ->
-            let cx = compare x2 x1 in
-            if cx <> 0 then cx else compare y2 y1)
+            let cx = Float.compare x2 x1 in
+            if cx <> 0 then cx else Float.compare y2 y1)
           processed_holes;
 
         (* Build hash table for O(1) outer ring vertex lookups *)
@@ -1604,6 +1626,9 @@ module Triangulator = struct
           in
           actual := !actual +. triangle_area verts i1 i2 i3
         done;
+        (* With areas in map units this absolute threshold is almost always
+           exceeded by float error alone, so the diagnostics below effectively
+           run for every polygon; the ratio check is the real filter. *)
         if abs_float (expected -. !actual) >= 1e-11 then begin
           let ratio = !actual /. expected in
 
@@ -1628,12 +1653,6 @@ module Triangulator = struct
                 out_buffer.(v_idx + 1),
                 out_buffer.(v_idx + 2) )
             in
-            (*
-            let x1, y1 = (Geometry.get_x verts i1, Geometry.get_y verts i1) in
-            let x2, y2 = (Geometry.get_x verts i2, Geometry.get_y verts i2) in
-            let x3, y3 = (Geometry.get_x verts i3, Geometry.get_y verts i3) in
-*)
-
             let d12_sq = Geometry.dist_sq verts i1 i2 in
             let d23_sq = Geometry.dist_sq verts i2 i3 in
             let d31_sq = Geometry.dist_sq verts i3 i1 in
@@ -1652,7 +1671,7 @@ module Triangulator = struct
                 ((a *. a) +. (b *. b) -. (c *. c)) /. (2.0 *. a *. b)
               in
               let cos_c = Geometry.fmax (-1.0) (Geometry.fmin 1.0 cos_c) in
-              acos cos_c *. 180.0 /. 3.14159265
+              acos cos_c *. 180.0 /. Float.pi
             in
             if d12 > 1e-9 && d23 > 1e-9 && d31 > 1e-9 then begin
               min_angle := Geometry.fmin !min_angle (angle d12 d23 d31);
