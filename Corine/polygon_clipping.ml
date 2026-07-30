@@ -66,8 +66,11 @@ module Clipper = struct
      This manually duplicates the loop 4 times to ensure the 'edge' check
      and intersection math are fully constant-folded by the compiler. *)
   let clip_pass input_data input_start input_len output_buf region edge =
-    FloatBuffer.ensure_capacity output_buf (input_len * 2);
+    (* Clear first so a resize in ensure_capacity does not copy stale data.
+       Each input vertex emits at most 2 points (intersection + vertex), so
+       [input_len * 2] is the exact worst case. *)
     FloatBuffer.clear output_buf;
+    FloatBuffer.ensure_capacity output_buf (input_len * 2);
 
     if input_len > 0 then begin
       let prev_idx = input_start + input_len - 1 in
@@ -201,7 +204,8 @@ module Clipper = struct
         0 polygons
     in
 
-    (* Work buffers: 2x ring size + overhead is usually safe for non-degenerate cases *)
+    (* Work buffers: initial size is only an estimate to limit reallocation;
+       ensure_capacity in each clip pass grows them as needed *)
     let work_cap = (max_ring * 2) + 32 in
     let buf_p1 = FloatBuffer.create work_cap in
     let buf_p2 = FloatBuffer.create work_cap in
