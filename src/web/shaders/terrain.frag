@@ -258,7 +258,17 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
                                     bumpStrength);
 }
 
-// Procedural water with organic shoreline
+// Procedural water with organic shoreline.
+// The implicit-LOD texture() below sits in non-uniform control flow, which
+// the spec leaves undefined -- accepted here: [waterFactor] is bilinearly
+// interpolated so the branch is quad-coherent except on the shoreline-edge
+// quads, where the worst case is one wrongly-mipped sample of decorative
+// jitter (and mipmapping drives the noise to 0.5 at range anyway). If
+// shoreline sparkle is ever observed on a device, the defined-behavior fix
+// is dFdx/dFdy on the uv outside the branch + textureGrad inside; it was
+// not applied preemptively because textureGrad takes a slower sampling path
+// on mobile GPUs. Same reasoning covers the wave fetches gated on
+// [waterMask] in applyWaterEffects.
 float getWaterMask(highp vec2 worldPos, float waterFactor) {
   if (waterFactor >= 0.01 && waterFactor < 0.99) {
     float noise_val = texture(u_detailMap, worldPos.xy * 0.2).r;
