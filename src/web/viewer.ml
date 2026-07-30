@@ -402,10 +402,15 @@ let init_anisotropic_filtering ctx =
   end
   else Format.eprintf "Anisotropic filtering not supported@."
 
-let apply_anisotropic_filtering ctx =
+let apply_anisotropic_filtering ?limit ctx =
   if !max_anisotropy > 1.0 then
+    let v =
+      match limit with
+      | Some l -> Float.min l !max_anisotropy
+      | None -> !max_anisotropy
+    in
     (* TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE *)
-    Gl.tex_parameterf ctx Gl.texture_2d 0x84FE !max_anisotropy
+    Gl.tex_parameterf ctx Gl.texture_2d 0x84FE v
 
 (* Detect supported compressed texture format *)
 type compressed_format = BC7 | ASTC | ETC2
@@ -490,7 +495,11 @@ let load_compressed_detail_map ctx tid =
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.repeat;
-            apply_anisotropic_filtering ctx;
+            (* The detail map is band-limited noise sampled 4-5x per fragment
+               at grazing angles: 16x anisotropy is the single most expensive
+               fetch group in the terrain shader and 4x is visually identical
+               (verified against pinned A/B captures). *)
+            apply_anisotropic_filtering ~limit:4.0 ctx;
             Gl.active_texture ctx Gl.texture0;
             force_redraw := true;
             Format.eprintf "Loaded compressed texture %s (%dx%d, %d levels)@."
