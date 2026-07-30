@@ -114,6 +114,35 @@ let decode_dataset ~inst msg =
   let data_ba = Brr.Tarray.to_bigarray1 data_ta in
 
   let header_size = 28 in
+  (* Validate the header: the -500..9000 m elevation range is hardcoded in
+     [Dem_loader.get_height], the sea-fill value and the terrain shaders, so
+     a tile encoded with a different range must fail loudly here rather than
+     silently decode to wrong heights. *)
+  if
+    Bigarray.Array1.dim data_ba < header_size
+    || Bigarray.Array1.get data_ba 0 <> Char.code 'D'
+    || Bigarray.Array1.get data_ba 1 <> Char.code 'E'
+    || Bigarray.Array1.get data_ba 2 <> Char.code 'M'
+    || Bigarray.Array1.get data_ba 3 <> Char.code '1'
+  then failwith "DEM tile: bad magic";
+  let get_f32_le offset =
+    let b i = Int32.of_int (Bigarray.Array1.get data_ba (offset + i)) in
+    Int32.float_of_bits
+      (Int32.logor (b 0)
+         (Int32.logor
+            (Int32.shift_left (b 1) 8)
+            (Int32.logor
+               (Int32.shift_left (b 2) 16)
+               (Int32.shift_left (b 3) 24))))
+  in
+  let min_elev = get_f32_le 12 in
+  let max_elev = get_f32_le 16 in
+  if min_elev <> -500.0 || max_elev <> 9000.0 then
+    failwith
+      (Printf.sprintf
+         "DEM tile: elevation range %g..%g does not match the expected \
+          -500..9000"
+         min_elev max_elev);
   let width = get_uint32_le_ba data_ba 4 in
   let height = get_uint32_le_ba data_ba 8 in
   let high_size = get_uint32_le_ba data_ba 20 in

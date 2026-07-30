@@ -5,7 +5,7 @@
    2. Apply parallelogram predictor: Residue = Val - (Left + Up - UpLeft)
    3. Zigzag encode the signed residues to unsigned values
    4. Split into high byte and low byte streams
-   5. Compress each stream separately with gzip
+   5. Compress each stream separately with zlib
 *)
 
 (* --- TIFF Reading (simplified, synchronous version) --- *)
@@ -50,15 +50,15 @@ let read_ifd ch offset =
 
 let ifd_uint16 tag ifd =
   let v = IntMap.find tag ifd in
-  assert (v.typ = 3);
-  assert (v.count = 1l);
+  if v.typ <> 3 || v.count <> 1l then
+    failwith (Printf.sprintf "TIFF: tag %d is not a single SHORT value" tag);
   Int32.to_int v.offset
 
 let ifd_int32s tag ifd ch =
   let v = IntMap.find tag ifd in
   let count = Int32.to_int v.count in
-  assert (v.typ = 4);
-  assert (count > 1);
+  if v.typ <> 4 || count <= 1 then
+    failwith (Printf.sprintf "TIFF: tag %d is not a LONG array" tag);
   let a = Array.make count 0l in
   seek_in ch (Int32.to_int v.offset);
   for i = 0 to count - 1 do
@@ -68,7 +68,8 @@ let ifd_int32s tag ifd ch =
 
 let read_tiff_info ch =
   let s = really_input_string ch 4 in
-  assert (s = "II\042\000");
+  if s <> "II\042\000" then
+    failwith "TIFF: not a little-endian classic TIFF (Copernicus COG expected)";
   let offset = read_int32_le ch in
   let ifd = read_ifd ch offset in
   let width = ifd_uint16 256 ifd in
@@ -78,14 +79,17 @@ let read_tiff_info ch =
   let tile_offsets = ifd_int32s 324 ifd ch in
   let tile_byte_counts = ifd_int32s 325 ifd ch in
   (* Verify expected format *)
-  assert (ifd_uint16 258 ifd = 32);
-  (* 32 bits per sample *)
-  assert (ifd_uint16 259 ifd = 8);
-  (* Deflate *)
-  assert (ifd_uint16 277 ifd = 1);
-  (* 1 sample per pixel *)
-  assert (ifd_uint16 317 ifd = 3);
-  (* Floating point prediction *)
+  let check tag expected what =
+    let v = ifd_uint16 tag ifd in
+    if v <> expected then
+      failwith
+        (Printf.sprintf "TIFF: expected %s (tag %d = %d), got %d" what tag
+           expected v)
+  in
+  check 258 32 "32 bits per sample";
+  check 259 8 "Deflate compression";
+  check 277 1 "1 sample per pixel";
+  check 317 3 "floating-point prediction";
   { width; height; tile_width; tile_height; tile_offsets; tile_byte_counts }
 
 (* Decode horizontal delta prediction (TIFF predictor = 2 with float prediction) *)
@@ -128,9 +132,11 @@ let read_tile ch info i =
     Zlib.inflate_string st compressed 0 (String.length compressed) b 0
       (Bytes.length b) Zlib.Z_FINISH
   in
-  assert ok;
-  assert (i_consumed = String.length compressed);
-  assert (j_produced = Bytes.length b);
+  if
+    (not ok)
+    || i_consumed <> String.length compressed
+    || j_produced <> Bytes.length b
+  then failwith (Printf.sprintf "TIFF: truncated or corrupt tile %d" i);
   Zlib.inflate_end st;
   (* Decode floating-point prediction *)
   let b = decode_fp b tile_width tile_height in
@@ -180,7 +186,11 @@ let read_dem tiff_path =
 
 (* --- Compression Pipeline --- *)
 
-(* Parameters for 16-bit quantization *)
+(* Parameters for 16-bit quantization.
+   The client hardcodes this range (Dem_loader.get_height, its sea-fill
+   value, and HEIGHT_SCALE in the terrain shaders) and the decode worker
+   rejects tiles whose header disagrees: changing it means updating all of
+   them and regenerating every tile. *)
 let min_elevation = -500.0
 let max_elevation = 9000.0
 let scale = 65535.0 /. (max_elevation -. min_elevation)
@@ -247,7 +257,7 @@ let compress heights ~src_row ~src_col ~tile_width ~tile_height =
   (high_bytes, low_bytes)
 
 (* Compress bytes using zlib *)
-let gzip_compress input =
+let zlib_compress input =
   let input_pos = ref 0 in
   let len = Bytes.length input in
   let input_cb buf =
@@ -267,16 +277,19 @@ let gzip_compress input =
 (* Magic: "DEM1" (4 bytes)
    Width: uint32 LE
    Height: uint32 LE
-   Min elevation: float32 LE (for reconstruction)
+   Min elevation: float32 LE (validated by the decode worker)
    Max elevation: float32 LE
    High bytes compressed size: uint32 LE
    Low bytes compressed size: uint32 LE
-   High bytes data (gzip)
-   Low bytes data (gzip)
+   High bytes data (zlib)
+   Low bytes data (zlib)
 *)
 
 let write_output path width height high_compressed low_compressed =
-  let oc = open_out_bin path in
+  (* Write to a temporary file and rename, so an interrupted run cannot
+     leave a plausible-looking partial tile behind *)
+  let tmp_path = path ^ ".tmp" in
+  let oc = open_out_bin tmp_path in
   output_string oc "DEM1";
   let buf = Bytes.create 4 in
   Bytes.set_int32_le buf 0 (Int32.of_int width);
@@ -293,7 +306,8 @@ let write_output path width height high_compressed low_compressed =
   output_bytes oc buf;
   output_string oc high_compressed;
   output_string oc low_compressed;
-  close_out oc
+  close_out oc;
+  Sys.rename tmp_path path
 
 (* Compress and write a single tile *)
 let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
@@ -303,13 +317,13 @@ let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
   let high_bytes, low_bytes =
     compress heights ~src_row ~src_col ~tile_width ~tile_height
   in
-  Printf.eprintf "Gzip compressing high bytes (%d bytes)...\n%!"
+  Printf.eprintf "Compressing high bytes (%d bytes)...\n%!"
     (Bytes.length high_bytes);
-  let high_compressed = gzip_compress high_bytes in
+  let high_compressed = zlib_compress high_bytes in
   Printf.eprintf "  -> %d bytes\n%!" (String.length high_compressed);
-  Printf.eprintf "Gzip compressing low bytes (%d bytes)...\n%!"
+  Printf.eprintf "Compressing low bytes (%d bytes)...\n%!"
     (Bytes.length low_bytes);
-  let low_compressed = gzip_compress low_bytes in
+  let low_compressed = zlib_compress low_bytes in
   Printf.eprintf "  -> %d bytes\n%!" (String.length low_compressed);
   write_output output_path tile_width tile_height high_compressed low_compressed;
   Printf.eprintf "Compressed: %d + %d = %d bytes (%.2f%%)\n%!"
@@ -341,7 +355,7 @@ let parse_lat_lon filename =
     Some (lat, lon)
   with Not_found -> None
 
-type fetch_result = Ok | NotFound | Error
+type fetch_result = Fetched | NotFound | Failed
 
 (* Fetch TIFF from AWS using curl *)
 let fetch_from_aws lat lon dest =
@@ -353,14 +367,11 @@ let fetch_from_aws lat lon dest =
       lat_c (abs lat) lon_c (abs lon) lat_c (abs lat) lon_c (abs lon)
   in
   Printf.eprintf "Fetching %s...\n%!" url;
-  let cmd =
-    Printf.sprintf "curl -s -L -w \"%%{http_code}\" -o %s %s"
-      (Filename.quote dest) (Filename.quote url)
-  in
-  let ic = Unix.open_process_in cmd in
+  let args = [| "curl"; "-s"; "-L"; "-w"; "%{http_code}"; "-o"; dest; url |] in
+  let ic = Unix.open_process_args_in "curl" args in
   let http_code = try input_line ic with _ -> "" in
   let _status = Unix.close_process_in ic in
-  if http_code = "200" then Ok
+  if http_code = "200" then Fetched
   else (
     if Sys.file_exists dest then Sys.remove dest;
     if http_code = "404" then (
@@ -368,7 +379,7 @@ let fetch_from_aws lat lon dest =
       NotFound)
     else (
       Printf.eprintf "Error: Failed to fetch %s (HTTP %s)\n" url http_code;
-      Error))
+      Failed))
 
 let () =
   if Array.length Sys.argv < 3 then begin
@@ -418,7 +429,7 @@ let () =
   let heights, width, height =
     if not (Sys.file_exists input_path) then
       match fetch_from_aws lat lon input_path with
-      | Ok ->
+      | Fetched ->
           is_temp := true;
           read_dem input_path
       | NotFound ->
@@ -426,7 +437,7 @@ let () =
           let heights = Bigarray.(Array2.create Float32 C_layout) h w in
           Bigarray.Array2.fill heights 0.0;
           (heights, w, h)
-      | Error -> exit 1
+      | Failed -> exit 1
     else read_dem input_path
   in
 
@@ -437,7 +448,8 @@ let () =
     exit 1
   end;
 
-  (* Ensure dem/ subdir exists *)
+  (* Ensure the output dir and its dem/ subdir exist *)
+  if not (Sys.file_exists output_dir) then Unix.mkdir output_dir 0o775;
   let dem_dir = Filename.concat output_dir "dem" in
   if not (Sys.file_exists dem_dir) then Unix.mkdir dem_dir 0o775;
 
