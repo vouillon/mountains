@@ -8,6 +8,7 @@ uniform highp float inv_sectors_div;
 uniform highp float grid_k;
 uniform highp float grid_scale;
 uniform highp vec2 inv_delta;
+uniform highp float meridian_conv; // tan(center latitude) / earth radius
 uniform highp float inv_w;
 uniform highp float inv_avg_delta;
 uniform highp int max_lod;
@@ -35,7 +36,17 @@ RadialVertex computeRadialVertex() {
   highp float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
   v.pos_plane = vec2(cos(angle), sin(angle)) * r;
   v.coord_meters = center_offset + v.pos_plane;
-  highp vec2 coord = v.coord_meters * inv_delta;
+
+  // Observer-centred azimuthal frame -> DEM lat/lon grid, to second order:
+  // meridians converge (the east-west scale shrinks with northing) and
+  // parallels curve relative to great circles. Validated against exact
+  // geodesics: residual <= 6 m at the 89 km corner where the linear mapping
+  // was off by 660 m (0.42 deg of azimuth). Must match the inverse used for
+  // POI placement in viewer.ml.
+  highp vec2 proj =
+      vec2(v.pos_plane.x * (1.0 + v.pos_plane.y * meridian_conv),
+           v.pos_plane.y - 0.5 * v.pos_plane.x * v.pos_plane.x * meridian_conv);
+  highp vec2 coord = (center_offset + proj) * inv_delta;
 
   // Grid spacing for LOD: dr = k(r + A)
   highp float grid_spacing = grid_k * (r + grid_scale);

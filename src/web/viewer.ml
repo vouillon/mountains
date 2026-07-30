@@ -1749,12 +1749,20 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
     (* Constant for the session, but the tile origin is only known here. *)
     let off_x = Render_state.compute_sub_arcsec_offset lon in
     let off_y = Render_state.compute_sub_arcsec_offset lat in
+    let conv = Render_state.meridian_convergence ~lat in
     List.filter_map
       (fun (pt, (x', y')) ->
-        let px = deltax *. (float (x' - x) -. off_x) in
-        let py = deltay *. (float (y' - y) -. off_y) in
-        (* Same Earth-curvature drop as the terrain mesh, so the labels stay
-           anchored to the rendered summits *)
+        (* Inverse of the grid mapping in radial_common.vert (meridian
+           convergence to second order), so the labels stay anchored to the
+           rendered summits; two fixed-point iterations converge to
+           millimetres at these magnitudes. *)
+        let ge = deltax *. (float (x' - x) -. off_x) in
+        let gn = deltay *. (float (y' - y) -. off_y) in
+        let px = ge /. (1. +. (gn *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        let px = ge /. (1. +. (py *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        (* Same Earth-curvature drop as the terrain mesh *)
         let z =
           Dem_loader.get_height tile y' x'
           -. Visibility.curvature_drop ((px *. px) +. (py *. py))

@@ -26,6 +26,12 @@ let compute_deltas ~lat =
     within the current arc-second. *)
 let compute_sub_arcsec_offset coord = (coord *. 3600.) -. floor (coord *. 3600.)
 
+(* Meridian convergence at [lat]: tan(latitude) over the Earth radius, the
+   coefficient of the second-order corrections between the observer-centred
+   azimuthal frame and the lat/lon grid. Must match radial_common.vert and
+   the inverse in viewer.ml. *)
+let meridian_convergence ~lat = tan (lat *. Float.pi /. 180.) /. 6_371_000.
+
 (** Compute center offset in meters from tile origin. [x] and [y] are
     tile-relative indices, [lat] and [lon] are geographic coords. *)
 let compute_center_offset ~lat ~lon ~x:_ ~y:_ =
@@ -69,6 +75,7 @@ type terrain_uniforms = {
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   (* Matrices *)
   proj : Gl.uniform_location;
@@ -106,6 +113,7 @@ type shadow_uniforms = {
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   (* Shadow-specific *)
   relief : Gl.uniform_location;
@@ -199,6 +207,7 @@ let init_terrain_uniforms ctx pid =
     inv_w = u "inv_w";
     max_lod = u "max_lod";
     inv_delta = u "inv_delta";
+    meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
     proj = u "proj";
     transform = u "transform";
@@ -231,6 +240,7 @@ let init_shadow_uniforms ctx pid =
     inv_w = u "inv_w";
     max_lod = u "max_lod";
     inv_delta = u "inv_delta";
+    meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
     shadow_view_proj = u "shadow_view_proj";
@@ -346,6 +356,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   (* Terrain shader uniforms *)
   Gl.use_program ctx terrain_pid;
   Gl.uniform1f ctx u.inv_w (1. /. float w);
+  Gl.uniform1f ctx u.meridian_conv (meridian_convergence ~lat);
   Gl.uniform1i ctx u.max_lod max_lod;
   Gl.uniform2f ctx u.inv_delta (1. /. deltax) (1. /. deltay);
   Gl.uniform1f ctx u.inv_avg_delta (1. /. avg_delta);
@@ -384,6 +395,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   (* Shadow shader uniforms *)
   Gl.use_program ctx shadow_pid;
   Gl.uniform1f ctx shadow_u.inv_w (1. /. float w);
+  Gl.uniform1f ctx shadow_u.meridian_conv (meridian_convergence ~lat);
   Gl.uniform1i ctx shadow_u.max_lod max_lod;
   Gl.uniform2f ctx shadow_u.inv_delta (1. /. deltax) (1. /. deltay);
   Gl.uniform1f ctx shadow_u.inv_avg_delta (1. /. avg_delta);

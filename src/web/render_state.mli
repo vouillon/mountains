@@ -12,6 +12,10 @@ val compute_sub_arcsec_offset : float -> float
 (** [compute_sub_arcsec_offset coord] returns the fractional part within the
     current arc-second for a geographic coordinate. *)
 
+val meridian_convergence : lat:float -> float
+(** tan(latitude) / earth radius: the second-order coefficient between the
+    observer-centred azimuthal frame and the lat/lon grid. *)
+
 val compute_center_offset :
   lat:float -> lon:float -> x:int -> y:int -> float * float
 (** [compute_center_offset ~lat ~lon ~x ~y] computes the center offset in meters
@@ -40,6 +44,7 @@ type terrain_uniforms = {
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   proj : Gl.uniform_location;
   transform : Gl.uniform_location;
@@ -70,6 +75,7 @@ type shadow_uniforms = {
   inv_w : Gl.uniform_location;
   max_lod : Gl.uniform_location;
   inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
   shadow_view_proj : Gl.uniform_location;
