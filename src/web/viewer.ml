@@ -1801,24 +1801,22 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   let current_azimuth = atan2 (-.fwd.Matrix.x) fwd.Matrix.y in
   let snapped_alpha = floor ((current_azimuth /. grid_k) +. 0.5) *. grid_k in
   Gl.uniform1f ctx terrain_uniforms.snapped_alpha snapped_alpha;
-  (* Azimuth culling: the grid spans a fixed 90° wedge centred on
-     [snapped_alpha], but the frustum needs much less. The frustum is the cone
-     spanned by its four corner rays (±1/x_scale, ±1/y_scale, -1) in view
-     space. Along a frustum edge the direction is affine in the edge parameter,
-     so its horizontal projection sweeps a straight segment and the azimuth is
-     monotonic (d/dt atan2 has a constant numerator): the azimuth extremes of
-     the frustum are attained at the four corners, and Δ is exactly the largest
-     azimuth offset of a corner. This is roll-aware — the cone bound
-     tan β = hypot (1/x_scale, 1/y_scale) it replaces had to cover the corner
-     under the worst roll, which costs 2x at the portrait default. If the world
-     vertical axis lies inside the frustum every azimuth is spanned, so the
-     full wedge is needed; in view space the vertical is (r.z, u.z, ∓f.z) with
-     r, u the view X, Y axes in world space, so that test is
-     |r.z| ≤ |f.z|/x_scale and |u.z| ≤ |f.z|/y_scale (written with [not (>)] so
-     a degenerate orientation (NaN) falls back too). Add two sectors of
-     margin — one for the azimuth span of a single triangle, one for the
-     [snapped_alpha] quantisation — then round outward to whole index blocks. *)
-  let half_blocks =
+  (* Azimuth culling and coverage: the mesh is a 90-degree wedge centred on
+     [snapped_alpha]; think of a virtual 64-block circle (4 wedge rotations of
+     16 blocks, 5.625 degrees each). The frustum needs blocks within [delta]
+     of the forward azimuth: delta is exact and roll-aware (the frustum's
+     azimuth extremes are at its four corner rays: along a frustum edge the
+     direction is affine in the edge parameter, so the azimuth is monotonic),
+     with two sectors of margin for the triangle span and the [snapped_alpha]
+     quantisation. If the world vertical lies inside the frustum (in view
+     space it is (r.z, u.z, -+f.z), so the test is |r.z| <= |f.z|/x_scale and
+     |u.z| <= |f.z|/y_scale, written with [not (>)] so NaN falls back too),
+     every azimuth is needed. Blocks outside the central wedge are drawn from
+     the same index buffer with [snapped_alpha] rotated by quarter turns
+     (exactly 512 sectors, so the seams are watertight), and only out to
+     [extra_ring_cap]: off-wedge terrain exists only when pitched down, and is
+     then visible only below the frustum's highest ray. *)
+  let g_half, extra_ring_cap =
     let tx = 1. /. x_scale and ty = 1. /. y_scale in
     (* r and u are columns 0 and 1 of [orientation]'s rotation (column 2 is
        -[fwd]), expanded as scalars — cf. [Quaternion.to_matrix] — so that no
@@ -1838,34 +1836,80 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
     and uz = 2. *. (yz +. wx) in
     let fx = fwd.Matrix.x and fy = fwd.Matrix.y and fz = fwd.Matrix.z in
     let afz = abs_float fz in
-    let max_blocks = n_index_blocks / 2 in
-    if (not (abs_float rz > tx *. afz)) && not (abs_float uz > ty *. afz) then
-      max_blocks
-    else
-      (* Corner (sa, sb) points along d = sa·tx·r + sb·ty·u + f, at azimuth
-         offset atan2 (f × d, f · d) = atan2 (sa·ca + sb·cb, h + sa·da + sb·db)
-         from [current_azimuth] (horizontal components only). *)
-      let ax = tx *. rx and ay = tx *. ry in
-      let bx = ty *. ux and by = ty *. uy in
-      let ca = (fx *. ay) -. (fy *. ax) and cb = (fx *. by) -. (fy *. bx) in
-      let da = (fx *. ax) +. (fy *. ay) and db = (fx *. bx) +. (fy *. by) in
-      let h = (fx *. fx) +. (fy *. fy) in
-      let o1 = abs_float (atan2 (ca +. cb) (h +. da +. db)) in
-      let o2 = abs_float (atan2 (ca -. cb) (h +. da -. db)) in
-      let o3 = abs_float (atan2 (cb -. ca) (h -. da +. db)) in
-      let o4 = abs_float (atan2 (-.ca -. cb) (h -. da -. db)) in
-      let delta =
-        Float.max (Float.max o1 o2) (Float.max o3 o4) +. (2. *. grid_k)
-      in
-      let n =
-        int_of_float (ceil (delta /. (float index_block_size *. grid_k)))
-      in
-      if n < 1 then 1 else if n > max_blocks then max_blocks else n
+    let g_half =
+      if (not (abs_float rz > tx *. afz)) && not (abs_float uz > ty *. afz) then
+        32
+      else
+        (* Corner (sa, sb) points along d = sa.tx.r + sb.ty.u + f, at azimuth
+           offset atan2 (f x d, f . d) = atan2 (sa.ca + sb.cb, h + sa.da +
+           sb.db) from [current_azimuth] (horizontal components only). *)
+        let ax = tx *. rx and ay = tx *. ry in
+        let bx = ty *. ux and by = ty *. uy in
+        let ca = (fx *. ay) -. (fy *. ax) and cb = (fx *. by) -. (fy *. bx) in
+        let da = (fx *. ax) +. (fy *. ay) and db = (fx *. bx) +. (fy *. by) in
+        let h = (fx *. fx) +. (fy *. fy) in
+        let o1 = abs_float (atan2 (ca +. cb) (h +. da +. db)) in
+        let o2 = abs_float (atan2 (ca -. cb) (h +. da -. db)) in
+        let o3 = abs_float (atan2 (cb -. ca) (h -. da +. db)) in
+        let o4 = abs_float (atan2 (-.ca -. cb) (h -. da -. db)) in
+        let delta =
+          Float.max (Float.max o1 o2) (Float.max o3 o4) +. (2. *. grid_k)
+        in
+        let n =
+          int_of_float (ceil (delta /. (float index_block_size *. grid_k)))
+        in
+        if n < 1 then 1 else if n > 32 then 32 else n
+    in
+    let extra_ring_cap =
+      if g_half <= n_index_blocks / 2 then 0
+      else
+        (* Highest frustum ray: pitch plus the cone half-angle (roll-safe).
+           When extras are needed it is normally below the horizon, and a
+           ground point d metres below the camera is then within
+           d / tan(-e_max) plus what the curvature drop adds; the +502 spans
+           the height range floor and the eye, 1.05 and the +1 ring absorb
+           the approximations. NaN or a near-horizontal bound draws full
+           rings. *)
+        let tan_beta = sqrt ((tx *. tx) +. (ty *. ty)) in
+        let e_max = asin (Float.max (-1.) (Float.min 1. fz)) +. atan tan_beta in
+        if e_max < -0.001 then
+          let depth = height +. 502. in
+          let t = Float.tan (-.e_max) in
+          let r0 = depth /. t in
+          let r = (depth +. (r0 *. r0 *. 6.8306e-8)) /. t *. 1.05 in
+          let gs = radial_params.Render_state.grid_scale in
+          min (n_rings - 1)
+            (max 1 (int_of_float (ceil (log ((r /. gs) +. 1.) /. grid_k)) + 1))
+        else n_rings - 1
+    in
+    (g_half, extra_ring_cap)
   in
+  let gmin = -g_half and gmax = g_half - 1 in
   let indices_per_block = index_count / n_index_blocks in
-  let terrain_index_count = 2 * half_blocks * indices_per_block in
-  let terrain_index_offset =
-    ((n_index_blocks / 2) - half_blocks) * indices_per_block * 4
+  let strip_indices = indices_per_block / (n_rings - 1) in
+  (* Draw the blocks of one wedge rotation covering circle blocks
+     [g_lo, g_hi] (their wedge-local index is g + b_off), clipped to the
+     needed range: the central wedge in one call with full rings, the extra
+     rotations per block with rings capped. *)
+  let draw_wedge_seg rot g_lo g_hi b_off =
+    let lo = max gmin g_lo and hi = min gmax g_hi in
+    if lo <= hi then begin
+      Gl.uniform1f ctx terrain_uniforms.snapped_alpha
+        (snapped_alpha +. (float rot *. (pi /. 2.)));
+      let b_lo = lo + b_off and b_hi = hi + b_off in
+      if rot = 0 then
+        Gl.draw_elements ctx Gl.triangle_strip
+          ((b_hi - b_lo + 1) * indices_per_block)
+          Gl.unsigned_int
+          (b_lo * indices_per_block * 4)
+      else
+        for b = b_lo to b_hi do
+          Gl.draw_elements ctx Gl.triangle_strip
+            (extra_ring_cap * strip_indices)
+            Gl.unsigned_int
+            (b * indices_per_block * 4)
+        done
+    end
   in
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
@@ -1873,8 +1917,11 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   Matrix.blit transform transform_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
   Gl.bind_vertex_array ctx (Some terrain_geo);
-  Gl.draw_elements ctx Gl.triangle_strip terrain_index_count Gl.unsigned_int
-    terrain_index_offset;
+  draw_wedge_seg 0 (-8) 7 8;
+  draw_wedge_seg 1 8 23 (-8);
+  draw_wedge_seg 3 (-24) (-9) 24;
+  draw_wedge_seg 2 24 31 (-24);
+  draw_wedge_seg 2 (-32) (-25) 40;
   Gl.bind_vertex_array ctx None;
 
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
