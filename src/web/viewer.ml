@@ -2469,6 +2469,12 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
    a load that fails or gets superseded leaves the previous location entirely
    intact and rendering. From the epoch check to the [session] assignment there
    is no await, so no frame observes a half-replaced location. *)
+(* How long a location load waits for the near-field elevation before going to
+   screen without it. Long enough to cover a hit in the persistent cache and the
+   fast rejections of being offline, short enough not to be the wait it exists to
+   avoid. *)
+let hd_grace_s = 1.5
+
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
@@ -2503,101 +2509,61 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   } =
     graphics
   in
-  (* Load DEM, CLC (for POIs) and the near-field high-resolution elevation in
-     parallel. The last one never fails: absent data simply leaves the location
-     on the base DEM. *)
-  let* (tile, (_, _, _, _, clc_tiles)), hd_raw =
+  (* The DEM and the CLC tiles (for POIs) load in parallel. The near-field
+     high-resolution elevation starts with them but is deliberately not awaited
+     alongside them: it is the one source that can take [Hd_dem.timeout_s] to
+     answer, and awaiting it holds the whole location -- base tiles that may well
+     be in cache included -- behind that ceiling. *)
+  let hd_fetch = Hd_dem.fetch ~lat ~lon in
+  let* tile, (_, _, _, _, clc_tiles) =
     Lwt.both
-      (Lwt.both
-         (Dem_loader.load ~size:w ~lat ~lon)
-         (Clc_loader.load_tiles ~lat ~lon ~size:w))
-      (Hd_dem.fetch ~lat ~lon)
+      (Dem_loader.load ~size:w ~lat ~lon)
+      (Clc_loader.load_tiles ~lat ~lon ~size:w)
+  in
+  (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
+     not free -- the eye is anchored on the surface that is drawn, so folding a
+     refinement in afterwards lifts the camera by up to a few tens of metres on a
+     summit -- so the cache hits and the fast rejections of being offline, which
+     is nearly every load, are kept on a single publish. Only a fetch slow enough
+     that waiting for it is itself the problem gets published around. *)
+  let* () =
+    Lwt.choose
+      [
+        (let* _ = hd_fetch in
+         Lwt.return_unit);
+        sleep hd_grace_s;
+      ]
   in
   if !location_epoch <> epoch then Lwt.return false
   else begin
     let x = w / 2 in
     let y = h / 2 in
-    let points = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
+    let poi = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
     (* The blended near-field grid equals the base upsample wherever the
        high-resolution data is missing, so the renderer can switch to it on a
-       plain extent test. Built before the eye height, which must be read off
-       the surface that is actually drawn. *)
-    let hd_grid = Option.bind hd_raw (Hd_dem.blend ~lat ~base:tile) in
-    (* Bilinear interpolation for height *)
-    let height =
-      let off_x = Render_state.compute_sub_arcsec_offset lon in
-      let off_y = Render_state.compute_sub_arcsec_offset lat in
-      let base_height =
-        let get_h = Dem_loader.get_height tile in
-        let h00 = get_h y x in
-        let h10 = get_h y (x + 1) in
-        let h01 = get_h (y + 1) x in
-        let h11 = get_h (y + 1) (x + 1) in
-        let h0 = h00 +. (off_x *. (h10 -. h00)) in
-        let h1 = h01 +. (off_x *. (h11 -. h01)) in
-        h0 +. (off_y *. (h1 -. h0))
-      in
-      (* Inside the high-resolution extent the mesh is drawn from the finer
-         grid, and it resolves summits the 30 m base smooths away: an eye
-         placed 2 m above the base surface would end up *inside* the terrain it
-         is looking out of. Read the eye height off the grid that is drawn. *)
-      match hd_grid with
-      | Some (g : Hd_dem.t) ->
-          let gx = (off_x -. g.origin_x) /. Hd_dem.px_arcsec in
-          let gy = (off_y -. g.origin_y) /. Hd_dem.px_arcsec in
-          if
-            gx >= 0.
-            && gx <= float (Hd_dem.size - 2)
-            && gy >= 0.
-            && gy <= float (Hd_dem.size - 2)
-          then begin
-            let get_h = Dem_loader.get_height g.grid in
-            let bx = int_of_float (floor gx) and by = int_of_float (floor gy) in
-            let fx = gx -. float bx and fy = gy -. float by in
-            let h00 = get_h by bx in
-            let h10 = get_h by (bx + 1) in
-            let h01 = get_h (by + 1) bx in
-            let h11 = get_h (by + 1) (bx + 1) in
-            let h0 = h00 +. (fx *. (h10 -. h00)) in
-            let h1 = h01 +. (fx *. (h11 -. h01)) in
-            h0 +. (fy *. (h1 -. h0))
-          end
-          else base_height
-      | None -> base_height
+       plain extent test. *)
+    let blend_hd raw = Option.bind raw (Hd_dem.blend ~lat ~base:tile) in
+    (* [Hd_dem.fetch] never fails, so [Fail] is unreachable; it is folded into
+       "no near-field data" rather than left to raise inside the refinement. *)
+    let in_time, refine_later =
+      match Lwt.state hd_fetch with
+      | Lwt.Return raw -> (blend_hd raw, false)
+      | Lwt.Sleep -> (None, true)
+      | Lwt.Fail _ -> (None, false)
     in
     (* The previous location's textures are dead from here on: the bakes below
        overwrite every unit they were bound to. Deleting first keeps the peak
-       footprint at one location's worth of DEM-sized textures. *)
+       footprint at one location's worth of DEM-sized textures. [session] is
+       cleared with them so that [publish] can tell a record it supersedes from
+       one already taken down; no [draw] observes the gap, everything from here
+       to the publish being synchronous. *)
     Option.iter (delete_location ctx) !session;
+    session := None;
     let tile_texture = make_tile_texture ctx tile in
     let relief_texture, relief_normal_texture =
       time_gpu ctx "compute_relief" (fun () ->
           compute_relief ctx w h lat triangle_geo tile_texture normal_pid
             downsample_pid relief_uniforms downsample_uniforms)
-    in
-    (* Second, finer relief pyramid over the near-field square. *)
-    let hd =
-      Option.map
-        (fun (g : Hd_dem.t) ->
-          let tex = make_tile_texture ctx g.grid in
-          let hd_relief_texture, hd_relief_normal_texture =
-            time_gpu ctx "compute_relief_hd" (fun () ->
-                compute_relief ~spacing_scale:Hd_dem.px_arcsec ~border:false ctx
-                  Hd_dem.size Hd_dem.size lat triangle_geo tex normal_pid
-                  downsample_pid relief_uniforms downsample_uniforms)
-          in
-          (* Nothing reads the source grid on the GPU after the bake. *)
-          Gl.delete_texture ctx tex;
-          { hd_relief_texture; hd_relief_normal_texture })
-        hd_grid
-    in
-    let hd_relief_texture =
-      match hd with Some h -> h.hd_relief_texture | None -> hd_placeholder
-    in
-    let hd_relief_normal_texture =
-      match hd with
-      | Some h -> h.hd_relief_normal_texture
-      | None -> hd_placeholder
     in
     let index_count = Bigarray.Array1.dim indices in
 
@@ -2626,33 +2592,6 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       Matrix.{ x = sx; y = sy; z = sz; w = 0. }
     in
     let splits_dist = [| 2000.; 8000.; 25000. |] in
-    let world_center =
-      let center_offset_x, center_offset_y =
-        Render_state.compute_center_offset ~lat ~lon ~x ~y
-      in
-      Matrix.
-        { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
-    in
-    let shadow_matrices =
-      (* view_proj is ignored in calculate_shadow_matrices *)
-      calculate_shadow_matrices ~light_dir ~world_center
-    in
-
-    (* Upload all location-static uniforms *)
-    Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
-      terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
-      ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
-      ~fog_color:fog_linear ~zenith_color:zenith_linear;
-    Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
-      shadow_uniforms
-      (Option.map
-         (fun (g : Hd_dem.t) ->
-           {
-             Render_state.hd_size = Hd_dem.size;
-             hd_px_arcsec = Hd_dem.px_arcsec;
-             hd_origin = (g.origin_x, g.origin_y);
-           })
-         hd_grid);
 
     (* GPU rasterize CLC tiles to FBO *)
     let cover_map_texture =
@@ -2661,154 +2600,293 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
     in
 
-    (* Render shadows into the session-wide shadow map (fixed 2048x2048x3) *)
-    time_gpu ctx "draw_shadows" (fun () ->
-        draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-          ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
-          ~relief_texture ~hd_relief_texture ctx);
+    (* Everything downstream of the near-field grid, gathered so that the
+       location can go to screen without it and be republished once it lands. The
+       bakes above -- base relief pyramid, ambient occlusion, land-cover raster
+       -- do not depend on it and are deliberately not among them: a refinement
+       redoes only the finer relief pyramid, the shadow map that samples it, the
+       eye height, and the POI replicas that are anchored on both. *)
+    let publish ~hd_grid =
+      (* Bilinear interpolation for height *)
+      let height =
+        let off_x = Render_state.compute_sub_arcsec_offset lon in
+        let off_y = Render_state.compute_sub_arcsec_offset lat in
+        let base_height =
+          let get_h = Dem_loader.get_height tile in
+          let h00 = get_h y x in
+          let h10 = get_h y (x + 1) in
+          let h01 = get_h (y + 1) x in
+          let h11 = get_h (y + 1) (x + 1) in
+          let h0 = h00 +. (off_x *. (h10 -. h00)) in
+          let h1 = h01 +. (off_x *. (h11 -. h01)) in
+          h0 +. (off_y *. (h1 -. h0))
+        in
+        (* Inside the high-resolution extent the mesh is drawn from the finer
+           grid, and it resolves summits the 30 m base smooths away: an eye
+           placed 2 m above the base surface would end up *inside* the terrain
+           it is looking out of. Read the eye height off the grid that is
+           drawn. *)
+        match hd_grid with
+        | Some (g : Hd_dem.t) ->
+            let gx = (off_x -. g.origin_x) /. Hd_dem.px_arcsec in
+            let gy = (off_y -. g.origin_y) /. Hd_dem.px_arcsec in
+            if
+              gx >= 0.
+              && gx <= float (Hd_dem.size - 2)
+              && gy >= 0.
+              && gy <= float (Hd_dem.size - 2)
+            then begin
+              let get_h = Dem_loader.get_height g.grid in
+              let bx = int_of_float (floor gx)
+              and by = int_of_float (floor gy) in
+              let fx = gx -. float bx and fy = gy -. float by in
+              let h00 = get_h by bx in
+              let h10 = get_h by (bx + 1) in
+              let h01 = get_h (by + 1) bx in
+              let h11 = get_h (by + 1) (bx + 1) in
+              let h0 = h00 +. (fx *. (h10 -. h00)) in
+              let h1 = h01 +. (fx *. (h11 -. h01)) in
+              h0 +. (fy *. (h1 -. h0))
+            end
+            else base_height
+        | None -> base_height
+      in
+      (* Second, finer relief pyramid over the near-field square. *)
+      let hd =
+        Option.map
+          (fun (g : Hd_dem.t) ->
+            let tex = make_tile_texture ctx g.grid in
+            let hd_relief_texture, hd_relief_normal_texture =
+              time_gpu ctx "compute_relief_hd" (fun () ->
+                  compute_relief ~spacing_scale:Hd_dem.px_arcsec ~border:false
+                    ctx Hd_dem.size Hd_dem.size lat triangle_geo tex normal_pid
+                    downsample_pid relief_uniforms downsample_uniforms)
+            in
+            (* Nothing reads the source grid on the GPU after the bake. *)
+            Gl.delete_texture ctx tex;
+            { hd_relief_texture; hd_relief_normal_texture })
+          hd_grid
+      in
+      let hd_relief_texture =
+        match hd with Some h -> h.hd_relief_texture | None -> hd_placeholder
+      in
+      let hd_relief_normal_texture =
+        match hd with
+        | Some h -> h.hd_relief_normal_texture
+        | None -> hd_placeholder
+      in
+      let world_center =
+        let center_offset_x, center_offset_y =
+          Render_state.compute_center_offset ~lat ~lon ~x ~y
+        in
+        Matrix.
+          { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
+      in
+      let shadow_matrices =
+        (* view_proj is ignored in calculate_shadow_matrices *)
+        calculate_shadow_matrices ~light_dir ~world_center
+      in
 
-    (* Bind all terrain textures - after all textures are created *)
-    bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
-      ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
-      ~hd_relief_texture ~hd_relief_normal_texture;
+      (* Upload all location-static uniforms *)
+      Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
+        terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
+        ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
+        ~fog_color:fog_linear ~zenith_color:zenith_linear;
+      Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
+        shadow_uniforms
+        (Option.map
+           (fun (g : Hd_dem.t) ->
+             {
+               Render_state.hd_size = Hd_dem.size;
+               hd_px_arcsec = Hd_dem.px_arcsec;
+               hd_origin = (g.origin_x, g.origin_y);
+             })
+           hd_grid);
 
-    (* Location-static state that was needlessly re-set every frame. Must come
-       after the bake passes above, which set their own clear colours. *)
-    Gl.use_program ctx terrain_pid;
-    Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
-    (let r, g, b = fog_linear in
-     Gl.clear_color ctx r g b 1.);
+      (* Render shadows into the session-wide shadow map (fixed 2048x2048x3) *)
+      time_gpu ctx "draw_shadows" (fun () ->
+          draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+            ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
+            ~relief_texture ~hd_relief_texture ctx);
 
-    (* Sight lines must be traced over the surface that is actually drawn: the
-       eye is anchored on the high-resolution grid now, and it sits up to 60 m
-       from the base DEM on a summit the 30 m grid smooths away, so a ray
-       traced over the base terrain would clear ridges the viewer cannot see
-       over -- or be blocked by ground that is no longer there.
+      (* Bind all terrain textures - after all textures are created *)
+      bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
+        ~ao_texture ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
+        ~hd_relief_texture ~hd_relief_normal_texture;
 
-       [hd_at] reads that grid at a fractional *base*-grid position.
-       [ray_height] hands the whole test the same surface at base resolution
-       (both endpoints, the curvature frame and the Bresenham phase), while
-       [~fine] lets the near phase, where the ray hugs the terrain, sample it
-       at its own 0.31 arcsec. Without HD both collapse to exactly the previous
-       call. *)
-    let hd_at =
-      match hd_grid with
-      | None -> fun _ _ -> None
-      | Some (g : Hd_dem.t) ->
-          let get_h = Dem_loader.get_height g.grid in
-          let limit = float (Hd_dem.size - 2) in
-          fun bx by ->
-            let hx = (bx -. float x -. g.origin_x) /. Hd_dem.px_arcsec in
-            let hy = (by -. float y -. g.origin_y) /. Hd_dem.px_arcsec in
-            if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
-              Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
-            else None
+      (* Location-static state that was needlessly re-set every frame. Must come
+         after the bake passes above, which set their own clear colours. *)
+      Gl.use_program ctx terrain_pid;
+      Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
+      (let r, g, b = fog_linear in
+       Gl.clear_color ctx r g b 1.);
+
+      (* Sight lines must be traced over the surface that is actually drawn: the
+         eye is anchored on the high-resolution grid now, and it sits up to 60 m
+         from the base DEM on a summit the 30 m grid smooths away, so a ray
+         traced over the base terrain would clear ridges the viewer cannot see
+         over -- or be blocked by ground that is no longer there.
+
+         [hd_at] reads that grid at a fractional *base*-grid position.
+         [ray_height] hands the whole test the same surface at base resolution
+         (both endpoints, the curvature frame and the Bresenham phase), while
+         [~fine] lets the near phase, where the ray hugs the terrain, sample it
+         at its own 0.31 arcsec. Without HD both collapse to exactly the
+         previous call. *)
+      let hd_at =
+        match hd_grid with
+        | None -> fun _ _ -> None
+        | Some (g : Hd_dem.t) ->
+            let get_h = Dem_loader.get_height g.grid in
+            let limit = float (Hd_dem.size - 2) in
+            fun bx by ->
+              let hx = (bx -. float x -. g.origin_x) /. Hd_dem.px_arcsec in
+              let hy = (by -. float y -. g.origin_y) /. Hd_dem.px_arcsec in
+              if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+                Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+              else None
+      in
+      let ray_height =
+        let base = Dem_loader.get_height tile in
+        match hd_grid with
+        | None -> base
+        | Some _ -> (
+            fun row col ->
+              match hd_at (float col) (float row) with
+              | Some h -> h
+              | None -> base row col)
+      in
+      let fine = Option.map (fun _ -> hd_at) hd_grid in
+      let points =
+        let off_x = Render_state.compute_sub_arcsec_offset lon in
+        let off_y = Render_state.compute_sub_arcsec_offset lat in
+        List.filter
+          (fun (_, (gx, gy)) ->
+            let dx = (gx -. float x) *. deltax in
+            let dy = (gy -. float y) *. deltay in
+            let dist_sq = (dx *. dx) +. (dy *. dy) in
+            if dist_sq > 4900000000. then false
+            else
+              (* The test walks whole texels; its summit exemption (10 texels)
+                 dwarfs the half-texel rounding of the destination. *)
+              let dst_x = int_of_float (Float.round gx) in
+              let dst_y = int_of_float (Float.round gy) in
+              Visibility.test_precise ray_height ~src_h:(height +. 2.)
+                ~curvature:(deltax, deltay) ?fine ~off_x ~off_y ~src_x:x
+                ~src_y:y ~dst_x ~dst_y ())
+          poi
+      in
+      let points =
+        let off_x = Render_state.compute_sub_arcsec_offset lon in
+        let off_y = Render_state.compute_sub_arcsec_offset lat in
+        let conv = Render_state.meridian_convergence ~lat in
+        let inv_avg_delta = 2. /. (deltax +. deltay) in
+        List.map
+          (fun ({ Points.name; elevation; _ }, (x', y')) ->
+            let texture =
+              prepare_text ctx
+                (match elevation with
+                | None -> name
+                | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
+            in
+            (* Plane position: inverse of the grid mapping in
+               radial_common.vert (meridian convergence to second order); two
+               fixed-point iterations converge to millimetres. *)
+            let ge = deltax *. (x' -. float x -. off_x) in
+            let gn = deltay *. (y' -. float y -. off_y) in
+            let px = ge /. (1. +. (gn *. conv)) in
+            let py = gn +. (px *. px *. conv /. 2.) in
+            let px = ge /. (1. +. (py *. conv)) in
+            let py = gn +. (px *. px *. conv /. 2.) in
+            let r2 = (px *. px) +. (py *. py) in
+            (* Anchor at the silhouette as drawn (mip-level height at this
+               distance), with the same curvature drop as the mesh. Inside the
+               high-resolution square the mesh reads the finer grid, so the
+               replica must too: same walker, over the blended grid, with the
+               LOD selection shifted by its refinement factor. *)
+            let z =
+              let r = sqrt r2 in
+              let hd_pos g o = (g -. float (w / 2) -. o) /. Hd_dem.px_arcsec in
+              match hd_grid with
+              | Some (g : Hd_dem.t)
+                when let hd_x = hd_pos x' g.origin_x
+                     and hd_y = hd_pos y' g.origin_y in
+                     hd_x >= 0.
+                     && hd_x <= float (Hd_dem.size - 1)
+                     && hd_y >= 0.
+                     && hd_y <= float (Hd_dem.size - 1) ->
+                  rendered_height g.grid ~radial_params
+                    ~inv_avg_delta:(inv_avg_delta /. Hd_dem.px_arcsec)
+                    ~size:Hd_dem.size ~r ~gx:(hd_pos x' g.origin_x)
+                    ~gy:(hd_pos y' g.origin_y)
+              | _ ->
+                  rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
+                    ~gx:x' ~gy:y'
+            in
+            let z = z -. Visibility.curvature_drop r2 in
+            let h =
+              let dz = z -. height in
+              (* Apparent elevation angle, for label priority *)
+              dz /. sqrt (r2 +. (dz *. dz))
+            in
+            ((texture, (px, py, z)), h))
+          points
+      in
+      let points =
+        points
+        |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
+        |> List.map fst
+      in
+      (* A refinement supersedes the first publish of this same location, and
+         that record shares every base texture with this one: [delete_location]
+         would take those down too. Only what it owns alone goes -- the POI
+         labels [draw_text] has materialised since, and its own near-field
+         relief, which is [None] on the path that is actually taken. *)
+      Option.iter
+        (fun (prev : location) ->
+          List.iter
+            (fun ({ texture; _ }, _) ->
+              match texture with
+              | Some (tid, _, _) -> Gl.delete_texture ctx tid
+              | None -> ())
+            prev.points;
+          Option.iter
+            (fun { hd_relief_texture; hd_relief_normal_texture } ->
+              Gl.delete_texture ctx hd_relief_texture;
+              Gl.delete_texture ctx hd_relief_normal_texture)
+            prev.hd)
+        !session;
+      (* Publish the new location: from the epoch check that guards this call to
+         here there is no await, so the swap is atomic as far as [draw] is
+         concerned. *)
+      session :=
+        Some
+          {
+            height;
+            points;
+            tile_texture;
+            relief_texture;
+            relief_normal_texture;
+            ao_texture;
+            cover_map_texture;
+            hd;
+          }
     in
-    let ray_height =
-      let base = Dem_loader.get_height tile in
-      match hd_grid with
-      | None -> base
-      | Some _ -> (
-          fun row col ->
-            match hd_at (float col) (float row) with
-            | Some h -> h
-            | None -> base row col)
-    in
-    let fine = Option.map (fun _ -> hd_at) hd_grid in
-    let points =
-      let off_x = Render_state.compute_sub_arcsec_offset lon in
-      let off_y = Render_state.compute_sub_arcsec_offset lat in
-      List.filter
-        (fun (_, (gx, gy)) ->
-          let dx = (gx -. float x) *. deltax in
-          let dy = (gy -. float y) *. deltay in
-          let dist_sq = (dx *. dx) +. (dy *. dy) in
-          if dist_sq > 4900000000. then false
+    publish ~hd_grid:in_time;
+    if refine_later then
+      Lwt.async (fun () ->
+          let* raw = hd_fetch in
+          if !location_epoch <> epoch then Lwt.return_unit
           else
-            (* The test walks whole texels; its summit exemption (10 texels)
-               dwarfs the half-texel rounding of the destination. *)
-            let dst_x = int_of_float (Float.round gx) in
-            let dst_y = int_of_float (Float.round gy) in
-            Visibility.test_precise ray_height ~src_h:(height +. 2.)
-              ~curvature:(deltax, deltay) ?fine ~off_x ~off_y ~src_x:x ~src_y:y
-              ~dst_x ~dst_y ())
-        points
-    in
-    let points =
-      let off_x = Render_state.compute_sub_arcsec_offset lon in
-      let off_y = Render_state.compute_sub_arcsec_offset lat in
-      let conv = Render_state.meridian_convergence ~lat in
-      let inv_avg_delta = 2. /. (deltax +. deltay) in
-      List.map
-        (fun ({ Points.name; elevation; _ }, (x', y')) ->
-          let texture =
-            prepare_text ctx
-              (match elevation with
-              | None -> name
-              | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
-          in
-          (* Plane position: inverse of the grid mapping in
-             radial_common.vert (meridian convergence to second order); two
-             fixed-point iterations converge to millimetres. *)
-          let ge = deltax *. (x' -. float x -. off_x) in
-          let gn = deltay *. (y' -. float y -. off_y) in
-          let px = ge /. (1. +. (gn *. conv)) in
-          let py = gn +. (px *. px *. conv /. 2.) in
-          let px = ge /. (1. +. (py *. conv)) in
-          let py = gn +. (px *. px *. conv /. 2.) in
-          let r2 = (px *. px) +. (py *. py) in
-          (* Anchor at the silhouette as drawn (mip-level height at this
-             distance), with the same curvature drop as the mesh. Inside the
-             high-resolution square the mesh reads the finer grid, so the
-             replica must too: same walker, over the blended grid, with the
-             LOD selection shifted by its refinement factor. *)
-          let z =
-            let r = sqrt r2 in
-            let hd_pos g o = (g -. float (w / 2) -. o) /. Hd_dem.px_arcsec in
-            match hd_grid with
-            | Some (g : Hd_dem.t)
-              when let hd_x = hd_pos x' g.origin_x
-                   and hd_y = hd_pos y' g.origin_y in
-                   hd_x >= 0.
-                   && hd_x <= float (Hd_dem.size - 1)
-                   && hd_y >= 0.
-                   && hd_y <= float (Hd_dem.size - 1) ->
-                rendered_height g.grid ~radial_params
-                  ~inv_avg_delta:(inv_avg_delta /. Hd_dem.px_arcsec)
-                  ~size:Hd_dem.size ~r ~gx:(hd_pos x' g.origin_x)
-                  ~gy:(hd_pos y' g.origin_y)
-            | _ ->
-                rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
-                  ~gx:x' ~gy:y'
-          in
-          let z = z -. Visibility.curvature_drop r2 in
-          let h =
-            let dz = z -. height in
-            (* Apparent elevation angle, for label priority *)
-            dz /. sqrt (r2 +. (dz *. dz))
-          in
-          ((texture, (px, py, z)), h))
-        points
-    in
-    let points =
-      points
-      |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
-      |> List.map fst
-    in
-    (* Publish the new location: from the epoch check above to here there is no
-       await, so the swap is atomic as far as [draw] is concerned. *)
-    session :=
-      Some
-        {
-          height;
-          points;
-          tile_texture;
-          relief_texture;
-          relief_normal_texture;
-          ao_texture;
-          cover_map_texture;
-          hd;
-        };
+            match blend_hd raw with
+            | None -> Lwt.return_unit
+            | Some _ as hd_grid ->
+                (* [Hd_dem.blend] is synchronous, so the epoch test above still
+                   holds here: no [draw] has run since. *)
+                publish ~hd_grid;
+                let* () = Web_utils.on_gpu_finished ctx in
+                force_redraw := true;
+                Lwt.return_unit);
     let* () = Web_utils.on_gpu_finished ctx in
     force_redraw := true;
     (* A switch started while the GPU was draining owns the screen now. *)
@@ -2909,7 +2987,7 @@ let featured_locations =
     ("Lacs de Morgon", 44.336516, 6.913906, 64., 88., 1.0);
     ("Roc Diolon (Orcières)", 44.73339, 6.36308, -130., 80., 0.5);
     ("Col Fromage", 44.6896583, 6.8061028, 180., 90., 1.0);
-    ("La Mortice Sud", 44.573885, 6.7694, 47., 90., 1.0);
+    ("La Mortice Sud", 44.57386, 6.76926, 47., 90., 1.0);
     ("Pic de Morgon", 44.4920, 6.3975, 63., 82., 1.0);
     ("Lac de Roburent", 44.424680, 6.93430, 220., 90., 1.0);
     ("Mont Ténibre", 44.28342, 6.97172, 178., 75., 0.5);
