@@ -1026,11 +1026,14 @@ previous one.
 | `…HIGHRES.QUALITY` (source mask) | `PM_6_16` | 6-16 | — | PNG |
 | `IGNF_LIDAR-HD_MNT/MNS/MNH_….SHADOW` | `PM_0_18` | 0-18 | — | PNG hillshade |
 
-**L14 is the floor for bare earth.** The generic `WGS84G` matrix set runs to L19
-(0.15 m) and the URL we send names it, but the HIGHRES *layer* binds only levels
-6-14 of it; `TILEMATRIX=15` 404s over the Ubaye at two different tiles while 13
-and 14 both return full 256 kB tiles. Anything advertised deeper is either a
-surface model or a precomputed hillshade.
+**L14 is the floor for bare earth over WMTS** — but not over WMS, see the
+section below. The generic `WGS84G` matrix set runs to L19 (0.15 m) and the URL
+we send names it, but the HIGHRES *layer* binds only levels 6-14 of it;
+`TILEMATRIX=15` 404s over the Ubaye at two different tiles while 13 and 14 both
+return full 256 kB tiles. Anything deeper on *WMTS* is a surface model or a
+hillshade. The `wms-r` endpoint is not bound to the tile matrix at all and does
+serve finer bare earth; L14 remains the right step for the nested layer planned
+here, but as a bandwidth choice rather than a data limit.
 
 Exact spacings from the matrix definitions (`MatrixWidth` x `TileWidth`), at 46N:
 
@@ -1068,12 +1071,12 @@ cost at 214 kB/tile:
 
 | L14 block | samples | extent (N-S x E-W) | half-extent | wire | GPU |
 | --- | --- | --- | --- | --- | --- |
-| 4x4 = 16 tiles | 1024^2 | 4.9 x 3.4 km | 2.44 x 1.70 km | +3.4 MB | **+2.67 MiB** |
+| 4x4 = 16 tiles | 1024^2 | 4.9 x 3.4 km | 2.44 x 1.70 km | +3.4 MB | **+5.33 MiB** |
 | 8x8 = 64 tiles | 2048^2 | 9.8 x 6.8 km | 4.88 x 3.39 km | +13.7 MB | +21.33 MiB |
 
 GPU is two RG8 pyramids with the full mip chain, i.e. `2 * 4/3 * size^2 * 2`
 bytes — computed, not scaled. Against a 140 MiB per-location baseline the 4x4
-block is under 2%.
+block is under 4%.
 
 **Start with 4x4.** It is +25% on the wire against today's 13.7 MB, covers the
 ~2 km where L14 is visible, and costs almost nothing in GPU memory. 8x8 doubles
@@ -1157,15 +1160,46 @@ of what L14 buys would arrive as terracing in the normals.
 - Gate: bake L14 with the current absolute u16 and look for terracing on a
   shaded near-field view on a real Mali/Adreno device. Banding on fp16 mobile
   GPUs already bit once (062d383).
-- If visible, revive the **residual encoding** — the original design for this
-  feature (see "CORE REPRESENTATION" above). It was dropped at gate 1 because a
-  *hosted* encoder would have had to replicate the client upsample bit-exactly;
-  that objection is void now that `blend` computes both sides on the client, so
-  the encoding is a purely local choice. Store the L14 grid as `hd - base
-  upsample` with its own scale: ±150 m in u16 gives a **0.46 cm** quantum, 30x
-  finer. Cost: `height_scale` / `height_offset` uniforms replacing the hardcoded
-  `HEIGHT_SCALE` and `-500.0` in `common_header.frag`, `normal.frag`,
-  `downsample.frag`, `radial_common.vert`. Would let L13 sharpen too.
+- **Fix: per-layer scale and offset, not a wider format and not residuals.** The
+  16 bits are not the problem; spending them on a 9500 m range that no single
+  grid contains is. The L14 tile measured above spans **522 m** of height, so
+  rescaling u16 to a grid's own min/max recovers 18x the precision for zero
+  memory, zero bandwidth and zero extra texture taps.
+
+  Precision matters for *normals*, not heights: the quantum is divided by the
+  sample spacing when differenced. Taking today's L13 as the acceptance bar
+  (0.87 deg, and it ships):
+
+  | spacing | global u16 (14.5 cm) | u16 over the grid's own range |
+  | --- | --- | --- |
+  | L13 9.54 m | 0.87 deg (the bar) | 0.125 deg |
+  | L14 4.77 m | 1.74 deg | 0.096 deg (522 m range) |
+  | WMS 1.19 m | 6.95 deg | 0.384 deg |
+  | WMS 0.60 m | 13.58 deg | 0.729 deg |
+
+  Even pessimistically — 1500 m of relief inside a 1 km box — a 1 m layer lands
+  at 1.10 deg, still 6x better than the 6.95 deg the global scale gives.
+
+  This **supersedes the residual encoding** proposed earlier (see "CORE
+  REPRESENTATION" above). Residuals reach the same precision but make the shader
+  sample coarse *and* fine and add them, coupling the fine layer's
+  reconstruction to the coarse layer's interpolation — the objection that killed
+  it at gate 1. Per-layer scaling gets the precision without either.
+
+  Scope: `Dem_loader.t` gains `scale`/`offset` and `get_height` uses them (also
+  needed by the CPU-side POI anchoring and `Visibility`); `Hd_dem.blend` emits
+  them, and it already scans the grid for nodata so min/max is free; and
+  `common_header.frag`, `normal.frag`, `downsample.frag`,
+  `radial_common.vert` stop hardcoding `HEIGHT_SCALE` and `-500.0`. Base tiles
+  keep today's constants, so they stay bit-identical and the `.dem` pipeline and
+  wasm decoder are untouched. At a layer boundary the two grids then agree only
+  to the coarser one's quantum, ~3 cm — invisible.
+- Fallback if some layer's own range is still too wide: **R32F** heights, 2x the
+  memory (10.67 vs 5.33 MiB for a 1024^2 pair) and needs
+  `EXT_color_buffer_float`. Viable because heights are only ever read by
+  `texelFetch` or a NEAREST sampler (see the comment at `viewer.ml:931`), so
+  `OES_texture_float_linear` is not required — only the normal texture is
+  filtered.
 
 ### Rejected
 
@@ -1191,10 +1225,12 @@ of what L14 buys would arrive as terracing in the normals.
     against a bilinear upsample of L14 — barely above the 0.145 m u16 quantum,
     and less than half the 0.365 m that DTM L13 -> L14 buys. Over vegetated
     ground the same step adds 0.757 m RMS, 4.5x more.
-  * Conclusion: the MNS's extra levels exist to resolve canopy and roofs — the
-    very thing a mask would exclude. The DTM stopping at L14 is not IGN
-    withholding bare-earth detail; below ~5 m there is no bare-earth signal
-    left. **This is the measured reason L14 is the right stopping point.**
+  * Conclusion: the MNS's extra levels exist mostly to resolve canopy and roofs
+    — the very thing a mask would exclude — so the MNS is not the way past L14.
+    NOTE (corrected below): the stronger claim first written here, that there is
+    no bare-earth signal left below ~5 m, was wrong. It generalised from an MNS
+    pyramid step, and the `wms-r` measurements in the next section show 0.288 m
+    RMS of real bare-earth detail between 4.77 m and 1.19 m.
   * Using the CLC cover map as the bare/vegetated mask (it is already loaded,
     co-registered and on the GPU via `rasterize_clc_tiles`) would work — the
     difference distribution is bimodal enough to classify — but it is moot given
@@ -1302,3 +1338,167 @@ NOT VERIFIED on a device. What to check: the cover map at 2048 is a 4x fill
 increase in `rasterize_clc_tiles`, so time that bake on Mali/Adreno before
 assuming it is free; and confirm visually that land-cover transitions lose their
 staircase. `dune build src/web` and `dune build @fmt` are clean.
+
+## LIDAR HD bare earth at 1 m over WMS — PLANNED (2026-07-31)
+
+`data.geopf.fr/wms-r/wms` (user's pointer) serves bare-earth DTM at arbitrary
+resolution via GetMap, so the L14 ceiling in the section above is a WMTS
+packaging limit, not a data limit. Layer
+`IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G`, `FORMAT=image/x-bil;bits=32`,
+`CRS=EPSG:4326` (BBOX is lat,lon in WMS 1.3.0), `MaxWidth/MaxHeight = 5010`.
+Rate limit 50 req/s.
+
+### Measured (same footprint as WMTS L14 `row=4150 col=17002`, Ubaye)
+
+| step | residual RMS | p99 | max |
+| --- | --- | --- | --- |
+| DTM L13 -> L14 (4.77 m), reference | 0.365 m | — | — |
+| **L14 -> 1.19 m** (1024 px over the tile) | **0.288 m** | 1.05 m | 9.07 m |
+| 1.19 m -> 0.60 m (2048 px) | 0.109 m | 0.32 m | — |
+| u16 quantum | 0.145 m | | |
+
+- 1 m buys 79% of the L13 -> L14 gain. Real, worth having.
+- **0.5 m is not worth having**: 0.109 m RMS is below the u16 quantum and p99 is
+  0.32 m, for 4x the bytes. Even with the residual encoding it stays marginal.
+  1 m is the floor that matters.
+- 4x4 box-mean of the 1 m data vs WMTS L14 is 0.098 m RMS but max 3.14 m, so
+  RGE ALTI HIGHRES is *not* a decimation of LIDAR HD. They are related products,
+  not nested levels — a 1 m layer will not fade into L14 as cleanly as L14 fades
+  into L13 (where the box-mean matched to RMS 0.000).
+- `…MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.WGS84G` and `…MNT_ELEVATION.MIXED.WGS84G`
+  are byte-identical here. Prefer MIXED if it falls back to RGE ALTI outside
+  LIDAR HD coverage — UNVERIFIED, test on an unflown area, since the flight
+  programme is incomplete.
+
+### Cost
+
+**`wms-r` does not compress.** A 1024^2 request is exactly 4,194,304 B on the
+wire; `image/geotiff` and `image/tiff` return the same size plus headers. Local
+`gzip -9` reaches 3.19 MB, so the server simply does not set `Content-Encoding`
+and nothing client-side can recover it. WMTS deflates to 79% by comparison.
+Measured 0.75-1.7 s per 1024^2 request (the 0.5 s figure is presumably for
+smaller ones).
+
+| layer extent | requests | wire | GPU | half-extent |
+| --- | --- | --- | --- | --- |
+| 1 L14 footprint, 1024^2 @ 1.19 m | 1 | 4.0 MB | 5.33 MiB | 610 x 436 m |
+| 2x2 footprints, 2048^2 @ 1.19 m | 4 | 16.8 MB | 21.33 MiB | 1.22 x 0.87 km |
+
+The 2x2 option costs more wire than the entire current 64-tile L13 block.
+
+### Design
+
+**Quantise the BBOX to the WMTS L14 tile grid** — the probe above used exactly a
+tile footprint. This is what keeps everything else working: the URL becomes a
+deterministic function of (row, col), so `anchor_tile` carries over, nearby
+locations share URLs, and `is_hd_dem` already matches on the
+`https://data.geopf.fr/` host prefix and caches with the query string included.
+**The service worker needs no change.** An arbitrary per-location bbox would
+destroy the cache-first rule and the offline story with it.
+
+- **Use the 2x2 block, not one footprint** — anchored on the tile *corner*
+  nearest the user, so the user is always at least 610 m N-S / 436 m E-W from
+  any edge. A single footprint is anchored on the tile *holding* the location
+  (as the L13 block is), which is harmless over 19.5 km but not over 1.22 km:
+  the user can sit anywhere in it, average nearest-edge distance ~218 m, so the
+  layer would often reach only a couple of hundred metres in the direction being
+  looked at. Each request is still a whole grid-aligned footprint, so URLs stay
+  deterministic and shared between nearby locations. This forces the 16.8 MB /
+  4-request option rather than the 4 MB one.
+- Deliver it through the refinement path (`publish ~hd_grid`, the two-phase load)
+  so its latency never blocks first paint. It is the ideal refinement candidate:
+  detail-only, invisible in its absence.
+- **Do not prefetch for offline.** 4 MB per ~600 m of roaming against the L13
+  block's ~40 MB for ~10 km is the wrong trade.
+- Angular check: 1.19 m matches pixel scale at ~1.2 km, so a 610 m half-extent
+  sits inside the useful range with L14 taking over beyond it.
+- Because L14 and 1 m are not box-consistent (max 3.14 m above), this layer needs
+  a real fade annulus, unlike the narrow one proposed for L14-onto-L13.
+
+### Rejected: eye-centred encoding window with height fallback
+
+Idea: instead of scaling u16 over a grid's own min/max, centre a fixed window on
+the *viewer's* elevation and fall back to a coarser layer where a sample falls
+outside it. Bounded worst case instead of a data-dependent one. Measured on the
+1 m layer over one L14 footprint at four featured locations, bar 0.87 deg:
+
+| location | relief | min/max q | min/max | +-256 m | +-512 m |
+| --- | --- | --- | --- | --- | --- |
+| Col Girardin | 680 m | 10.4 mm | **0.498 deg** | 0.376 deg, 96.5% | 0.751 deg, 100% |
+| Aiguille du Brévent | 941 m | 14.4 mm | **0.690 deg** | 0.376 deg, **27.4%** | 0.751 deg, 66.2% |
+| Plateau d'Emparis | 661 m | 10.1 mm | **0.484 deg** | 0.376 deg, 84.1% | 0.751 deg, 99.3% |
+| Pic de Morgon | 800 m | 12.2 mm | **0.587 deg** | 0.376 deg, 65.1% | 0.751 deg, 88.1% |
+
+(percentages are the share of the footprint the fine layer could still serve)
+
+- **min/max already clears the bar everywhere, at full coverage.** The 1500 m
+  worst case feared in L14-4 above does not occur; the worst real footprint is
+  Brévent at 941 m.
+- The window is *dominated*. At Brévent, +-512 m is both less precise (0.751 vs
+  0.690 deg) and covers only 66%, even though its 1024 m span exceeds the 941 m
+  of relief — the eye sits near the top of the box, so a symmetric window spends
+  half its range on sky. min/max is by construction the tightest window that
+  still covers everything, so any eye-centred window is either wider (worse
+  precision, no coverage gained) or narrower (better precision, coverage lost).
+- Rendering objection independent of the numbers: a height-based fallback
+  boundary is a *contour line*, and the fine and coarse layers differ by up to
+  3.14 m (measured above), so the switch would draw a horizontal seam across the
+  slope — the most conspicuous possible orientation. The extent boundary by
+  contrast is a distant square edge that `blend` fades to exact agreement.
+
+The spatial half of the same idea *was* right and is folded into the design
+above: anchor the block on the nearest tile corner so the user is never near an
+edge.
+
+### Revision: 2.38 m, not 1.19 m (measured over the four featured locations)
+
+Wire cost tracks *sample count*, not resolution — a 1024^2 GetMap is 4.0 MB
+whether it covers 1.2 km or 2.4 km — so a coarser grid buys proportionally more
+ground for the same bytes and the same GPU. Combined with where the detail
+actually is, that inverts the earlier recommendation.
+
+First, the server's 512 px output is **exactly** the 2x2 box mean of its 1024 px
+output (RMS 0.0001 m). Two consequences: the residuals below are exact rather
+than proxies, and **any two resolutions drawn from the same WMS layer are
+box-consistent**, so they fade into each other with no discrepancy — the property
+L13/L14 have and that RGE ALTI vs LIDAR HD does not (3.14 m max, above).
+
+| step | RMS | p99 |
+| --- | --- | --- |
+| 4.77 -> **2.38 m** | **0.693 m** | 2.93 m |
+| 2.38 -> 1.19 m | 0.423 m | 1.70 m |
+
+The 2.38 m step captures the larger share of the refinement. At equal ground
+(+-1.22 km): 2.38 m is 1024^2 = 1 request, 4.0 MB, 5.33 MiB; 1.19 m is 2048^2 =
+4 requests, 16.0 MB, 21.33 MiB. The 2.38 m grid also fixes the centring problem
+by itself — +-1.22 km with corner anchoring gives the same >=610 m margin the
+2x2 1 m block needed 16.8 MB to reach — and it is pixel-matched to 2.46 km while
+covering +-1.22 km, i.e. finer than pixel scale everywhere inside its own extent.
+
+**Chain to build:**
+
+| ring | source | spacing | cost |
+| --- | --- | --- | --- |
+| 0 - 1.22 km | WMS LIDAR HD, 1024^2 | 2.38 m | 1 req, 4.0 MB, 5.33 MiB |
+| 1.22 - 2.44 km | WMS LIDAR HD, 1024^2 | 4.77 m | 1 req, 4.0 MB, 5.33 MiB |
+| 2.44 - 9.77 km | WMTS L13 (existing) | 9.54 m | 13.4 MB |
+
+8 MB and 10.67 MiB added, against 20.2 MB / 26.67 MiB for the L14-plus-1 m
+design above, and better graded.
+
+Drop the 1.19 m layer for now: 0.423 m RMS is sub-pixel beyond ~440 m, so it
+only firms up the immediate foreground, at 4x the cost. Easy to add later.
+
+### Open
+
+Whether the 4.77 m ring comes from WMS or stays the 16-tile WMTS L14 block:
+
+- WMS — 1 request, box-consistent with the 2.38 m layer above it, product seam
+  pushed out to +-2.44 km; but 4.0 MB uncompressed and the URL is shared only
+  among locations in the same corner quadrant.
+- WMTS L14 — 3.4 MB deflated, cache sharing at tile granularity, already wired
+  into `Hd_dem.prefetch`; but the RGE ALTI / LIDAR HD product seam then sits at
+  +-1.22 km instead.
+
+Leaning WMS for the consistency, but the cache-reuse argument is real and the
+offline path is built around WMTS tiles.
