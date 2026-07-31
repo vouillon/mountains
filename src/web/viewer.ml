@@ -1108,8 +1108,18 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true) ctx width height lat
 let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
-  (* CLC GPU Rasterization setup *)
-  let cover_map_size = 1024 in
+  (* CLC GPU Rasterization setup.
+
+     A clipmap level spans half the ground of the one above it at the same texel
+     count, so a texel subtends a constant angle wherever you stand: at
+     [cover_map_size] = 1024 that is 1/512 to 1/256 of the distance, i.e. 2 to 4
+     pixels at a 60 degree field of view over 1080. Material boundaries came out
+     as a staircase of that width. 2048 halves it to 1-2 pixels, which is where
+     the bilinear blend in [sampleCLCBilinear] stops being visible as steps.
+     The shader reads the size from [textureSize] and the count from
+     [u_numLevels], so neither is baked into it. Costs 28 MiB per location
+     against 7. *)
+  let cover_map_size = 2048 in
 
   (* Create FBO for CLC rasterization *)
   let clc_fbo = Gl.create_framebuffer ctx in
@@ -1125,15 +1135,16 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   let sea_clear_val = Brr.Tarray.create Brr.Tarray.Uint32 4 in
   (Brr.Tarray.to_bigarray1 sea_clear_val).{0} <- 44l;
 
-  (* Create depth buffer for overdraw prevention (smaller features drawn first win) *)
-  (* Separate depth buffer for each level to prevent conflicts when batching tiles *)
-  let clc_depth_rbs =
-    Array.init 7 (fun _ ->
-        let rb = Gl.create_renderbuffer ctx in
-        Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
-        Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
-          cover_map_size cover_map_size;
-        rb)
+  (* Depth buffer for overdraw prevention (smaller features drawn first win).
+     One buffer, not one per level: the render loop below is level-outer and
+     clears depth at the top of every level, so only ever one is live. At 2048
+     the seven it used to allocate would have been 56 MiB of transient. *)
+  let clc_depth_rb =
+    let rb = Gl.create_renderbuffer ctx in
+    Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
+    Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.depth_component16
+      cover_map_size cover_map_size;
+    rb
   in
 
   (* Attach to FBO (attach layer 0 initially) *)
@@ -1141,7 +1152,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
     cover_map_texture 0 0;
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
-    Gl.renderbuffer clc_depth_rbs.(0);
+    Gl.renderbuffer clc_depth_rb;
   Gl.bind_texture ctx Gl.texture_2d None;
 
   (* Prepare FBO *)
@@ -1291,11 +1302,11 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
       level_bounds.(level)
     in
 
-    (* Switch FBO to this level ONCE *)
+    (* Switch FBO to this level ONCE. The depth attachment is the same buffer
+       for every level and was bound before the loop; the clear below is what
+       makes it reusable. *)
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
       cover_map_texture 0 level;
-    Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
-      Gl.renderbuffer clc_depth_rbs.(level);
 
     (* Clear color to sea and depth buffer *)
     Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val;
@@ -1427,7 +1438,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   Gl.bind_renderbuffer ctx Gl.renderbuffer None;
   Gl.delete_framebuffer ctx clc_fbo;
-  Array.iter (Gl.delete_renderbuffer ctx) clc_depth_rbs;
+  Gl.delete_renderbuffer ctx clc_depth_rb;
 
   cover_map_texture
 
