@@ -2095,7 +2095,7 @@ let format_float f =
   in
   s
 
-let update_url_params () =
+let update_url_params ?(push = false) () =
   let lat = !current_lat in
   let lon = !current_lon in
   let alpha_deg = compute_azimuth !current_orientation *. 180. /. Float.pi in
@@ -2113,8 +2113,9 @@ let update_url_params () =
       (Brr.Uri.Params.of_jstr search)
   in
   let history = Jv.get Jv.global "history" in
+  let action = if push then "pushState" else "replaceState" in
   ignore
-    (Jv.call history "replaceState"
+    (Jv.call history action
        [| Jv.null; Jv.of_string ""; Jv.of_jstr (Brr.Uri.to_jstr uri) |])
 
 (* Mouse state *)
@@ -2289,9 +2290,13 @@ let set_orientation alpha beta =
   target_orientation := !current_orientation
 
 let switch_location :
-    (camera:(float * float * float) option -> lat:float -> lon:float -> unit)
+    (push:bool ->
+    camera:(float * float * float) option ->
+    lat:float ->
+    lon:float ->
+    unit)
     ref =
-  ref (fun ~camera:_ ~lat:_ ~lon:_ -> ())
+  ref (fun ~push:_ ~camera:_ ~lat:_ ~lon:_ -> ())
 
 (* Bumped by every [load_location]. Lwt cancellation is awkward, so instead a
    load that finds itself no longer at the current epoch when it comes back from
@@ -2943,7 +2948,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
      zoom and every session-wide GPU resource are deliberately kept, so that
      heading continuity across a switch is preserved. *)
   (switch_location :=
-     fun ~camera ~lat ~lon ->
+     fun ~push ~camera ~lat ~lon ->
        Lwt.async (fun () ->
            Lwt.catch
              (fun () ->
@@ -2960,7 +2965,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
                      zoom := clamp_zoom z
                  | None -> ());
                  (* Reload and sharing must land on the new location. *)
-                 update_url_params ();
+                 update_url_params ~push ();
                  hide_startup_overlay ()
                end;
                Lwt.return_unit)
@@ -3158,6 +3163,19 @@ let get_url_position ~size =
       else None
   | _ -> None
 
+let setup_popstate_listener ~size =
+  let popstate = Brr.Ev.Type.create (Jstr.v "popstate") in
+  ignore
+    (Brr.Ev.listen popstate
+       (fun _ev ->
+         match get_url_position ~size with
+         | Some (lat, lon, alpha, beta, z) ->
+             !switch_location ~push:false
+               ~camera:(Some (alpha, beta, z))
+               ~lat ~lon
+         | None -> ())
+       (Brr.Window.as_target Brr.G.window))
+
 (* Approximate distance in metres from a position to the covered area, 0
    inside. Uses the raw dataset boxes (the per-tile extent handled by
    [in_range] shrinks them by ~0.57 degrees, well under the margins used here)
@@ -3335,7 +3353,7 @@ let create_location_ui ~size =
         if in_range ~size ~lat ~lon then begin
           clear_input_error ();
           close_menu ();
-          !switch_location ~camera:None ~lat ~lon
+          !switch_location ~push:true ~camera:None ~lat ~lon
         end
         else show_input_error "Location out of range"
     | None -> show_input_error "Invalid coordinates"
@@ -3377,7 +3395,7 @@ let create_location_ui ~size =
            match res with
            | Some (lat, lon, _, _, _) ->
                close_menu ();
-               !switch_location ~camera:None ~lat ~lon;
+               !switch_location ~push:true ~camera:None ~lat ~lon;
                Fut.return ()
            | None ->
                show_input_error "Location out of range or unavailable";
@@ -3409,7 +3427,9 @@ let create_location_ui ~size =
                (* In place, with the camera preset: no navigation, so
                   fullscreen mode survives the switch. *)
                close_menu ();
-               !switch_location ~camera:(Some (alpha, beta, z)) ~lat ~lon)
+               !switch_location ~push:true
+                 ~camera:(Some (alpha, beta, z))
+                 ~lat ~lon)
              (Brr.El.as_target item));
         Brr.El.append_children location_list [ item ];
         item)
@@ -4166,6 +4186,7 @@ let main () =
         navigate_to uri);
   (* current_orientation := { alpha = angle; beta = 90.; gamma = 0.; screen = 0. }; *)
   set_orientation angle pitch;
+  setup_popstate_listener ~size:tile_width;
 
   let start =
     let start = setup_events canvas in
