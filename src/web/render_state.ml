@@ -83,6 +83,15 @@ type terrain_uniforms = {
   (* Texture samplers *)
   relief : Gl.uniform_location; (* heights, vertex stage *)
   relief_normal : Gl.uniform_location; (* encoded normals, fragment stage *)
+  (* Near-field high-resolution relief (see [Hd_dem]) *)
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location; (* heights, vertex stage *)
+  hd_relief_normal : Gl.uniform_location; (* encoded normals, fragment *)
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
+  hd_half_texel : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   (* Lighting *)
@@ -118,6 +127,14 @@ type shadow_uniforms = {
   (* Shadow-specific *)
   relief : Gl.uniform_location;
   shadow_view_proj : Gl.uniform_location;
+  (* Near-field high-resolution relief (see [Hd_dem]): the shadow bake shares
+     radial_common.vert, so it inherits the HD terrain once these are set. *)
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location;
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -213,6 +230,14 @@ let init_terrain_uniforms ctx pid =
     transform = u "transform";
     relief = u "relief";
     relief_normal = u "relief_normal";
+    hd_valid = u "hd_valid";
+    hd_relief = u "hd_relief";
+    hd_relief_normal = u "hd_relief_normal";
+    hd_scale = u "hd_scale";
+    hd_bias = u "hd_bias";
+    hd_lod_bias = u "hd_lod_bias";
+    hd_max_lod = u "hd_max_lod";
+    hd_half_texel = u "hd_half_texel";
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_lightDir = u "u_lightDir";
@@ -244,6 +269,12 @@ let init_shadow_uniforms ctx pid =
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
     shadow_view_proj = u "shadow_view_proj";
+    hd_valid = u "hd_valid";
+    hd_relief = u "hd_relief";
+    hd_scale = u "hd_scale";
+    hd_bias = u "hd_bias";
+    hd_lod_bias = u "hd_lod_bias";
+    hd_max_lod = u "hd_max_lod";
   }
 
 (** Initialize sky uniform locations. Call once after program creation. *)
@@ -329,12 +360,57 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.ao 3;
   Gl.uniform1i ctx u.shadow_map 4;
   Gl.uniform1i ctx u.u_detailMap 5;
+  Gl.uniform1i ctx u.hd_relief 6;
   Gl.uniform1i ctx u.u_coverMap 7;
-  Gl.uniform1i ctx u.u_paletteTex 8
+  Gl.uniform1i ctx u.u_paletteTex 8;
+  Gl.uniform1i ctx u.hd_relief_normal 9
 
 (** Upload static texture unit bindings for shadow shader. *)
 let upload_texture_units_shadow ctx (u : shadow_uniforms) =
-  Gl.uniform1i ctx u.relief 0
+  Gl.uniform1i ctx u.relief 0;
+  Gl.uniform1i ctx u.hd_relief 6
+
+type hd_params = {
+  hd_size : int;  (** samples per side *)
+  hd_px_arcsec : float;  (** arcseconds per sample *)
+  hd_origin : float * float;
+      (** arcseconds from the anchor arcsecond to sample (0, 0) *)
+}
+(** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
+
+(** Upload that geometry to both the terrain and the shadow programs. [None]
+    disables the HD path, which restores exactly the base-only rendering. *)
+let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
+    (shadow_u : shadow_uniforms) hd =
+  let valid, scale, bias_x, bias_y, lod_bias, max_lod, half_texel =
+    match hd with
+    | None -> (0, 0., 0., 0., 0., 0, 0.)
+    | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
+        (* Normalized coordinate of an arcsecond offset [c] from the anchor:
+           (c - origin) / extent, written as an affine map so that the shader
+           keeps the shape of the base path. *)
+        let scale = 1. /. (hd_px_arcsec *. float hd_size) in
+        ( 1,
+          scale,
+          -.ox *. scale,
+          -.oy *. scale,
+          Float.log2 (1. /. hd_px_arcsec),
+          Web_utils.log2 hd_size,
+          0.5 /. float hd_size )
+  in
+  Gl.use_program ctx terrain_pid;
+  Gl.uniform1i ctx u.hd_valid valid;
+  Gl.uniform1f ctx u.hd_scale scale;
+  Gl.uniform2f ctx u.hd_bias bias_x bias_y;
+  Gl.uniform1f ctx u.hd_lod_bias lod_bias;
+  Gl.uniform1i ctx u.hd_max_lod max_lod;
+  Gl.uniform1f ctx u.hd_half_texel half_texel;
+  Gl.use_program ctx shadow_pid;
+  Gl.uniform1i ctx shadow_u.hd_valid valid;
+  Gl.uniform1f ctx shadow_u.hd_scale scale;
+  Gl.uniform2f ctx shadow_u.hd_bias bias_x bias_y;
+  Gl.uniform1f ctx shadow_u.hd_lod_bias lod_bias;
+  Gl.uniform1i ctx shadow_u.hd_max_lod max_lod
 
 (** Upload session-static uniforms. Call once after computing initial values.
     These uniforms don't change during the session:

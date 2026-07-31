@@ -523,6 +523,22 @@ let make_detail_map ctx =
   load_compressed_detail_map ctx tid;
   tid
 
+(* Bound to the high-resolution relief units of locations that have no such
+   data: a sampler of an active program must not name an incomplete texture,
+   even when the branch that would read it is never taken. *)
+let make_hd_placeholder ctx =
+  let data = Bigarray.(Array1.create int8_unsigned c_layout 2) in
+  data.{0} <- 0;
+  data.{1} <- 0;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 1 1 0 Gl.rg Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+    0;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tid
+
 (* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
 let make_palette_texture ctx =
   let data = Clc_palette.generate_palette () in
@@ -638,6 +654,7 @@ type graphics_resources = {
   water_raster_uniforms : Render_state.water_raster_uniforms;
   radial_params : Render_state.radial_params;
   nearest_sampler : Gl.sampler;
+  hd_placeholder : Gl.texture;
 }
 
 let resize_canvas ?device_width ?device_height canvas =
@@ -785,6 +802,7 @@ let init_graphics ctx =
     water_raster_uniforms;
     radial_params;
     nearest_sampler;
+    hd_placeholder = make_hd_placeholder ctx;
   }
 (* Rendering Passes *)
 
@@ -889,8 +907,20 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
    [rendered_height], which must agree exactly. *)
 let downsample_k _level = 0.25
 
-let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
-    downsample_pid (u : Render_state.relief_uniforms)
+(* [spacing_scale] is the texel spacing of [tile_texture] relative to one
+   arcsecond: the near-field high-resolution grid (see [Hd_dem]) is finer than
+   the base tile, and normals computed with the base spacing would come out
+   that many times too flat.
+
+   [border] leaves the outermost texel of every level at zero, which decodes as
+   -500 m: that is how out-of-range fetches sink below the horizon instead of
+   smearing the edge value, and it is invisible at the base tile's rim, 63 km
+   from the observer. The high-resolution pyramid's rim lands a few kilometres
+   away, in plain view, where such a ring reads as a wall of downward spikes:
+   it is filled with real heights instead. *)
+let compute_relief ?(spacing_scale = 1.0) ?(border = true) ctx width height lat
+    triangle_geo tile_texture normal_pid downsample_pid
+    (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
 
@@ -948,8 +978,10 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
   Gl.clear ctx Gl.color_buffer_bit;
 
   (* Use Scissor to leave 1-pixel border zero *)
-  Gl.enable ctx Gl.scissor_test;
-  Gl.scissor ctx 1 1 (width - 2) (height - 2);
+  if border then begin
+    Gl.enable ctx Gl.scissor_test;
+    Gl.scissor ctx 1 1 (width - 2) (height - 2)
+  end;
 
   Gl.use_program ctx normal_pid;
   (* Draw normals (Level 0) *)
@@ -961,6 +993,7 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
 
   (* Use the provided latitude for normals *)
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let deltax = deltax *. spacing_scale and deltay = deltay *. spacing_scale in
   Gl.uniform2f ctx u.delta deltax deltay;
   (* Level 0 samples full tile texture *)
   Gl.uniform2f ctx u.uv_scale 1.0 1.0;
@@ -1047,7 +1080,8 @@ let compute_relief ctx width height lat triangle_geo tile_texture normal_pid
       Gl.clear_color ctx 0. 0. 0. 0.;
       Gl.clear ctx Gl.color_buffer_bit;
 
-      if w > 2 && h > 2 then (
+      if not border then Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0
+      else if w > 2 && h > 2 then (
         (* Enable scissor to render only inner area, leaving 1-pixel border *)
         Gl.enable ctx Gl.scissor_test;
         Gl.scissor ctx 1 1 (w - 2) (h - 2);
@@ -1400,7 +1434,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
     ~index_count ~(radial_params : Render_state.radial_params) ~relief_texture
-    ctx =
+    ~hd_relief_texture ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
 
@@ -1417,6 +1451,12 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
   Gl.uniform1i ctx shadow_uniforms.relief 0;
+  (* The shadow vertex shader shares radial_common.vert, so the near-field
+     high-resolution heights must be bound here too: the bake then inherits
+     the HD terrain. *)
+  Gl.active_texture ctx Gl.texture6;
+  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_texture);
+  Gl.active_texture ctx Gl.texture0;
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
 
@@ -1497,7 +1537,8 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
 (** Bind all terrain textures to their units. Call at init and after
     draw_shadows. *)
 let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
-    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture =
+    ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
+    ~hd_relief_texture ~hd_relief_normal_texture =
   let open Brr_canvas in
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
@@ -1507,6 +1548,10 @@ let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
   Gl.active_texture ctx Gl.texture5;
   Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
+  Gl.active_texture ctx Gl.texture6;
+  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_texture);
+  Gl.active_texture ctx Gl.texture9;
+  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_normal_texture);
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
   Gl.active_texture ctx Gl.texture7;
@@ -1685,6 +1730,13 @@ let apply_manual_rotation q da_rad db_rad =
    replaced. The session-wide resources (programs, geometry, detail map,
    palette, shadow map) outlive every location and live in
    [graphics_resources]. *)
+type hd_relief = {
+  hd_relief_texture : Gl.texture;
+  hd_relief_normal_texture : Gl.texture;
+}
+(** The near-field high-resolution relief of a location (see [Hd_dem]), when the
+    service had data for it. *)
+
 type location = {
   height : float;
   points : (lazy_text * (float * float * float)) list;
@@ -1693,6 +1745,7 @@ type location = {
   relief_normal_texture : Gl.texture;
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
+  hd : hd_relief option;
 }
 
 let session : location option ref = ref None
@@ -1706,6 +1759,7 @@ let delete_location ctx
       ao_texture;
       cover_map_texture;
       points;
+      hd;
       _;
     } =
   Gl.delete_texture ctx tile_texture;
@@ -1713,6 +1767,11 @@ let delete_location ctx
   Gl.delete_texture ctx relief_normal_texture;
   Gl.delete_texture ctx ao_texture;
   Gl.delete_texture ctx cover_map_texture;
+  Option.iter
+    (fun { hd_relief_texture; hd_relief_normal_texture } ->
+      Gl.delete_texture ctx hd_relief_texture;
+      Gl.delete_texture ctx hd_relief_normal_texture)
+    hd;
   List.iter
     (fun ({ texture; _ }, _) ->
       match texture with
@@ -2341,13 +2400,16 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
     done);
   points
 
-(* Height of the terrain as actually drawn at grid position (gx, gy) seen
-   from [r] metres away: replicates the vertex shader's LOD selection and
-   corner-convention bilinear fetch over the soft-max height pyramid that
-   [compute_relief] bakes (downsample.frag, per-level sharpness
-   k = 0.1 * 0.5^(level-1), +0.5/255 encode bias). Distant mip levels cannot
-   reach a sharp summit's full-resolution height, so a POI anchored there
-   would float above the rendered silhouette. *)
+(* Height of the terrain as actually drawn at grid position (gx, gy) -- in
+   texels of [tile], which need not be whole ones since the high-resolution
+   grid is not aligned with the base one -- seen from [r] metres away:
+   replicates the vertex shader's LOD selection and corner-convention bilinear
+   fetch over the soft-max height pyramid that [compute_relief] bakes
+   (downsample.frag, per-level sharpness k = 0.1 * 0.5^(level-1), +0.5/255
+   encode bias). Distant mip levels cannot reach a sharp summit's
+   full-resolution height, so a POI anchored there would float above the
+   rendered silhouette. [inv_avg_delta] is per texel of [tile], so passing the
+   finer grid's value is what shifts the LOD selection with it. *)
 let rendered_height tile ~(radial_params : Render_state.radial_params)
     ~inv_avg_delta ~size ~r ~gx ~gy =
   let grid_spacing =
@@ -2356,8 +2418,7 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
   in
   let lod_f = Float.max 0. (Float.log2 (grid_spacing *. inv_avg_delta)) in
   let lod = min (int_of_float lod_f) (Web_utils.log2 size) in
-  if lod = 0 then Dem_loader.get_height tile gy gx
-  else begin
+  begin
     let get row col =
       Dem_loader.get_height tile
         (max 0 (min (size - 1) row))
@@ -2380,7 +2441,7 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
         m +. (log avg /. k) +. (0.5 /. 255. *. (9500. /. 257.))
     in
     let inv = 1. /. (2. ** float lod) in
-    let plx = float gx *. inv and ply = float gy *. inv in
+    let plx = gx *. inv and ply = gy *. inv in
     let bx = int_of_float (floor plx) and by = int_of_float (floor ply) in
     let fx = plx -. float bx and fy = ply -. float by in
     let n = size lsr lod in
@@ -2431,33 +2492,72 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     water_raster_uniforms;
     radial_params;
     nearest_sampler;
+    hd_placeholder;
     _;
   } =
     graphics
   in
-  (* Load DEM and CLC (for POIs) in parallel *)
-  let* tile, (_, _, _, _, clc_tiles) =
+  (* Load DEM, CLC (for POIs) and the near-field high-resolution elevation in
+     parallel. The last one never fails: absent data simply leaves the location
+     on the base DEM. *)
+  let* (tile, (_, _, _, _, clc_tiles)), hd_raw =
     Lwt.both
-      (Dem_loader.load ~size:w ~lat ~lon)
-      (Clc_loader.load_tiles ~lat ~lon ~size:w)
+      (Lwt.both
+         (Dem_loader.load ~size:w ~lat ~lon)
+         (Clc_loader.load_tiles ~lat ~lon ~size:w))
+      (Hd_dem.fetch ~lat ~lon)
   in
   if !location_epoch <> epoch then Lwt.return false
   else begin
     let x = w / 2 in
     let y = h / 2 in
     let points = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
+    (* The blended near-field grid equals the base upsample wherever the
+       high-resolution data is missing, so the renderer can switch to it on a
+       plain extent test. Built before the eye height, which must be read off
+       the surface that is actually drawn. *)
+    let hd_grid = Option.bind hd_raw (Hd_dem.blend ~lat ~base:tile) in
     (* Bilinear interpolation for height *)
     let height =
-      let get_h = Dem_loader.get_height tile in
       let off_x = Render_state.compute_sub_arcsec_offset lon in
       let off_y = Render_state.compute_sub_arcsec_offset lat in
-      let h00 = get_h y x in
-      let h10 = get_h y (x + 1) in
-      let h01 = get_h (y + 1) x in
-      let h11 = get_h (y + 1) (x + 1) in
-      let h0 = h00 +. (off_x *. (h10 -. h00)) in
-      let h1 = h01 +. (off_x *. (h11 -. h01)) in
-      h0 +. (off_y *. (h1 -. h0))
+      let base_height =
+        let get_h = Dem_loader.get_height tile in
+        let h00 = get_h y x in
+        let h10 = get_h y (x + 1) in
+        let h01 = get_h (y + 1) x in
+        let h11 = get_h (y + 1) (x + 1) in
+        let h0 = h00 +. (off_x *. (h10 -. h00)) in
+        let h1 = h01 +. (off_x *. (h11 -. h01)) in
+        h0 +. (off_y *. (h1 -. h0))
+      in
+      (* Inside the high-resolution extent the mesh is drawn from the finer
+         grid, and it resolves summits the 30 m base smooths away: an eye
+         placed 2 m above the base surface would end up *inside* the terrain it
+         is looking out of. Read the eye height off the grid that is drawn. *)
+      match hd_grid with
+      | Some (g : Hd_dem.t) ->
+          let gx = (off_x -. g.origin_x) /. Hd_dem.px_arcsec in
+          let gy = (off_y -. g.origin_y) /. Hd_dem.px_arcsec in
+          if
+            gx >= 0.
+            && gx <= float (Hd_dem.size - 2)
+            && gy >= 0.
+            && gy <= float (Hd_dem.size - 2)
+          then begin
+            let get_h = Dem_loader.get_height g.grid in
+            let bx = int_of_float (floor gx) and by = int_of_float (floor gy) in
+            let fx = gx -. float bx and fy = gy -. float by in
+            let h00 = get_h by bx in
+            let h10 = get_h by (bx + 1) in
+            let h01 = get_h (by + 1) bx in
+            let h11 = get_h (by + 1) (bx + 1) in
+            let h0 = h00 +. (fx *. (h10 -. h00)) in
+            let h1 = h01 +. (fx *. (h11 -. h01)) in
+            h0 +. (fy *. (h1 -. h0))
+          end
+          else base_height
+      | None -> base_height
     in
     (* The previous location's textures are dead from here on: the bakes below
        overwrite every unit they were bound to. Deleting first keeps the peak
@@ -2468,6 +2568,30 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       time_gpu ctx "compute_relief" (fun () ->
           compute_relief ctx w h lat triangle_geo tile_texture normal_pid
             downsample_pid relief_uniforms downsample_uniforms)
+    in
+    (* Second, finer relief pyramid over the near-field square. *)
+    let hd =
+      Option.map
+        (fun (g : Hd_dem.t) ->
+          let tex = make_tile_texture ctx g.grid in
+          let hd_relief_texture, hd_relief_normal_texture =
+            time_gpu ctx "compute_relief_hd" (fun () ->
+                compute_relief ~spacing_scale:Hd_dem.px_arcsec ~border:false ctx
+                  Hd_dem.size Hd_dem.size lat triangle_geo tex normal_pid
+                  downsample_pid relief_uniforms downsample_uniforms)
+          in
+          (* Nothing reads the source grid on the GPU after the bake. *)
+          Gl.delete_texture ctx tex;
+          { hd_relief_texture; hd_relief_normal_texture })
+        hd_grid
+    in
+    let hd_relief_texture =
+      match hd with Some h -> h.hd_relief_texture | None -> hd_placeholder
+    in
+    let hd_relief_normal_texture =
+      match hd with
+      | Some h -> h.hd_relief_normal_texture
+      | None -> hd_placeholder
     in
     let index_count = Bigarray.Array1.dim indices in
 
@@ -2513,6 +2637,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
       ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
       ~fog_color:fog_linear ~zenith_color:zenith_linear;
+    Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
+      shadow_uniforms
+      (Option.map
+         (fun (g : Hd_dem.t) ->
+           {
+             Render_state.hd_size = Hd_dem.size;
+             hd_px_arcsec = Hd_dem.px_arcsec;
+             hd_origin = (g.origin_x, g.origin_y);
+           })
+         hd_grid);
 
     (* GPU rasterize CLC tiles to FBO *)
     let cover_map_texture =
@@ -2525,11 +2659,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     time_gpu ctx "draw_shadows" (fun () ->
         draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
           ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
-          ~relief_texture ctx);
+          ~relief_texture ~hd_relief_texture ctx);
 
     (* Bind all terrain textures - after all textures are created *)
     bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
-      ~detail_map ~shadow_map ~cover_map_texture ~palette_texture;
+      ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
+      ~hd_relief_texture ~hd_relief_normal_texture;
 
     (* Location-static state that was needlessly re-set every frame. Must come
        after the bake passes above, which set their own clear colours. *)
@@ -2538,6 +2673,42 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     (let r, g, b = fog_linear in
      Gl.clear_color ctx r g b 1.);
 
+    (* Sight lines must be traced over the surface that is actually drawn: the
+       eye is anchored on the high-resolution grid now, and it sits up to 60 m
+       from the base DEM on a summit the 30 m grid smooths away, so a ray
+       traced over the base terrain would clear ridges the viewer cannot see
+       over -- or be blocked by ground that is no longer there.
+
+       [hd_at] reads that grid at a fractional *base*-grid position.
+       [ray_height] hands the whole test the same surface at base resolution
+       (both endpoints, the curvature frame and the Bresenham phase), while
+       [~fine] lets the near phase, where the ray hugs the terrain, sample it
+       at its own 0.31 arcsec. Without HD both collapse to exactly the previous
+       call. *)
+    let hd_at =
+      match hd_grid with
+      | None -> fun _ _ -> None
+      | Some (g : Hd_dem.t) ->
+          let get_h = Dem_loader.get_height g.grid in
+          let limit = float (Hd_dem.size - 2) in
+          fun bx by ->
+            let hx = (bx -. float x -. g.origin_x) /. Hd_dem.px_arcsec in
+            let hy = (by -. float y -. g.origin_y) /. Hd_dem.px_arcsec in
+            if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+              Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+            else None
+    in
+    let ray_height =
+      let base = Dem_loader.get_height tile in
+      match hd_grid with
+      | None -> base
+      | Some _ -> (
+          fun row col ->
+            match hd_at (float col) (float row) with
+            | Some h -> h
+            | None -> base row col)
+    in
+    let fine = Option.map (fun _ -> hd_at) hd_grid in
     let points =
       let off_x = Render_state.compute_sub_arcsec_offset lon in
       let off_y = Render_state.compute_sub_arcsec_offset lat in
@@ -2548,10 +2719,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           let dist_sq = (dx *. dx) +. (dy *. dy) in
           if dist_sq > 4900000000. then false
           else
-            Visibility.test_precise
-              (Dem_loader.get_height tile)
-              ~src_h:(height +. 2.) ~curvature:(deltax, deltay) ~off_x ~off_y
-              ~src_x:x ~src_y:y ~dst_x ~dst_y ())
+            Visibility.test_precise ray_height ~src_h:(height +. 2.)
+              ~curvature:(deltax, deltay) ?fine ~off_x ~off_y ~src_x:x ~src_y:y
+              ~dst_x ~dst_y ())
         points
     in
     let points =
@@ -2578,12 +2748,30 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           let py = gn +. (px *. px *. conv /. 2.) in
           let r2 = (px *. px) +. (py *. py) in
           (* Anchor at the silhouette as drawn (mip-level height at this
-             distance), with the same curvature drop as the mesh *)
+             distance), with the same curvature drop as the mesh. Inside the
+             high-resolution square the mesh reads the finer grid, so the
+             replica must too: same walker, over the blended grid, with the
+             LOD selection shifted by its refinement factor. *)
           let z =
-            rendered_height tile ~radial_params ~inv_avg_delta ~size:w
-              ~r:(sqrt r2) ~gx:x' ~gy:y'
-            -. Visibility.curvature_drop r2
+            let r = sqrt r2 in
+            let hd_pos g o = (float (g - (w / 2)) -. o) /. Hd_dem.px_arcsec in
+            match hd_grid with
+            | Some (g : Hd_dem.t)
+              when let hd_x = hd_pos x' g.origin_x
+                   and hd_y = hd_pos y' g.origin_y in
+                   hd_x >= 0.
+                   && hd_x <= float (Hd_dem.size - 1)
+                   && hd_y >= 0.
+                   && hd_y <= float (Hd_dem.size - 1) ->
+                rendered_height g.grid ~radial_params
+                  ~inv_avg_delta:(inv_avg_delta /. Hd_dem.px_arcsec)
+                  ~size:Hd_dem.size ~r ~gx:(hd_pos x' g.origin_x)
+                  ~gy:(hd_pos y' g.origin_y)
+            | _ ->
+                rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
+                  ~gx:(float x') ~gy:(float y')
           in
+          let z = z -. Visibility.curvature_drop r2 in
           let h =
             let dz = z -. height in
             (* Apparent elevation angle, for label priority *)
@@ -2609,6 +2797,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           relief_normal_texture;
           ao_texture;
           cover_map_texture;
+          hd;
         };
     let* () = Web_utils.on_gpu_finished ctx in
     force_redraw := true;

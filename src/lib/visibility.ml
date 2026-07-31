@@ -98,8 +98,8 @@ let debug = false
     @param dst_x destination column
     @param dst_y destination row
     @return true if destination is visible from source *)
-let test_precise (get_height : int -> int -> float) ?src_h ?curvature ~off_x
-    ~off_y ~src_x ~src_y ~dst_x ~dst_y () =
+let test_precise (get_height : int -> int -> float) ?src_h ?curvature ?fine
+    ~off_x ~off_y ~src_x ~src_y ~dst_x ~dst_y () =
   let src_x_f = float src_x +. off_x in
   let src_y_f = float src_y +. off_y in
   (* With [curvature] = (metres per pixel in x, in y), work in the
@@ -108,14 +108,31 @@ let test_precise (get_height : int -> int -> float) ?src_h ?curvature ~off_x
      algorithm below is then exactly the refracted ray over the sphere. The
      wrapped [get_height] also feeds the Bresenham fallback, whose sub-segment
      of the ray stays straight in this frame. *)
+  let drop =
+    match curvature with
+    | None -> fun _ _ -> 0.
+    | Some (mx, my) ->
+        fun x y ->
+          let dxm = (x -. src_x_f) *. mx in
+          let dym = (y -. src_y_f) *. my in
+          curvature_drop ((dxm *. dxm) +. (dym *. dym))
+  in
   let get_height =
     match curvature with
     | None -> get_height
-    | Some (mx, my) ->
-        fun row col ->
-          let dxm = (float col -. src_x_f) *. mx in
-          let dym = (float row -. src_y_f) *. my in
-          get_height row col -. curvature_drop ((dxm *. dxm) +. (dym *. dym))
+    | Some _ ->
+        fun row col -> get_height row col -. drop (float col) (float row)
+  in
+  (* The bilinear phase below is where the ray hugs the terrain, and it is also
+     the part of the ray a finer grid covers (see [Hd_dem]): sample that grid
+     directly there rather than whatever [get_height] can resolve. *)
+  let terrain_at x y =
+    match fine with
+    | None -> bilinear_height get_height ~x ~y
+    | Some f -> (
+        match f x y with
+        | Some h -> h -. drop x y
+        | None -> bilinear_height get_height ~x ~y)
   in
   let dst_x_f = float dst_x in
   let dst_y_f = float dst_y in
@@ -124,7 +141,7 @@ let test_precise (get_height : int -> int -> float) ?src_h ?curvature ~off_x
   let d = sqrt ((dx *. dx) +. (dy *. dy)) in
   if d < 0.1 then true (* Source and destination are the same point *)
   else
-    let src_terrain = bilinear_height get_height ~x:src_x_f ~y:src_y_f in
+    let src_terrain = terrain_at src_x_f src_y_f in
     let src_h = Option.value ~default:(src_terrain +. 2.) src_h in
     if debug then Format.eprintf "%f %f@." src_terrain src_h;
     let dst_h = get_height dst_y dst_x in
@@ -148,7 +165,7 @@ let test_precise (get_height : int -> int -> float) ?src_h ?curvature ~off_x
           test get_height ~src_h:h_line ~src_x:switch_x ~src_y:switch_y ~dst_x
             ~dst_y ()
       else
-        let terrain_h = bilinear_height get_height ~x ~y in
+        let terrain_h = terrain_at x y in
         if debug then Format.eprintf "%f %f@." terrain_h h_line;
         if terrain_h +. 0.1 > h_line then false
         else

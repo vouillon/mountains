@@ -50,6 +50,14 @@ type terrain_uniforms = {
   transform : Gl.uniform_location;
   relief : Gl.uniform_location;
   relief_normal : Gl.uniform_location;
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location;
+  hd_relief_normal : Gl.uniform_location;
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
+  hd_half_texel : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
@@ -79,6 +87,12 @@ type shadow_uniforms = {
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
   shadow_view_proj : Gl.uniform_location;
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location;
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -156,6 +170,26 @@ val upload_radial_static_shadow :
 
 val upload_texture_units : Gl.t -> terrain_uniforms -> unit
 val upload_texture_units_shadow : Gl.t -> shadow_uniforms -> unit
+
+type hd_params = {
+  hd_size : int;  (** samples per side *)
+  hd_px_arcsec : float;  (** arcseconds per sample *)
+  hd_origin : float * float;
+      (** arcseconds from the anchor arcsecond to sample (0, 0) *)
+}
+(** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
+
+val upload_hd_params :
+  Gl.t ->
+  Gl.program ->
+  Gl.program ->
+  terrain_uniforms ->
+  shadow_uniforms ->
+  hd_params option ->
+  unit
+(** [upload_hd_params ctx terrain_pid shadow_pid u shadow_u hd] describes the
+    near-field high-resolution relief to both programs. [None] disables the HD
+    path entirely, restoring exactly the base-only rendering. *)
 
 val upload_session_static :
   Gl.t ->

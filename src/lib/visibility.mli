@@ -25,10 +25,15 @@ val curvature_drop : float -> float
     tangent plane, [d2] square metres from the observer, with standard
     atmospheric refraction folded in (effective radius ~7320 km). *)
 
+val bilinear_height : (int -> int -> float) -> x:float -> y:float -> float
+(** Bilinear interpolation of a height grid at fractional coordinates. Reads the
+    (x+1, y+1) neighbours, so the caller must keep them inside the grid. *)
+
 val test_precise :
   (int -> int -> float) ->
   ?src_h:float ->
   ?curvature:float * float ->
+  ?fine:(float -> float -> float option) ->
   off_x:float ->
   off_y:float ->
   src_x:int ->
@@ -48,6 +53,11 @@ val test_precise :
       metres per pixel (x, y): when given, heights are evaluated in the
       observer-anchored frame lowered by the Earth-curvature drop, in which
       sight lines are straight (see {!curvature_drop})
+    @param fine
+      [fine x y] is the terrain height at the fractional grid position (x, y) as
+      read from a finer grid covering part of the ray, or [None] outside it.
+      Heights are raw: the curvature drop is applied here. Used by the bilinear
+      phase only, which is exactly where the ray hugs the terrain.
     @param off_x fractional X offset from src_x (in pixels/meters)
     @param off_y fractional Y offset from src_y (in pixels/meters)
     @param src_x source column (integer)

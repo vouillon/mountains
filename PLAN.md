@@ -149,6 +149,50 @@ Follow-up found during implementation, not yet done:
       implementation-dependent); make them `highp` for consistency with the
       Phase 3 changes.
 
+Second pass (2026-07-31, uncommitted), prompted by banding reported on a phone
+and absent on desktop. Three `terrain.frag` locals held a world or texture
+coordinate at the file-default mediump; all are one-word fixes and all are
+provably no-ops on desktop (RMSE exactly 0 on the pinned captures, since
+desktop mediump is fp32):
+
+- [x] `macroPos = v_world_pos.xy * 0.02` — world metres scaled, so it reaches
+      ~1400 at the tile edge, where the fp16 ulp is a whole unit. The three
+      `sin`/`cos` phases taken from it snap in ~1 radian steps, breaking the
+      grass patch pattern into flat blocks over distant grass. Best candidate
+      for the reported artefact.
+- [x] `levelUV` / `dist_from_center` / `d_center` / `frac` in
+      `sampleCLCBilinear` — the CLC clipmap texture coordinate, narrowed to
+      fp16 immediately before being multiplied by the 1024-wide cover map. The
+      bilinear weight then takes 2-4 values per texel instead of a ramp, so
+      every land-cover transition is a staircase (~120 m at the outer levels).
+- [x] `applyWaterEffects(..., vec2 worldPos)` — parameter at mediump receiving
+      `v_world_pos.xy`; the foam UV snaps into blocks metres across.
+
+Third pass, same session: the reported artefact turned out to be **shadow
+acne**, and the whole shadow lookup in `terrain.frag` was at mediump. Three
+compounding fp16 errors, each on its own enough to band a grazing slope along
+its contours, all fixed by qualifying them highp (again no-ops on desktop,
+RMSE exactly 0 on three pinned captures):
+
+- [x] `pcf_shadow(..., vec2 coords, float compare, ...)` — a shadow-map UV is
+      in [0, 1] over 2048 texels, so one texel is 4.88e-4, *exactly* the fp16
+      ulp there. The five PCF taps collapsed onto one texel.
+- [x] `offset_pos` — a world coordinate (the project rule again), quantised to
+      2 m at 3 km and 16 m at 20 km before being multiplied by the shadow
+      matrix.
+- [x] `s_pos` / `proj_coords` / `current_depth` — the comparison depth is in
+      [0, 1] over the cascade's depth span, so fp16 quantised it to 10 m
+      (cascade 0), 23 m (1) and 73 m (2) of world depth, against a bias sized
+      for the 2.93/11.7/36.6 m texel spans. Whole contour bands flipped
+      between lit and shadowed.
+
+Reproducing it needed the phone's framing, not the phone: the artefact is
+magnification-dependent, and the rig's default 1200x800 90-degree captures hid
+it. Portrait `WINDOW=864,1730` at `zoom=3` shows it on desktop.
+
+Still unaudited for fp16: `sky.frag`'s `cos_theta`/`horizon_factor` (steps
+computed at ~0.1 LSB, under the dither, so probably fine).
+
 ## Phase 4 — Renderer correctness
 
 Implemented 2026-07-29. Notes: the floor-based anchoring is now a single shared
@@ -686,7 +730,72 @@ color+depth panorama from the TRUE eye and ray-march it per water fragment
 of 1 — likely too heavy on Mali/Adreno when a lake fills the frame
 (Android is the primary target).
 
-## Near-field DEM refinement with RGE ALTI — designed around residual encoding (2026-07-31)
+## Near-field DEM refinement with RGE ALTI — Option B IMPLEMENTED (2026-07-31, uncommitted)
+
+IMPLEMENTED as Option B (live IGN fetch, no hosting pipeline), with the
+endpoint switched from WMS GetMap to WMTS GetTile late in the work. What
+shipped, and how it differs from the design below:
+
+- Source: `data.geopf.fr/wmts`, layer ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES,
+  WGS84G level 13, FORMAT=image/x-bil;bits=32. 256 x 256 raw float32 tiles,
+  0.30899 arcsec per sample (9.5 m N-S, ~3.2x the base grid and NOT a
+  power-of-two ratio to it — every consumer reads `Hd_dem.px_arcsec`).
+  Verified aligned with our base grid to better than a quarter of a base texel
+  (shift search against the Copernicus .tif: optimum exactly at 0,0).
+- Extent: an 8 x 8 tile block (2048^2 samples, 633 arcsec = 19.5 x 13.6 km at
+  46N) anchored on the level-13 tile holding the location, so nearby locations
+  share all 64 URLs. 214 kB deflated per tile, ~13.7 MB wire, 64 tiles in
+  2.7-8.7 s in-browser (4.1 s with curl -parallel 16).
+- Encoding: absolute heights, as gate 1 concluded. The enhancement-layer
+  semantics live in `Hd_dem.blend`, which resamples the base tile onto the HD
+  grid on the CPU and writes `base + fade * (hd - base)` into a u16 grid: the
+  result *equals the base upsample* wherever HD is missing (nodata, 404 tile,
+  outer 1.5 km annulus), so the renderer switches on a plain extent test and
+  degrades to today's rendering by construction. 0.35-5 s for 4M samples.
+- Renderer: second relief height+normal pyramid over that grid (existing
+  `compute_relief`, with the texel spacing parameterised); vertex LOD, fragment
+  normal, shadow bake and the POI silhouette replica all switch inside the
+  extent. AO stays base-resolution (follow-up).
+- `Visibility` (POI occlusion) follows the eye onto the HD surface:
+  `test_precise` gained `?fine`, a finer grid consulted by the bilinear phase
+  where the ray hugs the terrain, and the accessor it is handed now returns HD
+  heights inside the extent, so both endpoints, the curvature frame and the
+  Bresenham phase see the surface that is drawn. Without HD the call collapses
+  to exactly the previous one (verified bit-identical).
+- Two bugs found on first user review and fixed:
+  * `compute_relief` leaves the outermost texel of every level at zero, which
+    decodes as -500 m. Invisible at the base tile's rim (63 km, off-mesh); on
+    the HD pyramid that rim is a few km away and rendered as a ring of
+    vertical downward spikes. `compute_relief` now takes `?border`, and the HD
+    bake fills its pyramid edge to edge.
+  * The eye height came from the base DEM while the surface came from HD. RGE
+    ALTI is +59 m against Copernicus at the Aiguille du Midi (the 30 m DSM
+    smooths the summit down), so the camera ended up *inside* the terrain. The
+    eye is now read off the grid that is actually drawn.
+- Source caveat, not a renderer bug: RGE ALTI HIGHRES at level 13 is 32-63 m
+  BELOW Copernicus on the Mont Blanc summit dome (4778 m peak vs 4810 m), so
+  summit viewpoints sit lower than before. Glacier surfaces lower down are
+  excellent (crevasses resolved), so this looks like the summit ice being
+  surveyed at a different epoch rather than a defect.
+- Verified (headless, frozen clock): grazing forest and crag views visibly
+  changed (bare-earth valley floor with the Arve channel; crevasse fields on
+  the Géant/Vallée Blanche glacier that the 30 m DSM cannot hold); far vista
+  no seam at the boundary; POI labels still pinned at zoom 3; WMS/WMTS host
+  unreachable => RMSE exactly 0 vs the pre-change baseline on all three views
+  (the whole feature is a no-op without data). Terrain beyond the extent was
+  bit-identical too until the eye-height fix; the eye now follows the HD
+  surface, so the far field shifts with it — a whole-frame parallax shift, not
+  a change of content. GPU cost +22.4 MB per location.
+- Service worker: `data.geopf.fr` is cached cache-first in the persistent data
+  cache, stored and matched *with* the query string (unlike the hosted tiles,
+  whose query is stripped). Verified: 64 entries in cache `v1` after a load.
+
+Open follow-ups: the fetch blocks the location load (a deferred upgrade —
+publish on the base tile, rebake when the tiles land — would remove the
++3-9 s); AO and `Visibility` still use the base grid; level 14 (0.155 arcsec)
+is available at 4x the data if the near field ever needs it.
+
+Original design notes follow.
 
 Goal: sharper terrain within ~2-5 km of the viewer using IGN's RGE ALTI
 (bare-earth LIDAR DTM, 1 m / 5 m, France, open data / Etalab licence,

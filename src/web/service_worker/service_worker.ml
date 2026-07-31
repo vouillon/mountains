@@ -13,10 +13,20 @@ let data_cache_name = Jstr.v "v1"
 let open_cache name =
   Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) name
 
+(* Near-field high-resolution elevation ([Hd_dem]) comes from IGN's WMS. Those
+   responses are as immutable and as expensive as the hosted tiles -- the
+   request is derived from the location's anchor arcsecond, so one location
+   always asks for the same URL -- and belong in the persistent data cache.
+   Unlike the tiles, a WMS request carries its whole identity in its query
+   string, so it is the one entry that must be stored and matched with the
+   query included. *)
+let is_hd_dem url = String.starts_with ~prefix:"https://data.geopf.fr/" url
+
 let is_tile url =
   String.ends_with ~suffix:".dem" url
   || String.ends_with ~suffix:".clc" url
   || String.ends_with ~suffix:".tif" url
+  || is_hd_dem url
 
 (* [Cache.Storage.match'] searches every cache, so application caches from
    previous builds must be dropped, not just left unused. *)
@@ -61,12 +71,14 @@ let store_in_cache request response =
   in
   (* Strip query string to avoid duplicate cache entries *)
   let cache_url =
-    match Brr.Uri.of_jstr url with
-    | Ok uri -> (
-        match Brr.Uri.with_uri ~query:Jstr.empty uri with
-        | Ok uri -> Brr.Uri.to_jstr uri
-        | Error _ -> url)
-    | Error _ -> url
+    if is_hd_dem (Jstr.to_string url) then url
+    else
+      match Brr.Uri.of_jstr url with
+      | Ok uri -> (
+          match Brr.Uri.with_uri ~query:Jstr.empty uri with
+          | Ok uri -> Brr.Uri.to_jstr uri
+          | Error _ -> url)
+      | Error _ -> url
   in
   let cache_request = Brr_io.Fetch.Request.v cache_url in
   Brr_io.Fetch.Cache.put cache cache_request
@@ -84,10 +96,10 @@ let match_opts =
   let o = Jv.obj [| ("ignoreSearch", Jv.true') |] in
   Obj.magic o
 
-let use_cache_first request =
+let use_cache_first ?query_opts request =
   let* response =
-    Brr_io.Fetch.Cache.Storage.match' ~query_opts:match_opts
-      (Brr_io.Fetch.caches ()) request
+    Brr_io.Fetch.Cache.Storage.match' ?query_opts (Brr_io.Fetch.caches ())
+      request
   in
   match response with
   | Some response when Brr_io.Fetch.Response.ok response ->
@@ -145,11 +157,12 @@ let () =
            (let open Fut.Syntax in
             let* response =
               let url = Jstr.to_string url in
-              if
+              if is_hd_dem url then use_cache_first request
+              else if
                 is_tile url
                 || String.ends_with ~suffix:"worker.bc.js" url
                 || String.ends_with ~suffix:"decompress_tile.wasm" url
-              then use_cache_first request
+              then use_cache_first ~query_opts:match_opts request
               else use_cache_on_error ev request
             in
             match response with
