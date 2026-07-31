@@ -2918,6 +2918,10 @@ let featured_locations =
     ("Plateau d'Emparis", 45.0499, 6.2278, -149., 94., 0.6);
     ("La Chalannette (Jausiers)", 44.3950846, 6.7669714, 50., 90., 1.0);
     ("Aiguille du Brévent (Mont Blanc)", 45.9334, 6.83722, -169., 95., 1.0);
+    ("Le Maïdo (Cirque de Mafate)", -21.05886, 55.38188, -69., 78., 0.50);
+    ("Cap Noir", -20.9929, 55.38971, -133., 85., 0.50);
+    ("Fenêtre des Makes", -21.1852, 55.43295, -28., 82., 0.50);
+    ("Piton des Neiges", -21.09934, 55.48, 148., 73., 0.50);
   ]
 
 let get_preset_position () =
