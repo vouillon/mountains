@@ -13,13 +13,12 @@ let data_cache_name = Jstr.v "v1"
 let open_cache name =
   Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) name
 
-(* Near-field high-resolution elevation ([Hd_dem]) comes from IGN's WMS. Those
-   responses are as immutable and as expensive as the hosted tiles -- the
-   request is derived from the location's anchor arcsecond, so one location
-   always asks for the same URL -- and belong in the persistent data cache.
-   Unlike the tiles, a WMS request carries its whole identity in its query
-   string, so it is the one entry that must be stored and matched with the
-   query included. *)
+(* Near-field high-resolution elevation ([Hd_dem]) comes from IGN's WMTS.
+   Those responses are as immutable and as expensive as the hosted tiles --
+   the tile grid is fixed, so nearby locations share URLs -- and belong in the
+   persistent data cache. Unlike the hosted tiles, a WMTS request carries its
+   whole identity in its query string, so these are the entries that must be
+   stored and matched with the query included. *)
 let is_hd_dem url = String.starts_with ~prefix:"https://data.geopf.fr/" url
 
 let is_tile url =
@@ -96,13 +95,21 @@ let match_opts =
   let o = Jv.obj [| ("ignoreSearch", Jv.true') |] in
   Obj.magic o
 
-let use_cache_first ?query_opts request =
+(* [put_in_cache] stores error responses too. With [serve_not_found], a cached
+   404 is served rather than skipped: a WMTS elevation tile answers 404 when it
+   lies outside French territory, which is permanent, and asking the network
+   again on every visit to a location at the edge of coverage is at best
+   wasted requests and at worst -- on a weak connection -- tiles that hang
+   until [Hd_dem]'s timeout instead of resolving instantly. *)
+let use_cache_first ?(serve_not_found = false) ?query_opts request =
   let* response =
     Brr_io.Fetch.Cache.Storage.match' ?query_opts (Brr_io.Fetch.caches ())
       request
   in
   match response with
-  | Some response when Brr_io.Fetch.Response.ok response ->
+  | Some response
+    when Brr_io.Fetch.Response.ok response
+         || (serve_not_found && Brr_io.Fetch.Response.status response = 404) ->
       Fut.return (Ok response)
   | _ ->
       let* response = Brr_io.Fetch.request request in
@@ -157,7 +164,8 @@ let () =
            (let open Fut.Syntax in
             let* response =
               let url = Jstr.to_string url in
-              if is_hd_dem url then use_cache_first request
+              if is_hd_dem url then
+                use_cache_first ~serve_not_found:true request
               else if
                 is_tile url
                 || String.ends_with ~suffix:"worker.bc.js" url

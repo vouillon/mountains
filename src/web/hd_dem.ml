@@ -71,6 +71,14 @@ let to_lwt f =
   (Fut.await f @@ fun v -> Lwt.wakeup u v);
   t
 
+(* The level-13 tile holding the location, on which the block is centred. *)
+let anchor_tile ~lat ~lon =
+  let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
+  let span = 360. /. float tiles_per_axis in
+  let row = int_of_float (floor ((90. -. (float alat /. 3600.)) /. span)) in
+  let col = int_of_float (floor (((float alon /. 3600.) +. 180.) /. span)) in
+  (alat, alon, row, col)
+
 type raw = {
   samples : (float, float32_elt, c_layout) Array1.t;
       (* [size] x [size], row 0 northernmost *)
@@ -105,14 +113,7 @@ let fetch_tile ~row ~col =
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
 let fetch ~lat ~lon : raw option Lwt.t =
-  let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
-  let span = 360. /. float tiles_per_axis in
-  let anchor_row =
-    int_of_float (floor ((90. -. (float alat /. 3600.)) /. span))
-  in
-  let anchor_col =
-    int_of_float (floor (((float alon /. 3600.) +. 180.) /. span))
-  in
+  let alat, alon, anchor_row, anchor_col = anchor_tile ~lat ~lon in
   let row0 = anchor_row - (block_tiles / 2) in
   let col0 = anchor_col - (block_tiles / 2) in
   (* Sample centres: lon = -180 + (col * tile_px + j + 0.5) * px,
@@ -359,3 +360,60 @@ let blend ~lat ~(base : Dem_loader.t) raw =
         origin_y = raw.origin_y;
       }
   end
+
+(* Warm the persistent cache for offline use, like [Dem_loader.prefetch]: a
+   block twice the extent's width centred on the same anchor gives every
+   location within [block_tiles / 2] tiles (~10 km) of [lat]/[lon] its full
+   extent offline, for ~40 MB on the wire. The geoplateforme exempts the WMTS
+   from its rate limiting, so all the requests are issued at once, like the
+   extent's own.
+
+   The requests are made through the service worker, which stores every
+   response in the persistent data cache -- a 404 included, since it means
+   "outside French territory" and is served back rather than asked again.
+   [Cache.add] would reject those, hence fetches rather than the direct cache
+   writes of [Dem_loader.prefetch]. *)
+let prefetch ~lat ~lon =
+  let _, _, anchor_row, anchor_col = anchor_tile ~lat ~lon in
+  let n = 2 * block_tiles in
+  let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
+  let* cache =
+    to_lwt
+      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) (Jstr.v "v1"))
+  in
+  match cache with
+  | Error _ -> Lwt.return_unit
+  | Ok cache ->
+      let fetched = ref 0 in
+      let tasks =
+        List.concat_map
+          (fun br ->
+            List.map
+              (fun bc ->
+                Lwt.catch
+                  (fun () ->
+                    let url =
+                      Jstr.v (tile_url ~row:(row0 + br) ~col:(col0 + bc))
+                    in
+                    let* cached =
+                      to_lwt
+                        (Brr_io.Fetch.Cache.match' cache
+                           (Brr_io.Fetch.Request.v url))
+                    in
+                    match cached with
+                    | Ok (Some _) -> Lwt.return_unit
+                    | Ok None | Error _ -> (
+                        let* res = to_lwt (Brr_io.Fetch.url url) in
+                        match res with
+                        | Ok _ ->
+                            incr fetched;
+                            Lwt.return_unit
+                        | Error _ -> Lwt.return_unit))
+                  (fun _ -> Lwt.return_unit))
+              (List.init n Fun.id))
+          (List.init n Fun.id)
+      in
+      let* () = Lwt.join tasks in
+      if !fetched > 0 then
+        Format.eprintf "RGE ALTI: prefetched %d tiles@." !fetched;
+      Lwt.return_unit

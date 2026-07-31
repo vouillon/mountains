@@ -28,6 +28,12 @@ type t = {
   origin_y : float;  (** arcseconds from the anchor to the southernmost row *)
 }
 
+val prefetch : lat:float -> lon:float -> unit Lwt.t
+(** Warm the persistent tile cache for offline use with a block twice the
+    extent's width around [lat]/[lon] (~40 MB), so every location within about
+    10 km keeps its full near-field refinement offline. Tiles already cached (a
+    cached 404 included) are not requested again; failures are ignored. *)
+
 val blend : lat:float -> base:Dem_loader.t -> raw -> t option
 (** [blend ~lat ~base raw] resamples [base] onto the high-resolution grid and
     mixes the high-resolution correction into it, fading it out at the edge of

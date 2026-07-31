@@ -789,11 +789,23 @@ shipped, and how it differs from the design below:
 - Service worker: `data.geopf.fr` is cached cache-first in the persistent data
   cache, stored and matched *with* the query string (unlike the hosted tiles,
   whose query is stripped). Verified: 64 entries in cache `v1` after a load.
+- Offline prefetch (added 2026-07-31): `Hd_dem.prefetch`, fired for the
+  Geolocation source alongside the DEM/CLC prefetches, warms a 16 x 16 tile
+  block on the same anchor (~40 MB beyond the extent), so every location
+  within ~10 km keeps its full near field offline. The geoplateforme exempts
+  the WMTS from its rate limiting, so all requests are issued at once, through
+  the service worker (`Cache.add` would reject 404s). The worker now also
+  *serves* cached 404s for these URLs (`use_cache_first ~serve_not_found`):
+  a WMTS 404 means "outside French territory", which is permanent, and
+  re-asking the network turned coverage-edge loads on a weak connection into
+  tiles hanging until the 25 s timeout. Verified: 64 entries after the load,
+  256 after the prefetch ("prefetched 192 tiles" — the inner 8 x 8 skipped).
 
 Open follow-ups: the fetch blocks the location load (a deferred upgrade —
 publish on the base tile, rebake when the tiles land — would remove the
-+3-9 s); AO and `Visibility` still use the base grid; level 14 (0.155 arcsec)
-is available at 4x the data if the near field ever needs it.
++3-9 s); AO still uses the base grid, and `Visibility`'s Bresenham phase
+samples HD at the base 1-arcsec spacing only; level 14 (0.155 arcsec) is
+available at 4x the data if the near field ever needs it.
 
 Original design notes follow.
 

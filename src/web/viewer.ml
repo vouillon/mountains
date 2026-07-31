@@ -4066,7 +4066,8 @@ let main () =
          being displayed: only start once the first location is up. *)
       if source = Geolocation then begin
         Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
-        Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon)
+        Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon);
+        Lwt.async (fun () -> Hd_dem.prefetch ~lat ~lon)
       end
   in
   update_startup_status "Loading Terrain..." true;
