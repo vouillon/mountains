@@ -1007,3 +1007,230 @@ misses the flash): with URL parameters `["", "Loading Terrain..."]` — the
 geolocation wording never appears, including across an in-page switch; without
 them `["", "Loading Terrain...", "Getting current location...", "Loading
 Terrain..."]`.
+
+## Nested level-14 near field — PLANNED (2026-07-31)
+
+Follow-up to "level 14 (0.155 arcsec) is available at 4x the data if the near
+field ever needs it" above. The proposal is to **nest** L14 inside the existing
+L13 block rather than replace it: base -> L13 -> L14, each layer fading into the
+previous one.
+
+### What the service actually offers (measured 2026-07-31)
+
+`GetCapabilities` on `data.geopf.fr/wmts`, parsed per layer:
+
+| layer | TileMatrixSet | levels | finest | format |
+| --- | --- | --- | --- | --- |
+| `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` (RGE ALTI DTM) | `WGS84G_6_14` | 6-14 | 4.77 m | BIL f32 |
+| `…HIGHRES.MNS` (surface model) | `WGS84G_4_17` | 4-17 | 0.60 m | BIL f32 |
+| `…HIGHRES.QUALITY` (source mask) | `PM_6_16` | 6-16 | — | PNG |
+| `IGNF_LIDAR-HD_MNT/MNS/MNH_….SHADOW` | `PM_0_18` | 0-18 | — | PNG hillshade |
+
+**L14 is the floor for bare earth.** The generic `WGS84G` matrix set runs to L19
+(0.15 m) and the URL we send names it, but the HIGHRES *layer* binds only levels
+6-14 of it; `TILEMATRIX=15` 404s over the Ubaye at two different tiles while 13
+and 14 both return full 256 kB tiles. Anything advertised deeper is either a
+surface model or a precomputed hillshade.
+
+Exact spacings from the matrix definitions (`MatrixWidth` x `TileWidth`), at 46N:
+
+| level | arcsec/sample | m N-S | m E-W |
+| --- | --- | --- | --- |
+| 13 (current) | 0.3090 | 9.54 | 6.63 |
+| 14 | 0.1545 | 4.77 | 3.31 |
+
+### Why it is worth doing (measured, one tile)
+
+L14 tile `row=4150 col=17002` against its parent L13 tile `row=2075 col=8501`
+(Ubaye, 44.40N 6.80E, 572 m of relief in-tile):
+
+- 2x2 box average of L14 vs L13: **RMS 0.000 m, max 0.00 m**. L13 *is* the box
+  mean of L14 — so L14 is the genuine source and L13 a derived pyramid level.
+- L14 vs a bilinear upsample of L13 (roughly what the shader reconstructs
+  today): **RMS 0.365 m, peak 6.63 m**. That is the real information gain.
+- Detail beyond L14's own 2x2 mean, i.e. what L13 cannot represent at all:
+  RMS 1.315 m, peak 16.40 m.
+
+The first result matters for the design: because the two layers agree exactly
+under box-averaging, fading L14 into L13 is fading onto a *consistent* surface,
+unlike fading L13 into the 30 m Copernicus base. The step to hide is a few
+metres, not tens, so the L14 annulus can be far narrower than 1500 m.
+
+Visibility check (60 deg FOV / 1080 px = 0.970 mrad/px): 1 px is 0.97 m at 1 km
+and 4.85 m at 5 km. So L13's 9.54 m is ~10 px at 1 km (visibly coarse) and ~2 px
+at 5 km (at the floor). The gain is concentrated inside ~2 km, which sets the
+extent below.
+
+### Sizing
+
+Block sizes stay powers of two (the relief pyramid wants it). Per-location wire
+cost at 214 kB/tile:
+
+| L14 block | samples | extent (N-S x E-W) | half-extent | wire | GPU (est.) |
+| --- | --- | --- | --- | --- | --- |
+| 4x4 = 16 tiles | 1024^2 | 4.9 x 3.4 km | 2.44 x 1.70 km | +3.4 MB | +~5.6 MB |
+| 8x8 = 64 tiles | 2048^2 | 9.8 x 6.8 km | 4.88 x 3.39 km | +13.7 MB | +~22.4 MB |
+
+**Start with 4x4.** It is +25% on the wire against today's 13.7 MB, covers the
+~2 km where L14 is visible, and its 1024^2 textures are a quarter of the L13
+pyramid's cost (scaling the measured +22.4 MB/location). 8x8 doubles the wire
+for extent that is already near the visibility floor.
+
+`fade_metres` must become per-layer: 1500 m would consume almost all of a
+1.70 km E-W half-extent. Propose **300 m** for L14 — hiding a 6.6 m peak step
+over 300 m is a 2.2% slope change, invisible — leaving ~2.1 x 1.4 km of
+full-resolution core.
+
+### Phases
+
+**L14-0 — gates, before any code.**
+- Measure the L14-vs-bilinear-L13 residual at the actual featured locations, not
+  just the one Ubaye tile. Gate: if it is below ~0.2 m RMS there, stop.
+- Probe L14 coverage breadth across the data footprint (Alps, Provence, Corsica,
+  Réunion). Patchiness is fine — the nodata/fade path handles it — but it should
+  be known, since Réunion in particular may be absent from RGE ALTI HIGHRES.
+- Time 16 L14 tiles in-browser, to confirm the added latency against
+  `hd_grace_s`.
+
+**L14-1 — parameterise `Hd_dem` by level. Pure refactor, ship alone.**
+`matrix_level`, `tiles_per_axis`, `px_arcsec`, `block_tiles`, `size` and
+`fade_metres` are module constants today, and `Hd_dem.size` / `Hd_dem.px_arcsec`
+are read at ~20 sites in `viewer.ml`.
+- Add `type layer = { matrix_level; tiles_per_axis; block_tiles; px_arcsec;
+  size; fade_metres }` with `val l13 : layer` and `val l14 : layer`; thread it
+  through `tile_url`, `anchor_tile`, `fetch`, `blend`, `prefetch`.
+- `type t` carries its `layer`, so consumers read `g.layer.size` instead of the
+  module constant. This is the mechanical bulk of the work.
+- Gate: RMSE exactly 0 against the pinned views. It must be a no-op.
+
+**L14-2 — generalise `blend` to chain onto an arbitrary grid.**
+`blend ~lat ~base raw` hardcodes the base as 1-arcsec-spaced and anchored at
+`bsize / 2` (`let half = float (bsize / 2)`, `col_of j = clamp_base (half +.
+raw.origin_x +. float j *. px_arcsec)`).
+- Introduce `type source = { grid : Dem_loader.t; origin_x; origin_y;
+  px_arcsec }`. The base tile is `{ grid = tile; origin_x = -.(float (w / 2));
+  origin_y = same; px_arcsec = 1.0 }`; an `Hd_dem.t` is already almost one, so
+  chaining is natural — `blend` writes a `Dem_loader.t` and reads u16 pairs
+  either way.
+- Rewrite `col_of` / `cby` in terms of the source's origin and spacing.
+- Gate: L13-onto-base must be bit-identical to L14-1.
+
+**L14-3 — the second layer, end to end.**
+- `viewer.ml`: two fetches; `publish ~hd_grid` becomes `publish ~hd13 ~hd14`.
+  Both in the `hd_grace_s` window. A late L14 is a *good* candidate for the
+  refinement path — the eye-height pop it causes is bounded by the L13<->L14
+  difference (0.365 m RMS, 6.6 m peak) rather than the ~60 m base<->L13 gap that
+  motivated the grace period in the first place.
+- Blend chain `base -> L13 -> L14`. If L13 is missing but L14 present, chain L14
+  straight onto the base; the fade machinery already covers it.
+- Bake: a third `compute_relief ~spacing_scale:l14.px_arcsec ~border:false` at
+  1024^2. `hd_relief` grows to two texture pairs (or an array); `delete_location`
+  and the refinement-supersede cleanup in `publish` follow.
+- Shaders. `radial_common.vert` has `hd_valid / hd_relief / hd_scale / hd_bias /
+  hd_lod_bias / hd_max_lod` and `insideHd`; `computeRadialVertex` picks HD or
+  base at line ~117. Add the `hd2_*` set and test innermost-first:
+  `if (insideHd2(...)) else if (insideHd(...)) else base`. `terrain.frag` mirrors
+  it at line ~383 for the normal; `terrain_main.vert` needs a second varying and
+  a second `hd_half_texel`. The shadow pass shares the include, so it should
+  follow — verify rather than assume.
+  **Check the varying and sampler budget on Mali/Adreno** before committing to
+  two extra of each.
+- `hd_at` / `ray_height` / `fine` (POI occlusion) and the `rendered_height`
+  selection for label anchoring both become innermost-first, with
+  `inv_avg_delta /. layer.px_arcsec` per layer. Eye height reads the finest grid
+  that covers the anchor.
+- **Do not prefetch L14 initially.** 2x a 4x4 block is 64 L14 tiles (13.7 MB)
+  for only ~2.4 x 1.7 km of offline roaming, against the L13 prefetch's ~10 km
+  for ~40 MB. Leaving L14 online-only keeps the offline story exactly as it is,
+  and its absence offline is invisible by construction.
+- Service worker: no change, `is_hd_dem` matches on host.
+
+**L14-4 — quantisation gate.**
+`u16_of_metres` spreads 9500 m over 65536 steps: a **14.5 cm** quantum. Per unit
+of sample spacing that is 0.87 deg of normal quantisation at L13 and **1.74 deg
+at L14** — against a measured gain of 0.365 m RMS, i.e. **2.5 LSB**. A good part
+of what L14 buys would arrive as terracing in the normals.
+- Gate: bake L14 with the current absolute u16 and look for terracing on a
+  shaded near-field view on a real Mali/Adreno device. Banding on fp16 mobile
+  GPUs already bit once (062d383).
+- If visible, revive the **residual encoding** — the original design for this
+  feature (see "CORE REPRESENTATION" above). It was dropped at gate 1 because a
+  *hosted* encoder would have had to replicate the client upsample bit-exactly;
+  that objection is void now that `blend` computes both sides on the client, so
+  the encoding is a purely local choice. Store the L14 grid as `hd - base
+  upsample` with its own scale: ±150 m in u16 gives a **0.46 cm** quantum, 30x
+  finer. Cost: `height_scale` / `height_offset` uniforms replacing the hardcoded
+  `HEIGHT_SCALE` and `-500.0` in `common_header.frag`, `normal.frag`,
+  `downsample.frag`, `radial_common.vert`. Would let L13 sharpen too.
+
+### Rejected
+
+- **Replace L13 with L14** instead of nesting. At constant tile budget the
+  extent halves (19.5 -> 9.8 km) and the offline roaming range halves with it.
+  The mid field at 5-8 km still draws from the HD pyramid, and the prefetch
+  range is the more valuable property.
+- **`…HIGHRES.MNS` at L15-L17 as a way past the DTM's L14 floor.** Rejected on
+  measurement, not on principle. Both layers serve L14 on `WGS84G`, so they can
+  be differenced pixel-for-pixel; on the Ubaye tile (`L14 row=4150 col=17002`,
+  2017-2539 m):
+  * Where there is no canopy the two products agree to **centimetres** — median
+    MNS - DTM = +0.056 m, 46.3% of samples inside one u16 LSB (0.145 m), 80.7%
+    within 1 m. No systematic epoch or processing offset: on bare ground they
+    are interchangeable.
+  * The tile is *not* uniformly bare despite its altitude — 14.7% of samples
+    differ by more than 3 m, up to 24.7 m (larch/pine on the lower shaded
+    slopes). It straddles the tree line, so "high viewpoint => bare" is not a
+    usable assumption. An earlier note here claiming MNS == DTM above the tree
+    line was wrong.
+  * MNS L15 is a genuine box pyramid of MNS L14 (2x2 mean matches to RMS
+    0.0001 m), but the detail it adds **over bare ground** is only 0.169 m RMS
+    against a bilinear upsample of L14 — barely above the 0.145 m u16 quantum,
+    and less than half the 0.365 m that DTM L13 -> L14 buys. Over vegetated
+    ground the same step adds 0.757 m RMS, 4.5x more.
+  * Conclusion: the MNS's extra levels exist to resolve canopy and roofs — the
+    very thing a mask would exclude. The DTM stopping at L14 is not IGN
+    withholding bare-earth detail; below ~5 m there is no bare-earth signal
+    left. **This is the measured reason L14 is the right stopping point.**
+  * Using the CLC cover map as the bare/vegetated mask (it is already loaded,
+    co-registered and on the GPU via `rasterize_clc_tiles`) would work — the
+    difference distribution is bimodal enough to classify — but it is moot given
+    the above: 4x the tiles to recover ~17 cm RMS the u16 grid can barely hold.
+  * Worth keeping in mind for a *different* feature: `MNS - DTM` at L14 is a
+    canopy height model, exactly co-registered, at 4.77 m. That is the missing
+    input for the known artefact noted in the original design above — forested
+    near ridges silhouette at ground height instead of canopy top. CLC gives the
+    class but not the height.
+- **The `SHADOW` layers (PM, to L18) as an elevation source.** Not a format
+  objection — PNG is lossless and elevation-in-PNG is standard practice (Mapzen
+  Terrarium: `R*256 + G + B/256 - 32768`, 3.9 mm steps, finer than our u16's
+  14.5 cm). The blocker is that they are *estompage*: baked shaded relief.
+  Decoded, the tiles are 8-bit **grey+alpha**, spanning 0-254 within a single
+  256x256 tile with mean neighbour |delta| 8 and peaks of 162 — a shading image,
+  not a height field. Hillshade ~ f(normal . fixed light) collapses both normal
+  components onto one scalar and drops absolute elevation, so it is not
+  invertible even in principle: a perfect inversion yields slope with sign
+  ambiguity along the light azimuth. `…HIGHRES.QUALITY` is likewise a *source*
+  mask (which survey produced each cell), not vegetation height, and answers
+  400/404 at PM L16/L18 anyway.
+  If a data-bearing PNG layer ever does appear, the web-platform traps are:
+  canvas readback truncates to 8 bits/channel (16-bit greyscale loses half its
+  precision through `getImageData` — upload straight to a WebGL texture and
+  decode in the shader instead); `drawImage`+`getImageData` round-trips through
+  premultiplied alpha and corrupts any tile whose alpha is not 255 (use
+  `createImageBitmap(blob, {premultiplyAlpha:'none',
+  colorSpaceConversion:'none'})`); and an `iCCP`/`gAMA` chunk can shift values —
+  these tiles carry neither, their chunks are just IHDR/IDAT/IEND.
+- **Non-power-of-two blocks** (6x6 = 1536 samples): the relief pyramid wants a
+  power of two.
+
+### Verification
+
+- L14-1 and L14-2 are refactors: RMSE exactly 0 on the pinned views, or they are
+  wrong.
+- With L14 on, expect change *only* inside the L14 extent. Check the L13/L14
+  boundary at grazing incidence for a seam, and the L14 rim for the zero-border
+  spike ring that `?border` was added to fix at L13.
+- Frozen-clock captures per the headless rig; GPU budget per location against
+  the current +22.4 MB.
+- A host-unreachable run must still be RMSE 0 against the pre-change baseline,
+  as it was for L13.
