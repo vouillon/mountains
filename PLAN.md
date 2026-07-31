@@ -1066,15 +1066,19 @@ extent below.
 Block sizes stay powers of two (the relief pyramid wants it). Per-location wire
 cost at 214 kB/tile:
 
-| L14 block | samples | extent (N-S x E-W) | half-extent | wire | GPU (est.) |
+| L14 block | samples | extent (N-S x E-W) | half-extent | wire | GPU |
 | --- | --- | --- | --- | --- | --- |
-| 4x4 = 16 tiles | 1024^2 | 4.9 x 3.4 km | 2.44 x 1.70 km | +3.4 MB | +~5.6 MB |
-| 8x8 = 64 tiles | 2048^2 | 9.8 x 6.8 km | 4.88 x 3.39 km | +13.7 MB | +~22.4 MB |
+| 4x4 = 16 tiles | 1024^2 | 4.9 x 3.4 km | 2.44 x 1.70 km | +3.4 MB | **+2.67 MiB** |
+| 8x8 = 64 tiles | 2048^2 | 9.8 x 6.8 km | 4.88 x 3.39 km | +13.7 MB | +21.33 MiB |
+
+GPU is two RG8 pyramids with the full mip chain, i.e. `2 * 4/3 * size^2 * 2`
+bytes — computed, not scaled. Against a 140 MiB per-location baseline the 4x4
+block is under 2%.
 
 **Start with 4x4.** It is +25% on the wire against today's 13.7 MB, covers the
-~2 km where L14 is visible, and its 1024^2 textures are a quarter of the L13
-pyramid's cost (scaling the measured +22.4 MB/location). 8x8 doubles the wire
-for extent that is already near the visibility floor.
+~2 km where L14 is visible, and costs almost nothing in GPU memory. 8x8 doubles
+the wire and adds a second copy of the current HD cost, for extent that is
+already near the visibility floor.
 
 `fade_metres` must become per-layer: 1500 m would consume almost all of a
 1.70 km E-W half-extent. Propose **300 m** for L14 — hiding a 6.6 m peak step
@@ -1231,6 +1235,70 @@ of what L14 buys would arrive as terracing in the normals.
   boundary at grazing incidence for a seam, and the L14 rim for the zero-border
   spike ring that `?border` was added to fix at L13.
 - Frozen-clock captures per the headless rig; GPU budget per location against
-  the current +22.4 MB.
+  the 140 MiB baseline below.
 - A host-unreachable run must still be RMSE 0 against the pre-change baseline,
   as it was for L13.
+
+## GPU texture memory audit + two changes (2026-07-31, uncommitted)
+
+Read off the allocation calls (formats, dimensions, level counts), not estimated.
+MiB = 2^20. `w = h = 4096` (`tile_width`), HD grid 2048, cover map 7 clipmap
+levels, shadow map 2048^2 x 3.
+
+Per location, before -> after the two changes below:
+
+| texture | format | size | levels | MiB before | MiB after |
+| --- | --- | --- | --- | --- | --- |
+| `relief_texture` | RG8 | 4096^2 | 13 | 42.67 | 42.67 |
+| `relief_normal_texture` | RG8 | 4096^2 | 13 | 42.67 | 42.67 |
+| `tile_texture` | RG8 | 4096^2 | 1 | 32.00 | **0** |
+| `cover_map_texture` | R8UI array | 1024^2/2048^2 x 7 | 1 | 7.00 | **28.00** |
+| `hd_relief_texture` | RG8 | 2048^2 | 12 | 10.67 | 10.67 |
+| `hd_relief_normal_texture` | RG8 | 2048^2 | 12 | 10.67 | 10.67 |
+| `ao_texture` | R8 | 2048^2 | 12 | 5.33 | 5.33 |
+| | | | | **151.00** | **140.00** |
+
+Session-wide, unchanged: `shadow_map` DEPTH_COMPONENT24 2048^2 x 3 = 36 MiB, or
+48 MiB where the driver pads to D24X8; `detail_map` 1024^2 compressed, 11 levels
+= 1.33 MiB; `palette_texture` 512 B; `hd_placeholder` 2 B. Plus the POI labels —
+one RGBA8 per *visible* label, sized from a 48 px font measurement in
+`prepare_text_immediate`, created lazily by `draw_text` and freed with the
+location; ~70 KiB each, so a few MiB on a busy panorama. That is the one item
+not statically knowable.
+
+Resident 200.33 -> 189.33 MiB. Peak during a load 266.33 -> 249.33 MiB.
+
+**Change 1: free `tile_texture` after the relief bake.** Its only GPU use was
+`Gl.bind_texture` inside `compute_relief`; it is not among the textures
+`bind_terrain_textures` binds and nothing samples it per frame — it sat in the
+`location` record purely to be deleted later. Now deleted immediately after the
+bake, exactly as the HD path already did with its own source grid ("Nothing
+reads the source grid on the GPU after the bake"). The field is gone from
+`type location` and `delete_location`. **-32 MiB per location.**
+
+**Change 2: `cover_map_size` 1024 -> 2048.** A clipmap level spans half the
+ground of the one above at the same texel count, so a cover-map texel subtends a
+*constant* angle wherever the viewer stands: 1/512 to 1/256 of the distance,
+i.e. 2-4 screen pixels at 60 deg / 1080 px. The whole clipmap was therefore
+uniformly ~4x coarser than pixel scale, and material boundaries showed as
+stair-steps of that width at every distance — which is also why adding an inner
+level would not have helped, and why raising the resolution is the right fix.
+2048 gives 1-2 px per texel. `sampleCLCBilinear` reads the size from
+`textureSize` and the count from `u_numLevels`, so no shader change.
+**+21 MiB per location**, and 4x the rasterisation fill.
+
+**Enabler for change 2: one CLC depth renderbuffer instead of seven.** The
+render loop is level-outer and clears depth at the top of every level
+(`Gl.clear ctx Gl.depth_buffer_bit`), so only one depth buffer is ever live; the
+old comment about needing one per level "to prevent conflicts when batching
+tiles" described an ordering the code does not use. At 2048 the seven would have
+been 56 MiB of transient against 8 MiB. This is what keeps the peak from rising:
+the largest transient set goes 66 -> 60 MiB despite the resolution doubling.
+
+Net: change 1 more than pays for change 2 — 11 MiB less resident and 17 MiB
+lower peak, with a sharper land-cover map.
+
+NOT VERIFIED on a device. What to check: the cover map at 2048 is a 4x fill
+increase in `rasterize_clc_tiles`, so time that bake on Mali/Adreno before
+assuming it is free; and confirm visually that land-cover transitions lose their
+staircase. `dune build src/web` and `dune build @fmt` are clean.
