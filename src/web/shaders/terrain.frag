@@ -62,8 +62,8 @@ Surface sampleCLCBilinear(highp vec2 uv) {
   // Distance-based LOD (Coverage Constraint)
   // The concentric clipmaps have limited extent. Level L covers radius 0.5 /
   // 2^(6-L). We must choose a level large enough to cover the current UV.
-  vec2 dist_from_center = abs(uv - 0.5);
-  float d_center = max(dist_from_center.x, dist_from_center.y);
+  highp vec2 dist_from_center = abs(uv - 0.5);
+  highp float d_center = max(dist_from_center.x, dist_from_center.y);
   // Avoid log2(0)
   d_center = max(d_center, 0.000001);
 
@@ -76,13 +76,19 @@ Surface sampleCLCBilinear(highp vec2 uv) {
   // Level 6 covers the whole tile (scale 1x)
   // Level 0 covers 1/64th (scale 64x)
   float scale = exp2(float((u_numLevels - 1) - level));
-  vec2 levelUV = (uv - 0.5) * scale + 0.5;
+  // Texture coordinate: must be highp all the way to [texelPos]. At fp16 the
+  // ulp of a [0, 1] coordinate is 2.4-4.9e-4, which is a quarter to a half of
+  // a texel of the 1024-wide cover map: the bilinear weight below would take
+  // two to four values per texel instead of a ramp, and every land-cover
+  // transition would come out as a staircase (~120 m wide at the outer
+  // clipmap levels).
+  highp vec2 levelUV = (uv - 0.5) * scale + 0.5;
 
-  vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
+  highp vec2 texSize = vec2(textureSize(u_coverMap, 0).xy);
   highp vec2 texelPos = levelUV * texSize - 0.5;
 
   ivec2 p00_raw = ivec2(floor(texelPos));
-  vec2 frac = fract(texelPos);
+  highp vec2 frac = fract(texelPos);
 
   // Clamp to valid range
   ivec2 maxCoord = ivec2(texSize) - 1;
@@ -283,7 +289,9 @@ float getWaterMask(highp vec2 worldPos, float waterFactor) {
   return waterFactor;
 }
 
-vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
+// [worldPos] is a world coordinate (metres) and must be highp: at fp16 the
+// foam UV below would snap into blocks metres across.
+vec3 applyWaterEffects(vec3 baseColor, float waterMask, highp vec2 worldPos) {
   if (waterMask < 0.01)
     return baseColor;
 
@@ -314,7 +322,13 @@ vec3 applyWaterEffects(vec3 baseColor, float waterMask, vec2 worldPos) {
 
 // ========== Shadow Functions ==========
 
-float pcf_shadow(int layer, vec2 coords, float compare, vec2 texel_size) {
+// [coords] and [compare] must be highp. A shadow-map UV is in [0, 1] over 2048
+// texels, so one texel is 4.88e-4 -- exactly the fp16 ulp there: at mediump the
+// five taps below collapse onto one texel and the comparison depth snaps in
+// steps worth tens of metres of world depth, which is the classic acne
+// striping along the terrain's contours.
+float pcf_shadow(int layer, highp vec2 coords, highp float compare,
+                 highp vec2 texel_size) {
   float result = 0.0;
   // 5-tap Cross Pattern (Center + 4 neighbors) - Faster than 9-tap box
   result += texture(shadow_map, vec4(coords, float(layer), compare));
@@ -427,7 +441,10 @@ void main() {
     vec3 microCol = mix(rootColor, tipColor, grassNoise);
 
     // Macro: Patches of dying grass (yellowish) vs healthy grass (blue-green)
-    vec2 macroPos = v_world_pos.xy * 0.02;
+    // World coordinates, so highp: 0.02 * 70 km is 1400, where the fp16 ulp is
+    // a whole unit -- the sine phases below would snap in ~1 radian steps and
+    // the patch pattern would break into flat blocks over distant grass.
+    highp vec2 macroPos = v_world_pos.xy * 0.02;
     float macroNoise = sin(macroPos.x) * cos(macroPos.y * 0.8) +
                        sin(macroPos.x * 0.5 + macroPos.y * 1.5) * 0.5;
     float patchFactor = smoothstep(0.3, 0.7, macroNoise * 0.5 + 0.5);
@@ -591,14 +608,18 @@ void main() {
     // One shadow texel in world units per cascade (ortho width / 2048).
     float texelSz = (cascade == 0) ? 3.0 : ((cascade == 1) ? 12.0 : 37.0);
     float normalOffset = texelSz * slopeScale;
-    vec3 offset_pos =
+    // World coordinates, and everything derived from them down to the depth
+    // comparison, must stay highp: at fp16 [offset_pos] alone is quantised to
+    // 2 m at 3 km and 16 m at 20 km, and [proj_coords.z] to 10/23/73 m of
+    // world depth per cascade -- far more than the bias below is sized for.
+    highp vec3 offset_pos =
         v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
 
-    vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
-    vec3 proj_coords = s_pos.xyz / s_pos.w;
+    highp vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
+    highp vec3 proj_coords = s_pos.xyz / s_pos.w;
     proj_coords = proj_coords * 0.5 + 0.5;
 
-    float current_depth = proj_coords.z;
+    highp float current_depth = proj_coords.z;
     // World-space depth bias, expressed in this cascade's [0,1] depth range
     // (20/48/150 km): a small constant for sun-facing surfaces plus a
     // slope-proportional term covering the depth a shadow texel
@@ -606,12 +627,13 @@ void main() {
     // direction. Too little and the texel rows band such slopes (acne); a
     // large constant (the previous 30/72/225 m) detaches every shadow from
     // its caster instead.
-    float texelWorld = (cascade == 0) ? 2.93 : ((cascade == 1) ? 11.7 : 36.6);
-    float depthSpan =
+    highp float texelWorld =
+        (cascade == 0) ? 2.93 : ((cascade == 1) ? 11.7 : 36.6);
+    highp float depthSpan =
         (cascade == 0) ? 20000.0 : ((cascade == 1) ? 48000.0 : 150000.0);
-    float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
-                                  max(cosTheta, 0.1));
-    float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;
+    highp float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
+                                        max(cosTheta, 0.1));
+    highp float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;
     shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
                             vec2(0.000488));
     if (proj_coords.z > 1.0)
