@@ -1751,7 +1751,6 @@ type hd_relief = {
 type location = {
   height : float;
   points : (lazy_text * (float * float * float)) list;
-  tile_texture : Gl.texture;
   relief_texture : Gl.texture;
   relief_normal_texture : Gl.texture;
   ao_texture : Gl.texture;
@@ -1764,7 +1763,6 @@ let session : location option ref = ref None
 (* The POI textures are created lazily by [draw_text], hence the option. *)
 let delete_location ctx
     {
-      tile_texture;
       relief_texture;
       relief_normal_texture;
       ao_texture;
@@ -1773,7 +1771,6 @@ let delete_location ctx
       hd;
       _;
     } =
-  Gl.delete_texture ctx tile_texture;
   Gl.delete_texture ctx relief_texture;
   Gl.delete_texture ctx relief_normal_texture;
   Gl.delete_texture ctx ao_texture;
@@ -2570,11 +2567,20 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        to the publish being synchronous. *)
     Option.iter (delete_location ctx) !session;
     session := None;
-    let tile_texture = make_tile_texture ctx tile in
     let relief_texture, relief_normal_texture =
-      time_gpu ctx "compute_relief" (fun () ->
-          compute_relief ctx w h lat triangle_geo tile_texture normal_pid
-            downsample_pid relief_uniforms downsample_uniforms)
+      let tile_texture = make_tile_texture ctx tile in
+      let pyramids =
+        time_gpu ctx "compute_relief" (fun () ->
+            compute_relief ctx w h lat triangle_geo tile_texture normal_pid
+              downsample_pid relief_uniforms downsample_uniforms)
+      in
+      (* Nothing reads the source grid on the GPU after the bake: it is not among
+         the textures [bind_terrain_textures] binds, and every consumer goes
+         through the pyramids. Freeing it here rather than with the location
+         keeps 32 MiB (RG8 4096^2) out of the per-location footprint, as the
+         high-resolution bake below already does with its own source. *)
+      Gl.delete_texture ctx tile_texture;
+      pyramids
     in
     let index_count = Bigarray.Array1.dim indices in
 
@@ -2875,7 +2881,6 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           {
             height;
             points;
-            tile_texture;
             relief_texture;
             relief_normal_texture;
             ao_texture;
