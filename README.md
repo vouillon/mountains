@@ -4,7 +4,7 @@
 
 A Web-based terrain rendering application capable of visualizing landscapes from Digital Elevation Models (DEMs), currently covering the French Alps. It features atmospheric rendering, triplanar detail texturing, mobile device support, and a comprehensive data pipeline for processing CORINE Land Cover (CLC) data.
 
-![Col Girardin](assets/col%20Girardin.jpg)
+![Mafate](assets/Mafate.jpg)
 
 ## Key Features
 
@@ -58,8 +58,9 @@ cd src/web && dune build
 ## Data Sources
 
 1.  **DEM**: 30m resolution Copernicus Digital Elevation Models.
-2.  **Land Cover**: CORINE dataset processed into triangulated optimized tiles.
-3.  **Water**: OSM water polygons fetched and merged for higher precision coastlines and lakes.
+2.  **DEM**: 10m resolution RGE ALTI.
+3.  **Land Cover**: CORINE dataset processed into triangulated optimized tiles.
+4.  **Water**: OSM water polygons fetched and merged for higher precision coastlines and lakes.
 
 ## License
 

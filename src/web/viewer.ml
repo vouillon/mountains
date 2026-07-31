@@ -3004,13 +3004,14 @@ let featured_locations =
     ("Roc Diolon (Orcières)", 44.73339, 6.36308, -130., 80., 0.5);
     ("Col Fromage", 44.6896583, 6.8061028, 180., 90., 1.0);
     ("La Mortice Sud", 44.57386, 6.76926, 47., 90., 1.0);
-    ("Pic de Morgon", 44.4920, 6.3975, 63., 82., 1.0);
+    ("Pic de Morgon (Lac de Serre-Ponçon)", 44.4920, 6.3975, 63., 82., 1.0);
     ("Lac de Roburent", 44.424680, 6.93430, 220., 90., 1.0);
     ("Mont Ténibre", 44.28342, 6.97172, 178., 75., 0.5);
     ("Baisse de Druos", 44.191930, 7.19195, 126., 83., 1.0);
     ("Col de la Forclaz (Lac d'Annecy)", 45.80875, 6.24426, 57., 80., 0.50);
     ("Plateau d'Emparis", 45.0499, 6.2278, -149., 94., 0.6);
     ("La Chalannette (Jausiers)", 44.3950846, 6.7669714, 50., 90., 1.0);
+    ("Belvédère des Saisies (Mont Blanc)", 45.77006, 6.54734, -76., 89., 0.50);
     ("Aiguille du Brévent (Mont Blanc)", 45.9334, 6.83722, -169., 95., 1.0);
     ("Le Maïdo (Cirque de Mafate)", -21.05886, 55.38188, -69., 78., 0.50);
     ("Cap Noir", -20.9929, 55.38971, -133., 85., 0.50);
