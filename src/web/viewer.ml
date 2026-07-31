@@ -1748,6 +1748,8 @@ type hd_relief = {
 (** The near-field high-resolution relief of a location (see [Hd_dem]), when the
     service had data for it. *)
 
+let show_labels = ref true
+
 type location = {
   height : float;
   points : (lazy_text * (float * float * float)) list;
@@ -2005,59 +2007,61 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   Gl.uniform2f ctx sky_uniforms.Render_state.sky_params x_scale y_scale;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
-  (* VAO text_geo is still bound, reused for POIs *)
-  Gl.disable ctx Gl.depth_test;
-  Gl.enable ctx Gl.blend;
-  Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
+  if !show_labels then begin
+    (* VAO text_geo is still bound, reused for POIs *)
+    Gl.disable ctx Gl.depth_test;
+    Gl.enable ctx Gl.blend;
+    Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
 
-  (* 1. Triangles *)
-  Gl.use_program ctx triangle_pid;
-  (* Everything but the final translation is constant per frame. *)
-  let triangle_prefix shown =
-    let sx = 0.6 *. text_height *. x_scale /. text_scale in
-    let sy = 0.6 *. text_height *. y_scale /. text_scale in
-    let angle = if shown then -.pi /. 4. else 0. in
-    Matrix.(rotate_z (angle +. inclination) * scale sx sy 1.)
-  in
-  let triangle_prefix_shown = triangle_prefix true in
-  let triangle_prefix_hidden = triangle_prefix false in
-  List.iter
-    (fun (_, x, y, shown) ->
-      let x = x *. x_scale in
-      let y = y *. y_scale in
-      Matrix.mult_into poi_transform
-        (if shown then triangle_prefix_shown else triangle_prefix_hidden)
-        (Matrix.translate x y 0.);
-      Matrix.blit poi_transform transform_ba;
-      Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
-      if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
-      else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
-      Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
-    points;
-
-  (* 2. Text *)
-  Gl.use_program ctx text_pid;
-  let text_prefix =
-    let sx = text_height *. x_scale /. text_scale in
-    let sy = text_height *. y_scale /. text_scale in
-    Matrix.(
-      translate 0.7 (-0.5) 0.
-      * rotate_z ((pi /. 4.) +. inclination)
-      * scale sx sy 1.)
-  in
-  List.iter
-    (fun (texture, x, y, shown) ->
-      if shown then begin
+    (* 1. Triangles *)
+    Gl.use_program ctx triangle_pid;
+    (* Everything but the final translation is constant per frame. *)
+    let triangle_prefix shown =
+      let sx = 0.6 *. text_height *. x_scale /. text_scale in
+      let sy = 0.6 *. text_height *. y_scale /. text_scale in
+      let angle = if shown then -.pi /. 4. else 0. in
+      Matrix.(rotate_z (angle +. inclination) * scale sx sy 1.)
+    in
+    let triangle_prefix_shown = triangle_prefix true in
+    let triangle_prefix_hidden = triangle_prefix false in
+    List.iter
+      (fun (_, x, y, shown) ->
         let x = x *. x_scale in
         let y = y *. y_scale in
-        Matrix.mult_into poi_transform text_prefix (Matrix.translate x y 0.);
-        draw_text ctx text_uniforms poi_transform transform_ba transform_ta
-          texture
-      end)
-    points;
+        Matrix.mult_into poi_transform
+          (if shown then triangle_prefix_shown else triangle_prefix_hidden)
+          (Matrix.translate x y 0.);
+        Matrix.blit poi_transform transform_ba;
+        Gl.uniform_matrix4fv ctx triangle_uniforms.transform false transform_ta;
+        if shown then Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 1.
+        else Gl.uniform4f ctx triangle_uniforms.color 0. 0. 0. 0.4;
+        Gl.draw_elements ctx Gl.triangles 3 Gl.unsigned_byte 0)
+      points;
 
-  Gl.disable ctx Gl.blend;
-  Gl.bind_vertex_array ctx None
+    (* 2. Text *)
+    Gl.use_program ctx text_pid;
+    let text_prefix =
+      let sx = text_height *. x_scale /. text_scale in
+      let sy = text_height *. y_scale /. text_scale in
+      Matrix.(
+        translate 0.7 (-0.5) 0.
+        * rotate_z ((pi /. 4.) +. inclination)
+        * scale sx sy 1.)
+    in
+    List.iter
+      (fun (texture, x, y, shown) ->
+        if shown then begin
+          let x = x *. x_scale in
+          let y = y *. y_scale in
+          Matrix.mult_into poi_transform text_prefix (Matrix.translate x y 0.);
+          draw_text ctx text_uniforms poi_transform transform_ba transform_ta
+            texture
+        end)
+      points;
+
+    Gl.disable ctx Gl.blend;
+    Gl.bind_vertex_array ctx None
+  end
 
 (* Event loop *)
 
@@ -2067,7 +2071,7 @@ let sensor_orientation = ref Quaternion.identity
 let last_screen_angle = ref 0.
 let locked_inclination = ref 0.
 let fab_orientation = ref 0.
-let fab_el : Brr.El.t option ref = ref None
+let fab_els : Brr.El.t list ref = ref []
 let is_dragging = ref false
 let velocity = ref (0., 0.)
 let last_input_time = ref 0.
@@ -3258,9 +3262,23 @@ let create_location_ui ~size =
     Jv.set (Brr.El.to_jv el) "innerHTML"
       (Jv.of_string
          {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>|});
-    fab_el := Some el;
     el
   in
+  let eye_on_svg =
+    {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>|}
+  in
+  let eye_off_svg =
+    {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-10-7-10-7a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 5c7 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>|}
+  in
+  let fab_labels =
+    let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab-labels") ] [] in
+    Jv.set (Brr.El.to_jv el) "innerHTML"
+      (Jv.of_string (if !show_labels then eye_on_svg else eye_off_svg));
+    Brr.El.set_at (Jstr.v "title") (Some (Jstr.v "Toggle Labels")) el;
+    el
+  in
+  fab_els := [ fab; fab_labels ];
+
   let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
   let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
   let close_btn =
@@ -3277,7 +3295,17 @@ let create_location_ui ~size =
         [ Brr.El.txt (Jstr.v "Select Location") ];
     ];
   Brr.El.append_children overlay [ menu ];
-  Brr.El.append_children body [ fab; overlay ];
+  Brr.El.append_children body [ fab; fab_labels; overlay ];
+
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ ->
+         show_labels := not !show_labels;
+         Brr.El.set_class (Jstr.v "off") (not !show_labels) fab_labels;
+         Jv.set (Brr.El.to_jv fab_labels) "innerHTML"
+           (Jv.of_string (if !show_labels then eye_on_svg else eye_off_svg));
+         force_redraw := true)
+       (Brr.El.as_target fab_labels));
 
   (* Input Section *)
   let input =
@@ -3500,15 +3528,15 @@ let create_location_ui ~size =
     Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
 
 let update_fab_orientation angle =
-  match !fab_el with
-  | None -> ()
-  | Some fab ->
+  List.iter
+    (fun fab ->
       let is_rot90 = Float.abs (angle -. (-.Float.pi /. 2.)) < 0.01 in
       let is_rot180 = Float.abs (Float.abs angle -. Float.pi) < 0.01 in
       let is_rot270 = Float.abs (angle -. (Float.pi /. 2.)) < 0.01 in
       Brr.El.set_class (Jstr.v "rot90") is_rot90 fab;
       Brr.El.set_class (Jstr.v "rot180") is_rot180 fab;
-      Brr.El.set_class (Jstr.v "rot270") is_rot270 fab
+      Brr.El.set_class (Jstr.v "rot270") is_rot270 fab)
+    !fab_els
 
 (* iOS 13+ does not deliver any orientation event until permission is granted
    via [DeviceOrientationEvent.requestPermission ()], which must be called from

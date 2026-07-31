@@ -101,6 +101,63 @@
     }
     .fab.rot270 svg { transform: rotate(270deg); }
 
+    .fab-labels {
+      position: absolute;
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      right: calc(92px + env(safe-area-inset-right));
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      z-index: 100;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .fab-labels:active {
+      transform: scale(0.9);
+    }
+
+    .fab-labels svg {
+      width: 28px;
+      height: 28px;
+      stroke: #4f46e5;
+    }
+
+    .fab-labels.off {
+      background: rgba(230, 230, 230, 0.85);
+    }
+
+    .fab-labels.off svg {
+      stroke: #9ca3af;
+    }
+
+    .fab-labels.rot90 {
+      bottom: auto;
+      top: calc(24px + env(safe-area-inset-top));
+    }
+    .fab-labels.rot90 svg { transform: rotate(90deg); }
+
+    .fab-labels.rot180 {
+      bottom: auto; right: auto;
+      top: calc(24px + env(safe-area-inset-top));
+      left: calc(92px + env(safe-area-inset-left));
+    }
+    .fab-labels.rot180 svg { transform: rotate(180deg); }
+
+    .fab-labels.rot270 {
+      right: auto;
+      left: calc(92px + env(safe-area-inset-left));
+    }
+    .fab-labels.rot270 svg { transform: rotate(270deg); }
+
     .menu-overlay {
       position: fixed;
       top: 0;
