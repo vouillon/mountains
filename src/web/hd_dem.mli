@@ -16,11 +16,12 @@ type raw
     tiles that could not be fetched left at nodata. *)
 
 val fetch : lat:float -> lon:float -> raw option Lwt.t
-(** Fetch the high-resolution block around [lat]/[lon]. Never fails: [None]
-    (timeout, or not a single tile obtained) means the caller must carry on with
-    the base DEM alone. Individual tiles that fail -- including the 404 of a
-    tile outside coverage -- are nodata, which {!blend} turns back into the
-    base. *)
+(** Fetch the high-resolution block around [lat]/[lon]. Never fails: [None] (not
+    a single tile obtained, whether the requests failed or the deadline expired
+    first) means the caller must carry on with the base DEM alone. Individual
+    tiles that fail -- including the 404 of a tile outside coverage, and those
+    still in flight when the deadline expires -- are nodata, which {!blend}
+    turns back into the base. *)
 
 type t = {
   grid : Dem_loader.t;  (** blended heights, row 0 southernmost *)

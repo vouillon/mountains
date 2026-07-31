@@ -54,7 +54,10 @@ let fade_metres = 1500.
 
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
-   expiring is not an error, the location simply renders from the base tile. *)
+   expiring is not an error, the block is published with whatever has arrived by
+   then -- the tiles still in flight are nodata, which the blend fades back into
+   the base like any other gap. Only a block without a single tile falls back to
+   the base alone. *)
 let timeout_s = 25.
 
 (* u16 quantisation shared with the .dem pipeline (Corine/compress_dem.ml),
@@ -128,7 +131,17 @@ let fetch ~lat ~lon : raw option Lwt.t =
   in
   let full = Brr.Tarray.create Brr.Tarray.Float32 (size * size) in
   Brr.Tarray.fill (-99999.) full;
-  let missing = ref 0 in
+  let total = block_tiles * block_tiles in
+  (* Counting the tiles that arrived, not the ones that failed: on the timeout
+     path the requests still in flight are neither, and it is the arrived count
+     that says whether the block is worth publishing. *)
+  let arrived = ref 0 in
+  (* Set as soon as [full] is handed out. A tile arriving after that must not be
+     blitted: the raw block is published by reference, and the late write would
+     land in a buffer the caller has already started reading. The request itself
+     is not cancelled, so its response still reaches the service worker's cache
+     and the next visit to this location gets it for free. *)
+  let published = ref false in
   let t0 = Brr.(Performance.now_ms G.performance) in
   (* Every request is issued at once: the browser multiplexes them over one
      HTTP/2 connection. *)
@@ -140,43 +153,46 @@ let fetch ~lat ~lon : raw option Lwt.t =
             Lwt.catch
               (fun () ->
                 let* tile = fetch_tile ~row:(row0 + br) ~col:(col0 + bc) in
-                (* Blit row by row: the tile is contiguous, the destination is
-                   strided by the width of the whole block. *)
-                for i = 0 to tile_px - 1 do
-                  Brr.Tarray.set_tarray full
-                    ~dst:((((br * tile_px) + i) * size) + (bc * tile_px))
-                    (Brr.Tarray.sub tile ~start:(i * tile_px)
-                       ~stop:((i + 1) * tile_px))
-                done;
+                if not !published then begin
+                  (* Blit row by row: the tile is contiguous, the destination is
+                     strided by the width of the whole block. *)
+                  for i = 0 to tile_px - 1 do
+                    Brr.Tarray.set_tarray full
+                      ~dst:((((br * tile_px) + i) * size) + (bc * tile_px))
+                      (Brr.Tarray.sub tile ~start:(i * tile_px)
+                         ~stop:((i + 1) * tile_px))
+                  done;
+                  incr arrived
+                end;
                 Lwt.return ())
-              (fun _ ->
-                incr missing;
-                Lwt.return ()))
+              (fun _ -> Lwt.return ()))
           (List.init block_tiles Fun.id))
       (List.init block_tiles Fun.id)
   in
-  let finished = ref false in
+  let publish () =
+    published := true;
+    if !arrived = 0 then None
+    else
+      Some
+        {
+          samples = Brr.Tarray.to_bigarray1 full;
+          origin_x;
+          origin_y;
+          missing = total - !arrived;
+        }
+  in
   let all =
     let* () = Lwt.join tasks in
-    finished := true;
-    let total = block_tiles * block_tiles in
-    if !missing = total then begin
-      Brr.Console.error
-        [ Jstr.v "High-resolution elevation: no tile could be fetched" ];
-      Lwt.return None
-    end
+    (* The timeout got there first; [Lwt.choose] discards this. *)
+    if !published then Lwt.return None
     else begin
-      Format.eprintf "RGE ALTI: %d/%d tiles in %.0f ms@." (total - !missing)
-        total
-        (Brr.(Performance.now_ms G.performance) -. t0);
-      Lwt.return
-        (Some
-           {
-             samples = Brr.Tarray.to_bigarray1 full;
-             origin_x;
-             origin_y;
-             missing = !missing;
-           })
+      if !arrived = 0 then
+        Brr.Console.error
+          [ Jstr.v "High-resolution elevation: no tile could be fetched" ]
+      else
+        Format.eprintf "RGE ALTI: %d/%d tiles in %.0f ms@." !arrived total
+          (Brr.(Performance.now_ms G.performance) -. t0);
+      Lwt.return (publish ())
     end
   in
   let timeout =
@@ -185,10 +201,16 @@ let fetch ~lat ~lon : raw option Lwt.t =
       (Brr.G.set_timeout
          ~ms:(truncate (timeout_s *. 1000.))
          (fun () ->
-           if not !finished then begin
-             Brr.Console.error
-               [ Jstr.v "High-resolution elevation: request timed out" ];
-             Lwt.wakeup_later w None
+           if not !published then begin
+             if !arrived = 0 then
+               Brr.Console.error
+                 [ Jstr.v "High-resolution elevation: request timed out" ]
+             else
+               Format.eprintf
+                 "RGE ALTI: timed out with %d/%d tiles after %.0f ms@." !arrived
+                 total
+                 (Brr.(Performance.now_ms G.performance) -. t0);
+             Lwt.wakeup_later w (publish ())
            end));
     t
   in
