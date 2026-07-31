@@ -2305,11 +2305,7 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
           (fun (poi : Clc_loader.poi) ->
             {
               Points.name = poi.name;
-              coord =
-                {
-                  Points.lat = floor ((poi.lat *. 3600.) +. 0.5) /. 3600.;
-                  lon = floor ((poi.lon *. 3600.) +. 0.5) /. 3600.;
-                };
+              coord = { Points.lat = poi.lat; lon = poi.lon };
               elevation =
                 (if poi.elevation = 0 then None else Some poi.elevation);
             })
@@ -2334,14 +2330,22 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
           let min_lat_int = center_lat_int - (size / 2) in
 
           fun ({ Points.coord = { lat = pt_lat; lon = pt_lon }; _ } as pt) ->
-            (* POI coords are already rounded to arcseconds in the previous
-               step, but the division by 3600 is not exact: round back rather
-               than truncate or floor, which would both be off by one on the
-               coordinates that fall just below an integer. *)
-            let pt_lon_int = int_of_float (Float.round (pt_lon *. 3600.)) in
-            let pt_lat_int = int_of_float (Float.round (pt_lat *. 3600.)) in
-            let x = max 0 (min (w - 1) (pt_lon_int - min_lon_int)) in
-            let y = max 0 (min (h - 1) (pt_lat_int - min_lat_int)) in
+            (* Sub-arcsecond grid position: the tiles carry ~0.4 m precision,
+               and the high-resolution mesh has sub-texel detail for the
+               marker and its silhouette anchor to line up with. Only the
+               visibility test rounds to whole texels. *)
+            let x =
+              Float.max 0.
+                (Float.min
+                   (float (w - 1))
+                   ((pt_lon *. 3600.) -. float min_lon_int))
+            in
+            let y =
+              Float.max 0.
+                (Float.min
+                   (float (h - 1))
+                   ((pt_lat *. 3600.) -. float min_lat_int))
+            in
             (pt, (x, y)))
   in
   if false then (
@@ -2352,6 +2356,8 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
     let dys = ref 0 in
     List.iter
       (fun (_, (x, y)) ->
+        let x = int_of_float (Float.round x)
+        and y = int_of_float (Float.round y) in
         if x > r && y > r && x < w - r - 1 && y < h - r - 1 then (
           let get_h = Dem_loader.get_height tile in
           let max_h = ref (get_h y x) in
@@ -2713,12 +2719,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       let off_x = Render_state.compute_sub_arcsec_offset lon in
       let off_y = Render_state.compute_sub_arcsec_offset lat in
       List.filter
-        (fun (_, (dst_x, dst_y)) ->
-          let dx = float (dst_x - x) *. deltax in
-          let dy = float (dst_y - y) *. deltay in
+        (fun (_, (gx, gy)) ->
+          let dx = (gx -. float x) *. deltax in
+          let dy = (gy -. float y) *. deltay in
           let dist_sq = (dx *. dx) +. (dy *. dy) in
           if dist_sq > 4900000000. then false
           else
+            (* The test walks whole texels; its summit exemption (10 texels)
+               dwarfs the half-texel rounding of the destination. *)
+            let dst_x = int_of_float (Float.round gx) in
+            let dst_y = int_of_float (Float.round gy) in
             Visibility.test_precise ray_height ~src_h:(height +. 2.)
               ~curvature:(deltax, deltay) ?fine ~off_x ~off_y ~src_x:x ~src_y:y
               ~dst_x ~dst_y ())
@@ -2740,8 +2750,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           (* Plane position: inverse of the grid mapping in
              radial_common.vert (meridian convergence to second order); two
              fixed-point iterations converge to millimetres. *)
-          let ge = deltax *. (float (x' - x) -. off_x) in
-          let gn = deltay *. (float (y' - y) -. off_y) in
+          let ge = deltax *. (x' -. float x -. off_x) in
+          let gn = deltay *. (y' -. float y -. off_y) in
           let px = ge /. (1. +. (gn *. conv)) in
           let py = gn +. (px *. px *. conv /. 2.) in
           let px = ge /. (1. +. (py *. conv)) in
@@ -2754,7 +2764,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              LOD selection shifted by its refinement factor. *)
           let z =
             let r = sqrt r2 in
-            let hd_pos g o = (float (g - (w / 2)) -. o) /. Hd_dem.px_arcsec in
+            let hd_pos g o = (g -. float (w / 2) -. o) /. Hd_dem.px_arcsec in
             match hd_grid with
             | Some (g : Hd_dem.t)
               when let hd_x = hd_pos x' g.origin_x
@@ -2769,7 +2779,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                   ~gy:(hd_pos y' g.origin_y)
             | _ ->
                 rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
-                  ~gx:(float x') ~gy:(float y')
+                  ~gx:x' ~gy:y'
           in
           let z = z -. Visibility.curvature_drop r2 in
           let h =
