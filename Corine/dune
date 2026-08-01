@@ -18,6 +18,7 @@
   polygon_clipping
   polygon_triangulation
   polygon_test_utils
+  earcut
   wkb_decode
   osm_fetch
   poi_fetch
@@ -63,8 +64,8 @@
   (-cclib -lGLESv2)))
 
 (executables
- (names triangulation_tests data_tests)
- (modules triangulation_tests data_tests)
+ (names triangulation_tests data_tests run_earcut_tests run_earcut_bench)
+ (modules triangulation_tests data_tests run_earcut_tests run_earcut_bench)
  (libraries corine_core static_r_tree))
 
 (rule

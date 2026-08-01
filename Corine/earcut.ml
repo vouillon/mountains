@@ -1,5 +1,5 @@
 (* earcut.ml *)
-(* A robust OCaml implementation of the Ear Clipping algorithm for polygon triangulation. *)
+[@@@warning "-32-27-69"]
 
 type point = { x : float; y : float }
 
