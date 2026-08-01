@@ -501,6 +501,93 @@ let init_text_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   { transform = u "transform" }
 
+type path_uniforms = {
+  u_transform : Gl.uniform_location;
+  u_proj : Gl.uniform_location;
+  u_color : Gl.uniform_location;
+  u_viewport : Gl.uniform_location;
+  u_linewidth : Gl.uniform_location;
+  grid_k : Gl.uniform_location;
+  grid_scale : Gl.uniform_location;
+  center_offset : Gl.uniform_location;
+  inv_w : Gl.uniform_location;
+  max_lod : Gl.uniform_location;
+  inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
+  inv_avg_delta : Gl.uniform_location;
+  relief : Gl.uniform_location;
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location;
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
+}
+
+let init_path_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_transform = u "transform";
+    u_proj = u "proj";
+    u_color = u "u_color";
+    u_viewport = u "u_viewport";
+    u_linewidth = u "u_linewidth";
+    grid_k = u "grid_k";
+    grid_scale = u "grid_scale";
+    center_offset = u "center_offset";
+    inv_w = u "inv_w";
+    max_lod = u "max_lod";
+    inv_delta = u "inv_delta";
+    meridian_conv = u "meridian_conv";
+    inv_avg_delta = u "inv_avg_delta";
+    relief = u "relief";
+    hd_valid = u "hd_valid";
+    hd_relief = u "hd_relief";
+    hd_scale = u "hd_scale";
+    hd_bias = u "hd_bias";
+    hd_lod_bias = u "hd_lod_bias";
+    hd_max_lod = u "hd_max_lod";
+  }
+
+let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
+  Gl.uniform1f ctx u.grid_k p.grid_k;
+  Gl.uniform1f ctx u.grid_scale p.grid_scale;
+  Gl.uniform1i ctx u.relief 1;
+  Gl.uniform1i ctx u.hd_relief 6;
+  Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0;
+  Gl.uniform1f ctx u.u_linewidth 5.0
+
+let upload_path_session ctx (u : path_uniforms) ~w ~lat ~x ~y ~lon =
+  let deltax, deltay, avg_delta = compute_deltas ~lat in
+  let center_offset_x, center_offset_y =
+    compute_center_offset ~lat ~lon ~x ~y
+  in
+  Gl.uniform1f ctx u.inv_w (1. /. float w);
+  Gl.uniform1f ctx u.meridian_conv (meridian_convergence ~lat);
+  Gl.uniform1i ctx u.max_lod (Web_utils.log2 w);
+  Gl.uniform2f ctx u.inv_delta (1. /. deltax) (1. /. deltay);
+  Gl.uniform1f ctx u.inv_avg_delta (1. /. avg_delta);
+  Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y
+
+let upload_path_hd_params ctx (u : path_uniforms) hd =
+  let valid, scale, bias_x, bias_y, lod_bias, max_lod =
+    match hd with
+    | None -> (0, 0., 0., 0., 0., 0)
+    | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
+        let scale = 1. /. (hd_px_arcsec *. float hd_size) in
+        ( 1,
+          scale,
+          -.ox *. scale,
+          -.oy *. scale,
+          Float.log2 (1. /. hd_px_arcsec),
+          Web_utils.log2 hd_size )
+  in
+  Gl.uniform1i ctx u.hd_valid valid;
+  Gl.uniform1f ctx u.hd_scale scale;
+  Gl.uniform2f ctx u.hd_bias bias_x bias_y;
+  Gl.uniform1f ctx u.hd_lod_bias lod_bias;
+  Gl.uniform1i ctx u.hd_max_lod max_lod
+
 let anisotropy_ext = ref None
 
 let apply_anisotropic_filtering ctx =

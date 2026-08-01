@@ -1525,8 +1525,36 @@ correlation-derived photogrammetry, which is noisy on scree; LIDAR HD is clean
 airborne LIDAR. Statistics cannot separate the two: this needs a shaded render
 side by side, and it is the one thing that could send us back to LIDAR HD.
 
-If it does, the water problem is fixable client-side rather than by changing
-source: the CLC tiles already carry a water layer (`Clc_loader` water_indices /
-water_colors, rasterized by `rasterize_clc_tiles`; terrain.frag notes "lakes are
-coverage-rasterized"), so the blend could flatten the grid to a constant
-wherever the cover map says water. More work, and RGE ALTI gives it for free.
+If it does, water has to be fixed client-side. Sketched here because the obvious
+formulation does not work, and the premise is shakier than it looks.
+
+What exists: the water layer is **OSM**-derived, not CORINE
+(`Osm_fetch.fetch_water_polygons`, `extract_tiles.ml:786`), so shorelines are
+metres-accurate; the client holds it as triangles on the CPU (`water_positions`
+/ `water_indices` in `Clc_loader.t`, quantised at 220000 per tile range) and
+rasterised into the GPU cover map.
+
+- **Not "flatten to a constant".** A grid can hold several lakes at different
+  levels plus rivers, which are flat across but slope along. That needs
+  connected-component labelling and a per-lake statistic on every load.
+- **Instead set `fade = 0` on water.** `blend` already writes
+  `base + fade * (hd - base)`, so fade 0 yields the coarse layer's value — and
+  the coarse layer is RGE ALTI, measured hydro-flat. Rivers come out right too,
+  since RGE ALTI's correction slopes along them. `nodata_distance` already
+  builds the distance transform, so treating water as nodata reuses it.
+- Obstacles: `fade_metres = 1500` would erase HD detail for 1.5 km around every
+  pond, so water needs its own ~10-20 m fade (a second distance field);
+  watercourses become erased corridors at 2 samples wide plus fade; the
+  triangles are in per-tile quantised coordinates and the mapping must match
+  `rasterize_clc_tiles` exactly, since an offset mask flattens land and leaves
+  water rippling; and it duplicates the GPU rasteriser on the CPU.
+- **Cheaper variant.** The artefact is normal speckle, not geometry — 2 cm of
+  ripple is invisible as displacement, only the ~1 deg of tilt shows. Force the
+  normal to vertical where the cover map says water, inside `normal.frag` during
+  the relief bake, and leave heights alone. Needs the cover map bound during
+  `compute_relief`, which currently runs before `rasterize_clc_tiles`; they are
+  independent, so the order swaps freely. Perhaps a tenth of the work.
+- **The premise is contingent.** Every version falls back to RGE ALTI for water,
+  so it only works if RGE ALTI is being carried anyway — and if RGE ALTI is good
+  enough for water and serves 2.38 m directly, LIDAR HD only wins if its land
+  detail is visibly better. Do not build this before the side-by-side render.

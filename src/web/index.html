@@ -158,6 +158,30 @@
     }
     .fab-labels.rot270 svg { transform: rotate(270deg); }
 
+    /* GPX FAB Button */
+    .fab-gpx {
+      position: absolute;
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      right: calc(160px + env(safe-area-inset-right));
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      z-index: 100;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .fab-gpx:active { transform: scale(0.9); }
+    .fab-gpx svg { width: 26px; height: 26px; stroke: #4f46e5; }
+    .fab-gpx.active { background: rgba(224, 231, 255, 0.95); border-color: #6366f1; }
+
     .menu-overlay {
       position: fixed;
       top: 0;
@@ -181,11 +205,11 @@
     }
 
     .menu {
-      background: rgba(255, 255, 255, 0.9);
+      background: rgba(255, 255, 255, 0.92);
       backdrop-filter: blur(16px);
       border: 1px solid rgba(255, 255, 255, 0.4);
       width: 90%;
-      max-width: 400px;
+      max-width: 440px;
       max-height: 80vh;
       border-radius: 20px;
       padding: 24px;
@@ -202,6 +226,110 @@
     .menu-overlay.visible .menu {
       transform: scale(1);
     }
+
+    /* GPX Drop Zone */
+    .gpx-drop-zone {
+      border: 2px dashed #a5b4fc;
+      border-radius: 16px;
+      padding: 20px;
+      text-align: center;
+      background: rgba(238, 242, 255, 0.4);
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .gpx-drop-zone:hover, .gpx-drop-zone.dragover {
+      background: rgba(224, 231, 255, 0.85);
+      border-color: #4f46e5;
+    }
+
+    /* GPX Trace List */
+    .gpx-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 280px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .gpx-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-radius: 14px;
+      gap: 10px;
+      touch-action: manipulation;
+    }
+    .gpx-item-info {
+      flex: 1;
+      overflow: hidden;
+    }
+    .gpx-item-title {
+      font-weight: 600;
+      font-size: 14px;
+      color: #1f2937;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gpx-item-meta {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .gpx-item-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* iOS Toggle Switch */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 46px;
+      height: 26px;
+      flex-shrink: 0;
+      touch-action: manipulation;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #cbd5e1; transition: .3s; border-radius: 26px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px;
+      background-color: white; transition: .3s; border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    input:checked + .slider { background-color: #6366f1; }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    .btn-icon {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 8px;
+      border-radius: 10px;
+      color: #6b7280;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      transition: background 0.2s, color 0.2s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    .btn-icon:hover { background: rgba(0, 0, 0, 0.06); color: #111827; }
+    .btn-icon:active { transform: scale(0.92); background: rgba(0, 0, 0, 0.1); }
+    .btn-icon.delete:hover { background: #fee2e2; color: #ef4444; }
+    .btn-icon.delete:active { background: #fca5a5; color: #dc2626; }
 
     .input-group {
       display: flex;
@@ -476,4 +604,381 @@
       </ul>
     </div>
   </div>
-  <canvas id="canvas" width=640 height=480>
+  <canvas id="canvas" width=640 height=480></canvas>
+
+  <!-- GPX FAB Button -->
+  <button id="fab-gpx" class="fab-gpx" aria-label="Manage GPX Traces" title="Manage GPX Traces">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
+      <line x1="4" y1="22" x2="4" y2="15"></line>
+    </svg>
+  </button>
+
+  <!-- Hidden File Input for GPX Upload -->
+  <input type="file" id="gpx-file-input" accept=".gpx,application/gpx+xml,text/xml" multiple style="display:none">
+
+  <!-- GPX Management Modal Overlay -->
+  <div id="gpx-modal-overlay" class="menu-overlay">
+    <div class="menu">
+      <button id="gpx-modal-close" class="menu-close" aria-label="Close GPX Manager">&times;</button>
+      
+      <div style="display: flex; align-items: center; justify-content: space-between; position: relative; padding-right: 48px;">
+        <div>
+          <h2 style="margin:0; font-size: 20px; font-weight: 700; color: #111827;">GPX Traces</h2>
+          <div style="font-size: 13px; color: #6b7280; margin-top: 2px;">Manage 3D GPS trails on terrain</div>
+        </div>
+      </div>
+
+      <!-- Drop Zone & Add Button -->
+      <div id="gpx-drop-zone" class="gpx-drop-zone">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+        <div style="font-weight: 600; color: #374151; margin-top: 6px;">Drop GPX files here</div>
+        <div style="font-size: 13px; color: #6b7280; margin-bottom: 12px;">or click to browse files</div>
+        <button id="btn-add-gpx" class="btn-go" style="padding: 10px 18px; font-size: 14px; width: 100%;">+ Add GPX Trace</button>
+      </div>
+
+      <!-- Saved Traces List -->
+      <div class="section-title">Saved Traces</div>
+      <div id="gpx-list" class="gpx-list">
+        <!-- Dynamic items -->
+      </div>
+    </div>
+  </div>
+
+  <!-- GPX Manager Script -->
+  <script>
+    (function() {
+      const STORAGE_KEY = 'mountains_gpx_traces_v1';
+
+      function escapeHtml(str) {
+        return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      }
+
+      function parseGpxSummary(xmlString) {
+        let pointCount = 0;
+        let firstLat = null, firstLon = null;
+        let secondLat = null, secondLon = null;
+        let name = '';
+
+        const nameMatch = xmlString.match(/<name>([^<]+)<\/name>/i);
+        if (nameMatch) name = nameMatch[1].trim();
+
+        const trkptRegex = /<trkpt\s+[^>]*lat=["']([^"']+)["']\s+[^>]*lon=["']([^"']+)["']/gi;
+        const trkptRegex2 = /<trkpt\s+[^>]*lon=["']([^"']+)["']\s+[^>]*lat=["']([^"']+)["']/gi;
+
+        const distanceMeters = (lat1, lon1, lat2, lon2) => {
+          const toRadians = degrees => degrees * Math.PI / 180;
+          const deltaLat = toRadians(lat2 - lat1);
+          const deltaLon = toRadians(lon2 - lon1);
+          const a = Math.sin(deltaLat / 2) ** 2 +
+            Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
+            Math.sin(deltaLon / 2) ** 2;
+          return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        };
+        const addPoint = (lat, lon) => {
+          if (pointCount === 0) {
+            firstLat = lat;
+            firstLon = lon;
+          } else if (secondLat === null &&
+                     distanceMeters(firstLat, firstLon, lat, lon) >= 10) {
+            secondLat = lat;
+            secondLon = lon;
+          }
+          pointCount++;
+        };
+
+        let match;
+        while ((match = trkptRegex.exec(xmlString)) !== null) {
+          addPoint(parseFloat(match[1]), parseFloat(match[2]));
+        }
+        if (pointCount === 0) {
+          while ((match = trkptRegex2.exec(xmlString)) !== null) {
+            addPoint(parseFloat(match[2]), parseFloat(match[1]));
+          }
+        }
+
+        let bearing = null;
+        if (firstLat !== null && secondLat !== null &&
+            (firstLat !== secondLat || firstLon !== secondLon)) {
+          const toRadians = degrees => degrees * Math.PI / 180;
+          const lat1 = toRadians(firstLat);
+          const lat2 = toRadians(secondLat);
+          const deltaLon = toRadians(secondLon - firstLon);
+          const y = Math.sin(deltaLon) * Math.cos(lat2);
+          const x = Math.cos(lat1) * Math.sin(lat2) -
+            Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
+          bearing = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+
+        return {
+          name,
+          pointCount,
+          centerLat: firstLat,
+          centerLon: firstLon,
+          bearing
+        };
+      }
+
+      class GpxManager {
+        constructor() {
+          this.traces = [];
+          this.load();
+          this.setupUI();
+          this.setupEvents();
+          this.setupWebAPIs();
+          this.updateMap();
+        }
+
+        load() {
+          try {
+            const stored = localStorage.getItem(STORAGE_KEY);
+            if (stored) {
+              this.traces = JSON.parse(stored).filter(trace => trace.id !== 'default_ceillac');
+              this.save();
+            } else {
+              this.traces = [];
+            }
+          } catch (e) {
+            console.error('Failed to load GPX traces:', e);
+            this.traces = [];
+          }
+        }
+
+        save() {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(this.traces));
+          } catch (e) {
+            console.error('Failed to save GPX traces to localStorage:', e);
+          }
+        }
+
+        async addTrace(name, xmlString) {
+          if (!xmlString || !xmlString.trim()) return;
+          const summary = parseGpxSummary(xmlString);
+          const traceName = name || summary.name || ('Trace ' + (this.traces.length + 1) + '.gpx');
+
+          const trace = {
+            id: 'gpx_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            name: traceName,
+            content: xmlString,
+            active: true,
+            points: summary.pointCount,
+            centerLat: summary.centerLat,
+            centerLon: summary.centerLon,
+            bearing: summary.bearing
+          };
+
+          this.traces.push(trace);
+          this.save();
+          this.renderUI();
+          this.updateMap();
+        }
+
+        toggleTrace(id) {
+          const trace = this.traces.find(t => t.id === id);
+          if (trace) {
+            trace.active = !trace.active;
+            this.save();
+            this.renderUI();
+            this.updateMap();
+          }
+        }
+
+        deleteTrace(id) {
+          this.traces = this.traces.filter(t => t.id !== id);
+          this.save();
+          this.renderUI();
+          this.updateMap();
+        }
+
+        flyTo(id) {
+          const trace = this.traces.find(t => t.id === id);
+          if (trace && trace.centerLat && trace.centerLon && window.flyToCoords) {
+            const bearing = Number.isFinite(trace.bearing)
+              ? trace.bearing
+              : parseGpxSummary(trace.content || '').bearing;
+            this.modal.classList.remove('visible');
+            window.flyToCoords(trace.centerLat, trace.centerLon, bearing);
+          }
+        }
+
+        updateMap() {
+          if (!window.setGpxContent) {
+            setTimeout(() => this.updateMap(), 200);
+            return;
+          }
+
+          const activeTraces = this.traces.filter(t => t.active);
+          if (activeTraces.length === 0) {
+            window.setGpxContent("");
+            return;
+          }
+
+          const xmlParts = activeTraces.map(t => t.content).filter(Boolean);
+          const combined = xmlParts.join("\n");
+          window.setGpxContent(combined);
+        }
+
+        setupUI() {
+          this.fab = document.getElementById('fab-gpx');
+          this.modal = document.getElementById('gpx-modal-overlay');
+          this.closeBtn = document.getElementById('gpx-modal-close');
+          this.addBtn = document.getElementById('btn-add-gpx');
+          this.dropZone = document.getElementById('gpx-drop-zone');
+          this.fileInput = document.getElementById('gpx-file-input');
+          this.listEl = document.getElementById('gpx-list');
+
+          this.renderUI();
+        }
+
+        setupEvents() {
+          // Open Modal
+          this.fab.addEventListener('click', () => {
+            this.modal.classList.add('visible');
+          });
+
+          // Close Modal
+          this.closeBtn.addEventListener('click', () => {
+            this.modal.classList.remove('visible');
+          });
+
+          this.modal.addEventListener('click', (e) => {
+            if (e.target === this.modal) {
+              this.modal.classList.remove('visible');
+            }
+          });
+
+          // Trigger File Input
+          this.addBtn.addEventListener('click', () => {
+            this.fileInput.click();
+          });
+          this.dropZone.addEventListener('click', (e) => {
+            if (e.target !== this.addBtn) {
+              this.fileInput.click();
+            }
+          });
+
+          // File Input Selection
+          this.fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach(file => {
+              const reader = new FileReader();
+              reader.onload = (evt) => {
+                this.addTrace(file.name, evt.target.result);
+              };
+              reader.readAsText(file);
+            });
+            this.fileInput.value = '';
+          });
+
+          // Drag and Drop
+          ['dragenter', 'dragover'].forEach(eventName => {
+            this.dropZone.addEventListener(eventName, (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.dropZone.classList.add('dragover');
+            });
+          });
+
+          ['dragleave', 'drop'].forEach(eventName => {
+            this.dropZone.addEventListener(eventName, (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.dropZone.classList.remove('dragover');
+            });
+          });
+
+          this.dropZone.addEventListener('drop', (e) => {
+            const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.gpx') || f.type.includes('gpx') || f.type.includes('xml'));
+            files.forEach(file => {
+              const reader = new FileReader();
+              reader.onload = (evt) => {
+                this.addTrace(file.name, evt.target.result);
+              };
+              reader.readAsText(file);
+            });
+          });
+        }
+
+        setupWebAPIs() {
+          // 1. Web Launch API (File Handling API)
+          if ('launchQueue' in window && 'files' in LaunchParams.prototype) {
+            window.launchQueue.setConsumer(async (launchParams) => {
+              if (!launchParams.files || !launchParams.files.length) return;
+              for (const handle of launchParams.files) {
+                try {
+                  const file = await handle.getFile();
+                  const text = await file.text();
+                  await this.addTrace(file.name, text);
+                } catch (err) {
+                  console.error('Error opening launched file:', err);
+                }
+              }
+            });
+          }
+
+          // 2. Web Share Target API check
+          if (window.location.search.includes('share_received=1')) {
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+        }
+
+        renderUI() {
+          if (!this.listEl) return;
+
+          this.listEl.innerHTML = '';
+          if (this.traces.length === 0) {
+            this.listEl.innerHTML = '<div style="text-align:center; color:#9ca3af; padding:20px; font-size:14px;">No GPX traces saved. Upload a file above!</div>';
+            return;
+          }
+
+          this.traces.forEach(t => {
+            const item = document.createElement('div');
+            item.className = 'gpx-item';
+            item.innerHTML = `
+              <div class="gpx-item-info">
+                <div class="gpx-item-title" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+                <div class="gpx-item-meta">${t.points ? t.points + ' points' : 'GPX track'}</div>
+              </div>
+              <div class="gpx-item-actions">
+                ${t.centerLat ? `<button class="btn-icon fly-btn" title="Fly to trace center">✈️</button>` : ''}
+                <label class="switch" title="Toggle 3D visibility">
+                  <input type="checkbox" ${t.active ? 'checked' : ''}>
+                  <span class="slider"></span>
+                </label>
+                <button class="btn-icon delete delete-btn" title="Delete trace">🗑️</button>
+              </div>
+            `;
+
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            checkbox.addEventListener('change', () => this.toggleTrace(t.id));
+
+            const flyBtn = item.querySelector('.fly-btn');
+            if (flyBtn) {
+              flyBtn.addEventListener('click', () => this.flyTo(t.id));
+            }
+
+            const deleteBtn = item.querySelector('.delete-btn');
+            if (deleteBtn) {
+              deleteBtn.addEventListener('click', () => {
+                if (confirm(`Delete trace "${t.name}"?`)) {
+                  this.deleteTrace(t.id);
+                }
+              });
+            }
+
+            this.listEl.appendChild(item);
+          });
+        }
+      }
+
+      window.gpxManager = new GpxManager();
+    })();
+  </script>
+</body>
+
+</html>

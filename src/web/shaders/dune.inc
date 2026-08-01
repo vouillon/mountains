@@ -83,6 +83,30 @@
   (diff normal.frag normal.frag.fmt)))
 
 (rule
+ (target path.frag.fmt)
+ (deps path.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff path.frag path.frag.fmt)))
+
+(rule
+ (target path.vert.fmt)
+ (deps path.vert)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff path.vert path.vert.fmt)))
+
+(rule
  (target quad.vert.fmt)
  (deps quad.vert)
  (action

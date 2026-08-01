@@ -1,25 +1,53 @@
-{"name":"Mountain Skyline",
- "start_url": ".",
- "icons": [
-  {
-    "src": "icon192.png?v=2",
-    "sizes": "192x192",
-    "type": "image/png",
-    "purpose": "maskable"
-  },
-  {
-    "src": "icon512.png?v=2",
-    "sizes": "512x512",
-    "type": "image/png",
-    "purpose": "any"
-  },
-  {
-    "src": "icon512.png?v=2",
-    "sizes": "512x512",
-    "type": "image/png",
-    "purpose": "maskable"
-  }],
- "background_color": "#000000",
- "theme_color": "#000000",
- "display": "fullscreen",
- "orientation": "natural"}
+{
+  "name": "Mountain Skyline",
+  "short_name": "Skyline",
+  "start_url": ".",
+  "icons": [
+    {
+      "src": "icon192.png?v=2",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icon512.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon512.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "display": "fullscreen",
+  "orientation": "natural",
+  "file_handlers": [
+    {
+      "action": "./",
+      "name": "GPX Trail File",
+      "accept": {
+        "application/gpx+xml": [".gpx"],
+        "application/xml": [".gpx"],
+        "text/xml": [".gpx"]
+      }
+    }
+  ],
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "gpx_file",
+          "accept": ["application/gpx+xml", "application/xml", "text/xml", ".gpx"]
+        }
+      ]
+    }
+  }
+}

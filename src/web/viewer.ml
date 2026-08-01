@@ -268,6 +268,17 @@ let triangle_program =
     attributes = [];
   }
 
+let path_program =
+  {
+    vertex_shader =
+      [%blob "shaders/terrain_prefix.vert"] ^ radial_vertex_common
+      ^ [%blob "shaders/path.vert"];
+    fragment_shader = [%blob "shaders/path.frag"];
+    attributes = [];
+  }
+
+let current_gpx_str = ref None
+
 let text_program =
   {
     vertex_shader = [%blob "shaders/text.vert"];
@@ -655,6 +666,8 @@ type graphics_resources = {
   radial_params : Render_state.radial_params;
   nearest_sampler : Gl.sampler;
   hd_placeholder : Gl.texture;
+  path_pid : Gl.program;
+  path_uniforms : Render_state.path_uniforms;
 }
 
 let resize_canvas ?device_width ?device_height canvas =
@@ -763,6 +776,10 @@ let init_graphics ctx =
   let water_raster_uniforms =
     Render_state.init_water_raster_uniforms ctx water_raster_pid
   in
+  let path_pid = Web_utils.create_program ctx path_program in
+  let path_uniforms = Render_state.init_path_uniforms ctx path_pid in
+  Gl.use_program ctx path_pid;
+  Render_state.upload_path_static ctx path_uniforms radial_params;
 
   (* Create nearest sampler for AO passes (relief texture needs nearest filtering there) *)
   let nearest_sampler = Gl.create_sampler ctx in
@@ -803,6 +820,8 @@ let init_graphics ctx =
     radial_params;
     nearest_sampler;
     hd_placeholder = make_hd_placeholder ctx;
+    path_pid;
+    path_uniforms;
   }
 (* Rendering Passes *)
 
@@ -1758,6 +1777,7 @@ type location = {
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
   hd : hd_relief option;
+  gpx_path : (Gl.vertex_array_object * Gl.buffer * int) option;
 }
 
 let session : location option ref = ref None
@@ -1771,8 +1791,14 @@ let delete_location ctx
       cover_map_texture;
       points;
       hd;
+      gpx_path;
       _;
     } =
+  Option.iter
+    (fun (vao, vbo, _) ->
+      Gl.delete_vertex_array ctx vao;
+      Gl.delete_buffer ctx vbo)
+    gpx_path;
   Gl.delete_texture ctx relief_texture;
   Gl.delete_texture ctx relief_normal_texture;
   Gl.delete_texture ctx ao_texture;
@@ -1789,10 +1815,11 @@ let delete_location ctx
       | None -> ())
     points
 
-let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
+let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
-    ~(text_uniforms : Render_state.text_uniforms) ~proj_ba ~transform_ba
+    ~(text_uniforms : Render_state.text_uniforms)
+    ~(path_uniforms : Render_state.path_uniforms) ~proj_ba ~transform_ba
     ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta ~location ~orientation
     ~index_count ~sky_pid ~sky_uniforms
     ~(radial_params : Render_state.radial_params) canvas ctx =
@@ -1858,6 +1885,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
   Gl.depth_mask ctx true;
+  Gl.depth_func ctx Gl.lequal;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
   Gl.enable ctx Gl.cull_face';
@@ -1993,13 +2021,24 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
   draw_wedge_seg 2 (-32) (-25) 40;
   Gl.bind_vertex_array ctx None;
 
+  (* Draw 3D GPX Path *)
+  (match location.gpx_path with
+  | Some (vao, _vbo, count) ->
+      Gl.use_program ctx path_pid;
+      Gl.uniform_matrix4fv ctx path_uniforms.Render_state.u_transform false
+        transform_ta;
+      Gl.uniform_matrix4fv ctx path_uniforms.Render_state.u_proj false proj_ta;
+      Gl.uniform2f ctx path_uniforms.Render_state.u_viewport
+        (float canvas_width) (float canvas_height);
+      Gl.bind_vertex_array ctx (Some vao);
+      Gl.draw_arrays ctx Gl.triangle_strip 0 (count * 4)
+  | None -> ());
+
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
   Gl.depth_mask ctx false;
-  Gl.depth_func ctx Gl.lequal;
   (* Draw if Z <= 1.0 (Far Plane) *)
   Gl.disable ctx Gl.cull_face';
   Gl.use_program ctx sky_pid;
-  Gl.bind_vertex_array ctx (Some text_geo);
   (* Compute Inverse View *)
   let inv_view = Matrix.inverse transform in
   Matrix.blit inv_view inv_view_ba;
@@ -2012,6 +2051,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo
     Gl.disable ctx Gl.depth_test;
     Gl.enable ctx Gl.blend;
     Gl.blend_func ctx Gl.one Gl.one_minus_src_alpha;
+    Gl.bind_vertex_array ctx (Some text_geo);
 
     (* 1. Triangles *)
     Gl.use_program ctx triangle_pid;
@@ -2478,6 +2518,273 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
     h0 +. (fy *. (h1 -. h0))
   end
 
+let split_gpx_segment ~(radial_params : Render_state.radial_params)
+    ((x0, y0, _) as start) ((x1, y1, _) as finish) =
+  let grid_k = radial_params.Render_state.grid_k in
+  let grid_scale = radial_params.Render_state.grid_scale in
+  let sector_angle = pi /. 1024. in
+  let cross (ax, ay) (bx, by) = (ax *. by) -. (ay *. bx) in
+  let radius ring = grid_scale *. (exp (grid_k *. float ring) -. 1.) in
+  let barycentric (px, py) (ax, ay) (bx, by) (cx, cy) =
+    let denom = ((by -. cy) *. (ax -. cx)) +. ((cx -. bx) *. (ay -. cy)) in
+    let u =
+      (((by -. cy) *. (px -. cx)) +. ((cx -. bx) *. (py -. cy))) /. denom
+    in
+    let v =
+      (((cy -. ay) *. (px -. cx)) +. ((ax -. cx) *. (py -. cy))) /. denom
+    in
+    (u, v, 1. -. u -. v)
+  in
+  let triangle_at (px, py) =
+    let r = sqrt ((px *. px) +. (py *. py)) in
+    let ring =
+      min (n_rings - 2)
+        (max 0 (int_of_float (floor (log ((r /. grid_scale) +. 1.) /. grid_k))))
+    in
+    let angle = atan2 py px in
+    let angle0 =
+      (pi /. 4.)
+      +. (floor ((angle -. (pi /. 4.)) /. sector_angle) *. sector_angle)
+    in
+    let angle1 = angle0 +. sector_angle in
+    let vertex r angle = (cos angle *. r, sin angle *. r) in
+    let a0 = vertex (radius ring) angle0
+    and b0 = vertex (radius (ring + 1)) angle0
+    and a1 = vertex (radius ring) angle1
+    and b1 = vertex (radius (ring + 1)) angle1 in
+    if ring = 0 then (a1, b0, b1)
+    else
+      let u, v, w = barycentric (px, py) a0 b0 a1 in
+      if Float.min u (Float.min v w) < -0.00001 then (a1, b0, b1)
+      else (a0, b0, a1)
+  in
+  let dx = x1 -. x0 and dy = y1 -. y0 in
+  let point t = (x0 +. (t *. dx), y0 +. (t *. dy), 0.) in
+  let segment_length = sqrt ((dx *. dx) +. (dy *. dy)) in
+  let epsilon = 1e-6 in
+  let rec walk t acc steps =
+    if t >= 1. -. epsilon || steps = 4096 then List.rev (finish :: acc)
+    else
+      let px, py, _ = point (min 1. (t +. epsilon)) in
+      let a, b, c = triangle_at (px, py) in
+      let crossing edge_start edge_end =
+        let ex, ey =
+          (fst edge_end -. fst edge_start, snd edge_end -. snd edge_start)
+        in
+        let denom = cross (dx, dy) (ex, ey) in
+        if abs_float denom < 1e-12 then None
+        else
+          let qx = fst edge_start -. x0 and qy = snd edge_start -. y0 in
+          let t' = cross (qx, qy) (ex, ey) /. denom in
+          let u = cross (qx, qy) (dx, dy) /. denom in
+          if
+            t' > t +. epsilon
+            && t' < 1. -. epsilon
+            && u >= -.epsilon
+            && u <= 1. +. epsilon
+          then Some t'
+          else None
+      in
+      let next =
+        [ crossing a b; crossing b c; crossing c a ]
+        |> List.filter_map Fun.id
+        |> List.fold_left Float.min 1.
+      in
+      if next = 1. then List.rev (finish :: acc)
+      else
+        let nudge =
+          min
+            (0.01 /. max 0.01 segment_length)
+            (min ((next -. t) *. 0.25) ((1. -. next) *. 0.25))
+        in
+        let before = next -. nudge and after = next +. nudge in
+        walk after (point after :: point before :: acc) (steps + 1)
+  in
+  walk 0. [ start ] 0
+
+let split_gpx_triangle_boundaries radial_params points =
+  match points with
+  | [] -> []
+  | first :: rest ->
+      let rec aux acc previous = function
+        | [] -> List.rev acc
+        | next :: remaining ->
+            let segment = split_gpx_segment ~radial_params previous next in
+            aux (List.rev_append (List.tl segment) acc) next remaining
+      in
+      aux [ first ] first rest
+
+let build_gpx_path ctx ~lat ~lon ~radial_params =
+  let gpx_data =
+    match !current_gpx_str with
+    | Some str -> ( try Some (Gpx_loader.parse str) with _ -> None)
+    | None -> None
+  in
+  match gpx_data with
+  | None -> None
+  | Some data ->
+      let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+      let conv = Render_state.meridian_convergence ~lat in
+      let max_view_dist = 20000.0 in
+
+      let process_subsegment (pts_list : (float * float * float) list) =
+        let vert_count = List.length pts_list in
+        if vert_count < 2 then None
+        else
+          let pts_array = Array.of_list pts_list in
+          let verts = Array.make (vert_count * 4 * 10) 0. in
+          for i = 0 to vert_count - 1 do
+            let px, py, z = pts_array.(i) in
+            let p_px, p_py, p_z =
+              if i > 0 then pts_array.(i - 1) else (px, py, z)
+            in
+            let n_px, n_py, n_z =
+              if i < vert_count - 1 then pts_array.(i + 1) else (px, py, z)
+            in
+            let idx = i * 4 * 10 in
+            verts.(idx) <- p_px;
+            verts.(idx + 1) <- p_py;
+            verts.(idx + 2) <- p_z;
+            verts.(idx + 3) <- px;
+            verts.(idx + 4) <- py;
+            verts.(idx + 5) <- z;
+            verts.(idx + 6) <- n_px;
+            verts.(idx + 7) <- n_py;
+            verts.(idx + 8) <- n_z;
+            verts.(idx + 9) <- 1.0;
+
+            verts.(idx + 10) <- p_px;
+            verts.(idx + 11) <- p_py;
+            verts.(idx + 12) <- p_z;
+            verts.(idx + 13) <- px;
+            verts.(idx + 14) <- py;
+            verts.(idx + 15) <- z;
+            verts.(idx + 16) <- n_px;
+            verts.(idx + 17) <- n_py;
+            verts.(idx + 18) <- n_z;
+            verts.(idx + 19) <- -1.0;
+
+            verts.(idx + 20) <- p_px;
+            verts.(idx + 21) <- p_py;
+            verts.(idx + 22) <- p_z;
+            verts.(idx + 23) <- px;
+            verts.(idx + 24) <- py;
+            verts.(idx + 25) <- z;
+            verts.(idx + 26) <- n_px;
+            verts.(idx + 27) <- n_py;
+            verts.(idx + 28) <- n_z;
+            verts.(idx + 29) <- 2.0;
+
+            verts.(idx + 30) <- p_px;
+            verts.(idx + 31) <- p_py;
+            verts.(idx + 32) <- p_z;
+            verts.(idx + 33) <- px;
+            verts.(idx + 34) <- py;
+            verts.(idx + 35) <- z;
+            verts.(idx + 36) <- n_px;
+            verts.(idx + 37) <- n_py;
+            verts.(idx + 38) <- n_z;
+            verts.(idx + 39) <- -2.0
+          done;
+          Some verts
+      in
+
+      let segment_verts =
+        List.concat_map
+          (fun (trk : Gpx_loader.track) ->
+            let points_with_pos =
+              List.filter_map
+                (fun (pt : Gpx_loader.trackpoint) ->
+                  let dx = (pt.Gpx_loader.lon -. lon) *. 3600. in
+                  let dy = (pt.Gpx_loader.lat -. lat) *. 3600. in
+                  let ge = deltax *. dx in
+                  let gn = deltay *. dy in
+                  let px = ge /. (1. +. (gn *. conv)) in
+                  let py = gn +. (px *. px *. conv /. 2.) in
+                  let px = ge /. (1. +. (py *. conv)) in
+                  let py = gn +. (px *. px *. conv /. 2.) in
+                  let r = sqrt ((px *. px) +. (py *. py)) in
+                  if r > max_view_dist then None else Some (px, py, 0.))
+                trk.Gpx_loader.points
+            in
+            let points_with_pos =
+              split_gpx_triangle_boundaries radial_params points_with_pos
+            in
+            let rec split_segments current acc = function
+              | [] ->
+                  if List.length current >= 2 then
+                    List.rev (List.rev current :: acc)
+                  else List.rev acc
+              | pt :: rest -> split_segments (pt :: current) acc rest
+            in
+            let subsegs = split_segments [] [] points_with_pos in
+            List.filter_map process_subsegment subsegs)
+          data.Gpx_loader.tracks
+      in
+
+      if segment_verts = [] then None
+      else
+        let num_segs = List.length segment_verts in
+        let padded_segs =
+          List.mapi
+            (fun idx verts ->
+              let len = Array.length verts in
+              if len < 40 then verts
+              else
+                let first_vert = Array.sub verts 0 10 in
+                let last_vert = Array.sub verts (len - 10) 10 in
+                let prefix =
+                  if idx > 0 then Array.concat [ first_vert; first_vert ]
+                  else [||]
+                in
+                let suffix =
+                  if idx < num_segs - 1 then
+                    Array.concat [ last_vert; last_vert ]
+                  else [||]
+                in
+                Array.concat [ prefix; verts; suffix ])
+            segment_verts
+        in
+        let total_verts = Array.concat padded_segs in
+        let vert_count = Array.length total_verts / 40 in
+        let ba =
+          Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout
+            total_verts
+        in
+        let vbo =
+          Web_utils.create_buffer ctx Gl.array_buffer (Web_utils.Buffer ba)
+        in
+        let vao = Gl.create_vertex_array ctx in
+        Gl.bind_vertex_array ctx (Some vao);
+        Gl.bind_buffer ctx Gl.array_buffer (Some vbo);
+        let stride = 10 * 4 in
+        Gl.enable_vertex_attrib_array ctx 0;
+        Gl.vertex_attrib_pointer ctx 0 3 Gl.float false stride 0;
+        Gl.enable_vertex_attrib_array ctx 1;
+        Gl.vertex_attrib_pointer ctx 1 3 Gl.float false stride 12;
+        Gl.enable_vertex_attrib_array ctx 2;
+        Gl.vertex_attrib_pointer ctx 2 3 Gl.float false stride 24;
+        Gl.enable_vertex_attrib_array ctx 3;
+        Gl.vertex_attrib_pointer ctx 3 1 Gl.float false stride 36;
+        Gl.bind_vertex_array ctx None;
+        Gl.bind_buffer ctx Gl.array_buffer None;
+        Some (vao, vbo, vert_count)
+
+let update_gpx_path ctx ~radial_params =
+  match !session with
+  | None -> ()
+  | Some loc ->
+      Option.iter
+        (fun (vao, vbo, _) ->
+          Gl.delete_vertex_array ctx vao;
+          Gl.delete_buffer ctx vbo)
+        loc.gpx_path;
+      let new_gpx_path =
+        build_gpx_path ctx ~lat:!current_lat ~lon:!current_lon ~radial_params
+      in
+      session := Some { loc with gpx_path = new_gpx_path };
+      force_redraw := true
+
 (* Fetch the DEM and CLC tiles for [lat]/[lon], rebake every piece of
    location-dependent state and publish it in [session]. Resolves to whether
    this load is the one now on screen.
@@ -2522,6 +2829,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     radial_params;
     nearest_sampler;
     hd_placeholder;
+    path_pid;
+    path_uniforms;
     _;
   } =
     graphics
@@ -2718,16 +3027,21 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~fog_color:fog_linear ~zenith_color:zenith_linear;
+      let hd_params =
+        Option.map
+          (fun (g : Hd_dem.t) ->
+            {
+              Render_state.hd_size = Hd_dem.size;
+              hd_px_arcsec = Hd_dem.px_arcsec;
+              hd_origin = (g.origin_x, g.origin_y);
+            })
+          hd_grid
+      in
       Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
-        shadow_uniforms
-        (Option.map
-           (fun (g : Hd_dem.t) ->
-             {
-               Render_state.hd_size = Hd_dem.size;
-               hd_px_arcsec = Hd_dem.px_arcsec;
-               hd_origin = (g.origin_x, g.origin_y);
-             })
-           hd_grid);
+        shadow_uniforms hd_params;
+      Gl.use_program ctx path_pid;
+      Render_state.upload_path_session ctx path_uniforms ~w ~lat ~x ~y ~lon;
+      Render_state.upload_path_hd_params ctx path_uniforms hd_params;
 
       (* Render shadows into the session-wide shadow map (fixed 2048x2048x3) *)
       time_gpu ctx "draw_shadows" (fun () ->
@@ -2863,6 +3177,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
         |> List.map fst
       in
+      let gpx_path = build_gpx_path ctx ~lat ~lon ~radial_params in
       (* A refinement supersedes the first publish of this same location, and
          that record shares every base texture with this one: [delete_location]
          would take those down too. Only what it owns alone goes -- the POI
@@ -2880,7 +3195,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             (fun { hd_relief_texture; hd_relief_normal_texture } ->
               Gl.delete_texture ctx hd_relief_texture;
               Gl.delete_texture ctx hd_relief_normal_texture)
-            prev.hd)
+            prev.hd;
+          Option.iter
+            (fun (vao, vbo, _) ->
+              Gl.delete_vertex_array ctx vao;
+              Gl.delete_buffer ctx vbo)
+            prev.gpx_path)
         !session;
       (* Publish the new location: from the epoch check that guards this call to
          here there is no await, so the swap is atomic as far as [draw] is
@@ -2895,6 +3215,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             ao_texture;
             cover_map_texture;
             hd;
+            gpx_path;
           }
     in
     publish ~hd_grid:in_time;
@@ -2934,6 +3255,8 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
     triangle_uniforms;
     text_uniforms;
     radial_params;
+    path_pid;
+    path_uniforms;
     _;
   } =
     graphics
@@ -2981,6 +3304,17 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
                     (Printexc.to_string e));
                Lwt.return_unit)));
 
+  Jv.set Jv.global "setGpxContent"
+    (Jv.callback ~arity:1 (fun arg ->
+         let str =
+           if Jv.is_null arg || Jv.is_undefined arg then None
+           else
+             let s = Jv.to_string arg in
+             if String.length s = 0 then None else Some s
+         in
+         current_gpx_str := str;
+         update_gpx_path ctx ~radial_params));
+
   let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
   let transform_ba =
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
@@ -2998,11 +3332,11 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
       match !session with
       | None -> ()
       | Some location ->
-          draw terrain_pid terrain_geo triangle_pid text_pid text_geo
-            ~terrain_uniforms ~triangle_uniforms ~text_uniforms ~proj_ba
-            ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta ~inv_view_ta
-            ~location ~orientation ~index_count ~sky_pid ~sky_uniforms
-            ~radial_params canvas ctx)
+          draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
+            ~terrain_uniforms ~triangle_uniforms ~text_uniforms ~path_uniforms
+            ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta
+            ~inv_view_ta ~location ~orientation ~index_count ~sky_pid
+            ~sky_uniforms ~radial_params canvas ctx)
 (* Location & UI *)
 
 let featured_locations =
@@ -4192,6 +4526,18 @@ let main () =
   current_lat := lat;
   current_lon := lon;
   zoom := z;
+  Jv.set Jv.global "flyToCoords"
+    (Jv.callback ~arity:3 (fun lat_jv lon_jv bearing_jv ->
+         let lat = Jv.to_float lat_jv in
+         let lon = Jv.to_float lon_jv in
+         let bearing =
+           if Jv.is_null bearing_jv || Jv.is_undefined bearing_jv then None
+           else Some (Jv.to_float bearing_jv)
+         in
+         Option.iter (fun _ -> enter_manual_mode ()) bearing;
+         !switch_location ~push:true
+           ~camera:(Option.map (fun alpha -> (-.alpha, 90., !zoom)) bearing)
+           ~lat ~lon));
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with

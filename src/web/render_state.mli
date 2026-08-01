@@ -223,6 +223,44 @@ type text_uniforms = { transform : Gl.uniform_location }
 
 val init_text_uniforms : Gl.t -> Gl.program -> text_uniforms
 
+type path_uniforms = {
+  u_transform : Gl.uniform_location;
+  u_proj : Gl.uniform_location;
+  u_color : Gl.uniform_location;
+  u_viewport : Gl.uniform_location;
+  u_linewidth : Gl.uniform_location;
+  grid_k : Gl.uniform_location;
+  grid_scale : Gl.uniform_location;
+  center_offset : Gl.uniform_location;
+  inv_w : Gl.uniform_location;
+  max_lod : Gl.uniform_location;
+  inv_delta : Gl.uniform_location;
+  meridian_conv : Gl.uniform_location;
+  inv_avg_delta : Gl.uniform_location;
+  relief : Gl.uniform_location;
+  hd_valid : Gl.uniform_location;
+  hd_relief : Gl.uniform_location;
+  hd_scale : Gl.uniform_location;
+  hd_bias : Gl.uniform_location;
+  hd_lod_bias : Gl.uniform_location;
+  hd_max_lod : Gl.uniform_location;
+}
+
+val init_path_uniforms : Gl.t -> Gl.program -> path_uniforms
+val upload_path_static : Gl.t -> path_uniforms -> radial_params -> unit
+
+val upload_path_session :
+  Gl.t ->
+  path_uniforms ->
+  w:int ->
+  lat:float ->
+  x:int ->
+  y:int ->
+  lon:float ->
+  unit
+
+val upload_path_hd_params : Gl.t -> path_uniforms -> hd_params option -> unit
+
 val apply_anisotropic_filtering : Gl.t -> unit
 (** Apply cached max anisotropy to the currently bound texture. *)
 
