@@ -1493,68 +1493,104 @@ surface the eye expects mirror-flat, i.e. more than the entire 0.87 deg
 quantisation budget, on the worst possible surface for it. Also checked at
 Serre-Ponçon; same result.
 
-**RGE ALTI over WMS is exactly nested with the WMTS tiles.** Its 4x4 box-mean
-against WMTS L14 is RMS 0.0000 m, max 0.000 m — one product, so a WMS 2.38 m
-layer fades into WMTS L14 with zero discrepancy, against the 3.14 m mismatch
-LIDAR HD brings. And it is genuinely finer than L14 (0.736 m RMS beyond a
-bilinear upsample of L14, max 12.5 m), so **the L14 ceiling is a WMTS packaging
-limit for RGE ALTI too and LIDAR HD is not needed to get past it.**
+**RGE ALTI over WMS carries no information below 4.77 m — STRUCK.** An earlier
+version of this section proposed sourcing the 2.38 m ring from RGE ALTI over
+WMS, on the strength of it being "genuinely finer than L14 (0.736 m RMS beyond a
+bilinear upsample)". That was wrong. RGE ALTI's WMS output at 1024 px over an
+L14 footprint is **nearest-neighbour replication of the 4.77 m grid**: 100% of
+4x4 blocks are bit-identical, 16 distinct values along 64 samples, effective
+spacing exactly 4.77 m. The 0.736 m "detail" was the gap between nearest and
+bilinear upsampling — pure artefact. Its 4x4 box-mean matching L14 to RMS
+0.0000 m is a consequence of replication, not of nesting.
+
+The L14 ceiling is therefore a **real data limit** for RGE ALTI HIGHRES, and
+blockiness is worse than smoothness for rendering: flat 4.77 m plateaus with
+vertical steps give normals that are either 0 or 90 degrees.
+
+How it was caught, for reuse (the tests are cheap, run them on any new source):
+
+1. **Within-block spread** — decimate to the suspected source grid, check
+   whether fine samples vary inside each coarse cell. Decisive here; run first.
+2. **Autocorrelation vs lag 1..12** — real detail decays monotonically (LIDAR
+   HD: 0.73 0.43 0.30 0.17 0.05 ...). RGE ALTI peaked at lags 4, 8, 12 with
+   0.975, 0.936, 0.907 — period exactly one source cell.
+3. **Radial power spectrum slope** — catches white sensor noise as a flat
+   high-frequency floor. **Failed here**: both products gave beta ~2.9, because
+   a periodic artefact makes spectral peaks, not a floor. Not sufficient alone.
+4. **Excess vs slope / land cover** — correlation noise concentrates on smooth,
+   low-texture ground. Ambiguous here: the excess grew with slope, which fits
+   both real relief and resampling error.
 
 **Chain to build:**
 
-| ring | source | spacing | cost |
-| --- | --- | --- | --- |
-| 0 - 1.22 km | **WMS RGE ALTI** `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES`, 1024^2 | 2.38 m | 1 req, 4.0 MB, 5.33 MiB |
-| 1.22 - 2.44 km | **WMTS L14** (16 tiles, as planned) | 4.77 m | 3.4 MB, 5.33 MiB |
-| 2.44 - 9.77 km | WMTS L13 (existing) | 9.54 m | 13.4 MB |
+Both fine rings come from **WMS LIDAR HD**
+(`IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G`), each one 1024^2, each one request:
 
-One product end to end: every fade is exact, there is no product seam anywhere,
-the 4.77 m ring keeps WMTS's deflate and tile-granularity cache sharing and its
-existing `Hd_dem.prefetch` path, and only the innermost ring needs the new WMS
-code. 7.4 MB and 10.67 MiB added.
+| ring | source | bbox | spacing | cost |
+| --- | --- | --- | --- | --- |
+| 0 - 1.22 km | WMS LIDAR HD, 1024^2 | 2x2 L14 footprints | 2.38 m | 1 req, 4.0 MB, 5.33 MiB |
+| 1.22 - 2.44 km | WMS LIDAR HD, 1024^2 | 4x4 L14 footprints | 4.77 m | 1 req, 4.0 MB, 5.33 MiB |
+| 2.44 - 9.77 km | WMTS L13 (existing) | — | 9.54 m | 13.4 MB |
+
+8.0 MB and 10.67 MiB added. Both bboxes are grid-aligned and corner-anchored so
+the user sits near the centre (see the centring note above).
+
+An intermediate draft put the 4.77 m ring on WMTS L14. That came from the struck
+RGE ALTI revision, where the point was "one product end to end"; once the 2.38 m
+ring went back to LIDAR HD the rationale inverted — WMTS there *creates* a
+product seam at +-1.22 km instead of avoiding one. With both rings on LIDAR HD
+the server's exact box decimation (512 px = 2x2 box mean of 1024 px, RMS
+0.0001 m) makes the 2.38 <-> 4.77 handoff exact, and the only product seam is
+LIDAR HD against L13 at +-2.44 km, where the 3.14 m worst case subtends 1.3 px
+rather than 2.7 px and there is room for a wide fade.
+
+Costs of WMS over WMTS for the 4.77 m ring, accepted: +0.6 MB (WMS does not
+compress), and the URL is shared only among locations in the same corner
+quadrant instead of per tile. Neither touches the offline story, since L13
+remains the WMTS backbone and the fine rings are not prefetched anyway.
+
+Note the **`MIXED` fallback risk only bites below 4.77 m**: if it returns RGE
+ALTI outside LIDAR HD coverage, that is still genuine data at 4.77 m, which is
+RGE ALTI's real resolution. Only the 2.38 m layer needs the blockiness check.
+
+**Water needs no work — the shader already discards the DEM normal on water.**
+`terrain.frag` (~line 579) does
+`final_normal = normalize(mix(final_normal, waterNormal, waterMask))`, and past
+the 5 km wave fade `mix(final_normal, vec3(0,0,1), waterMask)`. At
+`waterMask == 1` the DEM-derived normal is replaced outright, so the ~1 deg of
+LIDAR ripple measured above never reaches the screen. What remains is invisible:
+the mesh geometry still carries the ripple (28 cm total spread at Annecy, 0.14
+mrad across a 2 km lake, i.e. 0.14 px, and lakes are never on the skyline); AO
+bakes from the base relief only and never sees the LIDAR grid; and
+`applyWaterEffects` replaces the albedo regardless. Only the shoreline band
+(0.01 < waterFactor < 0.99) mixes in terrain normal, where the ground is rough
+anyway.
+
+Residual dependency, pre-existing rather than introduced here: the override is
+driven by `waterFactor` from the OSM water layer, so a lake missing from OSM or
+a pre-CLC4 tile without the water layer (`is_clc4`) would show the ripple.
 
 Drop the 1.19 m layer for now: 0.423 m RMS is sub-pixel beyond ~440 m, so it
 only firms up the immediate foreground, at 4x the cost. Easy to add later.
 
 ### Open
 
-**Is RGE ALTI's fine-scale content signal or noise?** At the step actually
-deployed (4.77 -> 2.38 m, Ubaye tile) RGE ALTI adds 0.659 m RMS against LIDAR
-HD's 0.209 m — 3x more. RGE ALTI in the Alps is a mosaic including
-correlation-derived photogrammetry, which is noisy on scree; LIDAR HD is clean
-airborne LIDAR. Statistics cannot separate the two: this needs a shaded render
-side by side, and it is the one thing that could send us back to LIDAR HD.
+**ANSWERED — it was neither signal nor noise but nearest-neighbour replication;
+see the struck paragraph above. RGE ALTI cannot source anything below 4.77 m.**
 
-If it does, water has to be fixed client-side. Sketched here because the obvious
-formulation does not work, and the premise is shakier than it looks.
+**What `MIXED` returns outside LIDAR HD coverage — affects the 2.38 m ring
+only.** If it falls back to RGE ALTI, a 2.38 m request over an unflown area
+returns the blocky replication: 4.77 m plateaus with vertical steps, worse than
+dropping the ring entirely there. The 4.77 m ring is unaffected, since RGE ALTI
+is genuine at that spacing. Test on an unflown area before shipping; the
+within-block-spread check is cheap enough to run on the fetched grid itself and
+drop the 2.38 m ring when it trips.
 
-What exists: the water layer is **OSM**-derived, not CORINE
-(`Osm_fetch.fetch_water_polygons`, `extract_tiles.ml:786`), so shorelines are
-metres-accurate; the client holds it as triangles on the CPU (`water_positions`
-/ `water_indices` in `Clc_loader.t`, quantised at 220000 per tile range) and
-rasterised into the GPU cover map.
-
-- **Not "flatten to a constant".** A grid can hold several lakes at different
-  levels plus rivers, which are flat across but slope along. That needs
-  connected-component labelling and a per-lake statistic on every load.
-- **Instead set `fade = 0` on water.** `blend` already writes
-  `base + fade * (hd - base)`, so fade 0 yields the coarse layer's value — and
-  the coarse layer is RGE ALTI, measured hydro-flat. Rivers come out right too,
-  since RGE ALTI's correction slopes along them. `nodata_distance` already
-  builds the distance transform, so treating water as nodata reuses it.
-- Obstacles: `fade_metres = 1500` would erase HD detail for 1.5 km around every
-  pond, so water needs its own ~10-20 m fade (a second distance field);
-  watercourses become erased corridors at 2 samples wide plus fade; the
-  triangles are in per-tile quantised coordinates and the mapping must match
-  `rasterize_clc_tiles` exactly, since an offset mask flattens land and leaves
-  water rippling; and it duplicates the GPU rasteriser on the CPU.
-- **Cheaper variant.** The artefact is normal speckle, not geometry — 2 cm of
-  ripple is invisible as displacement, only the ~1 deg of tilt shows. Force the
-  normal to vertical where the cover map says water, inside `normal.frag` during
-  the relief bake, and leave heights alone. Needs the cover map bound during
-  `compute_relief`, which currently runs before `rasterize_clc_tiles`; they are
-  independent, so the order swaps freely. Perhaps a tenth of the work.
-- **The premise is contingent.** Every version falls back to RGE ALTI for water,
-  so it only works if RGE ALTI is being carried anyway — and if RGE ALTI is good
-  enough for water and serves 2.38 m directly, LIDAR HD only wins if its land
-  detail is visibly better. Do not build this before the side-by-side render.
+**Client-side water flattening — NOT NEEDED, struck.** Earlier drafts of this
+section worked out how to flatten LIDAR HD's water from the OSM water layer
+(CPU-rasterise the triangles, then set `fade = 0` so the sample inherits the
+hydro-corrected coarse value, rather than computing a per-lake level). None of
+it is required: `terrain.frag` already replaces the DEM normal with the
+procedural water normal, or with `(0,0,1)` past the wave fade, wherever
+`waterMask` is 1 — see the paragraph above. The measured ripple is a normal-only
+artefact and the normal is discarded before it is used.
