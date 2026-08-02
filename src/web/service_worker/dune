@@ -31,4 +31,5 @@
     %{dep:../viewer.bc.wasm.js}
     %{dep:../worker.bc.js}
     %{dep:../decompress_tile.wasm}
-    %{dep:../decode_clc.wasm}))))
+    %{dep:../decode_clc.wasm}
+    %{dep:../../../assets/details_bc7.ktx2}))))

@@ -218,6 +218,7 @@ let () =
                     "worker.bc.js";
                     "decompress_tile.wasm";
                     "decode_clc.wasm";
+                    "assets/details_bc7.ktx2";
                   ]
                  (* Loaded before the service worker claims the page, so the
                     fetch handler never gets to cache it on a first visit. *)
