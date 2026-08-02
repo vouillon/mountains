@@ -1629,11 +1629,12 @@ module Triangulator = struct
         (* With areas in map units this absolute threshold is almost always
            exceeded by float error alone, so the diagnostics below effectively
            run for every polygon; the ratio check is the real filter. *)
-        if !verbose && abs_float (expected -. !actual) >= 1e-11 then begin
+        if abs_float (expected -. !actual) >= 1e-11 then begin
           let ratio = !actual /. expected in
 
-          Printf.printf "  Captured Actual Area: %g (ratio: %.4f)\n" !actual
-            ratio;
+          if !verbose then
+            Printf.printf "  Captured Actual Area: %g (ratio: %.4f)\n" !actual
+              ratio;
 
           (* Quality Metrics *)
           let min_angle = ref 180.0 in
