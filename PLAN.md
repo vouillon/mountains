@@ -1475,30 +1475,58 @@ by itself — +-1.22 km with corner anchoring gives the same >=610 m margin the
 2x2 1 m block needed 16.8 MB to reach — and it is pixel-matched to 2.46 km while
 covering +-1.22 km, i.e. finer than pixel scale everywhere inside its own extent.
 
+### Revision 2: use RGE ALTI over WMS, not LIDAR HD (user's proposal, measured)
+
+Two measurements settle the source question, both against LIDAR HD.
+
+**Water is not rectified in LIDAR HD.** Per-sample neighbour differences over
+open water at 1.19 m, converted to normal tilt (`atan(|dh| / spacing)`):
+
+| product | mean tilt | p99 | max |
+| --- | --- | --- | --- |
+| LIDAR HD MNT | **0.88-1.15 deg** | 3.8-4.3 deg | 28-37 deg |
+| RGE ALTI | **0.00 deg** | 0.00-0.01 deg | — |
+
+Over Lac d'Annecy RGE ALTI is a single constant (446.88 m across the whole
+tile); LIDAR HD carries 18-24 mm of ripple. ~1 deg of mean normal tilt on a
+surface the eye expects mirror-flat, i.e. more than the entire 0.87 deg
+quantisation budget, on the worst possible surface for it. Also checked at
+Serre-Ponçon; same result.
+
+**RGE ALTI over WMS is exactly nested with the WMTS tiles.** Its 4x4 box-mean
+against WMTS L14 is RMS 0.0000 m, max 0.000 m — one product, so a WMS 2.38 m
+layer fades into WMTS L14 with zero discrepancy, against the 3.14 m mismatch
+LIDAR HD brings. And it is genuinely finer than L14 (0.736 m RMS beyond a
+bilinear upsample of L14, max 12.5 m), so **the L14 ceiling is a WMTS packaging
+limit for RGE ALTI too and LIDAR HD is not needed to get past it.**
+
 **Chain to build:**
 
 | ring | source | spacing | cost |
 | --- | --- | --- | --- |
-| 0 - 1.22 km | WMS LIDAR HD, 1024^2 | 2.38 m | 1 req, 4.0 MB, 5.33 MiB |
-| 1.22 - 2.44 km | WMS LIDAR HD, 1024^2 | 4.77 m | 1 req, 4.0 MB, 5.33 MiB |
+| 0 - 1.22 km | **WMS RGE ALTI** `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES`, 1024^2 | 2.38 m | 1 req, 4.0 MB, 5.33 MiB |
+| 1.22 - 2.44 km | **WMTS L14** (16 tiles, as planned) | 4.77 m | 3.4 MB, 5.33 MiB |
 | 2.44 - 9.77 km | WMTS L13 (existing) | 9.54 m | 13.4 MB |
 
-8 MB and 10.67 MiB added, against 20.2 MB / 26.67 MiB for the L14-plus-1 m
-design above, and better graded.
+One product end to end: every fade is exact, there is no product seam anywhere,
+the 4.77 m ring keeps WMTS's deflate and tile-granularity cache sharing and its
+existing `Hd_dem.prefetch` path, and only the innermost ring needs the new WMS
+code. 7.4 MB and 10.67 MiB added.
 
 Drop the 1.19 m layer for now: 0.423 m RMS is sub-pixel beyond ~440 m, so it
 only firms up the immediate foreground, at 4x the cost. Easy to add later.
 
 ### Open
 
-Whether the 4.77 m ring comes from WMS or stays the 16-tile WMTS L14 block:
+**Is RGE ALTI's fine-scale content signal or noise?** At the step actually
+deployed (4.77 -> 2.38 m, Ubaye tile) RGE ALTI adds 0.659 m RMS against LIDAR
+HD's 0.209 m — 3x more. RGE ALTI in the Alps is a mosaic including
+correlation-derived photogrammetry, which is noisy on scree; LIDAR HD is clean
+airborne LIDAR. Statistics cannot separate the two: this needs a shaded render
+side by side, and it is the one thing that could send us back to LIDAR HD.
 
-- WMS — 1 request, box-consistent with the 2.38 m layer above it, product seam
-  pushed out to +-2.44 km; but 4.0 MB uncompressed and the URL is shared only
-  among locations in the same corner quadrant.
-- WMTS L14 — 3.4 MB deflated, cache sharing at tile granularity, already wired
-  into `Hd_dem.prefetch`; but the RGE ALTI / LIDAR HD product seam then sits at
-  +-1.22 km instead.
-
-Leaning WMS for the consistency, but the cache-reuse argument is real and the
-offline path is built around WMTS tiles.
+If it does, the water problem is fixable client-side rather than by changing
+source: the CLC tiles already carry a water layer (`Clc_loader` water_indices /
+water_colors, rasterized by `rasterize_clc_tiles`; terrain.frag notes "lakes are
+coverage-rasterized"), so the blend could flatten the grid to a constant
+wherever the cover map says water. More work, and RGE ALTI gives it for free.
