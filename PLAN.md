@@ -2402,3 +2402,15 @@ Still to check before committing the bytes: LIDAR HD MNT coverage at the feature
 locations (gaps already cost tiles at the forest viewpoint), and that four
 concurrent 1024^2 GetMaps do not trip the 40 requests/second WMS limit alongside
 the other rings.
+
+### Reverted: 1.19 m is not visible (2026-08-05)
+
+Jérôme could hardly tell it from 2.38 m on device, and the reason is that the
+0.711 m RMS above measures the *data*, not the screen. The 2.38 m grid is already
+pixel-matched to 2.46 km while covering +-1.22 km -- finer than a screen pixel
+everywhere inside its own extent -- so 1.19 m sits below the display's Nyquist
+limit except with the camera almost on the ground, where it also has to compete
+with its own 0.83 degree quantisation error and with the procedural bump and
+triplanar detail. The four-location analysis that chose 2.38 m had it right; a
+terrain-space residual cannot see a screen-space limit. Do not revisit without a
+screen-space argument.
