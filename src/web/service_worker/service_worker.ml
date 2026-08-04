@@ -279,6 +279,21 @@ let () =
             | Error _ -> Fut.return (Ok (Brr_io.Fetch.Response.error ()))))
        Brr.G.target)
 
+(* A new worker otherwise waits for every window of the app to close, which for
+   something people leave open can be days: the page offers the update instead
+   and asks for this when it is accepted (see [watchForUpdate] in index.html).
+   Not done on install, unprompted: activating swaps the worker under a running
+   page, and [delete_old_caches] then takes away the shell it is still using, so
+   it must happen only when the page is about to reload into the new one. *)
+let () =
+  ignore
+    (Brr.Ev.listen Brr_io.Message.Ev.message
+       (fun ev ->
+         let data = Brr_io.Message.Ev.data (Brr.Ev.as_type ev) in
+         if Jstr.equal (Jv.to_jstr data) (Jstr.v "skipWaiting") then
+           ignore Brr_webworkers.Service_worker.G.(skip_waiting ()))
+       Brr.G.target)
+
 (* Navigation preload is unimplemented in Firefox, where
    [registration.navigationPreload] is undefined: enabling it must not throw
    before [Clients.claim] runs. *)

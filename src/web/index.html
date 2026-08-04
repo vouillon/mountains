@@ -460,6 +460,35 @@
       color: #6b7280;
     }
 
+    /* Offered just above the button row: clear of the panel's close button, which
+       on a phone sits in the top corner. */
+    .update-prompt {
+      position: absolute;
+      bottom: calc(96px + env(safe-area-inset-bottom));
+      /* Centred by auto margins between two anchored edges rather than by
+         translating from left: 50%: that would leave shrink-to-fit only half the
+         viewport to work with, and the message wraps to a column. */
+      left: 0;
+      right: 0;
+      margin: 0 auto;
+      width: fit-content;
+      z-index: 1100;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: 90%;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      color: #1f2937;
+    }
+    .update-prompt .btn-go { padding: 8px 14px; font-size: 14px; }
+
     .btn-go {
       padding: 0 20px;
       border: none;
@@ -782,6 +811,92 @@
         el.textContent = text;
         document.body.appendChild(el);
         setTimeout(() => el.remove(), ms);
+      }
+
+      // A new worker waits for every window of the app to close before taking
+      // over, which for something people leave open can be days. Rather than
+      // have it activate underneath a running page -- activation deletes the
+      // shell that page is still using -- the update is offered, and taken only
+      // together with the reload that lands on it.
+      let updateOffered = false;
+
+      // Held back until the loading screen has gone: an offer to reload makes no
+      // sense over a screen that is still loading.
+      function whenAppIsUp(action, attempt = 0) {
+        const overlay = document.getElementById('startup-overlay');
+        if (!overlay || overlay.classList.contains('hidden')) {
+          action();
+        } else if (attempt < 900) {
+          setTimeout(() => whenAppIsUp(action, attempt + 1), 200);
+        }
+      }
+
+      function offerUpdate(worker) {
+        if (updateOffered || !worker) return;
+        updateOffered = true;
+
+        const bar = document.createElement('div');
+        bar.className = 'update-prompt';
+        const text = document.createElement('span');
+        text.textContent = 'A new version is available';
+        const reload = document.createElement('button');
+        reload.className = 'btn-go';
+        reload.textContent = 'Reload';
+        const dismiss = document.createElement('button');
+        dismiss.className = 'btn-icon';
+        dismiss.title = 'Not now';
+        dismiss.setAttribute('aria-label', 'Not now');
+        dismiss.textContent = '✕';
+        bar.append(text, reload, dismiss);
+        document.body.appendChild(bar);
+
+        let reloading = false;
+        const reloadOnce = () => {
+          if (reloading) return;
+          reloading = true;
+          window.location.reload();
+        };
+
+        reload.addEventListener('click', () => {
+          reload.disabled = true;
+          reload.textContent = 'Reloading…';
+          // The new worker takes control once it stops waiting, and that is the
+          // moment its shell is the one being served.
+          navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+          worker.postMessage('skipWaiting');
+          // Should it not answer -- an older worker without that handler, say --
+          // reload anyway rather than leave the button dead.
+          setTimeout(reloadOnce, 2000);
+        });
+        dismiss.addEventListener('click', () => bar.remove());
+      }
+
+      async function watchForUpdate() {
+        if (!('serviceWorker' in navigator)) return;
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          // One may be waiting already, installed during an earlier visit.
+          if (registration.waiting && navigator.serviceWorker.controller) {
+            whenAppIsUp(() => offerUpdate(registration.waiting));
+          }
+          registration.addEventListener('updatefound', () => {
+            const installing = registration.installing;
+            if (!installing) return;
+            installing.addEventListener('statechange', () => {
+              // Installed while a worker is already in control means an update
+              // rather than a first visit, which needs no telling.
+              if (installing.state === 'installed' &&
+                  navigator.serviceWorker.controller) {
+                whenAppIsUp(() => offerUpdate(registration.waiting || installing));
+              }
+            });
+          });
+          // Chrome looks for a new worker on navigation and roughly daily, so a
+          // session left open for a week would hear about a deploy only here.
+          setInterval(() => registration.update().catch(() => {}), 60 * 60 * 1000);
+        } catch (e) {
+          console.error('Could not watch for updates:', e);
+        }
       }
 
       // The tile caches are what this app is worth offline -- hundreds of
@@ -1450,6 +1565,8 @@
 
       holdScreenAwake();
       document.addEventListener('visibilitychange', holdScreenAwake);
+
+      watchForUpdate();
     })();
   </script>
 </body>
