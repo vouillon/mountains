@@ -1885,12 +1885,64 @@ Still available, in order of value:
   and 8M writes of `out` (int8). Removing those needs a bulk Bytes-to-Bigarray
   path or hand-written wat with SIMD.
 
-## `blend.wat` in the worker — designed, not started (2026-08-04)
+## `blend.wat` — SHIPPED in the viewer, 3x (2026-08-04)
 
-Decision taken: do it as hand-written `.wat` **in the worker**, which collects
-both remaining wins at once (linear memory instead of Bigarray, and off the main
-thread). Not started; the 2x above is what is shipped. Written down here so the
-next session begins from a design rather than a blank page.
+Landed as `acbb8c2`, but **in the viewer, synchronously**, not in the worker as
+the design below assumed. The linear-memory win was the separable half and it is
+the larger one; the worker move is still open (see the end of this section).
+
+Two commits:
+
+- `bfd1fa6` extracts the arithmetic into `Blend_core` — plain arrays and scalars,
+  no Brr, no Lwt — which is the boundary the wat has to reproduce. Verified RMSE
+  exactly 0 on all three pinned views.
+- `acbb8c2` adds `blend.wat` plus `Blend_wasm`, which drives it exactly as
+  `Worker.Wasm` drives the other two modules.
+
+Mont Blanc, medians of three warm reps:
+
+| ring | OCaml | wasm | |
+| --- | --- | --- | --- |
+| l13 2048^2 | 240 ms | **79 ms** | 3.0x |
+| 4.77 m 1024^2 | 63 ms | **24 ms** | 2.6x |
+| 2.38 m 1024^2 | 44 ms | **13 ms** | 3.4x |
+| total | 347 ms | **116 ms** | 3.0x |
+
+And that is *with* 16 MB of samples copied into linear memory and 8 MB of output
+copied back on every call — see "still available" below.
+
+### How it was verified
+
+The rule written into the design below — do not trust a reference you wrote
+yourself — was kept, but by a cheaper route than a Node harness: run **both
+implementations in the browser on real blocks** and diff the output. Byte
+identical on all nine blends of the three views, with identical `height_scale`
+and `height_offset`, then RMSE exactly 0 with the wasm path alone.
+
+That also settled a question the timing numbers could not: the nodata path is
+genuinely exercised, not merely assumed. Mont Blanc's l13 block holds 355 nodata
+samples and its 4.77 m ring 337105 — a third of the block — so both sweeps of the
+distance transform ran under the diff.
+
+`Blend_core` stays: it is the reference for any future change to the wat, and the
+fallback if the module has not finished instantiating (`Blend_wasm.run` falls back
+silently, so callers need no branch).
+
+### Still available, in order of value
+
+- **The 24 MB of copying per call.** `Blend_wasm.run` copies the samples in and
+  the result out. `Hd_dem.fetch` could decode tiles straight into linear memory,
+  and the relief bake could upload from it, which would remove both.
+- **The worker**, for latency rather than throughput: 116 ms still runs on the
+  main thread before the location can be published. Now much less urgent than
+  when it was 830 ms, and still blocked on the same thing — `chain` is called
+  from a synchronous block that deletes the previous location's textures and
+  publishes with no `draw` in between, so making `blend` async is a real
+  restructuring, not plumbing.
+- **SIMD.** The resample is f64 throughout and could be f64x2, but the loop is
+  gather-heavy (`rowv[bx[j]]`), so this is speculative.
+
+### The original design, kept for the record
 
 ### Why the worker and not the viewer
 
@@ -1962,3 +2014,7 @@ measurement-driven reversals. So: drive `blend.wat` from **Node** against a real
 fetched tile and diff its u16 output byte-for-byte against a reference model of
 the current blend, before any of it touches the app. Only then wire up the
 worker, and gate that step on the usual RMSE-0 capture.
+
+*(What was actually done: the same rule, but the diff ran in the browser against
+`Blend_core` on real blocks, which needed no harness at all and covered the
+nodata path that synthetic Node inputs would have had to fake.)*
