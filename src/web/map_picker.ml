@@ -59,6 +59,14 @@ let relief_layer =
 let contour_layer = { id = "ELEVATION.CONTOUR.LINE"; tms = "PM_6_18" }
 let contour_min_level = 17
 
+(* The first level at which Plan IGN carries no relief shading of its own, leaving
+   the LiDAR shading to model the ground by itself -- so it is drawn stronger from
+   here up (see [map-level-unshaded] in index.html). Measured as the low-frequency
+   contrast of a basemap tile, which holds between 4.6 and 8.1 up to level 17 and
+   falls to 2.0 at 18, where the tile is all but white. Below that the two shadings
+   together are no trouble: the LiDAR one is far the finer of them. *)
+let unshaded_basemap_level = 18
+
 let tile_url l ~level ~row ~col =
   Printf.sprintf
     "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=%s&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=%s&TILEMATRIX=%d&TILEROW=%d&TILECOL=%d"
@@ -626,6 +634,9 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
       | Some lv -> lv
       | None ->
           let container = El.div ~at:At.[ class' (Jstr.v "map-level") ] [] in
+          (* Marked once, the level being fixed for the life of the container. *)
+          if level >= unshaded_basemap_level then
+            El.set_class (Jstr.v "map-level-unshaded") true container;
           let lv = { container; tiles = Hashtbl.create 64; ox; oy } in
           El.append_children layer_el [ container ];
           Hashtbl.replace levels level lv;

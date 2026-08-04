@@ -737,6 +737,16 @@
       opacity: 0.5;
     }
 
+    /* At the deepest level Plan IGN carries no shading of its own, so the LiDAR
+       shading models the ground alone and has to be stronger for it. Chosen by
+       matching the low-frequency contrast of the level-17 composite, where the two
+       shadings work together: 0.45 measures 12.1 against 11.6 there, while leaving
+       it at 0.25 gives 6.7 -- barely half the modelling, which is what made the
+       deepest level look washed out. */
+    .map-level-unshaded .map-tile-relief {
+      opacity: 0.45;
+    }
+
     /* GPX tracks over the tiles. The stroke widths hold at every zoom thanks to
        vector-effect="non-scaling-stroke" on the paths, the group being scaled. */
     .map-trace {
