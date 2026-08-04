@@ -1591,9 +1591,26 @@ let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
   Gl.active_texture ctx Gl.texture0
 (* Text Rendering *)
 
+(* The labels are read outdoors, where sunlight reflecting off the screen adds a
+   veil that flattens everything shown: plain black glyphs, 9:1 against the sky
+   indoors, fall to about 2:1 under it, and over shaded forest they are already
+   invisible without any veil. So the glyphs are bold, and each carries a white
+   halo: together they span the display range whatever lies behind them, and
+   measure 3:1 under the same veil. The weight is what does most of that work,
+   which is why the halo can stay narrow enough not to blur the letterforms. *)
+let text_font = "bold 48px sans"
+
+(* A stroke straddles the outline it follows, so the halo reaches out by half of
+   this width. *)
+let halo_width = 3.5
+
 type lazy_text = {
   text : string;
-  mutable texture : (Gl.texture * int * int) option;
+  (* The texture, and the transform taking the unit quad to it: the halo makes
+     the texture larger than the glyph box, and that transform is what keeps
+     the glyphs where they would be without one (see
+     [prepare_text_immediate]). *)
+  mutable texture : (Gl.texture * Matrix.t) option;
 }
 
 let text_canvas = Brr_canvas.Canvas.of_el (Brr.El.canvas [])
@@ -1602,29 +1619,61 @@ let text_ctx = Brr_canvas.C2d.get_context text_canvas
 let prepare_text_immediate ctx text =
   let open Brr_canvas in
   let text = Jstr.v text in
-  C2d.set_font text_ctx (Jstr.v "48px sans");
+  C2d.set_font text_ctx (Jstr.v text_font);
   let m = C2d.measure_text text_ctx text in
   let ascent = C2d.Text_metrics.font_bounding_box_ascent m in
   let descent = C2d.Text_metrics.font_bounding_box_descent m in
   let left = C2d.Text_metrics.actual_bounding_box_left m in
   let right = C2d.Text_metrics.actual_bounding_box_right m in
-  let w = truncate (left +. right +. 0.5) in
-  let h = truncate (ascent +. descent +. 0.5) in
+  let glyph_w = truncate (left +. right +. 0.5) in
+  let glyph_h = truncate (ascent +. descent +. 0.5) in
+  (* Room for the halo around the glyph box, plus one pixel so the bilinear
+     filter never reaches a texel the halo only partly covers. *)
+  let pad = truncate (ceil (halo_width /. 2.)) + 1 in
+  let w = glyph_w + (2 * pad) in
+  let h = glyph_h + (2 * pad) in
   if w > Brr_canvas.Canvas.w text_canvas then
     Brr_canvas.Canvas.set_w text_canvas (2 * w);
   if h > Brr_canvas.Canvas.h text_canvas then
     Brr_canvas.Canvas.set_h text_canvas h;
-  C2d.set_font text_ctx (Jstr.v "48px sans");
-  C2d.fill_text text_ctx text ~x:left ~y:ascent;
+  (* Resizing the canvas resets the 2d context, so the drawing state has to be
+     set after that, not before. *)
+  C2d.set_font text_ctx (Jstr.v text_font);
+  C2d.set_fill_style text_ctx (C2d.color (Jstr.v "black"));
+  C2d.set_stroke_style text_ctx (C2d.color (Jstr.v "white"));
+  C2d.set_line_width text_ctx halo_width;
+  (* Round joins: a miter shoots spikes out of the sharp corners of the glyphs
+     at this stroke width. *)
+  C2d.set_line_join text_ctx C2d.Line_join.round;
+  let x = left +. float pad in
+  let y = ascent +. float pad in
+  C2d.stroke_text text_ctx text ~x ~y;
+  C2d.fill_text text_ctx text ~x ~y;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  (* The labels are blended with [one, one_minus_src_alpha], which expects
+     premultiplied texels. Black glyphs on their own did not care, their colour
+     being zero either way; the halo does. *)
+  Gl.pixel_storei ctx Gl.unpack_premultiply_alpha_webgl 1;
   Gl.tex_image2d_of_source ctx Gl.texture_2d 0 Gl.rgba w h 0 Gl.rgba
     Gl.unsigned_byte
     (Gl.Tex_image_source.of_canvas_el text_canvas);
+  Gl.pixel_storei ctx Gl.unpack_premultiply_alpha_webgl 0;
   Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
   Gl.bind_texture ctx Gl.texture_2d None;
   C2d.clear_rect text_ctx ~x:0. ~y:0. ~w:(float w) ~h:(float h);
-  (tid, w, h)
+  (* Callers place a box one unit tall and [glyph_w / glyph_h] wide, with its
+     bottom-left corner at the origin; the padded texture has to cover slightly
+     more than that on all four sides, leaving the glyphs themselves at exactly
+     the size and position they had before the halo. Leftmost factor first, so
+     the quad is scaled up to the texture, then slid back by the padding. *)
+  let p = float pad /. float glyph_h in
+  let quad =
+    Matrix.(
+      scale (float w /. float glyph_h) (float h /. float glyph_h) 1.
+      * translate (-.p) (-.p) 0.)
+  in
+  (tid, quad)
 
 let prepare_text _ctx text = { text; texture = None }
 
@@ -1634,7 +1683,7 @@ let text_transform : Matrix.t = Array.make 16 0.
 
 let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
     (lazy_text : lazy_text) =
-  let tid, w, h =
+  let tid, quad =
     match lazy_text.texture with
     | Some t -> t
     | None ->
@@ -1643,9 +1692,7 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
         t
   in
   let open Brr_canvas in
-  Matrix.mult_into text_transform
-    (Matrix.scale (float w /. float h) 1. 1.)
-    transform;
+  Matrix.mult_into text_transform quad transform;
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Matrix.blit text_transform buffer;
   Gl.uniform_matrix4fv ctx uniforms.transform false view;
@@ -1811,7 +1858,7 @@ let delete_location ctx
   List.iter
     (fun ({ texture; _ }, _) ->
       match texture with
-      | Some (tid, _, _) -> Gl.delete_texture ctx tid
+      | Some (tid, _) -> Gl.delete_texture ctx tid
       | None -> ())
     points
 
@@ -3199,7 +3246,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           List.iter
             (fun ({ texture; _ }, _) ->
               match texture with
-              | Some (tid, _, _) -> Gl.delete_texture ctx tid
+              | Some (tid, _) -> Gl.delete_texture ctx tid
               | None -> ())
             prev.points;
           Option.iter
