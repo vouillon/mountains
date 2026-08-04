@@ -53,6 +53,12 @@ let relief_layer =
     tms = "PM_0_18";
   }
 
+(* Plan IGN draws contours up to level 16 and none above it, so they are fetched
+   separately there and only there: adding them lower down would double every line
+   the basemap already draws. *)
+let contour_layer = { id = "ELEVATION.CONTOUR.LINE"; tms = "PM_6_18" }
+let contour_min_level = 17
+
 let tile_url l ~level ~row ~col =
   Printf.sprintf
     "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=%s&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=%s&TILEMATRIX=%d&TILEROW=%d&TILECOL=%d"
@@ -248,7 +254,12 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
   let attribution =
     El.div
       ~at:At.[ class' (Jstr.v "map-attribution") ]
-      [ El.txt (Jstr.v "\u{00A9} IGN \u{2014} Plan IGN, Relief du terrain HD") ]
+      [
+        El.txt
+          (Jstr.v
+             "\u{00A9} IGN \u{2014} Plan IGN, Relief du terrain HD, Courbes de \
+              niveau");
+      ]
   in
   let zoom_in =
     svg_button "map-zoom-btn" "Zoom in"
@@ -515,13 +526,22 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
         | Some el -> if moved_origin then place el x y
         | None ->
             let el = El.div ~at:At.[ class' (Jstr.v "map-tile") ] [] in
-            (* The two images are revealed together: relief shaded straight
-                 onto the empty background, its basemap tile not yet in, reads as
-                 a blank grey block. Both are always requested, so the count is
-                 fixed rather than incremented as they are built -- an image load
-                 cannot complete before this returns, but it costs nothing to not
-                 depend on that. *)
-            let pending = ref 2 in
+            let wanted =
+              [
+                (base_layer, "map-tile-base"); (relief_layer, "map-tile-relief");
+              ]
+              @
+              if level >= contour_min_level then
+                [ (contour_layer, "map-tile-contour") ]
+              else []
+            in
+            (* The images are revealed together: relief shaded straight onto the
+                 empty background, its basemap tile not yet in, reads as a blank
+                 grey block. All are requested at once, so the count is fixed
+                 rather than incremented as they are built -- an image load cannot
+                 complete before this returns, but it costs nothing to not depend
+                 on that. *)
+            let pending = ref (List.length wanted) in
             let settle () =
               decr pending;
               if !pending <= 0 then begin
@@ -561,10 +581,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
               img
             in
             El.append_children el
-              [
-                image base_layer "map-tile-base";
-                image relief_layer "map-tile-relief";
-              ];
+              (List.map (fun (l, cls) -> image l cls) wanted);
             El.append_children lv.container [ el ];
             Hashtbl.replace lv.tiles key el;
             place el x y

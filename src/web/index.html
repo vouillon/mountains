@@ -730,6 +730,13 @@
       mix-blend-mode: multiply;
     }
 
+    /* Plan IGN draws no contours above level 16, so above it they come from their
+       own layer. Half opacity: enough to read the ground, not enough to fight the
+       map it is drawn over. */
+    .map-tile-contour {
+      opacity: 0.5;
+    }
+
     /* GPX tracks over the tiles. The stroke widths hold at every zoom thanks to
        vector-effect="non-scaling-stroke" on the paths, the group being scaled. */
     .map-trace {

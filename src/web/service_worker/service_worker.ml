@@ -53,7 +53,8 @@ let is_map_basemap url =
   is_hd_dem url
   && (contains_sub url "LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2"
      || contains_sub url
-          "LAYER=IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW")
+          "LAYER=IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW"
+     || contains_sub url "LAYER=ELEVATION.CONTOUR.LINE")
 
 (* [Cache.Storage.match'] searches every cache, so application caches from
    previous builds must be dropped, not just left unused. *)
