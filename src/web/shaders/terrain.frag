@@ -8,7 +8,7 @@ uniform highp sampler2D relief_normal;
 // first. Selected by the same extent tests as the vertex stage; [hd_valid] is
 // shared with it, and bool needs no precision qualifier, so the two
 // declarations cannot disagree.
-#define HD_SLOTS 2
+#define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
 uniform mediump sampler2D ao;
@@ -28,6 +28,7 @@ uniform highp float center_height;
 in highp vec2 reliefCoord; // Highp for texture coords
 in highp vec2 hdReliefCoord0;
 in highp vec2 hdReliefCoord1;
+in highp vec2 hdReliefCoord2;
 in highp float v_dist;
 in highp vec3 v_view_dir;
 in highp vec3 v_world_pos; // Highp for world coords
@@ -404,6 +405,9 @@ void main() {
   else if (hd_valid[1] && all(greaterThanEqual(hdReliefCoord1, vec2(0.0))) &&
            all(lessThanEqual(hdReliefCoord1, vec2(1.0))))
     encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
+  else if (hd_valid[2] && all(greaterThanEqual(hdReliefCoord2, vec2(0.0))) &&
+           all(lessThanEqual(hdReliefCoord2, vec2(1.0))))
+    encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
   else
     encodedN = texture(relief_normal, reliefCoord).rg;
   vec3 normal;

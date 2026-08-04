@@ -1464,8 +1464,15 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 (* Texture units per refinement ring. Ring 0 keeps the units the single HD layer
    always used; ring 1 takes the first two that were free. Must agree with
    [Render_state.upload_texture_units]. *)
-let hd_height_unit = function 0 -> Gl.texture6 | _ -> Gl.texture10
-let hd_normal_unit = function 0 -> Gl.texture9 | _ -> Gl.texture11
+let hd_height_unit = function
+  | 0 -> Gl.texture6
+  | 1 -> Gl.texture10
+  | _ -> Gl.texture12
+
+let hd_normal_unit = function
+  | 0 -> Gl.texture9
+  | 1 -> Gl.texture11
+  | _ -> Gl.texture13
 
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
@@ -2926,7 +2933,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let hd_fetches =
     List.map
       (fun layer -> (layer, Hd_dem.fetch layer ~lat ~lon))
-      [ Hd_dem.l13; Hd_dem.lidar_2m ]
+      (* Coarsest first: [chain] blends each onto its predecessor, so the order
+         here is the nesting order. *)
+      [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
   in
   let* tile, (_, _, _, _, clc_tiles) =
     Lwt.both

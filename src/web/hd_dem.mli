@@ -34,6 +34,12 @@ val l13 : layer
 (** RGE ALTI over WMTS level 13, 8 x 8 tiles: 0.309 arcsec (9.5 m N-S), 2048
     samples per side, 19.5 x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)
 
+val lidar_5m : layer
+(** LIDAR HD bare earth over WMS: 0.1545 arcsec (4.77 m N-S, 3.31 m E-W at 46
+    degrees), 1024 samples over 4 x 4 level-14 footprints, i.e. +-2.44 x 1.70
+    km. 2 x 2 GetMaps of 512^2, 4.0 MB in total. Nests inside {!l13};
+    {!lidar_2m} nests inside it, exactly box-consistent with it. *)
+
 val lidar_2m : layer
 (** LIDAR HD bare earth over WMS: 0.0772 arcsec (2.38 m N-S, 1.66 m E-W at 46
     degrees), 1024 samples over 2 x 2 level-14 footprints, i.e. +-1.22 x 0.87

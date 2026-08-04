@@ -26,7 +26,7 @@ uniform highp sampler2D relief;
 // innermost ring. The scalars are arrays, which GLSL ES 3.0 lets us index
 // dynamically; the sampler arrays it only lets us index by literal, hence the
 // unrolled chain in [sampleTerrainHeight].
-#define HD_SLOTS 2
+#define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief[HD_SLOTS];
 uniform highp float hd_scale[HD_SLOTS]; // 1 / extent of the ring, in arcseconds
@@ -103,6 +103,11 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
     return sampleReliefHeight(
         hd_relief[1], c1,
         min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]));
+  highp vec2 c2 = coord * hd_scale[2] + hd_bias[2];
+  if (insideHd(2, c2))
+    return sampleReliefHeight(
+        hd_relief[2], c2,
+        min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]));
   return sampleReliefHeight(relief, norm_coord,
                             min(int(max(0.0, lod_raw)), max_lod));
 }
@@ -143,6 +148,7 @@ RadialVertex computeRadialVertex() {
   v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
   v.hd_coord[0] = vec2(coord.x, coord.y) * hd_scale[0] + hd_bias[0];
   v.hd_coord[1] = vec2(coord.x, coord.y) * hd_scale[1] + hd_bias[1];
+  v.hd_coord[2] = vec2(coord.x, coord.y) * hd_scale[2] + hd_bias[2];
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
 
   // Earth curvature with standard atmospheric refraction folded in

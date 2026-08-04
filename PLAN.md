@@ -1610,13 +1610,21 @@ What was built, and where it differs from the two design sections above.
 
 | ring | source | spacing | extent | cost |
 | --- | --- | --- | --- | --- |
-| 0 (inner) | WMS LIDAR HD `IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G`, 1024^2 over 2x2 level-14 footprints | 2.38 m N-S | +-1.22 x 0.87 km | 1 request, 4.0 MB, ~1 s |
-| 1 | WMTS `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` level 13, 8x8 (unchanged) | 9.54 m | +-9.8 x 6.8 km | 64 tiles, 13.7 MB |
+| 0 (inner) | WMS LIDAR HD `IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G`, 1024^2 over 2x2 level-14 footprints | 2.38 m N-S | +-1.22 x 0.85 km | 2x2 GetMaps, 4.0 MB |
+| 1 | WMS LIDAR HD, same layer, 1024^2 over 4x4 footprints | 4.77 m | +-2.44 x 1.70 km | 2x2 GetMaps, 4.0 MB |
+| 2 | WMTS `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` level 13, 8x8 (unchanged) | 9.54 m | +-9.8 x 6.8 km | 64 tiles, 13.7 MB |
 | base | Copernicus `.dem` | ~30 m | +-63 km | hosted |
 
-**Two rings, not three.** The plan's 4.77 m ring for the 1.22-2.44 km band was
-not built; that band is still served by l13 at 9.54 m. The machinery is generic,
-so adding it is a `wms_layer` value plus one entry in the fetch list.
+Rings 0 and 1 are the same layer at half the resolution, so they are exactly
+box-consistent and the inner fade hides no product difference. Only ring 1's fade
+onto l13 crosses products, and at `fade_metres = 600` it has four times the inner
+ring's annulus for the same ~3 m worst case. Eight WMS requests per load against
+the 40/s ceiling.
+
+**Three rings as of 2026-08-04.** The 4.77 m ring for the 1.22-2.44 km band was
+added afterwards, and cost exactly what the design predicted: a `wms_layer`
+value, one entry in the fetch list, `hd_slots` 2 -> 3, and a third branch in the
+three shaders. See the ring table below.
 
 The 4.77 m ring was also going to come from WMS to keep the chain on one product.
 It does not: ring 1 is still the WMTS block, so the LIDAR HD / RGE ALTI product

@@ -108,6 +108,21 @@ let footprint_arcsec = 360. /. 32768. *. 3600.
    the width, and the surface underneath is a different product (0.098 m RMS,
    3.14 m worst case), so the annulus has to hide a few metres over a few
    hundred, not tens over kilometres. *)
+(* The middle ring: the same LIDAR HD source at 0.1545 arcseconds (4.77 m N-S,
+   3.31 m E-W at 46 degrees), 1024 samples over 4 x 4 footprints, i.e.
+   +-2.44 x 1.70 km. Fills the band between [lidar_2m]'s edge and l13, which was
+   served at 9.54 m.
+
+   Being the same layer as [lidar_2m] at half its resolution, the two are exactly
+   box-consistent -- the service's 512-pixel output is the 2 x 2 box mean of its
+   1024-pixel output, verified -- so the inner ring's fade onto this one hides no
+   product difference at all. Only this ring's fade onto l13 crosses products, and
+   at 600 m it has four times the annulus of the inner ring for the same 3 m
+   worst case. *)
+let lidar_5m =
+  wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
+    ~step_arcsec:footprint_arcsec ~steps:4 ~split:2 ~size:1024 ~fade_metres:600.
+
 let lidar_2m =
   wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
     ~step_arcsec:footprint_arcsec ~steps:2 ~split:2 ~size:1024 ~fade_metres:300.

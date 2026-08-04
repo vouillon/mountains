@@ -55,7 +55,7 @@ let compute_center_offset ~lat ~lon ~x:_ ~y:_ =
 (* Number of nested near-field refinement rings the shaders declare (HD_SLOTS in
    radial_common.vert). Adding a ring is a change to this and to the layer list
    [viewer.ml] passes, and nothing else. *)
-let hd_slots = 2
+let hd_slots = 3
 
 type radial_params = {
   w_mask : int;
@@ -381,15 +381,20 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.u_coverMap 7;
   Gl.uniform1i ctx u.u_paletteTex 8;
   Gl.uniform1i ctx u.hd_relief_normal.(0) 9;
-  (* Ring 1 takes the next free units: 0-9 were already spoken for. *)
+  (* Rings beyond the first take the next free units: 0-9 were already spoken
+     for by the base pyramids, the shadow map, the detail map, the cover map and
+     the palette. *)
   Gl.uniform1i ctx u.hd_relief.(1) 10;
-  Gl.uniform1i ctx u.hd_relief_normal.(1) 11
+  Gl.uniform1i ctx u.hd_relief_normal.(1) 11;
+  Gl.uniform1i ctx u.hd_relief.(2) 12;
+  Gl.uniform1i ctx u.hd_relief_normal.(2) 13
 
 (** Upload static texture unit bindings for shadow shader. *)
 let upload_texture_units_shadow ctx (u : shadow_uniforms) =
   Gl.uniform1i ctx u.relief 0;
   Gl.uniform1i ctx u.hd_relief.(0) 6;
-  Gl.uniform1i ctx u.hd_relief.(1) 10
+  Gl.uniform1i ctx u.hd_relief.(1) 10;
+  Gl.uniform1i ctx u.hd_relief.(2) 12
 
 type hd_params = {
   hd_size : int;  (** samples per side *)
@@ -590,6 +595,7 @@ let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.relief 1;
   Gl.uniform1i ctx u.hd_relief.(0) 6;
   Gl.uniform1i ctx u.hd_relief.(1) 10;
+  Gl.uniform1i ctx u.hd_relief.(2) 12;
   Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0;
   Gl.uniform1f ctx u.u_linewidth 5.0
 
