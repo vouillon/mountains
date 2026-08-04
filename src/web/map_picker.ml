@@ -92,6 +92,25 @@ type tile_level = {
   mutable oy : float;
 }
 
+(* What the drawn track geometry currently represents: a zoom level, and a window
+   of that level's pixels outside which nothing was drawn. Only the part of the
+   tracks that can be on screen is emitted, so the work follows the visible
+   extent instead of the size of the library -- moving the group's transform
+   re-rasterises the whole path, and a few tens of thousands of points is far too
+   much to redraw on every frame of a drag.
+
+   [ax]/[ay] is the window's own corner, which keeps the coordinates small, and
+   the transform undoes it. *)
+type trace_view = {
+  tv_level : int;
+  tv_ax : float;
+  tv_ay : float;
+  tv_cx : float;
+  tv_cy : float;
+  tv_hx : float;
+  tv_hy : float;
+}
+
 let create ~regions ~in_range ~traces ~on_select =
   let first_region =
     match regions with
@@ -258,63 +277,106 @@ let create ~regions ~in_range ~traces ~on_select =
 
   let clear_error () = El.set_class (Jstr.v "visible") false error_msg in
 
-  (* Tracks as read when the map was opened, and their projection for one zoom
-     level: (level, anchor x, anchor y, path data). Projecting once per level and
-     leaving panning to the transform is what keeps a long trace affordable --
-     reprojecting some thousands of points every frame of a glide would cost more
-     than the tiles do. The anchor is the first point, so the coordinates stay
-     near the trace rather than out at the Mercator origin. *)
+  (* Tracks as read when the map was opened, and what is currently drawn. *)
   let traces_now = ref [] in
-  let trace_path = ref None in
+  let trace_view = ref None in
 
-  let project_traces level =
-    match List.find_opt (fun pts -> Array.length pts > 0) !traces_now with
-    | None -> None
-    | Some first ->
-        let lat0, lon0 = first.(0) in
-        let ax = Float.round (lon_to_px ~level lon0) in
-        let ay = Float.round (lat_to_px ~level lat0) in
-        let b = Buffer.create 4096 in
-        List.iter
-          (fun pts ->
-            let n = Array.length pts in
-            if n >= 2 then begin
-              let lx = ref 0. and ly = ref 0. in
-              Array.iteri
-                (fun i (lat, lon) ->
-                  let x = lon_to_px ~level lon -. ax in
-                  let y = lat_to_px ~level lat -. ay in
-                  (* Points landing within a pixel of the last one kept are
-                     dropped: zoomed out, a dense track is thousands of them
-                     inside a few hundred pixels. The ends are always kept, so
-                     the line still starts and finishes where the track does. *)
-                  if
-                    i = 0
-                    || i = n - 1
-                    || Float.abs (x -. !lx) +. Float.abs (y -. !ly) >= 1.
-                  then begin
-                    Buffer.add_string b
-                      (Printf.sprintf "%c%.1f %.1f "
-                         (if i = 0 then 'M' else 'L')
-                         x y);
-                    lx := x;
-                    ly := y
-                  end)
-                pts
-            end)
-          !traces_now;
-        if Buffer.length b = 0 then None
-        else Some (level, ax, ay, Buffer.contents b)
+  let project_traces ~level ~ax ~ay ~min_x ~min_y ~max_x ~max_y =
+    let b = Buffer.create 8192 in
+    (* Bounding boxes overlap, so a segment crossing the window is kept even when
+       neither of its ends is inside it. *)
+    let visible x0 y0 x1 y1 =
+      Float.min x0 x1 <= max_x
+      && Float.max x0 x1 >= min_x
+      && Float.min y0 y1 <= max_y
+      && Float.max y0 y1 >= min_y
+    in
+    List.iter
+      (fun pts ->
+        let n = Array.length pts in
+        if n >= 2 then begin
+          let xs = Array.make n 0. and ys = Array.make n 0. in
+          Array.iteri
+            (fun i (lat, lon) ->
+              xs.(i) <- lon_to_px ~level lon;
+              ys.(i) <- lat_to_px ~level lat)
+            pts;
+          (* A subpath per run of segments through the window: without the break,
+             leaving it and re-entering would be joined by a straight line across
+             ground the track never covered. *)
+          let drawing = ref false in
+          let lx = ref 0. and ly = ref 0. in
+          for i = 0 to n - 2 do
+            if visible xs.(i) ys.(i) xs.(i + 1) ys.(i + 1) then begin
+              if not !drawing then begin
+                Buffer.add_string b
+                  (Printf.sprintf "M%.1f %.1f " (xs.(i) -. ax) (ys.(i) -. ay));
+                drawing := true;
+                lx := xs.(i);
+                ly := ys.(i)
+              end;
+              (* Points within a pixel of the last one kept add nothing: zoomed
+                 out, a dense track is thousands of them across a few hundred
+                 pixels. The final segment is always drawn, so the line reaches
+                 the end of the track. *)
+              if
+                i = n - 2
+                || Float.abs (xs.(i + 1) -. !lx) +. Float.abs (ys.(i + 1) -. !ly)
+                   >= 1.
+              then begin
+                Buffer.add_string b
+                  (Printf.sprintf "L%.1f %.1f "
+                     (xs.(i + 1) -. ax)
+                     (ys.(i + 1) -. ay));
+                lx := xs.(i + 1);
+                ly := ys.(i + 1)
+              end
+            end
+            else drawing := false
+          done
+        end)
+      !traces_now;
+    if Buffer.length b = 0 then None else Some (Buffer.contents b)
   in
 
-  let refresh_traces level =
+  (* Redrawn when the level changes or the view reaches the edge of what was
+     drawn, never merely because it moved: the window is padded by about a
+     screen, so a drag crosses it every few hundred pixels instead of every
+     frame. *)
+  let refresh_traces ~level ~cx ~cy ~hw ~hh =
     let stale =
-      match !trace_path with Some (l, _, _, _) -> l <> level | None -> true
+      match !trace_view with
+      | None -> true
+      | Some t ->
+          t.tv_level <> level
+          || Float.abs (cx -. t.tv_cx) +. hw > t.tv_hx
+          || Float.abs (cy -. t.tv_cy) +. hh > t.tv_hy
     in
     if stale then begin
-      trace_path := project_traces level;
-      let d = match !trace_path with Some (_, _, _, d) -> d | None -> "" in
-      List.iter (fun shape -> set_attr shape "d" d) trace_shapes
+      let pad = Float.max hw hh in
+      let hx = hw +. pad and hy = hh +. pad in
+      let ax = Float.round (cx -. hx) and ay = Float.round (cy -. hy) in
+      let d =
+        match !traces_now with
+        | [] -> None
+        | _ ->
+            project_traces ~level ~ax ~ay ~min_x:(cx -. hx) ~min_y:(cy -. hy)
+              ~max_x:(cx +. hx) ~max_y:(cy +. hy)
+      in
+      List.iter
+        (fun shape -> set_attr shape "d" (Option.value d ~default:""))
+        trace_shapes;
+      trace_view :=
+        Some
+          {
+            tv_level = level;
+            tv_ax = ax;
+            tv_ay = ay;
+            tv_cx = cx;
+            tv_cy = cy;
+            tv_hx = hx;
+            tv_hy = hy;
+          }
     end
   in
 
@@ -512,15 +574,15 @@ let create ~regions ~in_range ~traces ~on_select =
       levels;
     prune_levels ();
 
-    (* Same transform as a tile level, about the trace's own anchor. Unitless:
-       this is SVG's transform attribute, which rejects px. *)
-    refresh_traces level;
-    (match !trace_path with
-    | Some (_, ax, ay, _) ->
+    (* Same transform as a tile level, about the drawn window's own corner.
+       Unitless: this is SVG's transform attribute, which rejects px. *)
+    refresh_traces ~level ~cx ~cy ~hw ~hh;
+    (match !trace_view with
+    | Some t ->
         set_attr trace_group "transform"
           (Printf.sprintf
              "translate(%.2f %.2f) scale(%.5f) translate(%.2f %.2f)" (vw /. 2.)
-             (vh /. 2.) scale (ax -. cx) (ay -. cy))
+             (vh /. 2.) scale (t.tv_ax -. cx) (t.tv_ay -. cy))
     | None -> ());
 
     (* The bounds rectangle lives in untransformed viewport pixels so its outline
@@ -941,7 +1003,7 @@ let create ~regions ~in_range ~traces ~on_select =
     (* Read afresh: traces are added and toggled from a panel the map covers, so
        between two openings the set can be anything. *)
     traces_now := traces ();
-    trace_path := None;
+    trace_view := None;
     (restore_focus :=
        let active = Jv.get (Jv.get Jv.global "document") "activeElement" in
        if Jv.is_none active then None else Some active);
