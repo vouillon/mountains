@@ -2316,3 +2316,48 @@ Also cheap and not yet done: `near_step` is 0.02 px, but the finest ring's own
 `step` floor is 0.0386 px (half of 2.38 m). By the argument already used for
 `base_step` -- sampling a bilinear surface finer than half a cell adds nothing --
 the near phase is walked about twice as finely as any data justifies.
+
+### Done: the near phase's step comes from the finest grid (2026-08-05)
+
+`near_step` was the constant 0.02 base pixels (0.6 m). The finest ring's own
+`step` floor is 0.0386 (half of 2.38 m), and sampling a bilinear surface finer
+than half a cell tells us nothing new -- the argument `base_step` already rests
+on. Taking it from `fine` instead of a constant:
+
+| | before | after |
+| --- | --- | --- |
+| near-phase steps | 877771 | **456307** |
+| adaptive-phase steps | 950598 | 950567 |
+| total | 1.83M | **1.41M** |
+| pass | 901 ms | **594 ms** |
+
+Not quite verdict-identical: POIs kept go 1608/1128/83 to 1608/**1129**/83 over
+the three pinned views, so one marginal POI of 2819 becomes visible at the
+glacier. All three views are RMSE exactly 0 regardless -- that POI is kept but
+not drawn. For scale, the same measurement that justified this phase found that
+*removing* it let 125 POIs through; halving its resolution lets one.
+
+The other two attempts of this session on visibility are recorded above as
+rejected: removing per-step allocations (no effect), and the near-disc bound.
+
+### Why the near-disc bound does not work, in detail
+
+Worth writing down, because the idea is sound and the reason it fails is not
+obvious. `bound = max (terrain - src_h - 0.1) / t` is dominated by terrain *close*
+to the eye, since `t` is the divisor. A single global bound is therefore set by
+whatever is steepest anywhere in the disc and is vacuous: measured, it produced
+zero skips.
+
+Per azimuth sector does not rescue it. Cells close to the eye subtend wide
+azimuth ranges, so a conservative implementation must mark each of them across
+many sectors -- and the cell the observer stands in spans all of them. Excluding
+an inner disc (`near_inner`) removes that cell but not the problem: the cells
+just outside it still span tens of degrees each, and at Mont Blanc there is
+terrain above eye level within 180 m, which then poisons most sectors. Measured
+with 64 sectors and a 1-pixel inner disc: still zero skips.
+
+What could work is an actual horizon profile -- march one ray per azimuth for N
+azimuths and take, for each sector, the max over it and its neighbours -- which
+is O(N x 300) instead of O(rays x 300) and beats the current cost for N well
+below 4813. That is an approximation needing a safety margin, not a conservative
+bound, so it would have to be justified by measurement rather than by argument.

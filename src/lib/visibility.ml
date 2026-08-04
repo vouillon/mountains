@@ -109,7 +109,7 @@ let max_step = 1.0
    than the data, which cost more than the whole-pixel walk it replaced. *)
 let base_step = 0.5
 
-(* The observer's immediate surroundings are walked at [near_step] regardless of
+(* The observer's immediate surroundings are walked at a fixed step regardless of
    clearance. [max_slope] is a fair bound on what a grid resolves over its own
    spacing, but not on what sits a few metres from the eye: a boulder or the lip
    of the summit one is standing on rises far faster than 4:1 over a couple of
@@ -117,7 +117,6 @@ let base_step = 0.5
    the Mont Blanc vista, dropping this phase let 125 further POIs through that
    the fixed walk correctly hid. *)
 let near_distance = 6.0
-let near_step = 0.02
 
 (** Precise visibility test. Tests visibility from (src_x + off_x, src_y +
     off_y) to (dst_x, dst_y).
@@ -175,6 +174,15 @@ let test_precise (get_height : int -> int -> float) ?src_h ?curvature
     | None -> get_height
     | Some _ ->
         fun row col -> get_height row col -. drop (float col) (float row)
+  in
+  (* The near phase's step, from the finest grid actually available rather than a
+     constant: sampling a bilinear surface finer than half a cell tells us
+     nothing new, which is the same argument [base_step] rests on. With the 2.38 m
+     ring that is 0.0386 base pixels against the 0.02 this replaces, so the phase
+     costs about half as many steps; with no refinement at all it is [base_step]
+     and the phase collapses into the walk that follows. *)
+  let near_step =
+    List.fold_left (fun a r -> Float.min a r.step) base_step fine
   in
   (* Height, and the finest step the grid that supplied it justifies. *)
   let terrain_at x y =
