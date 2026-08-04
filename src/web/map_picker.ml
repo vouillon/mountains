@@ -160,7 +160,7 @@ type trace_view = {
   tv_hy : float;
 }
 
-let create ~regions ~in_range ~traces ~on_select =
+let create ~regions ~in_range ~traces ~landmarks ~on_select =
   let first_region =
     match regions with
     | r :: _ -> r
@@ -222,14 +222,23 @@ let create ~regions ~in_range ~traces ~on_select =
      level's, and the root clips to the viewport, which is exactly the part worth
      drawing. *)
   let trace_host = El.div ~at:At.[ class' (Jstr.v "map-trace") ] [] in
+  (* The landmark dots share the group, so they are placed by the same transform
+     and cost nothing to pan. Each is a zero-length subpath with a round cap,
+     which renders as a disc of the stroke's width -- and since the stroke does
+     not scale, neither does the dot, where anything with real geometry would
+     grow and shrink with the group. They come after the tracks, so a dot on a
+     track stays visible. *)
   Jv.set (El.to_jv trace_host) "innerHTML"
     (Jv.of_string
-       {|<svg width="100%" height="100%"><g><path class="map-trace-casing" fill="none" vector-effect="non-scaling-stroke"/><path class="map-trace-line" fill="none" vector-effect="non-scaling-stroke"/></g></svg>|});
+       {|<svg width="100%" height="100%"><g><path class="map-trace-casing" fill="none" vector-effect="non-scaling-stroke"/><path class="map-trace-line" fill="none" vector-effect="non-scaling-stroke"/><path class="map-landmark-casing" fill="none" vector-effect="non-scaling-stroke"/><path class="map-landmark" fill="none" vector-effect="non-scaling-stroke"/></g></svg>|});
   let query sel =
     Jv.call (El.to_jv trace_host) "querySelector" [| Jv.of_string sel |]
   in
   let trace_group = query "g" in
   let trace_shapes = [ query ".map-trace-casing"; query ".map-trace-line" ] in
+  let landmark_shapes =
+    [ query ".map-landmark-casing"; query ".map-landmark" ]
+  in
   let set_attr node name v =
     ignore (Jv.call node "setAttribute" [| Jv.of_string name; Jv.of_string v |])
   in
@@ -416,6 +425,20 @@ let create ~regions ~in_range ~traces ~on_select =
       List.iter
         (fun shape -> set_attr shape "d" (Option.value d ~default:""))
         trace_shapes;
+      (* Clipped to the same window, so a dot far outside it does not push the
+         coordinates into the millions at the deeper levels. *)
+      let marks = Buffer.create 256 in
+      List.iter
+        (fun (lat, lon) ->
+          let x = lon_to_px ~level lon and y = lat_to_px ~level lat in
+          if Float.abs (x -. cx) <= hx && Float.abs (y -. cy) <= hy then
+            Buffer.add_string marks
+              (Printf.sprintf "M%.1f %.1f L%.1f %.1f " (x -. ax) (y -. ay)
+                 (x -. ax) (y -. ay)))
+        landmarks;
+      List.iter
+        (fun shape -> set_attr shape "d" (Buffer.contents marks))
+        landmark_shapes;
       trace_view :=
         Some
           {

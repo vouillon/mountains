@@ -764,6 +764,8 @@
     @media (pointer: coarse) {
       .map-trace-casing { stroke-width: 11px; }
       .map-trace-line { stroke-width: 5px; }
+      .map-landmark-casing { stroke-width: 15px; }
+      .map-landmark { stroke-width: 10px; }
 
       /* The crosshair by the same argument, and it now has to stay findable
          against a much bolder trace. */
@@ -784,6 +786,22 @@
         height: 3px;
         width: 42px;
       }
+    }
+
+    /* The featured locations. Each is a zero-length subpath, so the round cap is
+       the whole dot and the stroke width is its diameter; the indigo of the
+       interface rather than the trace's crimson, so the two do not read as the
+       same thing. */
+    .map-landmark-casing {
+      stroke: rgba(255, 255, 255, 0.95);
+      stroke-width: 11px;
+      stroke-linecap: round;
+    }
+
+    .map-landmark {
+      stroke: #4f46e5;
+      stroke-width: 7px;
+      stroke-linecap: round;
     }
 
     /* Outlines the selectable rectangle and, with one very wide shadow, dims

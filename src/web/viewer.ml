@@ -3974,6 +3974,8 @@ let create_location_ui ~size =
                                 points)))
                   tracks
             | exception _ -> []))
+      ~landmarks:
+        (List.map (fun (_, lat, lon, _, _, _) -> (lat, lon)) featured_locations)
       ~on_select:(fun ~lat ~lon ->
         (* In place, like the coordinate input: no navigation, so fullscreen
            mode survives the switch. The camera is left alone, the map saying

@@ -33,6 +33,7 @@ val create :
   regions:region list ->
   in_range:(lat:float -> lon:float -> bool) ->
   traces:(unit -> (float * float) array list) ->
+  landmarks:(float * float) list ->
   on_select:(lat:float -> lon:float -> unit) ->
   lat:float ->
   lon:float ->
@@ -49,6 +50,11 @@ val create :
     latitude and longitude, and is read afresh on every opening. Drawing the
     loaded GPX traces is what lets a location be chosen against them -- a
     viewpoint over a route rather than a bare coordinate.
+
+    [landmarks] are marked with a dot: the featured locations, so the places
+    already known to be worth looking from can be seen while choosing, and aimed
+    at. Positions only -- they are not labelled, which at the zoom where several
+    are on screen at once would be more clutter than help.
 
     [in_range] gates the confirmation as the authority on what the renderer can
     actually load. [regions] are expected to be inside it already, so a
