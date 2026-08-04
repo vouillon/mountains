@@ -3574,11 +3574,81 @@ let get_current_position ~size =
         | Ok pos when Pos.accuracy pos < 2_000. -> use pos
         | Ok _ | Error _ -> None)
 
+(* [Fut] has no race combinator: both the future and the timer settle the same
+   future, and whichever gets there first wins. *)
+let with_timeout ~ms fut =
+  let result, set = Fut.create () in
+  let settled = ref false in
+  let settle v =
+    if not !settled then begin
+      settled := true;
+      set v
+    end
+  in
+  Fut.await fut (fun v -> settle (Some v));
+  ignore (Brr.G.set_timeout ~ms (fun () -> settle None));
+  result
+
+(* A shared GPX trace arrives in a cache the document drains, not in the URL
+   (see [drainSharedFiles] in index.html), so where to start cannot be read
+   synchronously. Waiting for it here is what spares a share two location
+   loads -- the current position, then the trace -- which is what flying to the
+   trace after startup cost.
+
+   The page sets both halves of the contract before this script runs, which
+   [defer] on the viewer guarantees: [sharedTracePending] tells us a share is
+   being drained at all, so an ordinary load waits for nothing, and
+   [sharedTraceStart] is a promise for the trace's first point. Setting
+   [sharedTraceConsumed] tells the page not to fly there as well. The wait is
+   capped: a Cache API that never answers must not keep the app on its loading
+   screen for ever, and giving up just means falling back to the flight. *)
+let shared_trace_timeout_ms = 3000
+
+let get_shared_trace_position ~size =
+  let pending = Jv.get Jv.global "sharedTracePending" in
+  let promise = Jv.get Jv.global "sharedTraceStart" in
+  if Jv.is_none pending || (not (Jv.to_bool pending)) || Jv.is_none promise then
+    Fut.return None
+  else
+    let open Fut.Syntax in
+    let+ start =
+      with_timeout ~ms:shared_trace_timeout_ms
+        (Fut.of_promise ~ok:Fun.id promise)
+    in
+    match start with
+    | Some (Ok start) when not (Jv.is_none start) -> (
+        let number k =
+          let v = Jv.get start k in
+          if Jv.is_none v then None
+          else
+            let x = Jv.to_float v in
+            if Float.is_finite x then Some x else None
+        in
+        match (number "lat", number "lon") with
+        | Some lat, Some lon when in_range ~size ~lat ~lon ->
+            (* Face along the trace, as the flight would have turned the camera:
+               alpha runs counter-clockwise from north, a bearing clockwise. *)
+            let alpha =
+              match number "bearing" with Some b -> -.b | None -> 0.
+            in
+            Jv.set Jv.global "sharedTraceConsumed" Jv.true';
+            Some (lat, lon, alpha, 90., clamp_zoom 1.0)
+        | _ -> None)
+    | Some (Ok _) | Some (Error _) | None -> None
+
 type location_source = Url | Geolocation | Preset
 
 let get_position ~size =
   let open Fut.Syntax in
-  match get_url_position ~size with
+  (* A shared trace outranks the rest: it is why the app was opened. It reports
+     itself as [Url] because it is just as explicit a request for a location,
+     and wants the same handling -- no location UI, no redirect to a resolved
+     position. *)
+  let* shared = get_shared_trace_position ~size in
+  let explicit =
+    match shared with Some _ -> shared | None -> get_url_position ~size
+  in
+  match explicit with
   | Some loc -> Fut.return (Ok (Url, loc))
   | None -> (
       (* Only this branch queries the device: an explicit position must never

@@ -877,17 +877,25 @@
         // no-op placeholder, and installs setGpxContent just after giving that
         // switch its implementation (see viewer.ml). Waiting on the wrong one
         // moves nothing, silently.
-        flyToStart(lat, lon, bearing, attempt = 0) {
+        flyToStart(lat, lon, bearing, opts = {}) {
+          const { unlessStartedThere = false, attempt = 0 } = opts;
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
           if (!window.flyToCoords || !window.setGpxContent) {
             // Bounded, unlike [updateMap]'s wait: there is nothing to move if
             // the viewer never comes up, and a flight arriving minutes late
             // would drag the camera off wherever the user had got to by then.
             if (attempt < 75) {
-              setTimeout(() => this.flyToStart(lat, lon, bearing, attempt + 1), 200);
+              setTimeout(
+                () => this.flyToStart(lat, lon, bearing, { ...opts, attempt: attempt + 1 }),
+                200);
             }
             return;
           }
+          // The viewer sets this while resolving where to start, long before it
+          // installs setGpxContent, so the wait above has already put us on the
+          // far side of the handshake: if it started at the trace, flying there
+          // would only load the same location a second time.
+          if (unlessStartedThere && window.sharedTraceConsumed) return;
           window.flyToCoords(lat, lon, Number.isFinite(bearing) ? bearing : null);
         }
 
@@ -1016,14 +1024,27 @@
 
           // 2. Web Share Target API. The service worker answered the share
           // POST by stashing the files in a cache of its own (see
-          // service_worker.ml) and redirecting here; the query parameter only
-          // marks that navigation, so drop it from the history.
-          if (window.location.search.includes('share_received=1')) {
+          // service_worker.ml) and redirecting here; the query parameter marks
+          // that navigation.
+          const shared = window.location.search.includes('share_received=1');
+          // Handed to the viewer, which waits for it before resolving where to
+          // start, so a share loads the trace's location instead of loading the
+          // current one and then switching to it (see
+          // [get_shared_trace_position] in viewer.ml). Both globals are set
+          // before viewer.bc.wasm.js runs: it is deferred, so this script, being
+          // inline, has already finished. The flag keeps an ordinary load from
+          // waiting on a drain that will find nothing.
+          window.sharedTracePending = shared;
+          // Draining unconditionally, rather than on the parameter alone,
+          // recovers files whose redirect never made it to a document. Such a
+          // late recovery has no parameter, so the viewer will not be waiting
+          // for it and the trace is flown to instead.
+          window.sharedTraceStart = this.drainSharedFiles();
+          // Only now: the parameter has served its purpose and does not belong
+          // in the history.
+          if (shared) {
             window.history.replaceState(null, '', window.location.pathname);
           }
-          // Draining unconditionally, rather than on the parameter alone,
-          // recovers files whose redirect never made it to a document.
-          this.drainSharedFiles();
         }
 
         // The stashed file name travels in the query string of the cache entry:
@@ -1048,12 +1069,20 @@
               // turn would just be a scramble ending on the last.
               if (trace && !destination) destination = trace;
             }
-            if (destination) {
-              this.flyToStart(
-                destination.centerLat, destination.centerLon, destination.bearing);
-            }
+            if (!destination) return null;
+            this.flyToStart(
+              destination.centerLat, destination.centerLon, destination.bearing,
+              { unlessStartedThere: true });
+            // Resolves [sharedTraceStart]: the viewer is waiting on this to
+            // decide where to start.
+            return {
+              lat: destination.centerLat,
+              lon: destination.centerLon,
+              bearing: destination.bearing,
+            };
           } catch (e) {
             console.error('Failed to read shared GPX files:', e);
+            return null;
           }
         }
 
