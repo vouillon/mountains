@@ -3504,23 +3504,23 @@ let in_range ~size ~lat ~lon =
    half extent [in_range] requires around a position (0.57 degrees at
    size = 4096), intersected with where the IGN basemap and its relief shading
    actually have tiles. That coverage is roughly France-shaped -- a buffer into
-   Italy is served, Switzerland past the border is not, Corsica is a detached
-   patch -- so it takes several rectangles rather than one, and they are
-   deliberately conservative: a position the picker offers must be one the
-   renderer can load, hence a strict subset of [in_range], which stays the
-   authority. Measured by probing the service on a grid, so extend them if IGN
-   extends coverage.
+   Italy is served, Switzerland past the border is not -- so it takes a rectangle
+   per area rather than one overall, and they are deliberately conservative: a
+   position the picker offers must be one the renderer can load, hence a strict
+   subset of [in_range], which stays the authority. Measured by probing the
+   service on a grid, so extend them if IGN extends coverage.
 
    Left out: the latitudes above 46 around Lake Geneva and the Jura, which the
    basemap only serves west of longitude 7 and so cannot share a rectangle with
-   the eastern Alps; and southern Corsica, already outside the elevation boxes.
-   La Reunion is narrowed to the island, the basemap reaching to lat -20.65 and
-   lon 54.90 .. 56.10 over open ocean.
+   the eastern Alps; and Corsica, where the elevation boxes begin at 42.57 and so
+   already exclude the whole spine -- Monte Cinto is at 42.38 -- leaving a
+   northern tip not worth a region of its own. La Reunion is narrowed to the
+   island, the basemap reaching to lat -20.65 and lon 54.90 .. 56.10 over open
+   ocean.
 
-   The view points are where each region opens: the Ecrins, the Agriates and the
-   Tenda massif -- the Corsican rectangle bounds a diagonal coast, so its middle
-   is at sea, and Cap Corse would start hard against the eastern edge -- and the
-   Piton des Neiges. *)
+   The view points are where each region opens, the Ecrins and the Piton des
+   Neiges: a rectangle bounding an irregular coast has much of its area at sea,
+   so its middle is not necessarily land. *)
 let map_regions =
   [
     {
@@ -3531,15 +3531,6 @@ let map_regions =
       max_lon = 8.25;
       view_lat = 44.85;
       view_lon = 6.35;
-    };
-    {
-      Map_picker.name = "Corsica";
-      min_lat = 42.58;
-      max_lat = 43.00;
-      min_lon = 8.55;
-      max_lon = 9.42;
-      view_lat = 42.70;
-      view_lon = 9.15;
     };
     {
       Map_picker.name = "La R\u{00E9}union";
