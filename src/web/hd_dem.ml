@@ -14,43 +14,54 @@ open Bigarray
 
 let ( let* ) = Lwt.bind
 
-(* Level 13 of the WGS84G tile matrix set: 256 x 256 sample tiles over
-   360/16384 degrees each, origin (-180, 90), row 0 northernmost. One sample is
-   0.309 arcseconds, i.e. 9.5 m north-south -- a bit over three times the base
-   grid, and *not* a power-of-two ratio to it, so every consumer takes the
-   spacing from [px_arcsec] rather than assuming one.
-
-   Level 14 exists at four times the data; measurements at level 13 (below)
-   already put this at the edge of what a location load can absorb. *)
-let matrix_level = 13
-let tiles_per_axis = 16384
+(* WGS84G tiles are always 256 x 256 samples, at every matrix level. *)
 let tile_px = 256
-
-(* Sample spacing. [px_arcsec] is the one spacing constant of the module. *)
-let px_deg = 360. /. float tiles_per_axis /. float tile_px
-let px_arcsec = px_deg *. 3600.
-
-(* A square block of 8 x 8 tiles centred on the tile holding the location:
-   2048 samples per side (a power of two, so the relief pyramid keeps its usual
-   shape), 633 arcseconds, i.e. 19.5 km north-south and 13.6 km east-west at 46
-   degrees. Anchoring the block on the *tile* rather than on the location makes
-   every location within one level-13 tile share the same 64 URLs, which is
-   what makes the service worker's cache-first rule worth having.
-
-   Measured: 214 kB on the wire per tile (the service deflates the payload),
-   64 tiles in ~4 s with browser-level parallelism over one HTTP/2
-   connection. *)
-let block_tiles = 8
-let size = tile_px * block_tiles
 
 (* Anything below this is IGN's nodata sentinel (-99999 outside coverage). *)
 let nodata_limit = -500.
 
-(* Width of the annulus over which the high-resolution data is faded back into
-   the base, both at the edge of the extent and around nodata. Held well inside
-   the extent so that the renderer's hard switch at the boundary lands where
-   the two agree. *)
-let fade_metres = 1500.
+(* One refinement ring. Several can be nested (see PLAN.md), so nothing here is
+   a module-level constant any more: every consumer reads the spacing and the
+   sample count off the layer that produced the grid it is holding.
+
+   [px_arcsec] and [size] are derived, never passed in, so they cannot drift
+   from [matrix_level] and [block_tiles]. The spacing is *not* a power-of-two
+   ratio to the 1-arcsecond base grid, which is why consumers must read it
+   rather than assume one. *)
+type layer = {
+  matrix_level : int;
+  tiles_per_axis : int;
+  block_tiles : int;
+  px_arcsec : float; (* sample spacing *)
+  size : int; (* samples per side of the block *)
+  fade_metres : float;
+      (* width of the annulus over which the refinement is faded back into the
+         coarser surface, both at the edge of the extent and around nodata. Held
+         well inside the extent so that the renderer's hard switch at the
+         boundary lands where the two agree. *)
+}
+
+let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
+  (* Level L has 2^(L+1) tiles across 360 degrees: level 0 is two tiles wide. *)
+  let tiles_per_axis = 1 lsl (matrix_level + 1) in
+  {
+    matrix_level;
+    tiles_per_axis;
+    block_tiles;
+    px_arcsec = 360. /. float tiles_per_axis /. float tile_px *. 3600.;
+    size = tile_px * block_tiles;
+    fade_metres;
+  }
+
+(* Level 13, 8 x 8 tiles: 0.309 arcseconds per sample (9.5 m north-south, a bit
+   over three times the base grid), 2048 samples per side -- a power of two, so
+   the relief pyramid keeps its usual shape -- spanning 633 arcseconds, i.e.
+   19.5 km north-south and 13.6 km east-west at 46 degrees.
+
+   Measured: 214 kB on the wire per tile (the service deflates the payload),
+   64 tiles in ~4 s with browser-level parallelism over one HTTP/2
+   connection. *)
+let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
 
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
@@ -64,27 +75,31 @@ let timeout_s = 25.
    [Dem_loader.get_height] and HEIGHT_SCALE in the shaders. *)
 let u16_of_metres h = (h +. 500.) *. (65535. /. 9500.)
 
-let tile_url ~row ~col =
+let tile_url layer ~row ~col =
   Printf.sprintf
     "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES&STYLE=normal&FORMAT=image/x-bil;bits=32&TILEMATRIXSET=WGS84G&TILEMATRIX=%d&TILEROW=%d&TILECOL=%d"
-    matrix_level row col
+    layer.matrix_level row col
 
 let to_lwt f =
   let t, u = Lwt.task () in
   (Fut.await f @@ fun v -> Lwt.wakeup u v);
   t
 
-(* The level-13 tile holding the location, on which the block is centred. *)
-let anchor_tile ~lat ~lon =
+(* The tile of [layer]'s matrix holding the location, on which the block is
+   centred. Anchoring on the *tile* rather than on the location makes every
+   location within one tile share the same URLs, which is what makes the service
+   worker's cache-first rule worth having. *)
+let anchor_tile layer ~lat ~lon =
   let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
-  let span = 360. /. float tiles_per_axis in
+  let span = 360. /. float layer.tiles_per_axis in
   let row = int_of_float (floor ((90. -. (float alat /. 3600.)) /. span)) in
   let col = int_of_float (floor (((float alon /. 3600.) +. 180.) /. span)) in
   (alat, alon, row, col)
 
 type raw = {
+  layer : layer;
   samples : (float, float32_elt, c_layout) Array1.t;
-      (* [size] x [size], row 0 northernmost *)
+      (* [layer.size] x [layer.size], row 0 northernmost *)
   origin_x : float; (* arcseconds from the anchor to sample column 0 *)
   origin_y : float; (* arcseconds from the anchor to the southernmost row *)
   missing : int;
@@ -93,9 +108,9 @@ type raw = {
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its
    region at nodata, which the blend turns back into the base. *)
-let fetch_tile ~row ~col =
+let fetch_tile layer ~row ~col =
   let open Brr_io.Fetch in
-  let* res = to_lwt (url (Jstr.v (tile_url ~row ~col))) in
+  let* res = to_lwt (url (Jstr.v (tile_url layer ~row ~col))) in
   match res with
   | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
   | Ok resp when not (Response.ok resp) ->
@@ -115,8 +130,9 @@ let fetch_tile ~row ~col =
 
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
-let fetch ~lat ~lon : raw option Lwt.t =
-  let alat, alon, anchor_row, anchor_col = anchor_tile ~lat ~lon in
+let fetch layer ~lat ~lon : raw option Lwt.t =
+  let { block_tiles; px_arcsec; size; _ } = layer in
+  let alat, alon, anchor_row, anchor_col = anchor_tile layer ~lat ~lon in
   let row0 = anchor_row - (block_tiles / 2) in
   let col0 = anchor_col - (block_tiles / 2) in
   (* Sample centres: lon = -180 + (col * tile_px + j + 0.5) * px,
@@ -152,7 +168,9 @@ let fetch ~lat ~lon : raw option Lwt.t =
           (fun bc ->
             Lwt.catch
               (fun () ->
-                let* tile = fetch_tile ~row:(row0 + br) ~col:(col0 + bc) in
+                let* tile =
+                  fetch_tile layer ~row:(row0 + br) ~col:(col0 + bc)
+                in
                 if not !published then begin
                   (* Blit row by row: the tile is contiguous, the destination is
                      strided by the width of the whole block. *)
@@ -175,6 +193,7 @@ let fetch ~lat ~lon : raw option Lwt.t =
     else
       Some
         {
+          layer;
           samples = Brr.Tarray.to_bigarray1 full;
           origin_x;
           origin_y;
@@ -219,7 +238,7 @@ let fetch ~lat ~lon : raw option Lwt.t =
 (* Chessboard distance in texels to the nearest nodata sample, saturated at
    255: two sweeps over the raster. Only built when the patch actually holds
    nodata, which means a location near the edge of French coverage. *)
-let nodata_distance (src : (float, float32_elt, c_layout) Array1.t) =
+let nodata_distance ~size (src : (float, float32_elt, c_layout) Array1.t) =
   let d = Array1.create int8_unsigned c_layout (size * size) in
   for i = 0 to size - 1 do
     let row = i * size in
@@ -264,7 +283,12 @@ let nodata_distance (src : (float, float32_elt, c_layout) Array1.t) =
 let smoothstep t =
   if t <= 0. then 0. else if t >= 1. then 1. else t *. t *. (3. -. (2. *. t))
 
-type t = { grid : Dem_loader.t; origin_x : float; origin_y : float }
+type t = {
+  layer : layer;
+  grid : Dem_loader.t;
+  origin_x : float;
+  origin_y : float;
+}
 
 (* Build the blended grid: the base tile resampled onto the high-resolution
    grid, plus [fade] times the high-resolution correction. [fade] is 1 in the
@@ -275,7 +299,8 @@ type t = { grid : Dem_loader.t; origin_x : float; origin_y : float }
    Returns [None] when the patch holds no valid sample at all (a location
    outside French coverage), which keeps such locations on the pure base path
    rather than on a bilinear upsample of it. *)
-let blend ~lat ~(base : Dem_loader.t) raw =
+let blend ~lat ~(base : Dem_loader.t) (raw : raw) =
+  let { px_arcsec; size; fade_metres; _ } = raw.layer in
   let t0 = Brr.(Performance.now_ms G.performance) in
   let src = raw.samples in
   let has_nodata = ref false and has_data = ref false in
@@ -288,7 +313,7 @@ let blend ~lat ~(base : Dem_loader.t) raw =
     let deltax, deltay, _ = Render_state.compute_deltas ~lat in
     let fade_x = fade_metres /. (deltax *. px_arcsec) in
     let fade_y = fade_metres /. (deltay *. px_arcsec) in
-    let dist = if !has_nodata then Some (nodata_distance src) else None in
+    let dist = if !has_nodata then Some (nodata_distance ~size src) else None in
     let fade_nodata = Float.min fade_x fade_y in
     let bsize = base.Dem_loader.size in
     let bdata = base.Dem_loader.data in
@@ -373,6 +398,7 @@ let blend ~lat ~(base : Dem_loader.t) raw =
       raw.missing;
     Some
       {
+        layer = raw.layer;
         grid =
           {
             Dem_loader.data = reshape_2 (genarray_of_array1 out) size (size * 2);
@@ -395,9 +421,9 @@ let blend ~lat ~(base : Dem_loader.t) raw =
    "outside French territory" and is served back rather than asked again.
    [Cache.add] would reject those, hence fetches rather than the direct cache
    writes of [Dem_loader.prefetch]. *)
-let prefetch ~lat ~lon =
-  let _, _, anchor_row, anchor_col = anchor_tile ~lat ~lon in
-  let n = 2 * block_tiles in
+let prefetch layer ~lat ~lon =
+  let _, _, anchor_row, anchor_col = anchor_tile layer ~lat ~lon in
+  let n = 2 * layer.block_tiles in
   let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
   let* cache =
     to_lwt
@@ -415,7 +441,7 @@ let prefetch ~lat ~lon =
                 Lwt.catch
                   (fun () ->
                     let url =
-                      Jstr.v (tile_url ~row:(row0 + br) ~col:(col0 + bc))
+                      Jstr.v (tile_url layer ~row:(row0 + br) ~col:(col0 + bc))
                     in
                     let* cached =
                       to_lwt

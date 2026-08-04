@@ -2898,7 +2898,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      alongside them: it is the one source that can take [Hd_dem.timeout_s] to
      answer, and awaiting it holds the whole location -- base tiles that may well
      be in cache included -- behind that ceiling. *)
-  let hd_fetch = Hd_dem.fetch ~lat ~lon in
+  let hd_fetch = Hd_dem.fetch Hd_dem.l13 ~lat ~lon in
   let* tile, (_, _, _, _, clc_tiles) =
     Lwt.both
       (Dem_loader.load ~size:w ~lat ~lon)
@@ -3021,13 +3021,13 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            drawn. *)
         match hd_grid with
         | Some (g : Hd_dem.t) ->
-            let gx = (off_x -. g.origin_x) /. Hd_dem.px_arcsec in
-            let gy = (off_y -. g.origin_y) /. Hd_dem.px_arcsec in
+            let gx = (off_x -. g.origin_x) /. g.layer.px_arcsec in
+            let gy = (off_y -. g.origin_y) /. g.layer.px_arcsec in
             if
               gx >= 0.
-              && gx <= float (Hd_dem.size - 2)
+              && gx <= float (g.layer.size - 2)
               && gy >= 0.
-              && gy <= float (Hd_dem.size - 2)
+              && gy <= float (g.layer.size - 2)
             then begin
               let get_h = Dem_loader.get_height g.grid in
               let bx = int_of_float (floor gx)
@@ -3051,9 +3051,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let tex = make_tile_texture ctx g.grid in
             let hd_relief_texture, hd_relief_normal_texture =
               time_gpu ctx "compute_relief_hd" (fun () ->
-                  compute_relief ~spacing_scale:Hd_dem.px_arcsec ~border:false
-                    ctx Hd_dem.size Hd_dem.size lat triangle_geo tex normal_pid
-                    downsample_pid relief_uniforms downsample_uniforms)
+                  compute_relief ~spacing_scale:g.layer.px_arcsec ~border:false
+                    ctx g.layer.size g.layer.size lat triangle_geo tex
+                    normal_pid downsample_pid relief_uniforms
+                    downsample_uniforms)
             in
             (* Nothing reads the source grid on the GPU after the bake. *)
             Gl.delete_texture ctx tex;
@@ -3089,8 +3090,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         Option.map
           (fun (g : Hd_dem.t) ->
             {
-              Render_state.hd_size = Hd_dem.size;
-              hd_px_arcsec = Hd_dem.px_arcsec;
+              Render_state.hd_size = g.layer.size;
+              hd_px_arcsec = g.layer.px_arcsec;
               hd_origin = (g.origin_x, g.origin_y);
             })
           hd_grid
@@ -3136,10 +3137,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         | None -> fun _ _ -> None
         | Some (g : Hd_dem.t) ->
             let get_h = Dem_loader.get_height g.grid in
-            let limit = float (Hd_dem.size - 2) in
+            let limit = float (g.layer.size - 2) in
             fun bx by ->
-              let hx = (bx -. float x -. g.origin_x) /. Hd_dem.px_arcsec in
-              let hy = (by -. float y -. g.origin_y) /. Hd_dem.px_arcsec in
+              let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
+              let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
               if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
                 Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
               else None
@@ -3204,19 +3205,22 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                LOD selection shifted by its refinement factor. *)
             let z =
               let r = sqrt r2 in
-              let hd_pos g o = (g -. float (w / 2) -. o) /. Hd_dem.px_arcsec in
+              let hd_pos (l : Hd_dem.layer) gc o =
+                (gc -. float (w / 2) -. o) /. l.px_arcsec
+              in
               match hd_grid with
               | Some (g : Hd_dem.t)
-                when let hd_x = hd_pos x' g.origin_x
-                     and hd_y = hd_pos y' g.origin_y in
+                when let hd_x = hd_pos g.layer x' g.origin_x
+                     and hd_y = hd_pos g.layer y' g.origin_y in
                      hd_x >= 0.
-                     && hd_x <= float (Hd_dem.size - 1)
+                     && hd_x <= float (g.layer.size - 1)
                      && hd_y >= 0.
-                     && hd_y <= float (Hd_dem.size - 1) ->
+                     && hd_y <= float (g.layer.size - 1) ->
                   rendered_height g.grid ~radial_params
-                    ~inv_avg_delta:(inv_avg_delta /. Hd_dem.px_arcsec)
-                    ~size:Hd_dem.size ~r ~gx:(hd_pos x' g.origin_x)
-                    ~gy:(hd_pos y' g.origin_y)
+                    ~inv_avg_delta:(inv_avg_delta /. g.layer.px_arcsec)
+                    ~size:g.layer.size ~r
+                    ~gx:(hd_pos g.layer x' g.origin_x)
+                    ~gy:(hd_pos g.layer y' g.origin_y)
               | _ ->
                   rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
                     ~gx:x' ~gy:y'
@@ -4877,7 +4881,7 @@ let main () =
         if not (Jv.is_none request) then ignore (Jv.apply request [||]);
         Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
         Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon);
-        Lwt.async (fun () -> Hd_dem.prefetch ~lat ~lon)
+        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon)
       end
   in
   update_startup_status "Loading Terrain..." true;
