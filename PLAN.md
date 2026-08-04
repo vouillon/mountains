@@ -1930,9 +1930,8 @@ silently, so callers need no branch).
 
 ### Still available, in order of value
 
-- **The 24 MB of copying per call.** `Blend_wasm.run` copies the samples in and
-  the result out. `Hd_dem.fetch` could decode tiles straight into linear memory,
-  and the relief bake could upload from it, which would remove both.
+- ~~**The 24 MB of copying per call.**~~ **Measured, and not worth it** (see
+  "The copying is 13 ms" below).
 - **The worker**, for latency rather than throughput: 116 ms still runs on the
   main thread before the location can be published. Now much less urgent than
   when it was 830 ms, and still blocked on the same thing — `chain` is called
@@ -2018,3 +2017,50 @@ worker, and gate that step on the usual RMSE-0 capture.
 *(What was actually done: the same rule, but the diff ran in the browser against
 `Blend_core` on real blocks, which needed no harness at all and covered the
 nodata path that synthetic Node inputs would have had to fake.)*
+
+## The copying in and out of linear memory is 13 ms — measured (2026-08-04)
+
+Correction to the "still available" list above, which called the 24 MB of copying
+per blend the highest-value item left. It is not. Phase breakdown at Mont Blanc,
+`in` being the samples copied into linear memory and `out` the result copied back:
+
+| ring | in | win | wasm | out | total |
+| --- | --- | --- | --- | --- | --- |
+| l13 2048^2 | 6.7 | 0.3 | **66.0** | 3.7 | 78 ms |
+| 4.77 m 1024^2 | 0.4 | 0.1 | **15.3** | 1.1 | 18 ms |
+| 2.38 m 1024^2 | 0.3 | 0.1 | **9.4** | 0.8 | 11 ms |
+
+All the copying together is **13.5 ms of 107**. 6.7 ms for 16 MB is about
+2.4 GB/s, i.e. `Bigarray.Array1.blit` already compiles to a memcpy -- unlike
+element access, which is the whole reason this module exists. The wat itself is
+85% of the cost.
+
+### What removing it would actually take
+
+Both halves need the same enabling change: **the memory may never grow again**,
+because `WebAssembly.Memory.grow` detaches the buffer and every view over it.
+That means reserving the static worst case at startup instead of growing on
+demand.
+
+- **Samples in (7.4 ms).** `Hd_dem.fetch` writes tiles into the block as they
+  arrive, so the block would have to be a region of linear memory. Three layers
+  are fetched concurrently, and a stale fetch from a previous location can still
+  be in flight, so the regions cannot be per-layer -- they need an allocator with
+  a free list. Worse, a raw block is blended *twice* (once from `settled` for the
+  early publish, once from `Lwt.all` for the refinement), so a slot cannot be
+  freed after its blend; its lifetime is the location epoch. Reserve 2 epochs
+  worth: ~48 MB.
+- **Result out (5.6 ms).** The blended grid would be a view into linear memory
+  rather than an independent bigarray. That needs no change at the consumers
+  (a view *is* a bigarray, so the bake, `get_height` and the next ring's
+  `source_window` all keep working) but it introduces aliasing: a published grid
+  would sit in a region the next location's blend can reuse, and getting that
+  wrong renders subtly wrong terrain rather than failing. Needs double buffering,
+  so ~24 MB of outputs rather than 12.
+
+So: ~50 MB permanently reserved (against ~29 MB that the memory grows to today
+and never releases), a new allocator coupled to `Hd_dem`'s epoch logic, and one
+new class of silent-corruption bug -- to save 13 ms of a 107 ms path, on an
+Android-first target. Not done.
+
+If the blend needs to be faster, the 66 ms is the target, not the 13.
