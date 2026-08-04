@@ -3098,8 +3098,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                    than the clearance the window would otherwise reach tens of
                    metres out and snap the eye to the highest point around,
                    which on a summit dome is metres above where one stands. *)
-                let dx = (float i -. gx) *. mx
-                and dy = (float j -. gy) *. my in
+                let dx = (float i -. gx) *. mx and dy = (float j -. gy) *. my in
                 if
                   ((i = bx || i = bx + 1) && (j = by || j = by + 1))
                   || (dx *. dx) +. (dy *. dy)
