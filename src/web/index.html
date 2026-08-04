@@ -792,14 +792,13 @@
           }
         }
 
-        // Returns whether the file was usable; a rejected one is reported and
-        // never stored, so the saved list cannot hold a trace that draws
-        // nothing.
+        // Returns the trace it stored, or null for a file that was rejected and
+        // reported, so the saved list cannot hold a trace that draws nothing.
         async addTrace(name, xmlString) {
           const validated = validateGpx(xmlString);
           if (validated.error) {
             this.showError(name, validated.error);
-            return false;
+            return null;
           }
           const summary = gpxSummary(validated.doc, validated.points);
           const traceName = name || summary.name || ('Trace ' + (this.traces.length + 1) + '.gpx');
@@ -819,7 +818,7 @@
           this.save();
           this.renderUI();
           this.updateMap();
-          return true;
+          return trace;
         }
 
         // The manager is where the message goes, and it is opened to carry it:
@@ -860,16 +859,36 @@
 
         flyTo(id) {
           const trace = this.traces.find(t => t.id === id);
-          if (trace && trace.centerLat && trace.centerLon && window.flyToCoords) {
-            // Traces saved before the bearing was recorded have to be reparsed;
-            // [parseGpxSummary] returns null if that no longer works, and
-            // [flyToCoords] takes a null bearing as "keep the current one".
-            const bearing = Number.isFinite(trace.bearing)
-              ? trace.bearing
-              : (parseGpxSummary(trace.content || '') || {}).bearing;
-            this.modal.classList.remove('visible');
-            window.flyToCoords(trace.centerLat, trace.centerLon, bearing);
+          if (!trace) return;
+          // Traces saved before the bearing was recorded have to be reparsed;
+          // [parseGpxSummary] returns null if that no longer works, and
+          // [flyToCoords] takes a null bearing as "keep the current one".
+          const bearing = Number.isFinite(trace.bearing)
+            ? trace.bearing
+            : (parseGpxSummary(trace.content || '') || {}).bearing;
+          this.modal.classList.remove('visible');
+          this.flyToStart(trace.centerLat, trace.centerLon, bearing);
+        }
+
+        // Moving the camera has to wait for the viewer, which a share drained at
+        // startup will beat. [setGpxContent] is the signal to wait on rather
+        // than [flyToCoords]: the viewer installs flyToCoords as soon as it has
+        // resolved a position, while the location switch it calls is still a
+        // no-op placeholder, and installs setGpxContent just after giving that
+        // switch its implementation (see viewer.ml). Waiting on the wrong one
+        // moves nothing, silently.
+        flyToStart(lat, lon, bearing, attempt = 0) {
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+          if (!window.flyToCoords || !window.setGpxContent) {
+            // Bounded, unlike [updateMap]'s wait: there is nothing to move if
+            // the viewer never comes up, and a flight arriving minutes late
+            // would drag the camera off wherever the user had got to by then.
+            if (attempt < 75) {
+              setTimeout(() => this.flyToStart(lat, lon, bearing, attempt + 1), 200);
+            }
+            return;
           }
+          window.flyToCoords(lat, lon, Number.isFinite(bearing) ? bearing : null);
         }
 
         updateMap() {
@@ -1013,6 +1032,7 @@
           if (!('caches' in window)) return;
           try {
             const cache = await caches.open(SHARE_CACHE_NAME);
+            let destination = null;
             for (const request of await cache.keys()) {
               const response = await cache.match(request);
               const text = response ? await response.text() : null;
@@ -1021,7 +1041,16 @@
               await cache.delete(request);
               if (!text) continue;
               const name = new URL(request.url).searchParams.get('name');
-              await this.addTrace(name || 'shared.gpx', text);
+              const trace = await this.addTrace(name || 'shared.gpx', text);
+              // Sharing a trace is a request to go and look at it, so the camera
+              // moves to where it starts. The first one shared wins: several
+              // files in one share cannot all be flown to, and flying to each in
+              // turn would just be a scramble ending on the last.
+              if (trace && !destination) destination = trace;
+            }
+            if (destination) {
+              this.flyToStart(
+                destination.centerLat, destination.centerLon, destination.bearing);
             }
           } catch (e) {
             console.error('Failed to read shared GPX files:', e);
