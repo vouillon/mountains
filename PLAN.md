@@ -2064,3 +2064,78 @@ new class of silent-corruption bug -- to save 13 ms of a 107 ms path, on an
 Android-first target. Not done.
 
 If the blend needs to be faster, the 66 ms is the target, not the 13.
+
+## Attacking the wat's own 66 ms: the distance transform (2026-08-04)
+
+In-wat phase profile at Mont Blanc, minima of several runs, via a temporary
+phase-limit parameter on the export:
+
+| phase | l13 2048^2 | 4.77 m (337k nodata) | 2.38 m (no nodata) |
+| --- | --- | --- | --- |
+| scan | 11.0 | 1.4 | 1.6 |
+| **nodata_distance** | **53.7** | 7.9 | 0 |
+| precompute | ~0 | ~0 | ~0 |
+| range scan | 4.7 | 1.4 | 1.5 |
+| resample+quantise | 45.8 | 13.9 | 13.5 |
+
+(Absolute numbers are inflated -- the profiling build calls the export 15 times
+per blend -- but the split is stable and reproduced across two rounds.)
+
+The distance transform was the largest single phase, and it was doing bounded
+work globally: Mont Blanc's l13 block has **355** nodata samples out of 4.2M,
+0.008% of it, and the transform swept all 4.2M cells twice for them.
+
+### The fix: bound it to the nodata box
+
+The scan already visits every sample, so it now also tracks the bounding box of
+the nodata samples (on the rare branch, so it costs nothing measurable). The
+transform runs over that box grown by `ceil(fade_nodata)`, with the rest of the
+raster filled with 255.
+
+This is **exact, not approximate**:
+
+- a cell whose true distance is below `fade_nodata` is within that many texels of
+  some nodata sample, so it is inside the grown box; and the propagation path
+  from that sample to it is monotone in both axes, so it lies inside the box too
+  and the sweeps reach the same value;
+- every cell outside has a true distance above `fade_nodata`, where only "at
+  least `fade_nodata`" is observable, because `smoothstep` saturates at 1;
+- treating the box edge like the raster edge is exact for the same reason the
+  original edge guards are: the skipped neighbour would have read 255, which is
+  what `m` starts at in the forward sweep and above every `m` in the backward one.
+
+The one precondition is `ceil(fade_nodata) <= 255`, or the distances outside the
+box would be observable through the saturation; above that it falls back to the
+whole raster. No layer is close today -- l13 is 157, both rings 126.
+
+### Result
+
+| | before | after |
+| --- | --- | --- |
+| l13, 355 nodata samples | 53.7 ms | **1.2 ms** |
+| 4.77 m, 337105 nodata samples | 7.9 ms | **3.8 ms** |
+| full l13 call, same conditions | 114.1 ms | **52.8 ms** |
+
+Byte-identical to `Blend_core` on all nine blends of the three views, and RMSE
+exactly 0 against the previous `blend.wasm`. Note the second row: the win is not
+merely "nodata is rare" -- even a block that is a third nodata halves, because
+the nodata is still confined to part of it.
+
+### What is left in the wat
+
+`resample+quantise` is now the dominant phase, then `scan`:
+
+- **The scan** is 4M f32 loads with three compares, a clean f32x4 candidate
+  (nodata lanes replaced by +/-inf, then a horizontal reduce; min/max are exact
+  and order-independent, so it stays bit-identical). The nodata bounding box can
+  be tracked per 4-lane group rather than per sample -- a box that merely
+  *contains* the nodata box is still exact, just marginally larger.
+- **The resample** has a large easy win that is *not* provably bit-identical:
+  wherever `t >= 1` (about 66% of an l13 block, the interior) `smoothstep` is
+  exactly 1 and the result is `b + (h - b)`, so the horizontal interpolation and
+  the smoothstep could both be skipped and `v` set to `h` -- but `b + (h - b)`
+  equals `h` only up to rounding. Sterbenz's lemma makes it exact for any two
+  terrain heights within a factor of two of each other, which is every real case,
+  and a 1-ulp difference would have to land within 1e-12 of a quantisation
+  boundary to change even one byte. Worth doing, but it would have to be reported
+  as empirically identical rather than provably so.

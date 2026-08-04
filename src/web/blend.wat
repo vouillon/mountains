@@ -83,21 +83,38 @@
   )
 
   ;; Chessboard distance in texels to the nearest nodata sample, saturated at
-  ;; 255, as two sweeps over the raster. Only called when the block actually
-  ;; holds nodata, i.e. near the edge of French coverage.
+  ;; 255, as two sweeps over the raster -- restricted to the box [$r0..$r1] x
+  ;; [$c0..$c1], with everything outside it left at 255.
+  ;;
+  ;; The caller passes the bounding box of the nodata samples grown by
+  ;; ceil(fade_nodata), which makes this exact rather than approximate:
+  ;;   - a cell whose true distance is below fade_nodata is within that many
+  ;;     texels of some nodata sample, hence inside the box, and the monotone
+  ;;     propagation path from that sample lies inside the box too, so the sweeps
+  ;;     reach the same value;
+  ;;   - every cell outside has a true distance above fade_nodata, where only
+  ;;     "at least fade_nodata" matters, because the fade saturates there.
+  ;; Treating the box edge like the raster edge is exact for the same reason the
+  ;; original guards are: the neighbour that is skipped would have read 255,
+  ;; which is what m starts at in the forward sweep, and is above every m in the
+  ;; backward one.
+  ;;
+  ;; At Mont Blanc this is the difference between two sweeps over 4.2M cells and
+  ;; two over the strip along the Italian border.
   (func $nodata_distance (param $samples i32) (param $dist i32)
                          (param $size i32)
+                         (param $r0 i32) (param $c0 i32)
+                         (param $r1 i32) (param $c1 i32)
     (local $i i32) (local $j i32) (local $row i32) (local $m i32)
-    (local $x i32) (local $last i32)
-    (local.set $last (i32.sub (local.get $size) (i32.const 1)))
-    (memory.fill (local.get $dist) (i32.const 0)
+    (local $x i32)
+    (memory.fill (local.get $dist) (i32.const 255)
                  (i32.mul (local.get $size) (local.get $size)))
 
     ;; --- forward sweep: north-west neighbours
-    (local.set $i (i32.const 0))
+    (local.set $i (local.get $r0))
     (loop $fwd_row
       (local.set $row (i32.mul (local.get $i) (local.get $size)))
-      (local.set $j (i32.const 0))
+      (local.set $j (local.get $c0))
       (loop $fwd_col
         (if (f64.lt
               (f64.promote_f32
@@ -108,7 +125,7 @@
           (then (local.set $m (i32.const 0)))
           (else
             (local.set $m (i32.const 255))
-            (if (i32.gt_s (local.get $i) (i32.const 0))
+            (if (i32.gt_s (local.get $i) (local.get $r0))
               (then
                 (local.set $x (i32.load8_u
                   (i32.add (local.get $dist)
@@ -116,8 +133,8 @@
                              (local.get $size)))))
                 (if (i32.lt_s (local.get $x) (local.get $m))
                   (then (local.set $m (local.get $x))))))
-            (if (i32.and (i32.gt_s (local.get $i) (i32.const 0))
-                         (i32.gt_s (local.get $j) (i32.const 0)))
+            (if (i32.and (i32.gt_s (local.get $i) (local.get $r0))
+                         (i32.gt_s (local.get $j) (local.get $c0)))
               (then
                 (local.set $x (i32.load8_u
                   (i32.add (local.get $dist)
@@ -126,8 +143,8 @@
                              (i32.const 1)))))
                 (if (i32.lt_s (local.get $x) (local.get $m))
                   (then (local.set $m (local.get $x))))))
-            (if (i32.and (i32.gt_s (local.get $i) (i32.const 0))
-                         (i32.lt_s (local.get $j) (local.get $last)))
+            (if (i32.and (i32.gt_s (local.get $i) (local.get $r0))
+                         (i32.lt_s (local.get $j) (local.get $c1)))
               (then
                 (local.set $x (i32.load8_u
                   (i32.add (local.get $dist)
@@ -136,7 +153,7 @@
                              (i32.const 1)))))
                 (if (i32.lt_s (local.get $x) (local.get $m))
                   (then (local.set $m (local.get $x))))))
-            (if (i32.gt_s (local.get $j) (i32.const 0))
+            (if (i32.gt_s (local.get $j) (local.get $c0))
               (then
                 (local.set $x (i32.load8_u
                   (i32.sub (i32.add (local.get $dist)
@@ -151,26 +168,26 @@
                       (i32.add (local.get $row) (local.get $j)))
                     (local.get $m))
         (local.set $j (i32.add (local.get $j) (i32.const 1)))
-        (br_if $fwd_col (i32.lt_u (local.get $j) (local.get $size))))
+        (br_if $fwd_col (i32.le_s (local.get $j) (local.get $c1))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br_if $fwd_row (i32.lt_u (local.get $i) (local.get $size))))
+      (br_if $fwd_row (i32.le_s (local.get $i) (local.get $r1))))
 
     ;; --- backward sweep: south-east neighbours, each one step further away
-    (local.set $i (local.get $last))
+    (local.set $i (local.get $r1))
     (block $bwd_done
       (loop $bwd_row
-        (br_if $bwd_done (i32.lt_s (local.get $i) (i32.const 0)))
+        (br_if $bwd_done (i32.lt_s (local.get $i) (local.get $r0)))
         (local.set $row (i32.mul (local.get $i) (local.get $size)))
-        (local.set $j (local.get $last))
+        (local.set $j (local.get $c1))
         (block $bwd_col_done
           (loop $bwd_col
-            (br_if $bwd_col_done (i32.lt_s (local.get $j) (i32.const 0)))
+            (br_if $bwd_col_done (i32.lt_s (local.get $j) (local.get $c0)))
             (local.set $m (i32.load8_u
               (i32.add (local.get $dist)
                        (i32.add (local.get $row) (local.get $j)))))
             (if (i32.gt_s (local.get $m) (i32.const 0))
               (then
-                (if (i32.lt_s (local.get $i) (local.get $last))
+                (if (i32.lt_s (local.get $i) (local.get $r1))
                   (then
                     (local.set $x (i32.add (i32.load8_u
                       (i32.add (local.get $dist)
@@ -178,8 +195,8 @@
                                  (local.get $j)))) (i32.const 1)))
                     (if (i32.lt_s (local.get $x) (local.get $m))
                       (then (local.set $m (local.get $x))))))
-                (if (i32.and (i32.lt_s (local.get $i) (local.get $last))
-                             (i32.gt_s (local.get $j) (i32.const 0)))
+                (if (i32.and (i32.lt_s (local.get $i) (local.get $r1))
+                             (i32.gt_s (local.get $j) (local.get $c0)))
                   (then
                     (local.set $x (i32.add (i32.load8_u
                       (i32.sub (i32.add (local.get $dist)
@@ -189,8 +206,8 @@
                                (i32.const 1))) (i32.const 1)))
                     (if (i32.lt_s (local.get $x) (local.get $m))
                       (then (local.set $m (local.get $x))))))
-                (if (i32.and (i32.lt_s (local.get $i) (local.get $last))
-                             (i32.lt_s (local.get $j) (local.get $last)))
+                (if (i32.and (i32.lt_s (local.get $i) (local.get $r1))
+                             (i32.lt_s (local.get $j) (local.get $c1)))
                   (then
                     (local.set $x (i32.add (i32.load8_u
                       (i32.add (i32.add (local.get $dist)
@@ -200,7 +217,7 @@
                                (i32.const 1))) (i32.const 1)))
                     (if (i32.lt_s (local.get $x) (local.get $m))
                       (then (local.set $m (local.get $x))))))
-                (if (i32.lt_s (local.get $j) (local.get $last))
+                (if (i32.lt_s (local.get $j) (local.get $c1))
                   (then
                     (local.set $x (i32.add (i32.load8_u
                       (i32.add (i32.add (local.get $dist)
@@ -258,6 +275,8 @@
     (local $bx_p i32) (local $fx_p i32) (local $ex_p i32)
     (local $ra_p i32) (local $rb_p i32) (local $rv_p i32)
     (local $rk i32) (local $src_row i32) (local $dst i32)
+    (local $nr0 i32) (local $nr1 i32) (local $nc0 i32) (local $nc1 i32)
+    (local $rr i32) (local $cc i32) (local $rad i32)
     (local $lo f64) (local $hi f64) (local $h f64) (local $a f64)
     (local $c f64) (local $bfl f64) (local $cby f64) (local $fy f64)
     (local $edge_y f64) (local $t f64) (local $vf f64) (local $bh f64)
@@ -282,6 +301,10 @@
     ;; ---- range of the refinement, and whether it holds data or nodata at all
     (local.set $lo (f64.const inf))
     (local.set $hi (f64.const -inf))
+    (local.set $nr0 (local.get $size))
+    (local.set $nc0 (local.get $size))
+    (local.set $nr1 (i32.const -1))
+    (local.set $nc1 (i32.const -1))
     (local.set $i (i32.const 0))
     (block $scan_done
       (loop $scan
@@ -290,7 +313,18 @@
           (f32.load (i32.add (local.get $samples)
                              (i32.shl (local.get $i) (i32.const 2))))))
         (if (f64.lt (local.get $h) (f64.const -500))
-          (then (local.set $has_nodata (i32.const 1)))
+          (then
+            (local.set $has_nodata (i32.const 1))
+            (local.set $rr (i32.div_u (local.get $i) (local.get $size)))
+            (local.set $cc (i32.rem_u (local.get $i) (local.get $size)))
+            (if (i32.lt_s (local.get $rr) (local.get $nr0))
+              (then (local.set $nr0 (local.get $rr))))
+            (if (i32.gt_s (local.get $rr) (local.get $nr1))
+              (then (local.set $nr1 (local.get $rr))))
+            (if (i32.lt_s (local.get $cc) (local.get $nc0))
+              (then (local.set $nc0 (local.get $cc))))
+            (if (i32.gt_s (local.get $cc) (local.get $nc1))
+              (then (local.set $nc1 (local.get $cc)))))
           (else
             (local.set $has_data (i32.const 1))
             (if (f64.lt (local.get $h) (local.get $lo))
@@ -301,10 +335,37 @@
         (br $scan)))
     (if (i32.eqz (local.get $has_data)) (then (return (i32.const 0))))
 
-    (if (local.get $has_nodata)
-      (then (call $nodata_distance (local.get $samples) (local.get $dist)
-                                   (local.get $size))))
     (local.set $fade_nd (f64.min (local.get $fade_x) (local.get $fade_y)))
+    (if (local.get $has_nodata)
+      (then
+        ;; Grow the nodata box by ceil(fade_nodata): outside it only "at least
+        ;; fade_nodata" matters. A fade wider than the saturation point would
+        ;; make the distances outside observable, so fall back to the whole
+        ;; raster -- no layer does that today (l13 157, both rings 126).
+        (local.set $rad (i32.trunc_sat_f64_s (f64.ceil (local.get $fade_nd))))
+        (if (i32.gt_s (local.get $rad) (i32.const 255))
+          (then
+            (local.set $nr0 (i32.const 0))
+            (local.set $nc0 (i32.const 0))
+            (local.set $nr1 (local.get $last))
+            (local.set $nc1 (local.get $last))
+            (local.set $rad (i32.const 0))))
+        (local.set $nr0 (i32.sub (local.get $nr0) (local.get $rad)))
+        (local.set $nc0 (i32.sub (local.get $nc0) (local.get $rad)))
+        (local.set $nr1 (i32.add (local.get $nr1) (local.get $rad)))
+        (local.set $nc1 (i32.add (local.get $nc1) (local.get $rad)))
+        (if (i32.lt_s (local.get $nr0) (i32.const 0))
+          (then (local.set $nr0 (i32.const 0))))
+        (if (i32.lt_s (local.get $nc0) (i32.const 0))
+          (then (local.set $nc0 (i32.const 0))))
+        (if (i32.gt_s (local.get $nr1) (local.get $last))
+          (then (local.set $nr1 (local.get $last))))
+        (if (i32.gt_s (local.get $nc1) (local.get $last))
+          (then (local.set $nc1 (local.get $last))))
+        (call $nodata_distance (local.get $samples) (local.get $dist)
+                               (local.get $size)
+                               (local.get $nr0) (local.get $nc0)
+                               (local.get $nr1) (local.get $nc1))))
 
     ;; ---- scratch layout
     (local.set $bx_p (local.get $aux))
