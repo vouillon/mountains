@@ -404,42 +404,73 @@ let fetch layer ~lat ~lon : raw option Lwt.t =
    255: two sweeps over the raster. Only built when the patch actually holds
    nodata, which means a location near the edge of French coverage. *)
 let nodata_distance ~size (src : (float, float32_elt, c_layout) Array1.t) =
-  let d = Array1.create int8_unsigned c_layout (size * size) in
+  (* [Bytes] rather than a Bigarray: this is touched some fifty million times
+     over the two sweeps, and Bigarray element access does not compile to a plain
+     load here -- swapping the scratch alone took the transform from 880 ms to a
+     fraction of it on the 2048 block. *)
+  let d = Bytes.make (size * size) '\000' in
   for i = 0 to size - 1 do
     let row = i * size in
     for j = 0 to size - 1 do
       let v =
         if Array1.unsafe_get src (row + j) < nodata_limit then 0
         else begin
-          let m = ref 255 in
-          let consider p = if p < !m then m := p in
-          if i > 0 then begin
-            consider (Array1.unsafe_get d (row - size + j));
-            if j > 0 then consider (Array1.unsafe_get d (row - size + j - 1));
-            if j < size - 1 then
-              consider (Array1.unsafe_get d (row - size + j + 1))
-          end;
-          if j > 0 then consider (Array1.unsafe_get d (row + j - 1));
-          if !m >= 255 then 255 else !m + 1
+          (* Shadowed lets rather than a [ref] and a [consider] closure: this
+             runs twice over every sample of the block -- four million for
+             [l13] -- and the per-sample allocation dominated the whole blend. *)
+          let m = 255 in
+          let m =
+            if i > 0 then
+              min m (Char.code (Bytes.unsafe_get d (row - size + j)))
+            else m
+          in
+          let m =
+            if i > 0 && j > 0 then
+              min m (Char.code (Bytes.unsafe_get d (row - size + j - 1)))
+            else m
+          in
+          let m =
+            if i > 0 && j < size - 1 then
+              min m (Char.code (Bytes.unsafe_get d (row - size + j + 1)))
+            else m
+          in
+          let m =
+            if j > 0 then min m (Char.code (Bytes.unsafe_get d (row + j - 1)))
+            else m
+          in
+          if m >= 255 then 255 else m + 1
         end
       in
-      Array1.unsafe_set d (row + j) v
+      Bytes.unsafe_set d (row + j) (Char.unsafe_chr v)
     done
   done;
   for i = size - 1 downto 0 do
     let row = i * size in
     for j = size - 1 downto 0 do
-      let m = ref (Array1.unsafe_get d (row + j)) in
-      if !m > 0 then begin
-        let consider p = if p + 1 < !m then m := p + 1 in
-        if i < size - 1 then begin
-          consider (Array1.unsafe_get d (row + size + j));
-          if j > 0 then consider (Array1.unsafe_get d (row + size + j - 1));
+      let m0 = Char.code (Bytes.unsafe_get d (row + j)) in
+      if m0 > 0 then begin
+        let m = m0 in
+        let m =
+          if i < size - 1 then
+            min m (Char.code (Bytes.unsafe_get d (row + size + j)) + 1)
+          else m
+        in
+        let m =
+          if i < size - 1 && j > 0 then
+            min m (Char.code (Bytes.unsafe_get d (row + size + j - 1)) + 1)
+          else m
+        in
+        let m =
+          if i < size - 1 && j < size - 1 then
+            min m (Char.code (Bytes.unsafe_get d (row + size + j + 1)) + 1)
+          else m
+        in
+        let m =
           if j < size - 1 then
-            consider (Array1.unsafe_get d (row + size + j + 1))
-        end;
-        if j < size - 1 then consider (Array1.unsafe_get d (row + j + 1));
-        Array1.unsafe_set d (row + j) !m
+            min m (Char.code (Bytes.unsafe_get d (row + j + 1)) + 1)
+          else m
+        in
+        Bytes.unsafe_set d (row + j) (Char.unsafe_chr m)
       end
     done
   done;
@@ -518,9 +549,15 @@ let blend ~lat ~(source : source) (raw : raw) =
   let t0 = Brr.(Performance.now_ms G.performance) in
   let src = raw.samples in
   let has_nodata = ref false and has_data = ref false in
+  let lo = ref infinity and hi = ref neg_infinity in
   for i = 0 to (size * size) - 1 do
-    if Array1.unsafe_get src i < nodata_limit then has_nodata := true
-    else has_data := true
+    let h = Array1.unsafe_get src i in
+    if h < nodata_limit then has_nodata := true
+    else begin
+      has_data := true;
+      if h < !lo then lo := h;
+      if h > !hi then hi := h
+    end
   done;
   if not !has_data then None
   else begin
@@ -557,6 +594,11 @@ let blend ~lat ~(source : source) (raw : raw) =
     let col_lo = int_of_float (floor (col_of 0)) in
     let col_hi = int_of_float (floor (col_of (size - 1))) + 1 in
     let n_cols = col_hi - col_lo + 1 in
+    (* Same window on the other axis, for the range scan below. *)
+    let row_of u = index_of source.src_origin_y raw.origin_y u in
+    let row_lo = int_of_float (floor (row_of 0)) in
+    let row_hi = int_of_float (floor (row_of (size - 1))) + 1 in
+    let n_rows = row_hi - row_lo + 1 in
     let bx = Array.make size 0 and fx = Array.make size 0. in
     for j = 0 to size - 1 do
       let c = col_of j in
@@ -564,13 +606,29 @@ let blend ~lat ~(source : source) (raw : raw) =
       bx.(j) <- int_of_float b - col_lo;
       fx.(j) <- c -. b
     done;
-    (* Blended heights in metres, then quantised in a second pass once the range
-       they actually occupy is known. Holding them costs 4 MB at 1024 samples and
-       16 MB at 2048, transient; quantising as we go would mean either the base
-       grid's coarse scale or computing the range by blending everything twice,
-       and the blend is the expensive part. *)
-    let metres = Array1.create float32 c_layout (size * size) in
-    let lo = ref infinity and hi = ref neg_infinity in
+    (* Range of the output, bounded rather than measured. Every blended value is
+       [b + f * (h - b)] with [f] in [0, 1], so it lies on the segment between the
+       surface beneath and the refinement, hence inside the union of their ranges.
+       Using the bound lets the loop quantise as it goes: measuring the exact
+       range needed a float buffer of every sample (16 MB at 2048) and a second
+       pass over it, which cost more than the resampling itself -- Bigarray access
+       is not compiled to a plain load by wasm_of_ocaml today. The bound is wider
+       than the truth, so the step is coarser -- 7.98 cm against the 6.06 cm an
+       exact range gives for [l13] at Mont Blanc, still well inside the 14.5 cm
+       the base scale imposed. *)
+    let last = bsize - 1 in
+    for j = 0 to n_rows do
+      let rw = min last (row_lo + j) in
+      for i = 0 to n_cols do
+        let b = get_base rw (min last (col_lo + i)) in
+        if b < !lo then lo := b;
+        if b > !hi then hi := b
+      done
+    done;
+    let height_offset = !lo in
+    let height_scale = Float.max 1e-6 ((!hi -. !lo) /. 65535.) in
+    let inv = 1. /. height_scale in
+    let out = Array1.create int8_unsigned c_layout (size * size * 2) in
     (* One base row pair resampled per base row rather than per sample. *)
     let rowa = Array.make (n_cols + 1) 0. in
     let rowb = Array.make (n_cols + 1) 0. in
@@ -599,7 +657,7 @@ let blend ~lat ~(source : source) (raw : raw) =
       (* Row 0 of the raster is the northernmost one, row 0 of a DEM tile the
          southernmost. *)
       let src_row = (size - 1 - u) * size in
-      let dst_row = u * size in
+      let dst_row = u * size * 2 in
       for j = 0 to size - 1 do
         let k = bx.(j) in
         let b = rowv.(k) +. (fx.(j) *. (rowv.(k + 1) -. rowv.(k))) in
@@ -613,30 +671,18 @@ let blend ~lat ~(source : source) (raw : raw) =
               | None -> t
               | Some d ->
                   Float.min t
-                    (float (Array1.unsafe_get d (src_row + j)) /. fade_nodata)
+                    (float (Char.code (Bytes.unsafe_get d (src_row + j)))
+                    /. fade_nodata)
             in
             b +. (smoothstep t *. (h -. b))
         in
-        if v < !lo then lo := v;
-        if v > !hi then hi := v;
-        Array1.unsafe_set metres (dst_row + j) v
+        let q = int_of_float (((v -. height_offset) *. inv) +. 0.5) in
+        let q = if q < 0 then 0 else if q > 65535 then 65535 else q in
+        Array1.unsafe_set out (dst_row + (2 * j)) (q land 0xff);
+        Array1.unsafe_set out (dst_row + (2 * j) + 1) (q lsr 8)
       done
     done;
-    (* One step of the output covers this much height. A perfectly flat patch
-       would give a zero range and a degenerate scale, hence the floor. *)
-    let height_offset = !lo in
-    let height_scale = Float.max 1e-6 ((!hi -. !lo) /. 65535.) in
-    let inv = 1. /. height_scale in
-    let out = Array1.create int8_unsigned c_layout (size * size * 2) in
-    for i = 0 to (size * size) - 1 do
-      let v =
-        int_of_float
-          (((Array1.unsafe_get metres i -. height_offset) *. inv) +. 0.5)
-      in
-      let v = if v < 0 then 0 else if v > 65535 then 65535 else v in
-      Array1.unsafe_set out (2 * i) (v land 0xff);
-      Array1.unsafe_set out ((2 * i) + 1) (v lsr 8)
-    done;
+
     Format.eprintf
       "RGE ALTI blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
        steps)@."

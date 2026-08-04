@@ -1834,3 +1834,53 @@ untouched, so the base path is bit-identical by construction.
 Verified: renders indistinguishable from the global-scale build (RMSE 0.2-5.9%,
 consistent with sub-decimetre height changes and no artefacts), all three rings
 loading, blend cost unchanged.
+
+## Blend cost: 2x, from getting Bigarray out of the hot paths (2026-08-04)
+
+Phase timing of `Hd_dem.blend`, measured in the browser:
+
+| grid | scan | nodata_distance | resample | quantise | total |
+| --- | --- | --- | --- | --- | --- |
+| l13 2048^2, before | 53 | **824** | 349 | 226 | 1452 ms |
+| l13 2048^2, after | 87 | 180 | 448 | 0 | **714 ms** |
+| ring 1 1024^2 | 5 | 16 | 40 | 0 | 65 ms |
+| ring 0 1024^2 | 9 | 0 | 42 | 0 | 51 ms |
+
+The distance transform was 57% of the l13 blend, not the resampling. It runs at
+Mont Blanc because the block straddles the Italian border, so part of it is
+nodata.
+
+**Bigarray element access is not compiled to a plain load by wasm_of_ocaml
+today** (confirmed by the author). That is the whole story:
+
+- The transform's scratch field was a Bigarray, touched ~50 million times across
+  the two sweeps. Switching it to `Bytes`: **824 -> 115 ms**. De-closuring the
+  inner loop first made no difference at all (824 -> 896), so the per-sample
+  `ref` and `consider` were already being optimised away -- it was the array.
+- The float32 scratch holding every blended sample, plus the second pass to
+  quantise it, cost 226 ms and 16 MB. Both are gone: every blended value is
+  `b + f * (h - b)` with `f` in [0, 1], so it lies on the segment between the two
+  surfaces and the range is *bounded* by the union of theirs. Scanning the source
+  window (~635^2 for l13) gives that bound cheaply, and the loop quantises inline.
+  The bound is wider than the truth, so the step is coarser: 7.98 cm against
+  6.06 cm, still well inside the 14.5 cm the base scale imposed.
+
+Note for the original question, which was whether a web worker and a piece of
+wasm would help as they do for the `.dem` tiles: the viewer already ships as
+wasm (`viewel.bc.wasm.js`, `wasm_of_ocaml`), so there is no "move it into wasm"
+win to be had -- blend was always wasm. The existing worker is JS (`(modes js)`)
+and gets its speed from hand-written SIMD `.wat`, so moving this float-heavy loop
+into it as-is could be slower.
+
+Still available, in order of value:
+
+- **Offload to a worker for latency, not throughput.** ~830 ms still runs on the
+  main thread before the location can be published. Each blend reads only a
+  *window* of its source -- ~635^2 samples (0.8 MB) for l13 over the base, ~512^2
+  for the rings over their predecessor -- so the transfer is small; there is no
+  need to ship the 32 MB base tile. The worker would have to be built to wasm
+  (`(modes js wasm)`) or the loop written as `.wat`, or it will lose more than it
+  gains.
+- **The remaining resample cost is Bigarray too**: 4M reads of `src` (float32)
+  and 8M writes of `out` (int8). Removing those needs a bulk Bytes-to-Bigarray
+  path or hand-written wat with SIMD.
