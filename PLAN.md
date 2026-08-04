@@ -2160,11 +2160,58 @@ interpolation it skips is four loads and three flops from a 5 kB `rowv` that is
 L1-resident throughout, which is nearly free, while the per-sample branch it adds
 divides the loop body into two divergent paths and costs more than that. Reverted.
 
-**The way to have it both ways** is to hoist the branch out of the inner loop
-entirely rather than test per sample. `edge_x[j] >= 1` holds on one contiguous
-column range `[flo, fhi]` (the array is unimodal), and `edge_y >= 1` is a
-per-row scalar, so a row that is vertically interior and clear of the nodata box
-splits into three spans -- slow, fast, slow -- each a branch-free loop. That
-needs the per-row state (`src_row`, `dst`, `edge_y`) lifted into globals so two
-span functions can share it, which is a moderate restructuring of the wat, for a
-predicted 15-20% of the blend. Not attempted.
+**Hoisting the branch out of the inner loop does work**, and by more than
+predicted -- see the next section. The interior samples were never the problem;
+deciding per sample that they were interior was.
+
+## Column spans instead of a per-sample test: -31% (2026-08-04)
+
+The rejected version above asked, for every sample, "is the refinement fully
+faded in here?". This one answers that per *row*, once, and then runs two
+branch-free loops.
+
+`edge_x` rises and then falls, so the columns where the edge fade is complete
+form one contiguous range `[flo, fhi]`, computed once per call. `edge_y >= 1` is
+a per-row scalar. And when the block holds nodata, a row outside the rows of the
+box the distance transform wrote has distance 255 at every sample -- hence a
+complete nodata fade -- and contains no nodata sample itself, both because every
+nodata sample is inside that box. So a row meeting all three conditions splits
+into `slow(0, flo-1)`, `fast(flo, fhi)`, `slow(fhi+1, last)`.
+
+The fast span is three instructions of real work per sample: load the f32,
+quantise, store. No interpolation of the surface beneath, no `edge_x` load, no
+`min`, no nodata test, no `smoothstep`. The per-row state (`src_row`, `dst`,
+`edge_y`) moved into globals so the two span functions can share it.
+
+Within-process minima of ten calls on identical data, three interleaved rounds,
+only `blend.wasm` swapped:
+
+| ring | box only | spans | |
+| --- | --- | --- | --- |
+| l13 2048^2 | 54.6 | **36.8** | -33% |
+| 4.77 m 1024^2 | 22.1 | **16.2** | -27% |
+| 2.38 m 1024^2 | 15.8 | **10.5** | -34% |
+| total | 92.5 | **63.5** | -31% |
+
+Byte-identical to `Blend_core` on all nine blends of the three views, and RMSE
+exactly 0 against the previous `blend.wasm`.
+
+So the interior samples were never the problem -- deciding per sample that they
+were interior was. Same arithmetic, same skipped work, 30% instead of -25%.
+
+### Where the blend stands now
+
+The l13 blend over the base tile, at Mont Blanc, across this session:
+
+| | ms |
+| --- | --- |
+| OCaml, Bigarray scratch (before 2026-08-04) | 1452 |
+| OCaml, `Bytes` scratch + bounded output range | 714 |
+| wat on linear memory | ~240 |
+| + distance transform bounded to the nodata box | ~54 |
+| + column spans | **~37** |
+
+Remaining, in order: the `scan` phase (~11 ms of the 37, a clean f32x4 candidate
+that stays bit-identical), then the `slow` spans and the range scan. The 13 ms of
+copying in and out is now a third of the total rather than a tenth, but the
+lifetime and memory costs of removing it have not changed.

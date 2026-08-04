@@ -29,6 +29,22 @@
   (global $g_hs (mut f64) (f64.const 0))
   (global $g_ho (mut f64) (f64.const 0))
 
+  ;; What the two span functions below need: everything the innermost loop reads,
+  ;; the last three re-set on every output row.
+  (global $g_samples (mut i32) (i32.const 0))
+  (global $g_dist (mut i32) (i32.const 0))
+  (global $g_bx (mut i32) (i32.const 0))
+  (global $g_fx (mut i32) (i32.const 0))
+  (global $g_ex (mut i32) (i32.const 0))
+  (global $g_rv (mut i32) (i32.const 0))
+  (global $g_nodata (mut i32) (i32.const 0))
+  (global $g_fade_nd (mut f64) (f64.const 0))
+  (global $g_out_ho (mut f64) (f64.const 0))
+  (global $g_inv (mut f64) (f64.const 0))
+  (global $g_src_row (mut i32) (i32.const 0))
+  (global $g_dst (mut i32) (i32.const 0))
+  (global $g_edge_y (mut f64) (f64.const 0))
+
   ;; The refinement-to-source mapping.
   (global $g_px (mut f64) (f64.const 0))
   (global $g_spx (mut f64) (f64.const 0))
@@ -80,6 +96,97 @@
     (f64.mul (f64.mul (local.get $t) (local.get $t))
              (f64.sub (f64.const 3)
                       (f64.mul (f64.const 2) (local.get $t))))
+  )
+
+  ;; Quantise one blended height into the output's own u16 scale.
+  (func $quantise (param $v f64) (result i32)
+    (local $q i32)
+    (local.set $q (i32.trunc_sat_f64_s
+      (f64.add (f64.mul (f64.sub (local.get $v) (global.get $g_out_ho))
+                        (global.get $g_inv))
+               (f64.const 0.5))))
+    (if (i32.lt_s (local.get $q) (i32.const 0))
+      (then (local.set $q (i32.const 0))))
+    (if (i32.gt_s (local.get $q) (i32.const 65535))
+      (then (local.set $q (i32.const 65535))))
+    (local.get $q)
+  )
+
+  ;; Columns [$j0, $j1] of the current row, in the general case: interpolate the
+  ;; surface beneath, work out how far the refinement has faded in, mix.
+  (func $span_slow (param $j0 i32) (param $j1 i32)
+    (local $j i32) (local $rk i32) (local $a f64) (local $bh f64)
+    (local $h f64) (local $t f64) (local $vf f64)
+    (local.set $j (local.get $j0))
+    (block $done
+      (br_if $done (i32.gt_s (local.get $j) (local.get $j1)))
+      (loop $col
+        (local.set $rk (i32.add (global.get $g_rv)
+          (i32.shl (i32.load (i32.add (global.get $g_bx)
+                               (i32.shl (local.get $j) (i32.const 2))))
+                   (i32.const 3))))
+        (local.set $a (f64.load (local.get $rk)))
+        (local.set $bh (f64.add (local.get $a)
+          (f64.mul (f64.load (i32.add (global.get $g_fx)
+                               (i32.shl (local.get $j) (i32.const 3))))
+                   (f64.sub (f64.load offset=8 (local.get $rk))
+                            (local.get $a)))))
+        (local.set $h (f64.promote_f32
+          (f32.load (i32.add (global.get $g_samples)
+                      (i32.shl (i32.add (global.get $g_src_row) (local.get $j))
+                               (i32.const 2))))))
+        (if (f64.lt (local.get $h) (f64.const -500))
+          (then (local.set $vf (local.get $bh)))
+          (else
+            (local.set $t (f64.min
+              (f64.load (i32.add (global.get $g_ex)
+                          (i32.shl (local.get $j) (i32.const 3))))
+              (global.get $g_edge_y)))
+            (if (global.get $g_nodata)
+              (then
+                (local.set $t (f64.min (local.get $t)
+                  (f64.div
+                    (f64.convert_i32_u (i32.load8_u
+                      (i32.add (global.get $g_dist)
+                        (i32.add (global.get $g_src_row) (local.get $j)))))
+                    (global.get $g_fade_nd))))))
+            (local.set $vf (f64.add (local.get $bh)
+              (f64.mul (call $smoothstep (local.get $t))
+                       (f64.sub (local.get $h) (local.get $bh)))))))
+        (i32.store16 (i32.add (global.get $g_dst)
+                       (i32.shl (local.get $j) (i32.const 1)))
+                     (call $quantise (local.get $vf)))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br_if $col (i32.le_s (local.get $j) (local.get $j1)))))
+  )
+
+  ;; Columns [$j0, $j1] of a row where the refinement is known to be fully faded
+  ;; in and free of nodata, so the blended value is the refinement itself: no
+  ;; interpolation of the surface beneath, no fade, no nodata test. The caller
+  ;; establishes all three preconditions per row, which is what keeps this loop
+  ;; branch-free -- testing them per sample costs more than the work it saves,
+  ;; measured (see PLAN.md).
+  ;;
+  ;; This is the one place the wat is not *provably* identical to the OCaml,
+  ;; which computes b + 1.0 * (h - b) and gets h only up to rounding. Sterbenz's
+  ;; lemma makes it exact whenever b and h are within a factor of two, which any
+  ;; two terrain heights in one block are; verified byte-identical over the
+  ;; pinned views.
+  (func $span_fast (param $j0 i32) (param $j1 i32)
+    (local $j i32)
+    (local.set $j (local.get $j0))
+    (block $done
+      (br_if $done (i32.gt_s (local.get $j) (local.get $j1)))
+      (loop $col
+        (i32.store16 (i32.add (global.get $g_dst)
+                       (i32.shl (local.get $j) (i32.const 1)))
+                     (call $quantise (f64.promote_f32
+                       (f32.load (i32.add (global.get $g_samples)
+                         (i32.shl (i32.add (global.get $g_src_row)
+                                           (local.get $j))
+                                  (i32.const 2)))))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br_if $col (i32.le_s (local.get $j) (local.get $j1)))))
   )
 
   ;; Chessboard distance in texels to the nearest nodata sample, saturated at
@@ -277,6 +384,7 @@
     (local $rk i32) (local $src_row i32) (local $dst i32)
     (local $nr0 i32) (local $nr1 i32) (local $nc0 i32) (local $nc1 i32)
     (local $rr i32) (local $cc i32) (local $rad i32)
+    (local $flo i32) (local $fhi i32) (local $rrow i32)
     (local $lo f64) (local $hi f64) (local $h f64) (local $a f64)
     (local $c f64) (local $bfl f64) (local $cby f64) (local $fy f64)
     (local $edge_y f64) (local $t f64) (local $vf f64) (local $bh f64)
@@ -381,6 +489,14 @@
     (local.set $rv_p (i32.add (local.get $rb_p)
                        (i32.shl (i32.add (local.get $n_cols) (i32.const 1))
                                 (i32.const 3))))
+    (global.set $g_samples (local.get $samples))
+    (global.set $g_dist (local.get $dist))
+    (global.set $g_bx (local.get $bx_p))
+    (global.set $g_fx (local.get $fx_p))
+    (global.set $g_ex (local.get $ex_p))
+    (global.set $g_rv (local.get $rv_p))
+    (global.set $g_nodata (local.get $has_nodata))
+    (global.set $g_fade_nd (local.get $fade_nd))
 
     ;; ---- per-column source index, fraction and edge fade
     (local.set $j (i32.const 0))
@@ -433,6 +549,24 @@
     (local.set $hs (f64.max (f64.const 1e-6)
       (f64.div (f64.sub (local.get $hi) (local.get $lo)) (f64.const 65535))))
     (local.set $inv (f64.div (f64.const 1) (local.get $hs)))
+    (global.set $g_out_ho (local.get $ho))
+    (global.set $g_inv (local.get $inv))
+    ;; The columns where the edge fade is complete. [edge_x] rises then falls, so
+    ;; they form one contiguous range; [flo] stays -1 for a block narrower than
+    ;; twice its fade, which then has no fast span at all.
+    (local.set $flo (i32.const -1))
+    (local.set $fhi (i32.const -1))
+    (local.set $j (i32.const 0))
+    (loop $span
+      (if (f64.ge (f64.load (i32.add (local.get $ex_p)
+                             (i32.shl (local.get $j) (i32.const 3))))
+                  (f64.const 1))
+        (then
+          (if (i32.lt_s (local.get $flo) (i32.const 0))
+            (then (local.set $flo (local.get $j))))
+          (local.set $fhi (local.get $j))))
+      (local.set $j (i32.add (local.get $j) (i32.const 1)))
+      (br_if $span (i32.lt_u (local.get $j) (local.get $size))))
 
     ;; ---- resample, fade, quantise
     (local.set $cur_by (i32.const -1))
@@ -491,53 +625,28 @@
       (local.set $dst (i32.add (local.get $out)
                         (i32.shl (i32.mul (local.get $u) (local.get $size))
                                  (i32.const 1))))
-      (local.set $j (i32.const 0))
-      (loop $col_loop
-        (local.set $rk (i32.add (local.get $rv_p)
-          (i32.shl (i32.load (i32.add (local.get $bx_p)
-                               (i32.shl (local.get $j) (i32.const 2))))
-                   (i32.const 3))))
-        (local.set $a (f64.load (local.get $rk)))
-        (local.set $bh (f64.add (local.get $a)
-          (f64.mul (f64.load (i32.add (local.get $fx_p)
-                               (i32.shl (local.get $j) (i32.const 3))))
-                   (f64.sub (f64.load offset=8 (local.get $rk))
-                            (local.get $a)))))
-        (local.set $h (f64.promote_f32
-          (f32.load (i32.add (local.get $samples)
-                      (i32.shl (i32.add (local.get $src_row) (local.get $j))
-                               (i32.const 2))))))
-        (if (f64.lt (local.get $h) (f64.const -500))
-          (then (local.set $vf (local.get $bh)))
-          (else
-            (local.set $t (f64.min
-              (f64.load (i32.add (local.get $ex_p)
-                          (i32.shl (local.get $j) (i32.const 3))))
-              (local.get $edge_y)))
-            (if (local.get $has_nodata)
-              (then
-                (local.set $t (f64.min (local.get $t)
-                  (f64.div
-                    (f64.convert_i32_u (i32.load8_u
-                      (i32.add (local.get $dist)
-                        (i32.add (local.get $src_row) (local.get $j)))))
-                    (local.get $fade_nd))))))
-            (local.set $vf (f64.add (local.get $bh)
-              (f64.mul (call $smoothstep (local.get $t))
-                       (f64.sub (local.get $h) (local.get $bh)))))))
-        (local.set $q (i32.trunc_sat_f64_s
-          (f64.add (f64.mul (f64.sub (local.get $vf) (local.get $ho))
-                            (local.get $inv))
-                   (f64.const 0.5))))
-        (if (i32.lt_s (local.get $q) (i32.const 0))
-          (then (local.set $q (i32.const 0))))
-        (if (i32.gt_s (local.get $q) (i32.const 65535))
-          (then (local.set $q (i32.const 65535))))
-        (i32.store16 (i32.add (local.get $dst)
-                       (i32.shl (local.get $j) (i32.const 1)))
-                     (local.get $q))
-        (local.set $j (i32.add (local.get $j) (i32.const 1)))
-        (br_if $col_loop (i32.lt_u (local.get $j) (local.get $size))))
+      (global.set $g_src_row (local.get $src_row))
+      (global.set $g_dst (local.get $dst))
+      (global.set $g_edge_y (local.get $edge_y))
+      ;; Split the row where the refinement is known to stand on its own:
+      ;; vertically past the edge fade, and -- when the block holds nodata at all
+      ;; -- outside the rows of the box the distance transform wrote, so that
+      ;; every sample in this row has distance 255, hence a complete nodata fade,
+      ;; and none of them is nodata itself.
+      (local.set $rrow (i32.sub (local.get $last) (local.get $u)))
+      (if (i32.and
+            (i32.and (f64.ge (local.get $edge_y) (f64.const 1))
+                     (i32.ge_s (local.get $flo) (i32.const 0)))
+            (i32.or (i32.eqz (local.get $has_nodata))
+                    (i32.or (i32.lt_s (local.get $rrow) (local.get $nr0))
+                            (i32.gt_s (local.get $rrow) (local.get $nr1)))))
+        (then
+          (call $span_slow (i32.const 0)
+                           (i32.sub (local.get $flo) (i32.const 1)))
+          (call $span_fast (local.get $flo) (local.get $fhi))
+          (call $span_slow (i32.add (local.get $fhi) (i32.const 1))
+                           (local.get $last)))
+        (else (call $span_slow (i32.const 0) (local.get $last))))
       (local.set $u (i32.add (local.get $u) (i32.const 1)))
       (br_if $row_loop (i32.lt_u (local.get $u) (local.get $size))))
 
