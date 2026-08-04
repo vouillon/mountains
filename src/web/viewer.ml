@@ -3500,23 +3500,33 @@ let in_range ~size ~lat ~lon =
   || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:54
        ~max_lon:57 ~lat ~lon
 
-(* Rectangles the map picker confines itself to: the boxes above, shrunk by the
-   half extent [in_range] requires around a position (0.57 degrees at
-   size = 4096), intersected with where the IGN basemap and its relief shading
-   actually have tiles. That coverage is roughly France-shaped -- a buffer into
-   Italy is served, Switzerland past the border is not -- so it takes a rectangle
-   per area rather than one overall, and they are deliberately conservative: a
-   position the picker offers must be one the renderer can load, hence a strict
-   subset of [in_range], which stays the authority. Measured by probing the
-   service on a grid, so extend them if IGN extends coverage.
+(* Rectangles the map picker confines itself to: what the renderer can load,
+   which is the boxes above shrunk by the half extent [in_range] requires around
+   a position (0.57 degrees at size = 4096). Deliberately not the basemap's own
+   extent.
 
-   Left out: the latitudes above 46 around Lake Geneva and the Jura, which the
-   basemap only serves west of longitude 7 and so cannot share a rectangle with
-   the eastern Alps; and Corsica, where the elevation boxes begin at 42.57 and so
-   already exclude the whole spine -- Monte Cinto is at 42.38 -- leaving a
-   northern tip not worth a region of its own. La Reunion is narrowed to the
-   island, the basemap reaching to lat -20.65 and lon 54.90 .. 56.10 over open
-   ocean.
+   An earlier version did clip to the basemap, measured by probing it on a grid,
+   and that was a mistake twice over. The extent is roughly France-shaped, so no
+   rectangle describes it: the grid had to be read conservatively, and doing that
+   at a quarter of a degree cut off the whole Marseille-to-Toulon coast -- the
+   Calanques included -- because the row below it sampled open sea. Worse, the
+   extent shrinks as the zoom deepens, a nested set from about everything at
+   level 10 down to little past the border at 18: longitude 7.4 at latitude 44.6
+   has tiles at level 13 and none at 14, and 7.0 lasts until 18. The picker spans
+   levels 9 to 18, so a rectangle fitted to any one of them is wrong at the rest,
+   and the one fitted at level 12 was both too small in the south and too large
+   in the east.
+
+   Where the basemap has nothing the tiles simply do not appear, which is already
+   handled, so nothing is lost by letting the map reach there; and the elevation
+   is global, so the terrain does load in Switzerland and Italy even though the
+   land cover and the near-field refinement stop at the border. The dimming
+   therefore marks where a location can be loaded, which is the only limit the
+   user cannot work around, and it needs no measuring to stay true.
+
+   La Reunion is still narrowed, to the island rather than the 3 by 2 degrees of
+   ocean the elevation box covers, for a different reason: not coverage but that
+   opening on a hundred kilometres of empty sea helps nobody.
 
    The view points are where each region opens, the Ecrins and the Piton des
    Neiges: a rectangle bounding an irregular coast has much of its area at sea,
@@ -3524,11 +3534,13 @@ let in_range ~size ~lat ~lon =
 let map_regions =
   [
     {
+      (* The elevation box inset, with a couple of arcseconds to spare so a
+         boundary position cannot fall foul of [in_range]'s flooring. *)
       Map_picker.name = "Alps";
-      min_lat = 43.25;
-      max_lat = 46.00;
-      min_lon = 4.60;
-      max_lon = 8.25;
+      min_lat = 42.58;
+      max_lat = 46.42;
+      min_lon = 4.58;
+      max_lon = 9.42;
       view_lat = 44.85;
       view_lon = 6.35;
     };
