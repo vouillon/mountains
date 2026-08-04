@@ -2869,6 +2869,19 @@ let update_gpx_path ctx ~radial_params =
    avoid. *)
 let hd_grace_s = 1.5
 
+(* Radius, in metres, of the terrain the eye must clear. The eye sits 2 m above
+   the surface, which was safe while the finest grid under it was l13's 9.5 m:
+   the surface barely varies within a couple of metres at that spacing. At the
+   2.38 m ring it varies by more, so an eye placed 2 m above a single bilinear
+   sample can end up *inside* a boulder or a moraine lip beside the anchor.
+
+   That is not only a rendering artefact. [Visibility.test_precise] starts its
+   finely-stepped phase at the source, so terrain standing above the eye there
+   makes it report every POI hidden -- the labels vanish wholesale rather than
+   degrade. Taking the highest sample within this radius, instead of the
+   interpolated value at one point, keeps the eye above its own surroundings. *)
+let eye_clearance_m = 4.
+
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
@@ -3070,7 +3083,37 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let h11 = get_h (by + 1) (bx + 1) in
             let h0 = h00 +. (fx *. (h10 -. h00)) in
             let h1 = h01 +. (fx *. (h11 -. h01)) in
-            Some (h0 +. (fy *. (h1 -. h0)))
+            let interpolated = h0 +. (fy *. (h1 -. h0)) in
+            (* Then lift to clear the neighbourhood: see [eye_clearance_m]. The
+               window always contains the four samples the interpolation used, so
+               this can only raise the eye, never lower it into the ground. *)
+            let mx = deltax *. g.layer.px_arcsec
+            and my = deltay *. g.layer.px_arcsec in
+            let rx = int_of_float (ceil (eye_clearance_m /. mx))
+            and ry = int_of_float (ceil (eye_clearance_m /. my)) in
+            let highest = ref interpolated in
+            for j = max 0 (by - ry) to min (g.layer.size - 1) (by + 1 + ry) do
+              for i = max 0 (bx - rx) to min (g.layer.size - 1) (bx + 1 + rx) do
+                (* Test true distance, not a sample count: at a spacing coarser
+                   than the clearance the window would otherwise reach tens of
+                   metres out and snap the eye to the highest point around,
+                   which on a summit dome is metres above where one stands. *)
+                let dx = (float i -. gx) *. mx
+                and dy = (float j -. gy) *. my in
+                if
+                  ((i = bx || i = bx + 1) && (j = by || j = by + 1))
+                  || (dx *. dx) +. (dy *. dy)
+                     <= eye_clearance_m *. eye_clearance_m
+                then begin
+                  let h = get_h j i in
+                  if h > !highest then highest := h
+                end
+              done
+            done;
+            if !highest > interpolated then
+              Format.eprintf "eye: %.2f m -> %.2f m (+%.2f) on a %.2f m grid@."
+                interpolated !highest (!highest -. interpolated) mx;
+            Some !highest
           end
           else None
         in
