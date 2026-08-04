@@ -1702,9 +1702,26 @@ grazing-forest views (see [[headless-verification-rig]]):
   drops the whole ring -- hit twice during testing. It falls back to l13 cleanly,
   but 2x2 requests of 512^2 would be the same bytes with graceful degradation,
   reusing the partial-block path the WMTS path already has.
-- What `MIXED` returns outside LIDAR HD coverage: if it falls back to RGE ALTI,
-  a 2.38 m request there is nearest-neighbour replication of the 4.77 m grid.
-  The within-block-spread check is cheap enough to run on the fetched grid and
-  drop the ring when it trips. Ring 1 is unaffected -- RGE ALTI is genuine at
-  4.77 m.
+- ~~What `MIXED` returns outside LIDAR HD coverage~~ **CLOSED (2026-08-04).** The
+  guard is not worth building. Coverage is essentially complete across the Alps,
+  and probing the ring bbox at the other extremes of the data footprint returns
+  genuine sub-5 m data everywhere tried -- Monte Cinto in Corsica, and Le Maïdo
+  and Piton des Neiges on Réunion, i.e. the overseas département, which was the
+  least likely to be covered:
+
+  | site | detail beyond its own 2x decimation | autocorrelation, lags 1..8 |
+  | --- | --- | --- |
+  | Plateau d'Emparis | 0.630 m RMS | 0.58 0.23 0.13 0.08 ... |
+  | Monte Cinto | 0.944 m | 0.56 0.21 0.11 0.08 ... |
+  | Le Maïdo | 0.555 m | 0.47 0.09 0.00 0.01 ... |
+  | Piton des Neiges | 1.115 m | 0.55 0.14 0.04 0.02 ... |
+
+  Monotonic decay at every site and no nodata, against RGE ALTI's replication
+  signature of 0.975 / 0.936 / 0.907 at lags 4, 8, 12. Note the distinction that
+  makes this less alarming than it looked: that replication came from requesting
+  the *RGE ALTI layer* below its native level, not from `MIXED`. Where `MIXED`
+  lacks LIDAR it most likely returns nodata, which `blend` already fades into
+  ring 1. Only 64/64 distinct values along a row would not have been enough to
+  conclude this -- a smooth upsample passes that test, which is why the
+  autocorrelation is the one to run.
 - Per-layer height scale (above), as cleanup.
