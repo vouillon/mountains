@@ -2249,3 +2249,70 @@ What that leaves, if the blend needs to be faster again: the `slow` spans (still
 the largest phase), or moving the whole thing off the main thread -- which buys
 latency rather than throughput, and is still blocked on `chain` being called from
 a synchronous publish block.
+
+## Visibility: where its 800 ms goes (2026-08-04)
+
+Now the largest per-location cost -- bigger than the blend, and it runs once per
+publish, so up to three times since rings publish independently. Measured at Mont
+Blanc with step counters in the march:
+
+| | |
+| --- | --- |
+| rays (POIs within 70 km) | 4813 |
+| near-phase steps (fixed 0.02 px over the first 6 px) | 877771 |
+| adaptive-phase steps | 950598 |
+| handovers to the Bresenham walk | 2689 |
+| total | ~1.83M steps in ~800 ms |
+
+So **~440 ns per step**, and the near phase -- 182 steps per ray on average, out
+of a fixed 300 -- is 48% of them.
+
+### Rejected: removing the per-step allocations
+
+Each step allocated a `float option` per refinement consulted (`sample`) plus a
+tuple (`terrain_at` returning height and step floor). Two million steps, so
+several million allocations. Replacing the option with a `nan` sentinel and the
+tuple with an out-parameter is **behaviour-identical** -- step counts matched to
+the digit, 877771/950598/2689, and the same 1608 POIs kept -- but **not faster**.
+Five paired rounds, only the two builds swapped, gave ratios 0.92, 0.54, 0.99,
+1.39, 0.88: no effect above a noise floor of +/-2x. Reverted.
+
+Two things worth keeping from the attempt:
+
+- **`float ref` boxes.** The first version held the step floor in a `float ref`,
+  which was *reliably slower* than the tuple it replaced (ratios 1.21, 1.16,
+  1.27). `ref` is polymorphic, so its field cannot be unboxed and every
+  assignment allocates a boxed float. A one-field `{ mutable f : float }` record
+  is flat and does not.
+- **`Float.is_nan` is a call.** Inlining it as `h <> h` moved the ratios from
+  mostly above 1 to mostly below it -- suggestive, though still inside the noise.
+
+### What to try instead: bound the near phase instead of walking it
+
+The near phase walks 6 px at 0.02 px for *every* ray, unconditionally, because
+`max_slope` is not a valid bound a few metres from the eye. But whether it can
+reject at all is decidable in advance. Rejection at parameter `t` means
+`terrain(t) - src_h - 0.1 > rise * t`, so with
+
+    bound = max over the near disc of (terrain(p) - src_h - 0.1) / t(p)
+
+any ray with `rise >= bound` provably cannot be rejected in the near phase and
+can jump straight to `t = near_distance`. Computing it over grid *cells* rather
+than along rays makes it conservative -- a bilinear sample never exceeds its
+cell's corners -- so verdicts cannot change, only the step count falls.
+
+One sweep of the cells within 6 px of the observer, over each grid: ~32k cells
+per location, once. On a summit the bound is roughly the local slope angle, so
+rays to anything on the horizon skip the phase entirely; rays into a nearby wall
+do not, and would have rejected in a few steps anyway. Per-sector bounds (say 64
+azimuth sectors) would recover the cases where one steep neighbour raises the
+global bound for every direction.
+
+The same reasoning applies to the adaptive phase, whose floor step inside the l13
+ring is 0.1545 px (4.8 m), so a grazing ray can take ~2000 steps there; the lever
+there is a max-height pyramid to skip open air, which is a bigger change.
+
+Also cheap and not yet done: `near_step` is 0.02 px, but the finest ring's own
+`step` floor is 0.0386 px (half of 2.38 m). By the argument already used for
+`base_step` -- sampling a bilinear surface finer than half a cell adds nothing --
+the near phase is walked about twice as finely as any data justifies.
