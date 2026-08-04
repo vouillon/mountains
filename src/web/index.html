@@ -795,9 +795,108 @@
   <!-- GPX Manager Script -->
   <script>
     (function() {
-      const STORAGE_KEY = 'mountains_gpx_traces_v1';
       // Kept in sync with [share_cache_name] in service_worker.ml.
       const SHARE_CACHE_NAME = 'shared-gpx';
+
+      // Traces used to live in localStorage, which is the wrong home for them: a
+      // watch-recorded hike runs to megabytes against a quota of about five, the
+      // whole list was re-serialised on every toggle, and going over the limit
+      // threw where it was only logged -- the trace stayed on screen and was
+      // gone on the next load. A database has room, keeps each trace as its own
+      // record, and reports a failure to write rather than swallowing it.
+      const DB_NAME = 'mountains_gpx';
+      const DB_STORE = 'traces';
+      // The old key, read once to move what is in it and then dropped.
+      const LEGACY_KEY = 'mountains_gpx_traces_v1';
+      // A trace shipped with an early version, which [load] has always discarded.
+      const RETIRED_ID = 'default_ceillac';
+
+      const requestAsPromise = (request) =>
+        new Promise((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+
+      function openTraceDb() {
+        return new Promise((resolve, reject) => {
+          if (!window.indexedDB) {
+            reject(new Error('indexedDB unavailable'));
+            return;
+          }
+          const request = indexedDB.open(DB_NAME, 1);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) {
+              db.createObjectStore(DB_STORE, { keyPath: 'id' });
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+          request.onblocked = () => reject(new Error('indexedDB blocked'));
+        });
+      }
+
+      function databaseTraces(db) {
+        const store = (mode) =>
+          db.transaction(DB_STORE, mode).objectStore(DB_STORE);
+        return {
+          kind: 'indexeddb',
+          readAll: () => requestAsPromise(store('readonly').getAll()),
+          write: (trace) => requestAsPromise(store('readwrite').put(trace)),
+          remove: (id) => requestAsPromise(store('readwrite').delete(id)),
+        };
+      }
+
+      // The same three operations over the old store, for a browser that will not
+      // open a database at all: the whole list in one string, as before. Kept so
+      // that this change cannot make persistence worse than it was.
+      function legacyTraces() {
+        const readAll = () => {
+          try {
+            return JSON.parse(localStorage.getItem(LEGACY_KEY) || '[]');
+          } catch (e) {
+            return [];
+          }
+        };
+        const writeAll = (traces) =>
+          localStorage.setItem(LEGACY_KEY, JSON.stringify(traces));
+        return {
+          kind: 'localstorage',
+          readAll: async () => readAll(),
+          write: async (trace) =>
+            writeAll([...readAll().filter(t => t.id !== trace.id), trace]),
+          remove: async (id) => writeAll(readAll().filter(t => t.id !== id)),
+        };
+      }
+
+      // Moved, not asked for again: what is in the old store is written to the
+      // database and only then forgotten, so a failure half way leaves the old
+      // copy to be found on the next run.
+      async function openTraceStorage() {
+        let storage;
+        try {
+          storage = databaseTraces(await openTraceDb());
+        } catch (e) {
+          console.error('Keeping GPX traces in localStorage:', e);
+          return legacyTraces();
+        }
+        try {
+          const legacy = localStorage.getItem(LEGACY_KEY);
+          if (legacy) {
+            const known = new Set((await storage.readAll()).map(t => t.id));
+            const moving = JSON.parse(legacy)
+              .filter(t => t && t.id && t.id !== RETIRED_ID && !known.has(t.id));
+            for (const trace of moving) await storage.write(trace);
+            localStorage.removeItem(LEGACY_KEY);
+            if (moving.length) {
+              console.log(`Moved ${moving.length} GPX trace(s) into the database`);
+            }
+          }
+        } catch (e) {
+          console.error('Could not move GPX traces into the database:', e);
+        }
+        return storage;
+      }
 
       function escapeHtml(str) {
         return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1095,33 +1194,51 @@
           this.traces = [];
           // The trace whose deletion is waiting on an answer, if any.
           this.confirmingId = null;
-          this.load();
+          // Reading a database is asynchronous, so the panel is built empty and
+          // filled when the traces arrive. Everything that adds or changes one
+          // waits on this first: a share drained before the read finished would
+          // otherwise be dropped by it.
+          this.ready = this.load();
           this.setupUI();
           this.setupEvents();
+          // Synchronous, and it has to stay that way: the viewer looks for the
+          // globals it sets before this script has done anything else.
           this.setupWebAPIs();
           this.updateMap();
         }
 
-        load() {
+        async load() {
           try {
-            const stored = localStorage.getItem(STORAGE_KEY);
-            if (stored) {
-              this.traces = JSON.parse(stored).filter(trace => trace.id !== 'default_ceillac');
-              this.save();
-            } else {
-              this.traces = [];
-            }
+            this.storage = await openTraceStorage();
+            this.traces = (await this.storage.readAll())
+              .filter(trace => trace && trace.id !== RETIRED_ID);
+            this.renderUI();
+            this.updateMap();
           } catch (e) {
             console.error('Failed to load GPX traces:', e);
             this.traces = [];
           }
         }
 
-        save() {
+        // One record at a time: changing a trace no longer rewrites the others,
+        // and a trace too big for the old store is no longer a problem for them.
+        async save(trace) {
+          if (!this.storage) return false;
           try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(this.traces));
+            await this.storage.write(trace);
+            return true;
           } catch (e) {
-            console.error('Failed to save GPX traces to localStorage:', e);
+            console.error('Failed to save GPX trace:', e);
+            return false;
+          }
+        }
+
+        async forget(id) {
+          if (!this.storage) return;
+          try {
+            await this.storage.remove(id);
+          } catch (e) {
+            console.error('Failed to delete GPX trace:', e);
           }
         }
 
@@ -1147,10 +1264,17 @@
             bearing: summary.bearing
           };
 
+          // Not before the stored traces have arrived, or this one would be lost
+          // when they replace the list.
+          await this.ready;
           this.traces.push(trace);
-          this.save();
           this.renderUI();
           this.updateMap();
+          // Said out loud, unlike the quota error the old store swallowed: a
+          // trace that cannot be written is on screen now and gone tomorrow.
+          if (!(await this.save(trace))) {
+            this.showError(trace.name, 'shown now, but could not be saved');
+          }
           return trace;
         }
 
@@ -1195,7 +1319,7 @@
           const trace = this.traces.find(t => t.id === id);
           if (trace) {
             trace.active = !trace.active;
-            this.save();
+            this.save(trace);
             this.renderUI();
             this.updateMap();
           }
@@ -1204,7 +1328,7 @@
         deleteTrace(id) {
           this.confirmingId = null;
           this.traces = this.traces.filter(t => t.id !== id);
-          this.save();
+          this.forget(id);
           this.renderUI();
           this.updateMap();
         }
