@@ -1867,7 +1867,7 @@ today** (confirmed by the author). That is the whole story:
 
 Note for the original question, which was whether a web worker and a piece of
 wasm would help as they do for the `.dem` tiles: the viewer already ships as
-wasm (`viewel.bc.wasm.js`, `wasm_of_ocaml`), so there is no "move it into wasm"
+wasm (`viewer.bc.wasm.js`, `wasm_of_ocaml`), so there is no "move it into wasm"
 win to be had -- blend was always wasm. The existing worker is JS (`(modes js)`)
 and gets its speed from hand-written SIMD `.wat`, so moving this float-heavy loop
 into it as-is could be slower.
@@ -1884,3 +1884,81 @@ Still available, in order of value:
 - **The remaining resample cost is Bigarray too**: 4M reads of `src` (float32)
   and 8M writes of `out` (int8). Removing those needs a bulk Bytes-to-Bigarray
   path or hand-written wat with SIMD.
+
+## `blend.wat` in the worker — designed, not started (2026-08-04)
+
+Decision taken: do it as hand-written `.wat` **in the worker**, which collects
+both remaining wins at once (linear memory instead of Bigarray, and off the main
+thread). Not started; the 2x above is what is shipped. Written down here so the
+next session begins from a design rather than a blank page.
+
+### Why the worker and not the viewer
+
+`grep -c WebAssembly src/web/viewer.ml` is **0** -- the viewer instantiates no
+wasm module of its own, it *is* one. `worker.ml` already owns the whole pattern:
+
+- a single `WebAssembly.Memory` (`initial 300`, `maximum 4096` pages),
+- `Wasm.get_ba ()`, a Bigarray view over `memory.buffer`, used to place inputs at
+  explicit integer pointers,
+- exported functions called with pointers plus dimensions (`decompress_simd`),
+- results bulk-copied out with `Bigarray.Array1.blit` into a fresh `Brr.Tarray`
+  and transferred.
+
+Adding wasm instantiation to `viewer.ml` instead would get the linear-memory win
+but leave the work on the main thread, which is the larger of the two prizes:
+~830 ms currently runs before the location can be published.
+
+### What the module has to carry
+
+The worker is `(modes js)`, so the wat must contain the entire hot path, not just
+a kernel. All three phases of `blend`:
+
+1. the nodata scan over the raw samples,
+2. the two-sweep chamfer distance transform (already `Bytes`, so this is a
+   straight port -- and the 824 -> 115 ms measurement above is exactly the win
+   this phase already banked, i.e. do not expect a second one here),
+3. resample + fade + inline quantise, which is where the remaining ~450 ms sits.
+
+### The data actually moves cheaply
+
+The reason this is worth doing at all: **each blend reads only a window of its
+source.** ~635^2 samples for l13 over the base, ~512^2 for the rings over their
+predecessor. The 32 MB base tile never needs transferring.
+
+Both sides are already byte arrays, which makes the marshalling nearly free:
+
+- `Dem_loader.t.data` is `int8_unsigned Array2`, rows of `2 * size` bytes,
+  little-endian u16 pairs (`get_height` reads `col*2`, `col*2+1`). Extracting the
+  window is one row-wise blit per row; the wat reads u16 with `i32.load16_u`.
+- the output is the same layout, so what the wat writes copies straight into the
+  texture-upload array with no repacking.
+- only `raw.samples` is float32 (`layer.size^2`), and it comes from the fetch
+  path, so it can be written into linear memory directly rather than copied.
+
+### Pieces to build
+
+- `src/web/blend.wat`, `(import "env" "memory" (memory 1))` like the other two.
+  For scale: `decompress_tile.wat` is 181 lines, `decode_clc.wat` 342.
+- a dune rule mirroring the existing ones:
+  `(run wasm-opt -O4 --enable-simd --enable-bulk-memory %{deps} -o %{target})`.
+- a `Blend` request variant in `Worker_pool` / `worker.ml` alongside `Decode`.
+- `Hd_dem.blend` becomes async: extract the source window (~8 ms of Bigarray
+  reads on the main thread, unavoidable), post, await. `chain` and `publish`
+  already tolerate a late ring, so the call-site change is small.
+
+Rough size: ~300-400 lines of wat, ~100 of plumbing.
+
+### Expected prize
+
+Extrapolating from the one clean measurement of the same swap (the distance
+transform's scratch, 7x on an unchanged algorithm): l13 blend ~714 -> ~250 ms,
+and ~830 ms of total blend time leaves the main thread. Latency, not throughput.
+
+### Verify it offline first
+
+This would be the least verifiable code in the repo -- a pointer slip yields
+silently wrong terrain, not a crash, and this branch has already produced several
+measurement-driven reversals. So: drive `blend.wat` from **Node** against a real
+fetched tile and diff its u16 output byte-for-byte against a reference model of
+the current blend, before any of it touches the app. Only then wire up the
+worker, and gate that step on the usual RMSE-0 capture.
