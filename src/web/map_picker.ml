@@ -95,6 +95,25 @@ let create ~regions ~in_range ~on_select =
   let center_lat = ref 0. and center_lon = ref 0. in
   let zoom = ref 13. in
 
+  (* Where each region was last left. Switching away and back returns to it, and
+     so does closing and reopening the map, which is the whole point: having
+     zoomed in to pick between two cols, coming back to the same place at the
+     same scale is what one expects, not starting over at the region's default.
+
+     Seeded with the region's own view point. Recorded on every render rather
+     than at the exits, so leaving by any route -- a region switch, cancel, a
+     confirmation, a key -- finds the view already written down. *)
+  let saved =
+    List.map (fun r -> (r, ref (r.view_lat, r.view_lon, !zoom))) regions
+  in
+  let saved_of r =
+    (* Physical equality: these are the very records the caller gave, and the
+       ones the region buttons hold. *)
+    match List.assq_opt r saved with
+    | Some slot -> slot
+    | None -> ref (r.view_lat, r.view_lon, !zoom)
+  in
+
   (* Focusable so the map can take the focus off whatever opened it, keeping
      typing out of controls left behind it; [restore_focus] hands it back. *)
   let overlay =
@@ -399,7 +418,11 @@ let create ~regions ~in_range ~on_select =
     El.set_inline_style (Jstr.v "height") (px (Float.max 0. (bb -. bt))) bounds;
 
     El.set_children coord
-      [ El.txt (Jstr.v (Printf.sprintf "%.5f, %.5f" !center_lat !center_lon)) ]
+      [ El.txt (Jstr.v (Printf.sprintf "%.5f, %.5f" !center_lat !center_lon)) ];
+
+    (* After [clamp_view], so what is remembered is a view that can be returned
+       to rather than one the region would immediately pull back. *)
+    saved_of !region := (!center_lat, !center_lon, !zoom)
   in
 
   (* Zoom always keeps the centre fixed, whatever drives it: the crosshair is
@@ -431,22 +454,9 @@ let create ~regions ~in_range ~on_select =
     lat >= r.min_lat && lat <= r.max_lat && lon >= r.min_lon && lon <= r.max_lon
   in
 
-  (* A position inside the region is kept as it is, so switching back and forth
-     costs nothing. One outside it opens at the region's own view point rather
-     than clamped onto the boundary: a rectangle bounding an irregular coast
-     has much of its area at sea, and its middle is not necessarily land. *)
-  let enter r ~lat ~lon =
+  let goto r =
     let switched = !region != r in
     region := r;
-    if contains r lat lon then begin
-      center_lat := lat;
-      center_lon := lon
-    end
-    else begin
-      center_lat := r.view_lat;
-      center_lon := r.view_lon;
-      zoom := 11.
-    end;
     (* Keeping a backdrop across a region switch would leave the Alps showing
        under Reunion: the point of retaining a level is that it shows the same
        ground as the one replacing it. *)
@@ -460,13 +470,43 @@ let create ~regions ~in_range ~on_select =
     render ()
   in
 
+  (* Switching regions returns to wherever that region was last left, scale
+     included. Picking the region already shown restores what is on screen, the
+     view having been recorded by the last render. *)
+  let enter_saved r =
+    let lat, lon, z = !(saved_of r) in
+    center_lat := lat;
+    center_lon := lon;
+    zoom := z;
+    goto r
+  in
+
+  (* Opening the map on a position: that position if the region holds it, else
+     wherever the region was last left -- a rectangle bounding an irregular coast
+     has much of its area at sea, so clamping onto its boundary, or taking its
+     middle, can land in open water. The scale is the region's remembered one
+     either way, so reopening resumes at the scale last used there. *)
+  let enter_at r ~lat ~lon =
+    let slat, slon, z = !(saved_of r) in
+    zoom := z;
+    if contains r lat lon then begin
+      center_lat := lat;
+      center_lon := lon
+    end
+    else begin
+      center_lat := slat;
+      center_lon := slon
+    end;
+    goto r
+  in
+
   List.iter
     (fun (r, btn) ->
       ignore
         (Ev.listen Ev.click
            (fun ev ->
              Ev.stop_propagation ev;
-             enter r ~lat:!center_lat ~lon:!center_lon)
+             enter_saved r)
            (El.as_target btn)))
     region_buttons;
 
@@ -678,10 +718,11 @@ let create ~regions ~in_range ~on_select =
             (fun best r -> if score r < score best then r else best)
             first_region regions
     in
-    zoom := 13.;
     (restore_focus :=
        let active = Jv.get (Jv.get Jv.global "document") "activeElement" in
        if Jv.is_none active then None else Some active);
     El.set_class (Jstr.v "visible") true overlay;
     El.set_has_focus true overlay;
-    enter r ~lat ~lon
+    (* No zoom reset: [enter_at] takes the region's remembered scale, so the map
+       reopens where the last look at that region left off. *)
+    enter_at r ~lat ~lon

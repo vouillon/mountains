@@ -13,9 +13,10 @@ type region = {
   min_lon : float;
   max_lon : float;
   view_lat : float;
-      (** where to open when entering the region with no position of its own: a
+      (** where the region is first shown, for want of anywhere better: a
           rectangle bounding an irregular coast has much of its area at sea, and
-          its middle is not necessarily on land *)
+          its middle is not necessarily on land. Only the starting point --
+          afterwards the region reopens wherever it was last left *)
   view_lon : float;
 }
 (** A rectangle the map is confined to: the centre never leaves it and zooming
@@ -24,8 +25,9 @@ type region = {
 
     Each must lie inside both the elevation coverage and the basemap's. The
     latter is roughly France-shaped -- a buffer into Italy is served,
-    Switzerland beyond the border is not, Corsica is detached -- so one
-    rectangle cannot describe it and several regions are needed. *)
+    Switzerland beyond the border is not, the overseas territories are islands
+    of their own -- so one rectangle cannot describe it and several regions are
+    needed. *)
 
 val create :
   regions:region list ->
@@ -37,6 +39,10 @@ val create :
 (** [create ~regions ~in_range ~on_select] builds the map, appends it to the
     document body hidden, and returns a function that opens it centred on the
     given position, in the region holding it or else the nearest one.
+
+    Each region remembers where it was last left, scale included, so reopening
+    the map or switching back to a region resumes there rather than starting
+    over. Only the centre is overridden on opening, by the position asked for.
 
     [in_range] gates the confirmation as the authority on what the renderer can
     actually load. [regions] are expected to be inside it already, so a
