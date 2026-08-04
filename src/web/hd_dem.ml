@@ -17,14 +17,6 @@ let ( let* ) = Lwt.bind
 (* WGS84G tiles are always 256 x 256 samples, at every matrix level. *)
 let tile_px = 256
 
-(* Anything below this counts as "no data here", which covers two distinct
-   things: IGN answers -9999 for ground outside its coverage -- the part of a
-   border block that lies in Italy or Switzerland, say -- and this module
-   pre-fills a block with -99999 so that a request which never arrives reads the
-   same way. Both are faded back into the surface beneath, so a viewpoint on the
-   frontier and one whose fetch half failed degrade by the same path. *)
-let nodata_limit = -500.
-
 (* One refinement ring. Several can be nested (see PLAN.md), so nothing here is
    a module-level constant any more: every consumer reads the spacing and the
    sample count off the layer that produced the grid it is holding.
@@ -316,6 +308,10 @@ let fetch layer ~lat ~lon : raw option Lwt.t =
   let size = layer.size in
   let origin_x, origin_y, reqs = plan layer ~lat ~lon in
   let full = Brr.Tarray.create Brr.Tarray.Float32 (size * size) in
+  (* Below [Blend_core.nodata_limit], so a request that never arrives reads
+     exactly like ground outside IGN's coverage (which answers -9999): both are
+     faded back into the surface beneath, and a viewpoint on the frontier
+     degrades by the same path as one whose fetch half failed. *)
   Brr.Tarray.fill (-99999.) full;
   let total = List.length reqs in
   (* Counting the tiles that arrived, not the ones that failed: on the timeout
@@ -400,85 +396,6 @@ let fetch layer ~lat ~lon : raw option Lwt.t =
   in
   Lwt.choose [ all; timeout ]
 
-(* Chessboard distance in texels to the nearest nodata sample, saturated at
-   255: two sweeps over the raster. Only built when the patch actually holds
-   nodata, which means a location near the edge of French coverage. *)
-let nodata_distance ~size (src : (float, float32_elt, c_layout) Array1.t) =
-  (* [Bytes] rather than a Bigarray: this is touched some fifty million times
-     over the two sweeps, and Bigarray element access does not compile to a plain
-     load here -- swapping the scratch alone took the transform from 880 ms to a
-     fraction of it on the 2048 block. *)
-  let d = Bytes.make (size * size) '\000' in
-  for i = 0 to size - 1 do
-    let row = i * size in
-    for j = 0 to size - 1 do
-      let v =
-        if Array1.unsafe_get src (row + j) < nodata_limit then 0
-        else begin
-          (* Shadowed lets rather than a [ref] and a [consider] closure: this
-             runs twice over every sample of the block -- four million for
-             [l13] -- and the per-sample allocation dominated the whole blend. *)
-          let m = 255 in
-          let m =
-            if i > 0 then
-              min m (Char.code (Bytes.unsafe_get d (row - size + j)))
-            else m
-          in
-          let m =
-            if i > 0 && j > 0 then
-              min m (Char.code (Bytes.unsafe_get d (row - size + j - 1)))
-            else m
-          in
-          let m =
-            if i > 0 && j < size - 1 then
-              min m (Char.code (Bytes.unsafe_get d (row - size + j + 1)))
-            else m
-          in
-          let m =
-            if j > 0 then min m (Char.code (Bytes.unsafe_get d (row + j - 1)))
-            else m
-          in
-          if m >= 255 then 255 else m + 1
-        end
-      in
-      Bytes.unsafe_set d (row + j) (Char.unsafe_chr v)
-    done
-  done;
-  for i = size - 1 downto 0 do
-    let row = i * size in
-    for j = size - 1 downto 0 do
-      let m0 = Char.code (Bytes.unsafe_get d (row + j)) in
-      if m0 > 0 then begin
-        let m = m0 in
-        let m =
-          if i < size - 1 then
-            min m (Char.code (Bytes.unsafe_get d (row + size + j)) + 1)
-          else m
-        in
-        let m =
-          if i < size - 1 && j > 0 then
-            min m (Char.code (Bytes.unsafe_get d (row + size + j - 1)) + 1)
-          else m
-        in
-        let m =
-          if i < size - 1 && j < size - 1 then
-            min m (Char.code (Bytes.unsafe_get d (row + size + j + 1)) + 1)
-          else m
-        in
-        let m =
-          if j < size - 1 then
-            min m (Char.code (Bytes.unsafe_get d (row + j + 1)) + 1)
-          else m
-        in
-        Bytes.unsafe_set d (row + j) (Char.unsafe_chr m)
-      end
-    done
-  done;
-  d
-
-let smoothstep t =
-  if t <= 0. then 0. else if t >= 1. then 1. else t *. t *. (3. -. (2. *. t))
-
 type t = {
   layer : layer;
   grid : Dem_loader.t;
@@ -544,164 +461,65 @@ let as_source (t : t) =
    Returns [None] when the patch holds no valid sample at all (a location
    outside French coverage), which keeps such locations on the source alone
    rather than on a bilinear upsample of it. *)
+(* The window of [source] that [Blend_core] will read, copied out row by row.
+   Only ~636^2 samples for [l13] over the base -- 0.8 MB against the tile's
+   32 MB -- which is what makes handing the blend to a worker cheap. *)
+let source_window (source : source) (g : Blend_core.geometry) =
+  let bdata = source.src_grid.Dem_loader.data in
+  let stride = g.win_cols * 2 in
+  let win = Array1.create int8_unsigned c_layout (g.win_rows * stride) in
+  for r = 0 to g.win_rows - 1 do
+    Array1.blit
+      (Array1.sub
+         (Array2.slice_left bdata (g.row_lo + r))
+         (g.col_lo * 2) stride)
+      (Array1.sub win (r * stride) stride)
+  done;
+  win
+
 let blend ~lat ~(source : source) (raw : raw) =
   let { px_arcsec; size; fade_metres; _ } = raw.layer in
   let t0 = Brr.(Performance.now_ms G.performance) in
-  let src = raw.samples in
-  let has_nodata = ref false and has_data = ref false in
-  let lo = ref infinity and hi = ref neg_infinity in
-  for i = 0 to (size * size) - 1 do
-    let h = Array1.unsafe_get src i in
-    if h < nodata_limit then has_nodata := true
-    else begin
-      has_data := true;
-      if h < !lo then lo := h;
-      if h > !hi then hi := h
-    end
-  done;
-  if not !has_data then None
-  else begin
-    let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-    let fade_x = fade_metres /. (deltax *. px_arcsec) in
-    let fade_y = fade_metres /. (deltay *. px_arcsec) in
-    let dist = if !has_nodata then Some (nodata_distance ~size src) else None in
-    let fade_nodata = Float.min fade_x fade_y in
-    let bsize = source.src_grid.Dem_loader.size in
-    let bdata = source.src_grid.Dem_loader.data in
-    (* In metres, decoded with the source's own quantisation: the surface beneath
-       may itself be a refinement with a scale of its own. *)
-    let get_base row col =
-      let low = Array2.unsafe_get bdata row (col * 2) in
-      let high = Array2.unsafe_get bdata row ((col * 2) + 1) in
-      (float_of_int ((high lsl 8) lor low) *. source.src_height_scale)
-      +. source.src_height_offset
-    in
-    (* Fine sample [j] sits [raw.origin_x + j * px_arcsec] arcseconds from the
-       anchor; the source's own origin and spacing turn that into a source index.
-       The refinement's samples fall between the source's, at a fixed fractional
-       step, so neither grid need be a power-of-two multiple of the other.
-
-       Written so that the base case is bit-identical to the hardcoded form it
-       replaces: subtracting a negative origin is exactly adding, addition is
-       commutative in IEEE754, the grouping is unchanged, and dividing by a
-       spacing of 1.0 is exact. *)
-    let clamp_base v = Float.max 0. (Float.min (float (bsize - 2)) v) in
-    let index_of origin o j =
-      clamp_base
-        ((o -. origin +. (float j *. px_arcsec)) /. source.src_px_arcsec)
-    in
-    let col_of j = index_of source.src_origin_x raw.origin_x j in
-    let col_lo = int_of_float (floor (col_of 0)) in
-    let col_hi = int_of_float (floor (col_of (size - 1))) + 1 in
-    let n_cols = col_hi - col_lo + 1 in
-    (* Same window on the other axis, for the range scan below. *)
-    let row_of u = index_of source.src_origin_y raw.origin_y u in
-    let row_lo = int_of_float (floor (row_of 0)) in
-    let row_hi = int_of_float (floor (row_of (size - 1))) + 1 in
-    let n_rows = row_hi - row_lo + 1 in
-    let bx = Array.make size 0 and fx = Array.make size 0. in
-    for j = 0 to size - 1 do
-      let c = col_of j in
-      let b = floor c in
-      bx.(j) <- int_of_float b - col_lo;
-      fx.(j) <- c -. b
-    done;
-    (* Range of the output, bounded rather than measured. Every blended value is
-       [b + f * (h - b)] with [f] in [0, 1], so it lies on the segment between the
-       surface beneath and the refinement, hence inside the union of their ranges.
-       Using the bound lets the loop quantise as it goes: measuring the exact
-       range needed a float buffer of every sample (16 MB at 2048) and a second
-       pass over it, which cost more than the resampling itself -- Bigarray access
-       is not compiled to a plain load by wasm_of_ocaml today. The bound is wider
-       than the truth, so the step is coarser -- 7.98 cm against the 6.06 cm an
-       exact range gives for [l13] at Mont Blanc, still well inside the 14.5 cm
-       the base scale imposed. *)
-    let last = bsize - 1 in
-    for j = 0 to n_rows do
-      let rw = min last (row_lo + j) in
-      for i = 0 to n_cols do
-        let b = get_base rw (min last (col_lo + i)) in
-        if b < !lo then lo := b;
-        if b > !hi then hi := b
-      done
-    done;
-    let height_offset = !lo in
-    let height_scale = Float.max 1e-6 ((!hi -. !lo) /. 65535.) in
-    let inv = 1. /. height_scale in
-    let out = Array1.create int8_unsigned c_layout (size * size * 2) in
-    (* One base row pair resampled per base row rather than per sample. *)
-    let rowa = Array.make (n_cols + 1) 0. in
-    let rowb = Array.make (n_cols + 1) 0. in
-    let rowv = Array.make (n_cols + 1) 0. in
-    let cur_by = ref (-1) in
-    (* Per-column edge fade, hoisted out of the inner loop. *)
-    let edge_x = Array.make size 0. in
-    for j = 0 to size - 1 do
-      edge_x.(j) <- float (min j (size - 1 - j)) /. fade_x
-    done;
-    for u = 0 to size - 1 do
-      let cby = index_of source.src_origin_y raw.origin_y u in
-      let by = int_of_float (floor cby) in
-      let fy = cby -. float by in
-      if by <> !cur_by then begin
-        cur_by := by;
-        for k = 0 to n_cols - 1 do
-          rowa.(k) <- get_base by (col_lo + k);
-          rowb.(k) <- get_base (by + 1) (col_lo + k)
-        done
-      end;
-      for k = 0 to n_cols - 1 do
-        rowv.(k) <- rowa.(k) +. (fy *. (rowb.(k) -. rowa.(k)))
-      done;
-      let edge_y = float (min u (size - 1 - u)) /. fade_y in
-      (* Row 0 of the raster is the northernmost one, row 0 of a DEM tile the
-         southernmost. *)
-      let src_row = (size - 1 - u) * size in
-      let dst_row = u * size * 2 in
-      for j = 0 to size - 1 do
-        let k = bx.(j) in
-        let b = rowv.(k) +. (fx.(j) *. (rowv.(k + 1) -. rowv.(k))) in
-        let h = Array1.unsafe_get src (src_row + j) in
-        let v =
-          if h < nodata_limit then b
-          else
-            let t = Float.min edge_x.(j) edge_y in
-            let t =
-              match dist with
-              | None -> t
-              | Some d ->
-                  Float.min t
-                    (float (Char.code (Bytes.unsafe_get d (src_row + j)))
-                    /. fade_nodata)
-            in
-            b +. (smoothstep t *. (h -. b))
-        in
-        let q = int_of_float (((v -. height_offset) *. inv) +. 0.5) in
-        let q = if q < 0 then 0 else if q > 65535 then 65535 else q in
-        Array1.unsafe_set out (dst_row + (2 * j)) (q land 0xff);
-        Array1.unsafe_set out (dst_row + (2 * j) + 1) (q lsr 8)
-      done
-    done;
-
-    Format.eprintf
-      "RGE ALTI blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
-       steps)@."
-      (Brr.(Performance.now_ms G.performance) -. t0)
-      raw.missing (!hi -. !lo) (height_scale *. 100.);
-    Some
-      {
-        layer = raw.layer;
-        grid =
-          {
-            Dem_loader.data = reshape_2 (genarray_of_array1 out) size (size * 2);
-            size;
-          };
-        origin_x = raw.origin_x;
-        origin_y = raw.origin_y;
-        height_scale;
-        height_offset;
-      }
-  end
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let p =
+    {
+      Blend_core.size;
+      px_arcsec;
+      raw_origin_x = raw.origin_x;
+      raw_origin_y = raw.origin_y;
+      src_size = source.src_grid.Dem_loader.size;
+      src_origin_x = source.src_origin_x;
+      src_origin_y = source.src_origin_y;
+      src_px_arcsec = source.src_px_arcsec;
+      src_height_scale = source.src_height_scale;
+      src_height_offset = source.src_height_offset;
+      fade_x = fade_metres /. (deltax *. px_arcsec);
+      fade_y = fade_metres /. (deltay *. px_arcsec);
+    }
+  in
+  let win = source_window source (Blend_core.geometry p) in
+  match Blend_core.run p ~samples:raw.samples ~win with
+  | None -> None
+  | Some { data; height_scale; height_offset; range } ->
+      Format.eprintf
+        "RGE ALTI blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
+         steps)@."
+        (Brr.(Performance.now_ms G.performance) -. t0)
+        raw.missing range (height_scale *. 100.);
+      Some
+        {
+          layer = raw.layer;
+          grid =
+            {
+              Dem_loader.data =
+                reshape_2 (genarray_of_array1 data) size (size * 2);
+              size;
+            };
+          origin_x = raw.origin_x;
+          origin_y = raw.origin_y;
+          height_scale;
+          height_offset;
+        }
 
 (* Warm the persistent cache for offline use, like [Dem_loader.prefetch]: a
    block twice the extent's width centred on the same anchor gives every
