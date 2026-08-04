@@ -1843,6 +1843,11 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
   let text_scale = scale *. !zoom in
+  (* POI labels keep a constant size relative to the smaller canvas dimension.
+     [x_scale] and [y_scale] are both derived from the larger one, so without
+     this correction the labels grow with the width of a landscape window: fine
+     on a phone, oversized on a desktop. *)
+  let text_height = text_height /. max 1. aspect in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
     (* Plane position and silhouette-anchored height are precomputed per
