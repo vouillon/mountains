@@ -3,6 +3,7 @@ module At = Brr.At
 module Ev = Brr.Ev
 
 let pi = 4.0 *. atan 1.0
+let now_ms () = Brr.(Performance.now_ms G.performance)
 
 type region = {
   name : string;
@@ -60,6 +61,12 @@ let tile_url l ~level ~row ~col =
 (* [Ev.error] is typed for the global error event, whose payload is of no use
    here: an image failure only ever needs to be noticed. *)
 let img_error_ev : Ev.void = Ev.Type.create (Jstr.v "error")
+
+(* Time constant of the drag inertia, in milliseconds: the same rate of decay as
+   the terrain viewer's 0.95 per 16.6 ms, written as a time constant because the
+   glide integrates it rather than applying it per frame. A fling therefore
+   travels its release speed times this, about a third of a second's worth. *)
+let glide_tau = -16.6 /. log 0.95
 let px v = Jstr.v (Printf.sprintf "%.2fpx" v)
 let clampf lo hi v = Float.min (Float.max v lo) hi
 let clampi lo hi v = Int.min (Int.max v lo) hi
@@ -112,6 +119,19 @@ let create ~regions ~in_range ~on_select =
     match List.assq_opt r saved with
     | Some slot -> slot
     | None -> ref (r.view_lat, r.view_lon, !zoom)
+  in
+
+  (* Drag inertia, in screen pixels per millisecond. [glide] is a generation: a
+     new gesture bumps it and the running animation sees it no longer owns the
+     map and gives up, which is cheaper to get right than cancelling a frame
+     request. *)
+  let vel_x = ref 0. and vel_y = ref 0. in
+  let last_move_ms = ref 0. in
+  let glide = ref 0 in
+  let stop_glide () =
+    incr glide;
+    vel_x := 0.;
+    vel_y := 0.
   in
 
   (* Focusable so the map can take the focus off whatever opened it, keeping
@@ -425,9 +445,68 @@ let create ~regions ~in_range ~on_select =
     saved_of !region := (!center_lat, !center_lon, !zoom)
   in
 
+  (* Moves the map by a screen-pixel delta, the way dragging it does: divided by
+     the current scale, since that is what stands between screen pixels and the
+     tile level's own. *)
+  let pan_by ~dx ~dy =
+    let level = current_level () in
+    let scale = current_scale () in
+    let cx = lon_to_px ~level !center_lon -. (dx /. scale) in
+    let cy = lat_to_px ~level !center_lat -. (dy /. scale) in
+    center_lon := px_to_lon ~level cx;
+    center_lat := px_to_lat ~level cy
+  in
+
+  let rec glide_step mine prev_t =
+    if mine = !glide then
+      let t = now_ms () in
+      let dt = t -. prev_t in
+      let again t =
+        ignore (Brr.G.request_animation_frame (fun _ -> glide_step mine t))
+      in
+      if dt <= 0. then again prev_t
+      else begin
+        (* Integrate the decay over the frame rather than stepping by v*dt: the
+           exact displacement of v*exp(-t/tau) is v*tau*(1-exp(-dt/tau)), which
+           makes the whole glide cover v0*tau however long the frames turn out to
+           be. Stepping by v*dt instead loses distance as frames lengthen, and a
+           fast fling lengthens them by needing more tiles -- which had the
+           absurd result of a brisk flick gliding less far than a gentle one. *)
+        let decay = exp (-.dt /. glide_tau) in
+        let travel = glide_tau *. (1. -. decay) in
+        let was_lat = !center_lat and was_lon = !center_lon in
+        pan_by ~dx:(!vel_x *. travel) ~dy:(!vel_y *. travel);
+        vel_x := !vel_x *. decay;
+        vel_y := !vel_y *. decay;
+        render ();
+        (* Stopping on "did not move" is what handles the region edge: the clamp
+           in [render] pins the centre there and the fling would otherwise keep
+           running invisibly to its threshold. *)
+        let moved = !center_lat <> was_lat || !center_lon <> was_lon in
+        if moved && (Float.abs !vel_x > 0.01 || Float.abs !vel_y > 0.01) then
+          again t
+        else stop_glide ()
+      end
+  in
+
+  let start_glide () =
+    (* A pointer held still before release must not fling. No move events arrive
+       while it is stationary, so the last velocity measured would be a stale
+       reading of a gesture that had already stopped. *)
+    if
+      now_ms () -. !last_move_ms < 100.
+      && (Float.abs !vel_x > 0.02 || Float.abs !vel_y > 0.02)
+    then begin
+      incr glide;
+      glide_step !glide (now_ms ())
+    end
+    else stop_glide ()
+  in
+
   (* Zoom always keeps the centre fixed, whatever drives it: the crosshair is
      the target being aimed, so anchoring anywhere else would push it off. *)
   let zoom_by delta =
+    stop_glide ();
     zoom := !zoom +. delta;
     render ()
   in
@@ -457,6 +536,8 @@ let create ~regions ~in_range ~on_select =
   let goto r =
     let switched = !region != r in
     region := r;
+    (* A fling in progress belongs to the view being left. *)
+    stop_glide ();
     (* Keeping a backdrop across a region switch would leave the Alps showing
        under Reunion: the point of retaining a level is that it shows the same
        ground as the one replacing it. *)
@@ -529,6 +610,11 @@ let create ~regions ~in_range ~on_select =
          let m = Ev.Pointer.as_mouse p in
          Ev.prevent_default ev;
          Ev.stop_propagation ev;
+         (* Touching the map catches it, as grabbing a spinning thing does. This
+            also clears the velocity, so a pinch -- whose moves never measure one
+            -- cannot be released into a fling left over from an earlier drag. *)
+         stop_glide ();
+         last_move_ms := now_ms ();
          Hashtbl.replace pointers (Ev.Pointer.id p)
            (Ev.Mouse.client_x m, Ev.Mouse.client_y m);
          pinch :=
@@ -559,15 +645,19 @@ let create ~regions ~in_range ~on_select =
                | _ -> ()
                end
              else begin
-               let level = current_level () and scale = current_scale () in
-               let cx =
-                 lon_to_px ~level !center_lon -. ((x -. prev_x) /. scale)
-               in
-               let cy =
-                 lat_to_px ~level !center_lat -. ((y -. prev_y) /. scale)
-               in
-               center_lon := px_to_lon ~level cx;
-               center_lat := px_to_lat ~level cy;
+               let dx = x -. prev_x and dy = y -. prev_y in
+               let t = now_ms () in
+               let dt = t -. !last_move_ms in
+               last_move_ms := t;
+               (* Smoothed over a 50 ms window rather than taken from the last
+                  pair of samples, so an uneven pointer rate does not turn into
+                  an erratic fling. *)
+               if dt > 0. then begin
+                 let a = 1. -. exp (-.dt /. 50.) in
+                 vel_x := (dx /. dt *. a) +. (!vel_x *. (1. -. a));
+                 vel_y := (dy /. dt *. a) +. (!vel_y *. (1. -. a))
+               end;
+               pan_by ~dx ~dy;
                render ()
              end)
        (Brr.Document.as_target Brr.G.document));
@@ -579,7 +669,10 @@ let create ~regions ~in_range ~on_select =
       Hashtbl.remove pointers id;
       (* Dropping to one finger restarts the drag from where it is rather than
          carrying the pinch baseline over. *)
-      if Hashtbl.length pointers < 2 then pinch := None
+      if Hashtbl.length pointers < 2 then pinch := None;
+      (* Only once nothing is touching the map: letting go of one finger of a
+         pinch leaves the other still dragging. *)
+      if Hashtbl.length pointers = 0 then start_glide ()
     end
   in
   ignore
@@ -628,6 +721,9 @@ let create ~regions ~in_range ~on_select =
     El.set_class (Jstr.v "visible") false overlay;
     Hashtbl.reset pointers;
     pinch := None;
+    (* Or the map would still be drifting behind a hidden overlay, and would be
+       found mid-glide on reopening. *)
+    stop_glide ();
     (* Without this the focus would stay on a hidden overlay and the menu behind
        would stop answering its own arrow keys. *)
     Option.iter (fun el -> ignore (Jv.call el "focus" [||])) !restore_focus;
@@ -670,7 +766,10 @@ let create ~regions ~in_range ~on_select =
              let _, vh = viewport_size () in
              vh /. 10. /. current_scale ()
            in
+           (* In tile-level pixels, [step] having already divided by the scale;
+              unlike [pan_by], which takes a pointer's screen delta. *)
            let pan ~dx ~dy =
+             stop_glide ();
              let level = current_level () in
              let cx = lon_to_px ~level !center_lon +. dx in
              let cy = lat_to_px ~level !center_lat +. dy in
