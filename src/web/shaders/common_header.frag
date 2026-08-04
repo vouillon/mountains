@@ -45,10 +45,10 @@ const float TONE_PIVOT_125 = 0.278855; // 0.36^1.25
 // costs one curve instead of three. The sky pays a little for it, coming out a
 // few percent below where it was, its red and green no longer bleached upwards.
 //
-// One thing not to try: AMBIENT_LIGHT does not lift those walls. Between 0.15
-// and 0.28 the Emparis face moves by 0.009, because what actually lights a
-// shaded surface here is the sky reflection folded in through [reflectivity],
-// not the ambient term at all.
+// One thing not to try: the lighting does not lift those walls, so do not go
+// looking for the answer in AMBIENT_LIGHT. Past a few kilometres most of what
+// the eye lands on for a surface that dark is airlight -- around three quarters
+// of it at 5 km -- and that leaves this curve as what decides how they read.
 //
 // Every shader drawing something the eye reads as part of the view has to apply
 // this, and identically: the terrain fades into a horizon the sky shader draws

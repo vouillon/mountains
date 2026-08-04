@@ -371,11 +371,13 @@ uniform vec3 u_zenithColor;
 // it used to be 1 to 1 -- see the ambient term itself, further down, for what
 // that cost.
 //
-// AMBIENT_LIGHT is not the lever it looks like: raising it barely touches the
-// slopes in shade, which the sky reflection in [reflectivity] lights far more
-// than this does. DIRECT_LIGHT is the one that moves them, and it moves them by
-// moving everything the sun reaches instead, so turning it down buys open
-// shadows with relief.
+// AMBIENT_LIGHT is not the lever on shaded ground that it looks like, and the
+// reason lies outside this file: at 5 km the haze puts about 0.015 of airlight
+// in front of a sunless slope that is emitting 0.005 of its own, so three
+// quarters of what the eye lands on there is atmosphere. Taking this from 0.15
+// to 0.25 moves such a slope by 0.015 of the output range and no more.
+// DIRECT_LIGHT does move them, by moving everything the sun reaches instead, so
+// turning it down buys open shadows with relief.
 const float DIRECT_LIGHT = 1.0;
 const float AMBIENT_LIGHT = 0.15;
 
@@ -602,19 +604,39 @@ void main() {
 
   // Store roughness and reflection properties for lighting
   float material_roughness = surface.roughness;
-  float reflectivity = (1.0 - material_roughness) * 0.6; // Smooth = reflective
-
-  // Ice and water get extra reflection
   float iceAmount = surface.detailWeights.a;
-  if (iceAmount > 0.1 || waterMask > 0.1) {
-    reflectivity = max(reflectivity, 0.4);
-  }
+
+  // Only water and ice reflect the sky the way a mirror does, which is what the
+  // [mix] below models: what comes off the surface stands in place of what lies
+  // under it. Land used to be given a share of that too, and it was the wrong
+  // shape twice over -- substituted rather than added, so it carried none of
+  // the material's own colour, and taken from the mirror direction, which on a
+  // steep face is near the zenith and has almost no red in it. It ended up
+  // supplying more than half the light leaving every slope in shade, more than
+  // the ambient term that is meant to carry the sky, so shaded ground lost half
+  // its separation between materials and came out very nearly pure blue. Land
+  // now takes the sky through the ambient term, and reflects on top of it only
+  // what the sheen below adds.
+  float mirror = (iceAmount > 0.1 || waterMask > 0.1) ? 0.4 : 0.0;
+  bool is_mirror = mirror > 0.0;
 
   // === Specular & Environment Reflection ===
   vec3 halfVec = normalize(lightDir + view_dir_n);
 
-  // GGX-inspired specular (simplified)
+  // GGX distribution with a hand-tuned strength in front of it, which is not a
+  // reflectance and does hand a quarter of the light on sunlit rock and grass
+  // -- and two fifths of it on snow -- to a white, view-dependent wash.
+  // Completing it into a BRDF, with the Fresnel and geometry terms it is
+  // missing, was tried and put back: a view down a valley towards the sun is
+  // grazing and backlit at once, and single-scattering GGX answers that with
+  // more sheen than this, not less. It took the specular to nearly half the
+  // light on sunlit ground, and cost snow and rock a tenth of their local
+  // contrast. Capping the Fresnel climb at 1 - roughness, which is the usual
+  // stand-in for the multiple scattering that would damp it, brought the share
+  // back but not the contrast. What is wrong with this term is its shape rather
+  // than its size, and shape is not what the app is short of.
   float NdotH = max(0.0, dot(final_normal, halfVec));
+  float NdotV = max(dot(final_normal, view_dir_n), 1e-3);
   float roughSq = material_roughness * material_roughness;
   float denom = NdotH * NdotH * (roughSq - 1.0) + 1.0;
   float D = roughSq / (3.14159 * denom * denom + 0.0001);
@@ -686,10 +708,9 @@ void main() {
 
   // Fresnel for water
   if (waterMask > 0.01) {
-    float n_dot_v = max(0.0, dot(final_normal, view_dir_n));
     // Schlick's approximation
-    float fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
-    reflectivity = mix(reflectivity, fresnel, waterMask);
+    float fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
+    mirror = mix(mirror, fresnel, waterMask);
     // Removed explicit fog mixing here; let distance fog handle it
     // envColor = mix(envColor, fog_color, waterMask);
   }
@@ -750,7 +771,17 @@ void main() {
   // reflection by the diffuse term, turning grazing lakes muddy, and applied
   // the (already shadowed) specular through the shadowed direct term twice.
   vec3 lit = lighting * terrain_color;
-  lit = mix(lit, envColor * occlusion, reflectivity * reflectDamp);
+  lit = mix(lit, envColor * occlusion, mirror * reflectDamp);
+  // What land returns of the sky: a few percent face-on, rising towards
+  // grazing, and added on top of the material rather than in place of it.
+  // Scaled by AMBIENT_LIGHT because it is the same sky the ambient term carries
+  // and has to stay in proportion to it, and by smoothness because a rough
+  // surface scatters it too wide to show.
+  if (!is_mirror) {
+    float sheen = 0.04 + 0.6 * pow(1.0 - NdotV, 5.0);
+    lit += envColor * occlusion * AMBIENT_LIGHT * sheen *
+           (1.0 - material_roughness);
+  }
   lit += specColor * 0.4;
 
   // === Fog & Haze ===
