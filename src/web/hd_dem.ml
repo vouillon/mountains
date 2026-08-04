@@ -213,7 +213,13 @@ let plan layer ~lat ~lon =
          pitch of [size] over [span], so the pieces tile the same sample grid
          with no resampling and no seam. Each URL is still a deterministic
          function of the corner and the piece, so nearby locations share them and
-         the service worker can now hit on a subset. *)
+         the service worker can now hit on a subset.
+
+         Budget for anyone raising [split] or adding rings: unlike the WMTS, this
+         endpoint *is* rate limited -- over 40 requests in one second and it
+         answers 400 to everything for the next five. A location load spends
+         [split * split] of that allowance, so 4 here against a ceiling of 40.
+         Development 400s came from test traffic outside the app, not from this. *)
       let px = layer.size / split in
       let piece = span /. float split in
       let reqs =

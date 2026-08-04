@@ -1725,3 +1725,36 @@ grazing-forest views (see [[headless-verification-rig]]):
   conclude this -- a smooth upsample passes that test, which is why the
   autocorrelation is the one to run.
 - Per-layer height scale (above), as cleanup.
+
+## Correction: the development HTTP 400s were self-inflicted (2026-08-04)
+
+Commit `82a2203` justifies the 2 x 2 split partly by "the geoplateforme
+intermittently answers HTTP 400 to valid WMS requests under concurrency". That
+reading is wrong and the message should not be trusted on it.
+
+The actual rule: **the WMTS is not rate limited at all**; the WMS endpoint is,
+at 40 requests per second, and exceeding it returns 400 for everything for the
+next five seconds. A location load spends 4 of that allowance -- the four pieces
+of the inner ring -- and the 64 WMTS tiles and the 256-request prefetch spend
+none. The app is nowhere near the ceiling.
+
+The 400s seen while developing came from *test* traffic: this session fired many
+curl bursts at the WMS endpoint (coverage probes, the piece-reassembly check,
+three rounds of latency comparison), and with a five-second penalty window those
+landed on browser runs seconds later. The one run in four that fetched 4/4 was
+simply the one after a pause.
+
+A paced request gate was written and then reverted: at 45/s it would have added
+~1.4 s to every load by spacing 64 exempt tiles, to solve a problem the app does
+not have.
+
+The split itself stands, on the narrower ground it was designed for: it is
+pixel-exact (verified, 0 of 1048576 samples differ against the single request),
+costs the same bytes, allows a partial cache hit, and turns any single-request
+failure into a faded quadrant rather than no ring. Just do not expect it to be
+fixing a regular occurrence.
+
+Also corrected here, since two rounds of it are recorded above: the tile losses
+that looked like a service-worker defect were the test harness, not the app --
+see [[headless-verification-rig]] for the two traps (single-threaded HTTP/1.0
+server; Chrome's storage quota against a full /tmp).
