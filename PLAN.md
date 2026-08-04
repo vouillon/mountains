@@ -1758,3 +1758,34 @@ Also corrected here, since two rounds of it are recorded above: the tile losses
 that looked like a service-worker defect were the test harness, not the app --
 see [[headless-verification-rig]] for the two traps (single-threaded HTTP/1.0
 server; Chrome's storage quota against a full /tmp).
+
+## Behaviour at the border (checked 2026-08-04)
+
+Several featured locations sit on or near the Italian frontier -- Baisse de
+Druos is essentially on it, and Mont Ténibre, Col Girardin and the Aiguille du
+Brévent are close. Fetching the 2.38 m ring there:
+
+| site | out-of-coverage fill | share of the block | where |
+| --- | --- | --- | --- |
+| Baisse de Druos | -9999 | 9.9% | rows 0-539, cols 376-1023 (north-east) |
+| Mont Ténibre | -9999 | 8.7% | rows 0-565, cols 427-1023 |
+
+-9999 is well below `nodata_limit` (-500), so `blend` treats it as nodata,
+builds the distance field and fades to the ring beneath over `fade_metres`
+(300 m for the inner ring). Fading a 3 m product difference across 300 m is a 1%
+slope change. No `0`-fill plateau lurks among the valid samples -- their minimum
+is 2279 m and 2496 m respectively, and no value repeats more than ~50 times in
+950k.
+
+Two nested fades therefore run along the frontier: 2.38 m into l13 over 300 m,
+and l13 into the Copernicus base over 1500 m (RGE ALTI tiles east of the border
+404, which has always been handled).
+
+The eye is safe at such a viewpoint: it reads the *blended* grid, which carries
+the coarser surface's height throughout the nodata region, so there is no
+underground case even standing on the frontier.
+
+Corrected while checking: the `nodata_limit` comment attributed -99999 to IGN.
+That is this module's own pre-fill for a request that never arrives; IGN's
+out-of-coverage value is -9999. Both are below the limit, so nothing was broken,
+but anyone tightening it on the strength of that comment would have been.

@@ -17,7 +17,12 @@ let ( let* ) = Lwt.bind
 (* WGS84G tiles are always 256 x 256 samples, at every matrix level. *)
 let tile_px = 256
 
-(* Anything below this is IGN's nodata sentinel (-99999 outside coverage). *)
+(* Anything below this counts as "no data here", which covers two distinct
+   things: IGN answers -9999 for ground outside its coverage -- the part of a
+   border block that lies in Italy or Switzerland, say -- and this module
+   pre-fills a block with -99999 so that a request which never arrives reads the
+   same way. Both are faded back into the surface beneath, so a viewpoint on the
+   frontier and one whose fetch half failed degrade by the same path. *)
 let nodata_limit = -500.
 
 (* One refinement ring. Several can be nested (see PLAN.md), so nothing here is
