@@ -1008,7 +1008,10 @@ geolocation wording never appears, including across an in-page switch; without
 them `["", "Loading Terrain...", "Getting current location...", "Loading
 Terrain..."]`.
 
-## Nested level-14 near field — PLANNED (2026-07-31)
+## Nested level-14 near field — SUPERSEDED design notes (2026-07-31)
+
+See "Nested near field — SHIPPED" at the end of this file for what was actually
+built. Kept because the measurements and the rejected alternatives still hold.
 
 Follow-up to "level 14 (0.155 arcsec) is available at 4x the data if the near
 field ever needs it" above. The proposal is to **nest** L14 inside the existing
@@ -1339,7 +1342,11 @@ increase in `rasterize_clc_tiles`, so time that bake on Mali/Adreno before
 assuming it is free; and confirm visually that land-cover transitions lose their
 staircase. `dune build src/web` and `dune build @fmt` are clean.
 
-## LIDAR HD bare earth at 1 m over WMS — PLANNED (2026-07-31)
+## LIDAR HD bare earth at 1 m over WMS — SUPERSEDED design notes (2026-07-31)
+
+See "Nested near field — SHIPPED" at the end of this file. The source survey,
+the cost figures and the rejected alternatives here still hold; the chain and the
+phase list do not.
 
 `data.geopf.fr/wms-r/wms` (user's pointer) serves bare-earth DTM at arbitrary
 resolution via GetMap, so the L14 ceiling in the section above is a WMTS
@@ -1594,3 +1601,110 @@ it is required: `terrain.frag` already replaces the DEM normal with the
 procedural water normal, or with `(0,0,1)` past the wave fade, wherever
 `waterMask` is 1 — see the paragraph above. The measured ripple is a normal-only
 artefact and the normal is discarded before it is used.
+
+## Nested near field — SHIPPED (2026-08-04, branch `hd`)
+
+What was built, and where it differs from the two design sections above.
+
+### The chain as shipped
+
+| ring | source | spacing | extent | cost |
+| --- | --- | --- | --- | --- |
+| 0 (inner) | WMS LIDAR HD `IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G`, 1024^2 over 2x2 level-14 footprints | 2.38 m N-S | +-1.22 x 0.87 km | 1 request, 4.0 MB, ~1 s |
+| 1 | WMTS `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` level 13, 8x8 (unchanged) | 9.54 m | +-9.8 x 6.8 km | 64 tiles, 13.7 MB |
+| base | Copernicus `.dem` | ~30 m | +-63 km | hosted |
+
+**Two rings, not three.** The plan's 4.77 m ring for the 1.22-2.44 km band was
+not built; that band is still served by l13 at 9.54 m. The machinery is generic,
+so adding it is a `wms_layer` value plus one entry in the fetch list.
+
+The 4.77 m ring was also going to come from WMS to keep the chain on one product.
+It does not: ring 1 is still the WMTS block, so the LIDAR HD / RGE ALTI product
+seam sits at +-1.22 km rather than +-2.44 km. The fade handles it -- each ring is
+blended onto the surface beneath it, so it equals that surface at its own edge --
+and `fade_metres` is 300 for the inner ring against l13's 1500.
+
+### Commits
+
+- `6fd44fd` parameterise `Hd_dem` by layer (pure refactor, RMSE 0)
+- `19440d9` let `blend` chain onto any grid, not just the base tile (RMSE 0)
+- `16bba21` the ring itself, end to end: `Wms` layer kind, uniform arrays,
+  `sampleTerrainHeight` shared by the terrain, shadow and GPX path programs
+- `5cacf1c` lift the eye to clear local relief
+- `e42149f` step the visibility ray by its clearance
+
+### L14-4 (per-layer height scale) — measured, demoted to cleanup
+
+The gate above predicted terracing from the global u16 encoding at the ring's
+spacing, on the strength of `atan(14.5 cm / 1.66 m)` = 5.0 deg. **That figure was
+a worst-case bound and about 4x pessimistic.** Quantising the real 2.38 m grids
+and recomputing normals gives, on the slopes where terracing would show
+(under 10 deg):
+
+| view | encoding | quantum | normal error |
+| --- | --- | --- | --- |
+| Emparis | global (9500 m) | 14.50 cm | mean 1.09 deg, p99 2.36 deg |
+| Emparis | per-layer (756 m) | 1.15 cm | mean 0.09 deg, p99 0.19 deg |
+| glacier basin | global | 14.50 cm | mean 1.11 deg, p99 2.41 deg |
+| glacier basin | per-layer (1463 m) | 2.23 cm | mean 0.17 deg, p99 0.37 deg |
+
+The realistic error is ~1.1 deg rather than 5, because the relief bake uses
+central differences spanning two samples and neighbouring rounding errors partly
+cancel.
+
+**And it does not reach the screen.** Emparis is statistically unchanged with the
+ring on (4494 -> 4519 distinct luminance levels, flat-neighbour fraction
+9.3% -> 9.1%); the basin shows more flat neighbours (10.8% -> 13.9%) but *more*
+distinct levels, so that is flat ice pans the finer grid resolves, not steps.
+Amplified crops of the Emparis plateau show no contour-following bands that the
+ring-off capture does not also have. `perturbNormal`'s procedural noise at
+500/70/10 m almost certainly dithers over a degree or two.
+
+So per-layer scale/offset is still worth doing -- 12x better for zero memory or
+bandwidth, and it would unblock any finer ring -- but as cleanup, not as a fix
+for a visible defect.
+
+### Two things the plan did not anticipate
+
+- **The eye could end up underground.** The eye sits 2 m above a single bilinear
+  sample, which is safe at l13's 9.5 m but not at 2.38 m: the glacier view
+  rendered a wedge of slope interior across the lower frame. It also silently hid
+  every POI, because `Visibility.test_precise` starts its finely-stepped phase at
+  the source. Fixed in `5cacf1c` by taking the highest sample within 4 m --
+  testing true distance, not a sample count, which had lifted the Mont Blanc
+  summit by 11.3 m.
+- **`Visibility`'s whole-pixel tail mattered more than expected.** Fixed in
+  `e42149f`: the middle of the ray now steps by its clearance above the terrain,
+  and each refinement carries the finest step worth taking over it. 348 more
+  occlusions found at Mont Blanc for ~3% more time.
+
+### Verification
+
+Frozen-clock headless captures at the Mont Blanc vista, glacier and
+grazing-forest views (see [[headless-verification-rig]]):
+
+- With the WMS ring blocked at the network layer, RMSE exactly 0 against the
+  pre-change build. The whole restructure -- uniform arrays, sampler chain, blend
+  chaining, list-based publish, texture slot arrays, three programs rewired -- is
+  byte-identical when the new ring is absent.
+- With it enabled, `1/1 tiles` for the WMS ring and `64/64` for l13, both
+  blended; change concentrated in the near field.
+- **Verified on device and looks good** (2026-08-04), which is what the rig
+  cannot speak to: swiftshader is not a real driver and desktop runs `mediump` at
+  fp32, so the fp16 normal precision, the two extra vertex-stage sampler-array
+  entries and the two extra varyings were all untested until then. It also
+  confirms the terracing result on hardware where fp16 could have worsened it.
+
+### Still open
+
+- The 4.77 m ring for the 1.22-2.44 km band (above).
+- **The WMS ring is all-or-nothing.** One request, so a single transient failure
+  drops the whole ring -- hit twice during testing. It falls back to l13 cleanly,
+  but 2x2 requests of 512^2 would be the same bytes with graceful degradation,
+  reusing the partial-block path the WMTS path already has.
+- What `MIXED` returns outside LIDAR HD coverage: if it falls back to RGE ALTI,
+  a 2.38 m request there is nearest-neighbour replication of the 4.77 m grid.
+  The within-block-spread check is cheap enough to run on the fetched grid and
+  drop the ring when it trips. Ring 1 is unaffected -- RGE ALTI is genuine at
+  4.77 m.
+- Per-layer height scale (above), as cleanup.
