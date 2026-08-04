@@ -29,18 +29,11 @@ float radialVertexHeight(vec2 pos_plane) {
            pos_plane.y - 0.5 * pos_plane.x * pos_plane.x * meridian_conv);
   vec2 coord = (center_offset + proj) * inv_delta;
   vec2 norm_coord = coord * inv_w + 0.5;
-  vec2 hd_coord = coord * hd_scale + hd_bias;
   float grid_spacing = grid_k * (r + grid_scale);
   float lod_raw = log2(grid_spacing * inv_avg_delta);
-  float height;
-  if (insideHd(hd_coord)) {
-    height = sampleReliefHeight(
-        hd_relief, hd_coord,
-        min(int(max(0.0, lod_raw + hd_lod_bias)), hd_max_lod));
-  } else {
-    height = sampleReliefHeight(relief, norm_coord,
-                                min(int(max(0.0, lod_raw)), max_lod));
-  }
+  // Same selector as the mesh: a trace resolving its height from a different
+  // ring than the ground under it would float or sink.
+  float height = sampleTerrainHeight(coord, norm_coord, lod_raw);
   return height - r * r * 6.8306e-8;
 }
 

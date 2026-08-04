@@ -4,12 +4,13 @@ precision highp sampler2DArray;
 // Encoded normal only (RG8). The heights live in a separate RG8 texture that
 // the vertex stage declares as `relief`; this stage never reads them.
 uniform highp sampler2D relief_normal;
-// Encoded normals of the near-field high-resolution relief (see [Hd_dem]).
-// Selected by the same extent test as the vertex stage; [hd_valid] is the one
-// uniform shared with it, and bool needs no precision qualifier, so the two
+// Encoded normals of the near-field refinement rings (see [Hd_dem]), innermost
+// first. Selected by the same extent tests as the vertex stage; [hd_valid] is
+// shared with it, and bool needs no precision qualifier, so the two
 // declarations cannot disagree.
-uniform bool hd_valid;
-uniform highp sampler2D hd_relief_normal;
+#define HD_SLOTS 2
+uniform bool hd_valid[HD_SLOTS];
+uniform highp sampler2D hd_relief_normal[HD_SLOTS];
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
@@ -25,7 +26,8 @@ uniform vec3 u_lightDir; // Pre-normalized on CPU
 uniform highp float center_height;
 
 in highp vec2 reliefCoord; // Highp for texture coords
-in highp vec2 hdReliefCoord;
+in highp vec2 hdReliefCoord0;
+in highp vec2 hdReliefCoord1;
 in highp float v_dist;
 in highp vec3 v_view_dir;
 in highp vec3 v_world_pos; // Highp for world coords
@@ -396,9 +398,12 @@ void main() {
   // fragments are on the same side of a boundary kilometres away, and both
   // sources derive from the same heights there).
   mediump vec2 encodedN;
-  if (hd_valid && all(greaterThanEqual(hdReliefCoord, vec2(0.0))) &&
-      all(lessThanEqual(hdReliefCoord, vec2(1.0))))
-    encodedN = texture(hd_relief_normal, hdReliefCoord).rg;
+  if (hd_valid[0] && all(greaterThanEqual(hdReliefCoord0, vec2(0.0))) &&
+      all(lessThanEqual(hdReliefCoord0, vec2(1.0))))
+    encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
+  else if (hd_valid[1] && all(greaterThanEqual(hdReliefCoord1, vec2(0.0))) &&
+           all(lessThanEqual(hdReliefCoord1, vec2(1.0))))
+    encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
   else
     encodedN = texture(relief_normal, reliefCoord).rg;
   vec3 normal;

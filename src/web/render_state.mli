@@ -50,14 +50,14 @@ type terrain_uniforms = {
   transform : Gl.uniform_location;
   relief : Gl.uniform_location;
   relief_normal : Gl.uniform_location;
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location;
-  hd_relief_normal : Gl.uniform_location;
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
-  hd_half_texel : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array;
+  hd_relief_normal : Gl.uniform_location array;
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
+  hd_half_texel : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
@@ -87,12 +87,12 @@ type shadow_uniforms = {
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
   shadow_view_proj : Gl.uniform_location;
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location;
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array;
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -179,17 +179,21 @@ type hd_params = {
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
 
+val hd_slots : int
+(** Number of nested refinement rings the shaders declare. *)
+
 val upload_hd_params :
   Gl.t ->
   Gl.program ->
   Gl.program ->
   terrain_uniforms ->
   shadow_uniforms ->
-  hd_params option ->
+  hd_params option list ->
   unit
 (** [upload_hd_params ctx terrain_pid shadow_pid u shadow_u hd] describes the
-    near-field high-resolution relief to both programs. [None] disables the HD
-    path entirely, restoring exactly the base-only rendering. *)
+    refinement rings to both programs, innermost first. Slots past the end of
+    [hd], and [None] entries, are disabled -- with none valid this restores
+    exactly the base-only rendering. *)
 
 val upload_session_static :
   Gl.t ->
@@ -238,12 +242,12 @@ type path_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location;
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array;
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
 }
 
 val init_path_uniforms : Gl.t -> Gl.program -> path_uniforms
@@ -259,7 +263,10 @@ val upload_path_session :
   lon:float ->
   unit
 
-val upload_path_hd_params : Gl.t -> path_uniforms -> hd_params option -> unit
+val upload_path_hd_params :
+  Gl.t -> path_uniforms -> hd_params option list -> unit
+(** Same rings, for the GPX path program: it shares the vertex selector, so a
+    trace resolves its height from the same ring as the ground beneath it. *)
 
 val apply_anisotropic_filtering : Gl.t -> unit
 (** Apply cached max anisotropy to the currently bound texture. *)

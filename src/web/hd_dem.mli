@@ -7,21 +7,35 @@
     nothing here is a global constant: read the spacing and the sample count off
     the {!layer} carried by the grid in hand. *)
 
+type kind =
+  | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
+      (** A block of tiles from a WGS84G matrix level, centred on the tile
+          holding the location. *)
+  | Wms of { wms_name : string; step_arcsec : float; steps : int }
+      (** One GetMap over a bbox aligned to a [step_arcsec] grid and spanning
+          [steps] steps, centred on the grid corner nearest the location.
+          Resolution is free-form: the matrix levels do not bound it. *)
+
 type layer = {
-  matrix_level : int;  (** WGS84G tile matrix level *)
-  tiles_per_axis : int;  (** tiles across 360 degrees at that level *)
-  block_tiles : int;  (** block is [block_tiles] x [block_tiles] tiles *)
+  kind : kind;
   px_arcsec : float;  (** sample spacing; derived, never a power of two *)
-  size : int;  (** samples per side; derived *)
+  size : int;  (** samples per side *)
   fade_metres : float;
       (** width of the annulus over which the refinement is faded back into the
           coarser surface, at the edge of the extent and around nodata *)
 }
-(** One refinement ring. *)
+(** One refinement ring. Rings nest: each is blended onto the next coarser
+    surface, so the renderer can pick between them on a plain extent test. *)
 
 val l13 : layer
-(** Level 13, 8 x 8 tiles: 0.309 arcsec (9.5 m N-S), 2048 samples per side, 19.5
-    x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)
+(** RGE ALTI over WMTS level 13, 8 x 8 tiles: 0.309 arcsec (9.5 m N-S), 2048
+    samples per side, 19.5 x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)
+
+val lidar_2m : layer
+(** LIDAR HD bare earth over WMS: 0.0772 arcsec (2.38 m N-S, 1.66 m E-W at 46
+    degrees), 1024 samples over 2 x 2 level-14 footprints, i.e. +-1.22 x 0.87
+    km. One GetMap, 4.0 MB (the WMS endpoint does not compress). Nests inside
+    {!l13}. *)
 
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the

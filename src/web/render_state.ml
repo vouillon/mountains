@@ -52,6 +52,11 @@ let compute_center_offset ~lat ~lon ~x:_ ~y:_ =
   in
   (center_offset_x, center_offset_y)
 
+(* Number of nested near-field refinement rings the shaders declare (HD_SLOTS in
+   radial_common.vert). Adding a ring is a change to this and to the layer list
+   [viewer.ml] passes, and nothing else. *)
+let hd_slots = 2
+
 type radial_params = {
   w_mask : int;
   w_shift : int;
@@ -84,14 +89,14 @@ type terrain_uniforms = {
   relief : Gl.uniform_location; (* heights, vertex stage *)
   relief_normal : Gl.uniform_location; (* encoded normals, fragment stage *)
   (* Near-field high-resolution relief (see [Hd_dem]) *)
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location; (* heights, vertex stage *)
-  hd_relief_normal : Gl.uniform_location; (* encoded normals, fragment *)
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
-  hd_half_texel : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array; (* heights, vertex stage *)
+  hd_relief_normal : Gl.uniform_location array; (* encoded normals, fragment *)
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
+  hd_half_texel : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   (* Lighting *)
@@ -129,12 +134,12 @@ type shadow_uniforms = {
   shadow_view_proj : Gl.uniform_location;
   (* Near-field high-resolution relief (see [Hd_dem]): the shadow bake shares
      radial_common.vert, so it inherits the HD terrain once these are set. *)
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location;
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array;
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -230,14 +235,21 @@ let init_terrain_uniforms ctx pid =
     transform = u "transform";
     relief = u "relief";
     relief_normal = u "relief_normal";
-    hd_valid = u "hd_valid";
-    hd_relief = u "hd_relief";
-    hd_relief_normal = u "hd_relief_normal";
-    hd_scale = u "hd_scale";
-    hd_bias = u "hd_bias";
-    hd_lod_bias = u "hd_lod_bias";
-    hd_max_lod = u "hd_max_lod";
-    hd_half_texel = u "hd_half_texel";
+    hd_valid =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
+    hd_relief =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
+    hd_relief_normal =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief_normal[%d]" i));
+    hd_scale =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_scale[%d]" i));
+    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
+    hd_lod_bias =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
+    hd_max_lod =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
+    hd_half_texel =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_half_texel[%d]" i));
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_lightDir = u "u_lightDir";
@@ -269,12 +281,17 @@ let init_shadow_uniforms ctx pid =
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
     shadow_view_proj = u "shadow_view_proj";
-    hd_valid = u "hd_valid";
-    hd_relief = u "hd_relief";
-    hd_scale = u "hd_scale";
-    hd_bias = u "hd_bias";
-    hd_lod_bias = u "hd_lod_bias";
-    hd_max_lod = u "hd_max_lod";
+    hd_valid =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
+    hd_relief =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
+    hd_scale =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_scale[%d]" i));
+    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
+    hd_lod_bias =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
+    hd_max_lod =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
   }
 
 (** Initialize sky uniform locations. Call once after program creation. *)
@@ -360,15 +377,19 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.ao 3;
   Gl.uniform1i ctx u.shadow_map 4;
   Gl.uniform1i ctx u.u_detailMap 5;
-  Gl.uniform1i ctx u.hd_relief 6;
+  Gl.uniform1i ctx u.hd_relief.(0) 6;
   Gl.uniform1i ctx u.u_coverMap 7;
   Gl.uniform1i ctx u.u_paletteTex 8;
-  Gl.uniform1i ctx u.hd_relief_normal 9
+  Gl.uniform1i ctx u.hd_relief_normal.(0) 9;
+  (* Ring 1 takes the next free units: 0-9 were already spoken for. *)
+  Gl.uniform1i ctx u.hd_relief.(1) 10;
+  Gl.uniform1i ctx u.hd_relief_normal.(1) 11
 
 (** Upload static texture unit bindings for shadow shader. *)
 let upload_texture_units_shadow ctx (u : shadow_uniforms) =
   Gl.uniform1i ctx u.relief 0;
-  Gl.uniform1i ctx u.hd_relief 6
+  Gl.uniform1i ctx u.hd_relief.(0) 6;
+  Gl.uniform1i ctx u.hd_relief.(1) 10
 
 type hd_params = {
   hd_size : int;  (** samples per side *)
@@ -378,39 +399,48 @@ type hd_params = {
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
 
-(** Upload that geometry to both the terrain and the shadow programs. [None]
-    disables the HD path, which restores exactly the base-only rendering. *)
+(* The affine map from an arcsecond offset [c] to a ring's normalized coordinate:
+   (c - origin) / extent, written so the shader keeps the shape of the base path.
+   A ring with no data yields [valid = 0] and is skipped by the shader. *)
+let hd_slot_values = function
+  | None -> (0, 0., 0., 0., 0., 0, 0.)
+  | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
+      let scale = 1. /. (hd_px_arcsec *. float hd_size) in
+      ( 1,
+        scale,
+        -.ox *. scale,
+        -.oy *. scale,
+        Float.log2 (1. /. hd_px_arcsec),
+        Web_utils.log2 hd_size,
+        0.5 /. float hd_size )
+
+(** Upload the rings' geometry to the terrain and shadow programs, innermost
+    first. Slots past the end of [hd] are disabled, which restores exactly the
+    base-only rendering for them. *)
 let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
-    (shadow_u : shadow_uniforms) hd =
-  let valid, scale, bias_x, bias_y, lod_bias, max_lod, half_texel =
-    match hd with
-    | None -> (0, 0., 0., 0., 0., 0, 0.)
-    | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
-        (* Normalized coordinate of an arcsecond offset [c] from the anchor:
-           (c - origin) / extent, written as an affine map so that the shader
-           keeps the shape of the base path. *)
-        let scale = 1. /. (hd_px_arcsec *. float hd_size) in
-        ( 1,
-          scale,
-          -.ox *. scale,
-          -.oy *. scale,
-          Float.log2 (1. /. hd_px_arcsec),
-          Web_utils.log2 hd_size,
-          0.5 /. float hd_size )
-  in
+    (shadow_u : shadow_uniforms) (hd : hd_params option list) =
+  let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
   Gl.use_program ctx terrain_pid;
-  Gl.uniform1i ctx u.hd_valid valid;
-  Gl.uniform1f ctx u.hd_scale scale;
-  Gl.uniform2f ctx u.hd_bias bias_x bias_y;
-  Gl.uniform1f ctx u.hd_lod_bias lod_bias;
-  Gl.uniform1i ctx u.hd_max_lod max_lod;
-  Gl.uniform1f ctx u.hd_half_texel half_texel;
+  for i = 0 to hd_slots - 1 do
+    let valid, scale, bx, by, lod_bias, max_lod, half_texel =
+      hd_slot_values (slot i)
+    in
+    Gl.uniform1i ctx u.hd_valid.(i) valid;
+    Gl.uniform1f ctx u.hd_scale.(i) scale;
+    Gl.uniform2f ctx u.hd_bias.(i) bx by;
+    Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
+    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
+    Gl.uniform1f ctx u.hd_half_texel.(i) half_texel
+  done;
   Gl.use_program ctx shadow_pid;
-  Gl.uniform1i ctx shadow_u.hd_valid valid;
-  Gl.uniform1f ctx shadow_u.hd_scale scale;
-  Gl.uniform2f ctx shadow_u.hd_bias bias_x bias_y;
-  Gl.uniform1f ctx shadow_u.hd_lod_bias lod_bias;
-  Gl.uniform1i ctx shadow_u.hd_max_lod max_lod
+  for i = 0 to hd_slots - 1 do
+    let valid, scale, bx, by, lod_bias, max_lod, _ = hd_slot_values (slot i) in
+    Gl.uniform1i ctx shadow_u.hd_valid.(i) valid;
+    Gl.uniform1f ctx shadow_u.hd_scale.(i) scale;
+    Gl.uniform2f ctx shadow_u.hd_bias.(i) bx by;
+    Gl.uniform1f ctx shadow_u.hd_lod_bias.(i) lod_bias;
+    Gl.uniform1i ctx shadow_u.hd_max_lod.(i) max_lod
+  done
 
 (** Upload session-static uniforms. Call once after computing initial values.
     These uniforms don't change during the session:
@@ -516,12 +546,12 @@ type path_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
-  hd_valid : Gl.uniform_location;
-  hd_relief : Gl.uniform_location;
-  hd_scale : Gl.uniform_location;
-  hd_bias : Gl.uniform_location;
-  hd_lod_bias : Gl.uniform_location;
-  hd_max_lod : Gl.uniform_location;
+  hd_valid : Gl.uniform_location array;
+  hd_relief : Gl.uniform_location array;
+  hd_scale : Gl.uniform_location array;
+  hd_bias : Gl.uniform_location array;
+  hd_lod_bias : Gl.uniform_location array;
+  hd_max_lod : Gl.uniform_location array;
 }
 
 let init_path_uniforms ctx pid =
@@ -541,19 +571,25 @@ let init_path_uniforms ctx pid =
     meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
-    hd_valid = u "hd_valid";
-    hd_relief = u "hd_relief";
-    hd_scale = u "hd_scale";
-    hd_bias = u "hd_bias";
-    hd_lod_bias = u "hd_lod_bias";
-    hd_max_lod = u "hd_max_lod";
+    hd_valid =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
+    hd_relief =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
+    hd_scale =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_scale[%d]" i));
+    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
+    hd_lod_bias =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
+    hd_max_lod =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
   }
 
 let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
   Gl.uniform1f ctx u.grid_k p.grid_k;
   Gl.uniform1f ctx u.grid_scale p.grid_scale;
   Gl.uniform1i ctx u.relief 1;
-  Gl.uniform1i ctx u.hd_relief 6;
+  Gl.uniform1i ctx u.hd_relief.(0) 6;
+  Gl.uniform1i ctx u.hd_relief.(1) 10;
   Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0;
   Gl.uniform1f ctx u.u_linewidth 5.0
 
@@ -569,24 +605,18 @@ let upload_path_session ctx (u : path_uniforms) ~w ~lat ~x ~y ~lon =
   Gl.uniform1f ctx u.inv_avg_delta (1. /. avg_delta);
   Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y
 
-let upload_path_hd_params ctx (u : path_uniforms) hd =
-  let valid, scale, bias_x, bias_y, lod_bias, max_lod =
-    match hd with
-    | None -> (0, 0., 0., 0., 0., 0)
-    | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
-        let scale = 1. /. (hd_px_arcsec *. float hd_size) in
-        ( 1,
-          scale,
-          -.ox *. scale,
-          -.oy *. scale,
-          Float.log2 (1. /. hd_px_arcsec),
-          Web_utils.log2 hd_size )
-  in
-  Gl.uniform1i ctx u.hd_valid valid;
-  Gl.uniform1f ctx u.hd_scale scale;
-  Gl.uniform2f ctx u.hd_bias bias_x bias_y;
-  Gl.uniform1f ctx u.hd_lod_bias lod_bias;
-  Gl.uniform1i ctx u.hd_max_lod max_lod
+(* The path program shares radial_common.vert's selector, so a GPX trace resolves
+   its height from the same ring as the ground beneath it. *)
+let upload_path_hd_params ctx (u : path_uniforms) (hd : hd_params option list) =
+  let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
+  for i = 0 to hd_slots - 1 do
+    let valid, scale, bx, by, lod_bias, max_lod, _ = hd_slot_values (slot i) in
+    Gl.uniform1i ctx u.hd_valid.(i) valid;
+    Gl.uniform1f ctx u.hd_scale.(i) scale;
+    Gl.uniform2f ctx u.hd_bias.(i) bx by;
+    Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
+    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod
+  done
 
 let anisotropy_ext = ref None
 

@@ -1461,10 +1461,16 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 
   cover_map_texture
 
+(* Texture units per refinement ring. Ring 0 keeps the units the single HD layer
+   always used; ring 1 takes the first two that were free. Must agree with
+   [Render_state.upload_texture_units]. *)
+let hd_height_unit = function 0 -> Gl.texture6 | _ -> Gl.texture10
+let hd_normal_unit = function 0 -> Gl.texture9 | _ -> Gl.texture11
+
 let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~terrain_geo
     ~index_count ~(radial_params : Render_state.radial_params) ~relief_texture
-    ~hd_relief_texture ctx =
+    ~(hd_slot_textures : (Gl.texture * Gl.texture) array) ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
 
@@ -1481,11 +1487,14 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
   Gl.uniform1i ctx shadow_uniforms.relief 0;
-  (* The shadow vertex shader shares radial_common.vert, so the near-field
-     high-resolution heights must be bound here too: the bake then inherits
-     the HD terrain. *)
-  Gl.active_texture ctx Gl.texture6;
-  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_texture);
+  (* The shadow vertex shader shares radial_common.vert, so every refinement
+     ring's heights must be bound here too: the bake then inherits the same
+     surface the mesh is drawn from, which is what keeps it free of acne. *)
+  Array.iteri
+    (fun i (heights, _) ->
+      Gl.active_texture ctx (hd_height_unit i);
+      Gl.bind_texture ctx Gl.texture_2d (Some heights))
+    hd_slot_textures;
   Gl.active_texture ctx Gl.texture0;
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
@@ -1568,7 +1577,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
     draw_shadows. *)
 let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
     ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
-    ~hd_relief_texture ~hd_relief_normal_texture =
+    ~(hd_slot_textures : (Gl.texture * Gl.texture) array) =
   let open Brr_canvas in
   Gl.active_texture ctx Gl.texture1;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
@@ -1578,10 +1587,13 @@ let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
   Gl.bind_texture ctx Gl.texture_2d (Some ao_texture);
   Gl.active_texture ctx Gl.texture5;
   Gl.bind_texture ctx Gl.texture_2d (Some detail_map);
-  Gl.active_texture ctx Gl.texture6;
-  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_texture);
-  Gl.active_texture ctx Gl.texture9;
-  Gl.bind_texture ctx Gl.texture_2d (Some hd_relief_normal_texture);
+  Array.iteri
+    (fun i (heights, normals) ->
+      Gl.active_texture ctx (hd_height_unit i);
+      Gl.bind_texture ctx Gl.texture_2d (Some heights);
+      Gl.active_texture ctx (hd_normal_unit i);
+      Gl.bind_texture ctx Gl.texture_2d (Some normals))
+    hd_slot_textures;
   Gl.active_texture ctx Gl.texture4;
   Gl.bind_texture ctx Gl.texture_2d_array (Some shadow_map);
   Gl.active_texture ctx Gl.texture7;
@@ -1823,7 +1835,7 @@ type location = {
   relief_normal_texture : Gl.texture;
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
-  hd : hd_relief option;
+  hd : hd_relief list;  (** innermost ring first *)
   gpx_path : (Gl.vertex_array_object * Gl.buffer * int) option;
 }
 
@@ -1850,7 +1862,7 @@ let delete_location ctx
   Gl.delete_texture ctx relief_normal_texture;
   Gl.delete_texture ctx ao_texture;
   Gl.delete_texture ctx cover_map_texture;
-  Option.iter
+  List.iter
     (fun { hd_relief_texture; hd_relief_normal_texture } ->
       Gl.delete_texture ctx hd_relief_texture;
       Gl.delete_texture ctx hd_relief_normal_texture)
@@ -2898,7 +2910,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      alongside them: it is the one source that can take [Hd_dem.timeout_s] to
      answer, and awaiting it holds the whole location -- base tiles that may well
      be in cache included -- behind that ceiling. *)
-  let hd_fetch = Hd_dem.fetch Hd_dem.l13 ~lat ~lon in
+  let hd_fetches =
+    List.map
+      (fun layer -> (layer, Hd_dem.fetch layer ~lat ~lon))
+      [ Hd_dem.l13; Hd_dem.lidar_2m ]
+  in
   let* tile, (_, _, _, _, clc_tiles) =
     Lwt.both
       (Dem_loader.load ~size:w ~lat ~lon)
@@ -2913,7 +2929,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let* () =
     Lwt.choose
       [
-        (let* _ = hd_fetch in
+        (let* _ = Lwt.all (List.map snd hd_fetches) in
          Lwt.return_unit);
         sleep hd_grace_s;
       ]
@@ -2923,20 +2939,35 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     let x = w / 2 in
     let y = h / 2 in
     let poi = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
-    (* The blended near-field grid equals the base upsample wherever the
-       high-resolution data is missing, so the renderer can switch to it on a
-       plain extent test. *)
-    let blend_hd raw =
-      Option.bind raw (Hd_dem.blend ~lat ~source:(Hd_dem.base_source tile))
+    (* Each ring is blended onto the surface beneath it -- the coarsest onto the
+       base tile, each finer one onto its predecessor -- so a ring equals the
+       surface below wherever its own data is missing or faded, and the renderer
+       can switch between them on a plain extent test. A ring whose fetch came
+       back empty simply drops out of the chain, and the next finer one blends
+       onto whatever is left.
+
+       Returns the rings innermost first, which is the order the shader tests
+       them in and the order [publish] assigns texture slots. *)
+    let chain raws =
+      let rings, _ =
+        List.fold_left
+          (fun (rings, source) raw ->
+            match Option.bind raw (Hd_dem.blend ~lat ~source) with
+            | None -> (rings, source)
+            | Some g -> (g :: rings, Hd_dem.as_source g))
+          ([], Hd_dem.base_source tile)
+          raws
+      in
+      rings
     in
     (* [Hd_dem.fetch] never fails, so [Fail] is unreachable; it is folded into
-       "no near-field data" rather than left to raise inside the refinement. *)
-    let in_time, refine_later =
-      match Lwt.state hd_fetch with
-      | Lwt.Return raw -> (blend_hd raw, false)
-      | Lwt.Sleep -> (None, true)
-      | Lwt.Fail _ -> (None, false)
+       "no data for this ring" rather than left to raise inside the refinement. *)
+    let settled p = match Lwt.state p with Lwt.Return r -> r | _ -> None in
+    let still_pending p =
+      match Lwt.state p with Lwt.Sleep -> true | _ -> false
     in
+    let in_time = chain (List.map (fun (_, p) -> settled p) hd_fetches) in
+    let refine_later = List.exists (fun (_, p) -> still_pending p) hd_fetches in
     (* The previous location's textures are dead from here on: the bakes below
        overwrite every unit they were bound to. Deleting first keeps the peak
        footprint at one location's worth of DEM-sized textures. [session] is
@@ -3001,7 +3032,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        -- do not depend on it and are deliberately not among them: a refinement
        redoes only the finer relief pyramid, the shadow map that samples it, the
        eye height, and the POI replicas that are anchored on both. *)
-    let publish ~hd_grid =
+    let publish ~hd_grids =
       (* Bilinear interpolation for height *)
       let height =
         let off_x = Render_state.compute_sub_arcsec_offset lon in
@@ -3021,34 +3052,35 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            placed 2 m above the base surface would end up *inside* the terrain
            it is looking out of. Read the eye height off the grid that is
            drawn. *)
-        match hd_grid with
-        | Some (g : Hd_dem.t) ->
-            let gx = (off_x -. g.origin_x) /. g.layer.px_arcsec in
-            let gy = (off_y -. g.origin_y) /. g.layer.px_arcsec in
-            if
-              gx >= 0.
-              && gx <= float (g.layer.size - 2)
-              && gy >= 0.
-              && gy <= float (g.layer.size - 2)
-            then begin
-              let get_h = Dem_loader.get_height g.grid in
-              let bx = int_of_float (floor gx)
-              and by = int_of_float (floor gy) in
-              let fx = gx -. float bx and fy = gy -. float by in
-              let h00 = get_h by bx in
-              let h10 = get_h by (bx + 1) in
-              let h01 = get_h (by + 1) bx in
-              let h11 = get_h (by + 1) (bx + 1) in
-              let h0 = h00 +. (fx *. (h10 -. h00)) in
-              let h1 = h01 +. (fx *. (h11 -. h01)) in
-              h0 +. (fy *. (h1 -. h0))
-            end
-            else base_height
+        let from_ring (g : Hd_dem.t) =
+          let gx = (off_x -. g.origin_x) /. g.layer.px_arcsec in
+          let gy = (off_y -. g.origin_y) /. g.layer.px_arcsec in
+          if
+            gx >= 0.
+            && gx <= float (g.layer.size - 2)
+            && gy >= 0.
+            && gy <= float (g.layer.size - 2)
+          then begin
+            let get_h = Dem_loader.get_height g.grid in
+            let bx = int_of_float (floor gx) and by = int_of_float (floor gy) in
+            let fx = gx -. float bx and fy = gy -. float by in
+            let h00 = get_h by bx in
+            let h10 = get_h by (bx + 1) in
+            let h01 = get_h (by + 1) bx in
+            let h11 = get_h (by + 1) (bx + 1) in
+            let h0 = h00 +. (fx *. (h10 -. h00)) in
+            let h1 = h01 +. (fx *. (h11 -. h01)) in
+            Some (h0 +. (fy *. (h1 -. h0)))
+          end
+          else None
+        in
+        match List.find_map from_ring hd_grids with
+        | Some h -> h
         | None -> base_height
       in
-      (* Second, finer relief pyramid over the near-field square. *)
+      (* A finer relief pyramid over each ring's square, innermost first. *)
       let hd =
-        Option.map
+        List.map
           (fun (g : Hd_dem.t) ->
             let tex = make_tile_texture ctx g.grid in
             let hd_relief_texture, hd_relief_normal_texture =
@@ -3061,15 +3093,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             (* Nothing reads the source grid on the GPU after the bake. *)
             Gl.delete_texture ctx tex;
             { hd_relief_texture; hd_relief_normal_texture })
-          hd_grid
+          hd_grids
       in
-      let hd_relief_texture =
-        match hd with Some h -> h.hd_relief_texture | None -> hd_placeholder
-      in
-      let hd_relief_normal_texture =
-        match hd with
-        | Some h -> h.hd_relief_normal_texture
-        | None -> hd_placeholder
+      (* Slots the rings do not fill get the 1x1 placeholder: their [hd_valid] is
+         false, so nothing samples them, but a texture must still be bound or the
+         driver may complain about an incomplete unit. *)
+      let hd_slot_textures =
+        Array.init Render_state.hd_slots (fun i ->
+            match List.nth_opt hd i with
+            | Some h -> (h.hd_relief_texture, h.hd_relief_normal_texture)
+            | None -> (hd_placeholder, hd_placeholder))
       in
       let world_center =
         let center_offset_x, center_offset_y =
@@ -3089,14 +3122,15 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~fog_color:fog_linear ~zenith_color:zenith_linear;
       let hd_params =
-        Option.map
+        List.map
           (fun (g : Hd_dem.t) ->
-            {
-              Render_state.hd_size = g.layer.size;
-              hd_px_arcsec = g.layer.px_arcsec;
-              hd_origin = (g.origin_x, g.origin_y);
-            })
-          hd_grid
+            Some
+              {
+                Render_state.hd_size = g.layer.size;
+                hd_px_arcsec = g.layer.px_arcsec;
+                hd_origin = (g.origin_x, g.origin_y);
+              })
+          hd_grids
       in
       Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
         shadow_uniforms hd_params;
@@ -3108,12 +3142,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       time_gpu ctx "draw_shadows" (fun () ->
           draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
             ~matrices:shadow_matrices ~terrain_geo ~index_count ~radial_params
-            ~relief_texture ~hd_relief_texture ctx);
+            ~relief_texture ~hd_slot_textures ctx);
 
       (* Bind all terrain textures - after all textures are created *)
       bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
         ~ao_texture ~detail_map ~shadow_map ~cover_map_texture ~palette_texture
-        ~hd_relief_texture ~hd_relief_normal_texture;
+        ~hd_slot_textures;
 
       (* Location-static state that was needlessly re-set every frame. Must come
          after the bake passes above, which set their own clear colours. *)
@@ -3135,29 +3169,32 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          at its own 0.31 arcsec. Without HD both collapse to exactly the
          previous call. *)
       let hd_at =
-        match hd_grid with
-        | None -> fun _ _ -> None
-        | Some (g : Hd_dem.t) ->
-            let get_h = Dem_loader.get_height g.grid in
-            let limit = float (g.layer.size - 2) in
-            fun bx by ->
-              let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
-              let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
-              if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
-                Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
-              else None
+        (* Sampler per ring, prepared once; the innermost that covers the point
+           wins, exactly as in the shader. *)
+        let samplers =
+          List.map
+            (fun (g : Hd_dem.t) ->
+              let get_h = Dem_loader.get_height g.grid in
+              let limit = float (g.layer.size - 2) in
+              fun bx by ->
+                let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
+                let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
+                if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+                  Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+                else None)
+            hd_grids
+        in
+        fun bx by -> List.find_map (fun f -> f bx by) samplers
       in
       let ray_height =
         let base = Dem_loader.get_height tile in
-        match hd_grid with
-        | None -> base
-        | Some _ -> (
-            fun row col ->
-              match hd_at (float col) (float row) with
-              | Some h -> h
-              | None -> base row col)
+        if hd_grids = [] then base
+        else fun row col ->
+          match hd_at (float col) (float row) with
+          | Some h -> h
+          | None -> base row col
       in
-      let fine = Option.map (fun _ -> hd_at) hd_grid in
+      let fine = if hd_grids = [] then None else Some hd_at in
       let points =
         let off_x = Render_state.compute_sub_arcsec_offset lon in
         let off_y = Render_state.compute_sub_arcsec_offset lat in
@@ -3210,20 +3247,24 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               let hd_pos (l : Hd_dem.layer) gc o =
                 (gc -. float (w / 2) -. o) /. l.px_arcsec
               in
-              match hd_grid with
-              | Some (g : Hd_dem.t)
-                when let hd_x = hd_pos g.layer x' g.origin_x
-                     and hd_y = hd_pos g.layer y' g.origin_y in
-                     hd_x >= 0.
-                     && hd_x <= float (g.layer.size - 1)
-                     && hd_y >= 0.
-                     && hd_y <= float (g.layer.size - 1) ->
-                  rendered_height g.grid ~radial_params
-                    ~inv_avg_delta:(inv_avg_delta /. g.layer.px_arcsec)
-                    ~size:g.layer.size ~r
-                    ~gx:(hd_pos g.layer x' g.origin_x)
-                    ~gy:(hd_pos g.layer y' g.origin_y)
-              | _ ->
+              let from_ring (g : Hd_dem.t) =
+                let hd_x = hd_pos g.layer x' g.origin_x
+                and hd_y = hd_pos g.layer y' g.origin_y in
+                if
+                  hd_x >= 0.
+                  && hd_x <= float (g.layer.size - 1)
+                  && hd_y >= 0.
+                  && hd_y <= float (g.layer.size - 1)
+                then
+                  Some
+                    (rendered_height g.grid ~radial_params
+                       ~inv_avg_delta:(inv_avg_delta /. g.layer.px_arcsec)
+                       ~size:g.layer.size ~r ~gx:hd_x ~gy:hd_y)
+                else None
+              in
+              match List.find_map from_ring hd_grids with
+              | Some z -> z
+              | None ->
                   rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
                     ~gx:x' ~gy:y'
             in
@@ -3255,7 +3296,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               | Some (tid, _) -> Gl.delete_texture ctx tid
               | None -> ())
             prev.points;
-          Option.iter
+          List.iter
             (fun { hd_relief_texture; hd_relief_normal_texture } ->
               Gl.delete_texture ctx hd_relief_texture;
               Gl.delete_texture ctx hd_relief_normal_texture)
@@ -3282,18 +3323,18 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             gpx_path;
           }
     in
-    publish ~hd_grid:in_time;
+    publish ~hd_grids:in_time;
     if refine_later then
       Lwt.async (fun () ->
-          let* raw = hd_fetch in
+          let* raws = Lwt.all (List.map snd hd_fetches) in
           if !location_epoch <> epoch then Lwt.return_unit
           else
-            match blend_hd raw with
-            | None -> Lwt.return_unit
-            | Some _ as hd_grid ->
+            match chain raws with
+            | [] -> Lwt.return_unit
+            | hd_grids ->
                 (* [Hd_dem.blend] is synchronous, so the epoch test above still
                    holds here: no [draw] has run since. *)
-                publish ~hd_grid;
+                publish ~hd_grids;
                 let* () = Web_utils.on_gpu_finished ctx in
                 force_redraw := true;
                 Lwt.return_unit);

@@ -14,29 +14,33 @@ uniform highp float inv_avg_delta;
 uniform highp int max_lod;
 uniform highp sampler2D relief;
 
-// Near-field high-resolution relief (IGN RGE ALTI, fetched per location; see
-// [Hd_dem]). A second height pyramid over a square that is neither centred on
-// the anchor arcsecond nor a power-of-two refinement of the base grid: its
-// placement is [hd_bias] and its sampling exp2(hd_lod_bias) times finer, both
-// derived from the actual sample spacing. [Hd_dem.blend] has already faded the
-// high-resolution data back into the base at the edge of that square, so the
-// two agree there and the selection below can be a hard switch. When no data is
-// available [hd_valid] is false and this file behaves exactly as it did before
-// the HD layer existed.
-uniform bool hd_valid;
-uniform highp sampler2D hd_relief;
-uniform highp float hd_scale;    // 1 / extent of the HD square, in arcseconds
-uniform highp vec2 hd_bias;      // normalized position of the anchor arcsecond
-uniform highp float hd_lod_bias; // log2 of the refinement over the base grid
-uniform highp int hd_max_lod;
+// Near-field refinement rings (IGN RGE ALTI over WMTS, LIDAR HD over WMS;
+// see [Hd_dem]). Extra height pyramids over squares that are neither centred on
+// the anchor arcsecond nor power-of-two refinements of the base grid: each
+// one's placement is [hd_bias] and its sampling exp2(hd_lod_bias) times finer,
+// both derived from the actual sample spacing. [Hd_dem.blend] has already faded
+// each ring back into the surface beneath it at the edge of its square, so they
+// agree there and the selection below can be a hard switch. A ring with no data
+// has [hd_valid] false and is skipped; with none valid this file behaves
+// exactly as it did before the refinement layers existed. Slot 0 is the
+// innermost ring. The scalars are arrays, which GLSL ES 3.0 lets us index
+// dynamically; the sampler arrays it only lets us index by literal, hence the
+// unrolled chain in [sampleTerrainHeight].
+#define HD_SLOTS 2
+uniform bool hd_valid[HD_SLOTS];
+uniform highp sampler2D hd_relief[HD_SLOTS];
+uniform highp float hd_scale[HD_SLOTS]; // 1 / extent of the ring, in arcseconds
+uniform highp vec2 hd_bias[HD_SLOTS];   // normalized position of the anchor
+uniform highp float hd_lod_bias[HD_SLOTS]; // log2 of refinement over the base
+uniform highp int hd_max_lod[HD_SLOTS];
 
 // Output structure for radial vertex computation
 struct RadialVertex {
-  highp vec2 pos_plane;    // Position relative to camera in meters
-  highp vec2 coord_meters; // Absolute world position in meters
-  highp vec2 norm_coord;   // Normalized texture coordinate (0..1)
-  highp vec2 hd_coord;     // Same, over the high-resolution square
-  highp float height;      // Terrain height at this position
+  highp vec2 pos_plane;          // Position relative to camera in meters
+  highp vec2 coord_meters;       // Absolute world position in meters
+  highp vec2 norm_coord;         // Normalized texture coordinate (0..1)
+  highp vec2 hd_coord[HD_SLOTS]; // Same, over each refinement ring
+  highp float height;            // Terrain height at this position
 };
 
 // Bilinear fetch over a height pyramid, in the corner convention (the level-l
@@ -72,10 +76,35 @@ highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
   return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 }
 
-// True where the high-resolution pyramid must be used instead of the base one.
-bool insideHd(highp vec2 hd_coord) {
-  return hd_valid && all(greaterThanEqual(hd_coord, vec2(0.0))) &&
-         all(lessThanEqual(hd_coord, vec2(1.0)));
+// True where ring [i] covers this coordinate and must be used in preference to
+// anything coarser.
+bool insideHd(int i, highp vec2 c) {
+  return hd_valid[i] && all(greaterThanEqual(c, vec2(0.0))) &&
+         all(lessThanEqual(c, vec2(1.0)));
+}
+
+// Height at a base-grid coordinate, taken from the innermost ring that covers
+// it and falling back to the base pyramid. Shared by the terrain, shadow and
+// path programs so the three cannot disagree about which surface is drawn --
+// a GPX trace resolving its height differently from the mesh under it would
+// float or sink.
+highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
+                                highp float lod_raw) {
+  // The bias is relative to the base spacing, and applies before the clamp to
+  // level 0: near the camera the mesh is finer than the base grid, which is
+  // precisely where the extra levels pay off.
+  highp vec2 c0 = coord * hd_scale[0] + hd_bias[0];
+  if (insideHd(0, c0))
+    return sampleReliefHeight(
+        hd_relief[0], c0,
+        min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]));
+  highp vec2 c1 = coord * hd_scale[1] + hd_bias[1];
+  if (insideHd(1, c1))
+    return sampleReliefHeight(
+        hd_relief[1], c1,
+        min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]));
+  return sampleReliefHeight(relief, norm_coord,
+                            min(int(max(0.0, lod_raw)), max_lod));
 }
 
 // Compute radial grid vertex position and sample terrain height
@@ -112,19 +141,9 @@ RadialVertex computeRadialVertex() {
 
   // Normalized coordinate (no flip: row 0 is south, see [Dem_loader.load])
   v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
-  v.hd_coord = vec2(coord.x, coord.y) * hd_scale + hd_bias;
-
-  if (insideHd(v.hd_coord)) {
-    // The bias is relative to the base spacing, and applies before the clamp
-    // to level 0: near the camera the mesh is finer than the base grid, which
-    // is precisely where the extra levels pay off.
-    v.height = sampleReliefHeight(
-        hd_relief, v.hd_coord,
-        min(int(max(0.0, lod_raw + hd_lod_bias)), hd_max_lod));
-  } else {
-    v.height = sampleReliefHeight(relief, v.norm_coord,
-                                  min(int(max(0.0, lod_raw)), max_lod));
-  }
+  v.hd_coord[0] = vec2(coord.x, coord.y) * hd_scale[0] + hd_bias[0];
+  v.hd_coord[1] = vec2(coord.x, coord.y) * hd_scale[1] + hd_bias[1];
+  v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
 
   // Earth curvature with standard atmospheric refraction folded in
   // (effective radius R / (1 - 0.13) ~ 7320 km). The grid is centred on the

@@ -28,10 +28,17 @@ let nodata_limit = -500.
    from [matrix_level] and [block_tiles]. The spacing is *not* a power-of-two
    ratio to the 1-arcsecond base grid, which is why consumers must read it
    rather than assume one. *)
+type kind =
+  | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
+      (** A block of tiles from a WGS84G matrix level, centred on the tile
+          holding the location. *)
+  | Wms of { wms_name : string; step_arcsec : float; steps : int }
+      (** One GetMap over a bbox aligned to a [step_arcsec] grid and spanning
+          [steps] steps, centred on the grid corner nearest the location.
+          Arbitrary resolution: the matrix levels do not bound it. *)
+
 type layer = {
-  matrix_level : int;
-  tiles_per_axis : int;
-  block_tiles : int;
+  kind : kind;
   px_arcsec : float; (* sample spacing *)
   size : int; (* samples per side of the block *)
   fade_metres : float;
@@ -45,11 +52,18 @@ let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
   (* Level L has 2^(L+1) tiles across 360 degrees: level 0 is two tiles wide. *)
   let tiles_per_axis = 1 lsl (matrix_level + 1) in
   {
-    matrix_level;
-    tiles_per_axis;
-    block_tiles;
+    kind = Wmts { matrix_level; tiles_per_axis; block_tiles };
     px_arcsec = 360. /. float tiles_per_axis /. float tile_px *. 3600.;
     size = tile_px * block_tiles;
+    fade_metres;
+  }
+
+let wms_layer ~wms_name ~step_arcsec ~steps ~size ~fade_metres =
+  assert (steps mod 2 = 0);
+  {
+    kind = Wms { wms_name; step_arcsec; steps };
+    px_arcsec = step_arcsec *. float steps /. float size;
+    size;
     fade_metres;
   }
 
@@ -63,6 +77,33 @@ let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
    connection. *)
 let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
 
+(* One level-14 tile, 39.55078125 arcseconds. Used as the alignment grid for the
+   WMS blocks below so that nearby locations share a bbox exactly as they share
+   tile URLs -- without which the service worker's cache-first rule and the
+   offline story would not apply to them at all. Dyadic, so the bbox corners are
+   exact in binary and the formatted URL is stable. *)
+let footprint_arcsec = 360. /. 32768. *. 3600.
+
+(* The innermost ring: LIDAR HD bare earth at 0.0772 arcseconds (2.38 m N-S,
+   1.66 m E-W at 46 degrees), 1024 samples over 2 x 2 footprints, i.e.
+   +-1.22 x 0.87 km. One GetMap, 4.0 MB on the wire (the WMS endpoint does not
+   compress), ~1 s.
+
+   RGE ALTI cannot serve this: below level 14 its WMS output is
+   nearest-neighbour replication of the 4.77 m grid (100% of 4x4 blocks
+   bit-identical), so LIDAR HD is the only real sub-5 m bare-earth source. Its
+   water is unrectified, which does not matter because terrain.frag replaces the
+   DEM normal with the procedural water normal wherever the cover map says
+   water.
+
+   [fade_metres] is 300 rather than [l13]'s 1500: the extent is a sixteenth of
+   the width, and the surface underneath is a different product (0.098 m RMS,
+   3.14 m worst case), so the annulus has to hide a few metres over a few
+   hundred, not tens over kilometres. *)
+let lidar_2m =
+  wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
+    ~step_arcsec:footprint_arcsec ~steps:2 ~size:1024 ~fade_metres:300.
+
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
    expiring is not an error, the block is published with whatever has arrived by
@@ -75,26 +116,103 @@ let timeout_s = 25.
    [Dem_loader.get_height] and HEIGHT_SCALE in the shaders. *)
 let u16_of_metres h = (h +. 500.) *. (65535. /. 9500.)
 
-let tile_url layer ~row ~col =
+let wmts_url ~matrix_level ~row ~col =
   Printf.sprintf
     "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES&STYLE=normal&FORMAT=image/x-bil;bits=32&TILEMATRIXSET=WGS84G&TILEMATRIX=%d&TILEROW=%d&TILECOL=%d"
-    layer.matrix_level row col
+    matrix_level row col
+
+(* WMS 1.3.0 with CRS=EPSG:4326 takes BBOX in latitude,longitude order. Fixed
+   precision keeps the string stable for a given block, which is what makes the
+   URL shareable between nearby locations. *)
+let wms_url ~wms_name ~size ~lat_min ~lon_min ~lat_max ~lon_max =
+  Printf.sprintf
+    "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=%s&STYLES=&CRS=EPSG:4326&FORMAT=image/x-bil;bits=32&BBOX=%.9f,%.9f,%.9f,%.9f&WIDTH=%d&HEIGHT=%d"
+    wms_name lat_min lon_min lat_max lon_max size size
 
 let to_lwt f =
   let t, u = Lwt.task () in
   (Fut.await f @@ fun v -> Lwt.wakeup u v);
   t
 
-(* The tile of [layer]'s matrix holding the location, on which the block is
+(* The tile of a matrix level holding the location, on which a WMTS block is
    centred. Anchoring on the *tile* rather than on the location makes every
    location within one tile share the same URLs, which is what makes the service
    worker's cache-first rule worth having. *)
-let anchor_tile layer ~lat ~lon =
+let anchor_tile ~tiles_per_axis ~lat ~lon =
   let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
-  let span = 360. /. float layer.tiles_per_axis in
+  let span = 360. /. float tiles_per_axis in
   let row = int_of_float (floor ((90. -. (float alat /. 3600.)) /. span)) in
   let col = int_of_float (floor (((float alon /. 3600.) +. 180.) /. span)) in
   (alat, alon, row, col)
+
+(* One fetch feeding a [px] x [px] square of the block at [dst_row]/[dst_col].
+   Both kinds reduce to a list of these, so the request loop, the deadline and
+   the partial-block handling below are written once. *)
+type request = { url : string; px : int; dst_row : int; dst_col : int }
+
+(* Where the block sits and what to fetch for it. [origin_x]/[origin_y] are
+   arcseconds from the anchor arcsecond to sample column 0 and to the
+   *southernmost* row; sample centres sit half a sample inside the block's
+   edge on both axes. *)
+let plan layer ~lat ~lon =
+  match layer.kind with
+  | Wmts { matrix_level; tiles_per_axis; block_tiles } ->
+      let alat, alon, anchor_row, anchor_col =
+        anchor_tile ~tiles_per_axis ~lat ~lon
+      in
+      let row0 = anchor_row - (block_tiles / 2) in
+      let col0 = anchor_col - (block_tiles / 2) in
+      let origin_x =
+        -648000.
+        +. ((float (col0 * tile_px) +. 0.5) *. layer.px_arcsec)
+        -. float alon
+      in
+      let origin_y =
+        324000.
+        -. (float ((row0 * tile_px) + layer.size - 1) +. 0.5)
+           *. layer.px_arcsec
+        -. float alat
+      in
+      let reqs =
+        List.concat_map
+          (fun br ->
+            List.map
+              (fun bc ->
+                {
+                  url = wmts_url ~matrix_level ~row:(row0 + br) ~col:(col0 + bc);
+                  px = tile_px;
+                  dst_row = br * tile_px;
+                  dst_col = bc * tile_px;
+                })
+              (List.init block_tiles Fun.id))
+          (List.init block_tiles Fun.id)
+      in
+      (origin_x, origin_y, reqs)
+  | Wms { wms_name; step_arcsec; steps } ->
+      let alat = Web_utils.arcsec_floor lat
+      and alon = Web_utils.arcsec_floor lon in
+      (* Centre on the nearest grid *corner*, not on the step holding the
+         location: over a block this small, anchoring on the step would leave the
+         location a couple of hundred metres from an edge on average, in the very
+         direction it is likely looking. Rounding to a corner keeps it at least
+         half a step from every edge, and stays deterministic so the URL is still
+         shared. *)
+      let half = float (steps / 2) in
+      let corner v = Float.round (v /. step_arcsec) in
+      let lon_min = (corner (float alon) -. half) *. step_arcsec in
+      let lat_min = (corner (float alat) -. half) *. step_arcsec in
+      let span = float steps *. step_arcsec in
+      let url =
+        wms_url ~wms_name ~size:layer.size ~lat_min:(lat_min /. 3600.)
+          ~lon_min:(lon_min /. 3600.)
+          ~lat_max:((lat_min +. span) /. 3600.)
+          ~lon_max:((lon_min +. span) /. 3600.)
+      in
+      let origin_x = lon_min +. (0.5 *. layer.px_arcsec) -. float alon in
+      let origin_y = lat_min +. (0.5 *. layer.px_arcsec) -. float alat in
+      ( origin_x,
+        origin_y,
+        [ { url; px = layer.size; dst_row = 0; dst_col = 0 } ] )
 
 type raw = {
   layer : layer;
@@ -108,9 +226,9 @@ type raw = {
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its
    region at nodata, which the blend turns back into the base. *)
-let fetch_tile layer ~row ~col =
+let fetch_one req =
   let open Brr_io.Fetch in
-  let* res = to_lwt (url (Jstr.v (tile_url layer ~row ~col))) in
+  let* res = to_lwt (url (Jstr.v req.url)) in
   match res with
   | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
   | Ok resp when not (Response.ok resp) ->
@@ -120,7 +238,7 @@ let fetch_tile layer ~row ~col =
       match buf with
       | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
       | Ok buf ->
-          let expected = tile_px * tile_px * 4 in
+          let expected = req.px * req.px * 4 in
           if Brr.Tarray.Buffer.byte_length buf <> expected then
             Lwt.fail
               (Failure
@@ -131,23 +249,11 @@ let fetch_tile layer ~row ~col =
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
 let fetch layer ~lat ~lon : raw option Lwt.t =
-  let { block_tiles; px_arcsec; size; _ } = layer in
-  let alat, alon, anchor_row, anchor_col = anchor_tile layer ~lat ~lon in
-  let row0 = anchor_row - (block_tiles / 2) in
-  let col0 = anchor_col - (block_tiles / 2) in
-  (* Sample centres: lon = -180 + (col * tile_px + j + 0.5) * px,
-     lat = 90 - (row * tile_px + i + 0.5) * px. *)
-  let origin_x =
-    -648000. +. ((float (col0 * tile_px) +. 0.5) *. px_arcsec) -. float alon
-  in
-  let origin_y =
-    324000.
-    -. ((float ((row0 * tile_px) + size - 1) +. 0.5) *. px_arcsec)
-    -. float alat
-  in
+  let size = layer.size in
+  let origin_x, origin_y, reqs = plan layer ~lat ~lon in
   let full = Brr.Tarray.create Brr.Tarray.Float32 (size * size) in
   Brr.Tarray.fill (-99999.) full;
-  let total = block_tiles * block_tiles in
+  let total = List.length reqs in
   (* Counting the tiles that arrived, not the ones that failed: on the timeout
      path the requests still in flight are neither, and it is the arrived count
      that says whether the block is worth publishing. *)
@@ -162,30 +268,25 @@ let fetch layer ~lat ~lon : raw option Lwt.t =
   (* Every request is issued at once: the browser multiplexes them over one
      HTTP/2 connection. *)
   let tasks =
-    List.concat_map
-      (fun br ->
-        List.map
-          (fun bc ->
-            Lwt.catch
-              (fun () ->
-                let* tile =
-                  fetch_tile layer ~row:(row0 + br) ~col:(col0 + bc)
-                in
-                if not !published then begin
-                  (* Blit row by row: the tile is contiguous, the destination is
-                     strided by the width of the whole block. *)
-                  for i = 0 to tile_px - 1 do
-                    Brr.Tarray.set_tarray full
-                      ~dst:((((br * tile_px) + i) * size) + (bc * tile_px))
-                      (Brr.Tarray.sub tile ~start:(i * tile_px)
-                         ~stop:((i + 1) * tile_px))
-                  done;
-                  incr arrived
-                end;
-                Lwt.return ())
-              (fun _ -> Lwt.return ()))
-          (List.init block_tiles Fun.id))
-      (List.init block_tiles Fun.id)
+    List.map
+      (fun req ->
+        Lwt.catch
+          (fun () ->
+            let* tile = fetch_one req in
+            if not !published then begin
+              (* Blit row by row: the response is contiguous, the destination is
+                 strided by the width of the whole block. *)
+              for i = 0 to req.px - 1 do
+                Brr.Tarray.set_tarray full
+                  ~dst:(((req.dst_row + i) * size) + req.dst_col)
+                  (Brr.Tarray.sub tile ~start:(i * req.px)
+                     ~stop:((i + 1) * req.px))
+              done;
+              incr arrived
+            end;
+            Lwt.return ())
+          (fun _ -> Lwt.return ()))
+      reqs
   in
   let publish () =
     published := true;
@@ -457,9 +558,19 @@ let blend ~lat ~(source : source) (raw : raw) =
    "outside French territory" and is served back rather than asked again.
    [Cache.add] would reject those, hence fetches rather than the direct cache
    writes of [Dem_loader.prefetch]. *)
-let prefetch layer ~lat ~lon =
-  let _, _, anchor_row, anchor_col = anchor_tile layer ~lat ~lon in
-  let n = 2 * layer.block_tiles in
+let rec prefetch layer ~lat ~lon =
+  match layer.kind with
+  (* WMS blocks are deliberately not prefetched: 4 MB buys ~600 m of offline
+     roaming against the ~40 MB that buys ~10 km for [l13], which is the wrong
+     trade. Their absence offline is invisible -- the blend falls back to the
+     coarser surface. *)
+  | Wms _ -> Lwt.return_unit
+  | Wmts { matrix_level; tiles_per_axis; block_tiles } ->
+      prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon
+
+and prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon =
+  let _, _, anchor_row, anchor_col = anchor_tile ~tiles_per_axis ~lat ~lon in
+  let n = 2 * block_tiles in
   let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
   let* cache =
     to_lwt
@@ -477,7 +588,8 @@ let prefetch layer ~lat ~lon =
                 Lwt.catch
                   (fun () ->
                     let url =
-                      Jstr.v (tile_url layer ~row:(row0 + br) ~col:(col0 + bc))
+                      Jstr.v
+                        (wmts_url ~matrix_level ~row:(row0 + br) ~col:(col0 + bc))
                     in
                     let* cached =
                       to_lwt
