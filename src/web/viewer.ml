@@ -2139,7 +2139,12 @@ let format_float f =
   in
   s
 
-let update_url_params ?(push = false) () =
+(* The camera as a link -- position, heading, pitch and zoom, the parameters the
+   app reads back on startup. Shared between the history updates and the
+   [currentViewUrl] hook the share button calls: the address bar only catches up
+   once the camera has settled, so reading it there would hand over a view a
+   second stale, or none at all early on. *)
+let current_view_uri () =
   let lat = !current_lat in
   let lon = !current_lon in
   let alpha_deg = compute_azimuth !current_orientation *. 180. /. Float.pi in
@@ -2151,11 +2156,12 @@ let update_url_params ?(push = false) () =
       (Printf.sprintf "?lat=%s&lon=%s&alpha=%.0f&beta=%.0f&zoom=%.2f"
          (format_float lat) (format_float lon) alpha_deg beta_deg z)
   in
-  let uri =
-    Brr.Uri.with_query_params
-      (Brr.Window.location Brr.G.window)
-      (Brr.Uri.Params.of_jstr search)
-  in
+  Brr.Uri.with_query_params
+    (Brr.Window.location Brr.G.window)
+    (Brr.Uri.Params.of_jstr search)
+
+let update_url_params ?(push = false) () =
+  let uri = current_view_uri () in
   let history = Jv.get Jv.global "history" in
   let action = if push then "pushState" else "replaceState" in
   ignore
@@ -3315,6 +3321,12 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
          current_gpx_str := str;
          update_gpx_path ctx ~radial_params));
 
+  (* Installed alongside [setGpxContent], once a location is loaded and the
+     camera means something: the share button reads the view from here. *)
+  Jv.set Jv.global "currentViewUrl"
+    (Jv.callback ~arity:1 (fun _ ->
+         Jv.of_jstr (Brr.Uri.to_jstr (current_view_uri ()))));
+
   let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
   let transform_ba =
     Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
@@ -3681,7 +3693,13 @@ let create_location_ui ~size =
     Brr.El.set_at (Jstr.v "title") (Some (Jstr.v "Toggle Labels")) el;
     el
   in
-  fab_els := [ fab; fab_labels ];
+  (* The GPX and share buttons live in index.html rather than being built here,
+     but they sit in the same row and have to turn with it: without this they
+     stayed put while the other two moved. This script is deferred, so they are
+     in the document by now. *)
+  let html_fab id = Brr.Document.find_el_by_id Brr.G.document (Jstr.v id) in
+  fab_els :=
+    [ fab; fab_labels ] @ List.filter_map html_fab [ "fab-gpx"; "fab-share" ];
 
   let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
   let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
@@ -4639,6 +4657,13 @@ let main () =
       (* Warming the surroundings must not compete with the tiles of the view
          being displayed: only start once the first location is up. *)
       if source = Geolocation then begin
+        (* Warming the surroundings is what makes the tile cache worth keeping,
+           and the only moment a request to keep it means anything to the user:
+           the app is visibly downloading where they are. See
+           [requestPersistentStorage] in index.html, absent if that script has
+           not run. *)
+        let request = Jv.get Jv.global "requestPersistentStorage" in
+        if not (Jv.is_none request) then ignore (Jv.apply request [||]);
         Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
         Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon);
         Lwt.async (fun () -> Hd_dem.prefetch ~lat ~lon)

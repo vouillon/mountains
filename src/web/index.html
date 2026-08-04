@@ -178,8 +178,73 @@
       transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.2s;
       -webkit-tap-highlight-color: transparent;
     }
+    /* Fourth in the row, at the same 68px pitch as the others. */
+    .fab-share {
+      position: absolute;
+      bottom: calc(24px + env(safe-area-inset-bottom));
+      right: calc(228px + env(safe-area-inset-right));
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      z-index: 100;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .fab-share:active { transform: scale(0.9); }
+    .fab-share svg { width: 24px; height: 24px; stroke: #4f46e5; }
+
     .fab-gpx:active { transform: scale(0.9); }
     .fab-gpx svg { width: 26px; height: 26px; stroke: #4f46e5; }
+
+    /* Turning with the screen, as the two buttons the viewer builds do: the row
+       keeps to one edge and each button keeps its own place along it, while the
+       glyph turns back upright. [update_fab_orientation] in viewer.ml sets these
+       classes; the buttons have to be in [fab_els] to receive them. */
+    .fab-gpx.rot90 {
+      bottom: auto;
+      top: calc(24px + env(safe-area-inset-top));
+    }
+    .fab-gpx.rot90 svg { transform: rotate(90deg); }
+
+    .fab-gpx.rot180 {
+      bottom: auto; right: auto;
+      top: calc(24px + env(safe-area-inset-top));
+      left: calc(160px + env(safe-area-inset-left));
+    }
+    .fab-gpx.rot180 svg { transform: rotate(180deg); }
+
+    .fab-gpx.rot270 {
+      right: auto;
+      left: calc(160px + env(safe-area-inset-left));
+    }
+    .fab-gpx.rot270 svg { transform: rotate(270deg); }
+
+    .fab-share.rot90 {
+      bottom: auto;
+      top: calc(24px + env(safe-area-inset-top));
+    }
+    .fab-share.rot90 svg { transform: rotate(90deg); }
+
+    .fab-share.rot180 {
+      bottom: auto; right: auto;
+      top: calc(24px + env(safe-area-inset-top));
+      left: calc(228px + env(safe-area-inset-left));
+    }
+    .fab-share.rot180 svg { transform: rotate(180deg); }
+
+    .fab-share.rot270 {
+      right: auto;
+      left: calc(228px + env(safe-area-inset-left));
+    }
+    .fab-share.rot270 svg { transform: rotate(270deg); }
     .fab-gpx.active { background: rgba(224, 231, 255, 0.95); border-color: #6366f1; }
 
     .menu-overlay {
@@ -387,6 +452,12 @@
 
     .input-error.visible {
       display: block;
+    }
+
+    .storage-note {
+      margin: 0 2px;
+      font-size: 12px;
+      color: #6b7280;
     }
 
     .btn-go {
@@ -640,6 +711,17 @@
     </svg>
   </button>
 
+  <!-- Share the current view -->
+  <button id="fab-share" class="fab-share" aria-label="Share this view" title="Share this view">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="18" cy="5" r="3"></circle>
+      <circle cx="6" cy="12" r="3"></circle>
+      <circle cx="18" cy="19" r="3"></circle>
+      <line x1="8.6" y1="10.6" x2="15.4" y2="6.4"></line>
+      <line x1="8.6" y1="13.4" x2="15.4" y2="17.6"></line>
+    </svg>
+  </button>
+
   <!-- Hidden File Input for GPX Upload -->
   <input type="file" id="gpx-file-input" accept=".gpx,application/gpx+xml,text/xml" multiple style="display:none">
 
@@ -670,6 +752,9 @@
       <!-- Files that could not be used, one line each -->
       <div id="gpx-error" class="input-error"></div>
 
+      <!-- What the app is holding offline, and whether it is safe there -->
+      <div id="storage-note" class="storage-note"></div>
+
       <!-- Saved Traces List -->
       <div class="section-title">Saved Traces</div>
       <div id="gpx-list" class="gpx-list">
@@ -687,6 +772,109 @@
 
       function escapeHtml(str) {
         return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      }
+
+      // A brief note in the middle of the screen, in the style the viewer uses
+      // for its own messages.
+      function flashMessage(text, ms = 2500) {
+        const el = document.createElement('div');
+        el.className = 'message';
+        el.textContent = text;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), ms);
+      }
+
+      // The tile caches are what this app is worth offline -- hundreds of
+      // megabytes of elevation and land cover, slow and sometimes impossible to
+      // fetch again where it gets used. Storage granted only best-effort can be
+      // evicted whenever the device is short of room, which would empty them
+      // between planning a walk at home and walking it out of signal, so ask for
+      // the persistent kind. An installed app is usually granted it silently;
+      // refusal costs nothing but the risk we already ran.
+      async function requestPersistentStorage() {
+        if (!navigator.storage || !navigator.storage.persist) return null;
+        try {
+          if (await navigator.storage.persisted()) return true;
+          return await navigator.storage.persist();
+        } catch (e) {
+          console.error('Could not ask for persistent storage:', e);
+          return null;
+        }
+      }
+
+      function formatBytes(bytes) {
+        if (!(bytes > 0)) return '0 MB';
+        const mb = bytes / (1024 * 1024);
+        return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+      }
+
+      // Reported rather than acted on: the figure is the browser's, and the
+      // point is to show whether what has been downloaded is safe where it is.
+      async function describeStorage() {
+        if (!navigator.storage || !navigator.storage.estimate) return '';
+        try {
+          const { usage } = await navigator.storage.estimate();
+          const persisted = navigator.storage.persisted
+            ? await navigator.storage.persisted()
+            : false;
+          return `Offline data: ${formatBytes(usage)} — ${
+            persisted ? 'kept until you clear it' : 'may be cleared if storage runs low'}`;
+        } catch (e) {
+          return '';
+        }
+      }
+
+      // Held while the app is on screen: this gets used standing outside with the
+      // rendered skyline held up against the real one, which is exactly when a
+      // phone decides to sleep. The lock is dropped by the browser whenever the
+      // page is hidden, so it has to be taken again on the way back.
+      let wakeLock = null;
+
+      async function holdScreenAwake() {
+        if (!('wakeLock' in navigator) || document.visibilityState !== 'visible') {
+          return;
+        }
+        if (wakeLock && !wakeLock.released) return;
+        try {
+          wakeLock = await navigator.wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => { wakeLock = null; });
+        } catch (e) {
+          // Refused on a low battery, among other reasons; nothing to do but
+          // let the screen behave as it normally would.
+          wakeLock = null;
+        }
+      }
+
+      // The viewer knows where the camera is; the address bar only finds out once
+      // it has settled (see [update_url_params] in viewer.ml), so ask it.
+      function shareableViewUrl() {
+        if (window.currentViewUrl) {
+          try {
+            const url = window.currentViewUrl();
+            if (url) return url;
+          } catch (e) { /* fall back to the address bar */ }
+        }
+        return window.location.href;
+      }
+
+      async function shareCurrentView() {
+        const url = shareableViewUrl();
+        if (navigator.share) {
+          try {
+            await navigator.share({ title: 'Mountain Skyline', url });
+            return;
+          } catch (e) {
+            // Dismissing the sheet is not a failure worth reporting.
+            if (e.name === 'AbortError') return;
+          }
+        }
+        // No share sheet, or it refused: the link is the useful part either way.
+        try {
+          await navigator.clipboard.writeText(url);
+          flashMessage('Link to this view copied');
+        } catch (e) {
+          flashMessage('Could not share this view');
+        }
       }
 
       const toRadians = degrees => degrees * Math.PI / 180;
@@ -870,6 +1058,13 @@
           this.errorEl.classList.remove('visible');
         }
 
+        // Read afresh each time the panel opens, the figure having moved with
+        // every tile fetched since.
+        async showStorage() {
+          if (!this.storageEl) return;
+          this.storageEl.textContent = await describeStorage();
+        }
+
         // Nothing half-asked outlives closing or reopening the panel: neither a
         // message about the last batch of files nor a delete waiting on an
         // answer.
@@ -972,6 +1167,7 @@
           this.fileInput = document.getElementById('gpx-file-input');
           this.listEl = document.getElementById('gpx-list');
           this.errorEl = document.getElementById('gpx-error');
+          this.storageEl = document.getElementById('storage-note');
 
           this.renderUI();
         }
@@ -980,6 +1176,7 @@
           // Open Modal, afresh: see [resetPrompts].
           this.fab.addEventListener('click', () => {
             this.resetPrompts();
+            this.showStorage();
             this.modal.classList.add('visible');
           });
 
@@ -1239,6 +1436,20 @@
       }
 
       window.gpxManager = new GpxManager();
+
+      const shareBtn = document.getElementById('fab-share');
+      if (shareBtn) shareBtn.addEventListener('click', shareCurrentView);
+
+      // Asked for by the viewer when it starts warming the surroundings, which
+      // is when these caches become worth keeping (see the prefetch branch in
+      // viewer.ml). Not on the way in: nothing is at stake yet, and a browser
+      // that puts the question to the user -- Firefox does -- should ask it
+      // while the app is visibly downloading their surroundings, not over a
+      // cold first paint.
+      window.requestPersistentStorage = requestPersistentStorage;
+
+      holdScreenAwake();
+      document.addEventListener('visibilitychange', holdScreenAwake);
     })();
   </script>
 </body>
