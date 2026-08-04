@@ -494,6 +494,15 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
             !complete)
   in
 
+  (* Whether a level covers its own extent, and so can stand in for another. A
+     half-loaded one would show its own gaps and is no use as a backdrop. *)
+  let level_drawn lv =
+    Hashtbl.length lv.tiles > 0
+    && Hashtbl.fold
+         (fun _ el ok -> ok && El.class' loaded_class el)
+         lv.tiles true
+  in
+
   let drop_levels_except keep =
     (* Collected first: removing while iterating the table is not safe. *)
     let doomed =
@@ -508,10 +517,37 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
       doomed
   in
 
+  (* Which level to keep behind [level]: the nearest one that is drawn, and of two
+     equally near the finer. One container beyond the live one, never more.
+
+     Nearest, so that whatever stands in is stretched as little as possible -- but
+     always something, because a moment with no map at all is the worst of the
+     options. Finer on a tie is what settles a zoom out: the level just left is
+     sharp and covers the middle, leaving the margins bare until the new one
+     arrives, which is a better look than a coarser level stretched over the whole
+     screen to hide ground it cannot describe. It also means each direction keeps
+     what the other needs, so stepping back is instant either way. *)
+  let backdrops level =
+    match
+      Hashtbl.fold
+        (fun l other acc -> if level_drawn other then l :: acc else acc)
+        levels []
+      |> List.filter (fun l -> l <> level)
+      |> List.sort (fun a b ->
+          match compare (abs (level - a)) (abs (level - b)) with
+          | 0 -> compare b a
+          | c -> c)
+    with
+    | [] -> []
+    | l :: _ -> [ l ]
+  in
+
   let prune_levels () =
     match !view with
     | Some (level, _, _, _, _) when level_complete () ->
-        drop_levels_except [ level ]
+        (* The stand-in stays even once this level is whole: it is what a zoom
+           either way will fall back on, and it is one container. *)
+        drop_levels_except (level :: backdrops level)
     | _ -> ()
   in
 
@@ -643,12 +679,11 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
           lv
     in
     if !cur_level <> Some level then begin
-      (* Exactly one level is kept as a backdrop, the one just left: holding on
-         to more would pile up containers when zooming through several levels. *)
-      drop_levels_except
-        (match !cur_level with
-        | Some prev -> [ level; prev ]
-        | None -> [ level ]);
+      (* Only levels that are drawn are kept. Keeping the level just left is not
+         enough: zoom through three in a row and that one is itself still loading,
+         while the last drawn level -- the only thing covering the screen -- gets
+         dropped, which is half of what made the map flash. *)
+      drop_levels_except (level :: backdrops level);
       (* Last child paints on top, so the level coming in covers the backdrop as
          its tiles arrive. Re-appending an existing child moves it. *)
       El.append_children layer_el [ lv.container ];
