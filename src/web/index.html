@@ -881,10 +881,15 @@
           const { unlessStartedThere = false, attempt = 0 } = opts;
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
           if (!window.flyToCoords || !window.setGpxContent) {
-            // Bounded, unlike [updateMap]'s wait: there is nothing to move if
-            // the viewer never comes up, and a flight arriving minutes late
-            // would drag the camera off wherever the user had got to by then.
-            if (attempt < 75) {
+            // Keep waiting while the app is still starting: a cold start over a
+            // slow connection takes tens of seconds, and the user cannot have
+            // taken the camera anywhere while the loading overlay is still over
+            // the screen, which is what a late flight would otherwise undo. Once
+            // the overlay has gone the wait is short, and bounded either way:
+            // there is nothing to move if the viewer never comes up at all.
+            const overlay = document.getElementById('startup-overlay');
+            const starting = overlay && !overlay.classList.contains('hidden');
+            if (attempt < 75 || (starting && attempt < 900)) {
               setTimeout(
                 () => this.flyToStart(lat, lon, bearing, { ...opts, attempt: attempt + 1 }),
                 200);
@@ -1006,51 +1011,87 @@
         }
 
         setupWebAPIs() {
+          const canHandleFiles =
+            'launchQueue' in window && 'files' in LaunchParams.prototype;
+
+          // Which way in the app was opened, decided synchronously: the viewer's
+          // script is deferred and this one is inline, so it always finds the
+          // answer already here. A share is marked by the redirect the worker
+          // sends (see service_worker.ml), opening a file by the query on the
+          // manifest's file_handlers action -- launchQueue only delivers later,
+          // and offers no way to ask whether anything is coming.
+          const search = window.location.search;
+          this.openedWith =
+            search.includes('share_received=1') ? 'share'
+            : canHandleFiles && search.includes('opened=1') ? 'file'
+            : null;
+          // The viewer waits on this before resolving where to start, so that a
+          // trace arriving from outside is loaded directly instead of being
+          // switched to afterwards (see [get_shared_trace_position] in
+          // viewer.ml). The flag spares an ordinary load any wait at all.
+          window.sharedTracePending = this.openedWith !== null;
+          window.sharedTraceStart = new Promise(resolve => {
+            this.settleStart = resolve;
+          });
+          // The marker has served its purpose and does not belong in history.
+          if (this.openedWith) {
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+
           // 1. Web Launch API (File Handling API)
-          if ('launchQueue' in window && 'files' in LaunchParams.prototype) {
+          if (canHandleFiles) {
             window.launchQueue.setConsumer(async (launchParams) => {
-              if (!launchParams.files || !launchParams.files.length) return;
-              for (const handle of launchParams.files) {
+              let opened = null;
+              for (const handle of launchParams.files || []) {
                 try {
                   const file = await handle.getFile();
                   const text = await file.text();
-                  await this.addTrace(file.name, text);
+                  const trace = await this.addTrace(file.name, text);
+                  if (trace && !opened) opened = trace;
                 } catch (err) {
                   console.error('Error opening launched file:', err);
                 }
               }
+              this.announceStart(opened, this.openedWith === 'file');
+              // Same as a share: the viewer may have started there already, in
+              // which case flying would load the location a second time.
+              if (opened) {
+                this.flyToStart(opened.centerLat, opened.centerLon, opened.bearing,
+                                { unlessStartedThere: true });
+              }
             });
           }
 
-          // 2. Web Share Target API. The service worker answered the share
-          // POST by stashing the files in a cache of its own (see
-          // service_worker.ml) and redirecting here; the query parameter marks
-          // that navigation.
-          const shared = window.location.search.includes('share_received=1');
-          // Handed to the viewer, which waits for it before resolving where to
-          // start, so a share loads the trace's location instead of loading the
-          // current one and then switching to it (see
-          // [get_shared_trace_position] in viewer.ml). Both globals are set
-          // before viewer.bc.wasm.js runs: it is deferred, so this script, being
-          // inline, has already finished. The flag keeps an ordinary load from
-          // waiting on a drain that will find nothing.
-          window.sharedTracePending = shared;
-          // Draining unconditionally, rather than on the parameter alone,
-          // recovers files whose redirect never made it to a document. Such a
-          // late recovery has no parameter, so the viewer will not be waiting
-          // for it and the trace is flown to instead.
-          window.sharedTraceStart = this.drainSharedFiles();
-          // Only now: the parameter has served its purpose and does not belong
-          // in the history.
-          if (shared) {
-            window.history.replaceState(null, '', window.location.pathname);
-          }
+          // 2. Web Share Target API. The service worker answered the share POST
+          // by stashing the files in a cache of its own (see service_worker.ml)
+          // and redirecting here. Draining unconditionally, rather than on the
+          // marker alone, recovers files whose redirect never made it to a
+          // document; such a late recovery has no marker, so the viewer will not
+          // be waiting for it and the trace is flown to instead.
+          this.drainSharedFiles();
+        }
+
+        // Resolves [sharedTraceStart], which the viewer is waiting on. Only the
+        // way the app was actually opened may report having nothing: the other
+        // may still be about to deliver, and answering "nothing" early would
+        // send the viewer off to the current location instead.
+        announceStart(trace, authoritative) {
+          if (!this.settleStart || (!trace && !authoritative)) return;
+          const settle = this.settleStart;
+          this.settleStart = null;
+          settle(trace
+            ? { lat: trace.centerLat, lon: trace.centerLon, bearing: trace.bearing }
+            : null);
         }
 
         // The stashed file name travels in the query string of the cache entry:
         // a cache has nowhere else to keep it.
         async drainSharedFiles() {
-          if (!('caches' in window)) return;
+          const shareWasTheWayIn = () => this.openedWith === 'share';
+          if (!('caches' in window)) {
+            this.announceStart(null, shareWasTheWayIn());
+            return;
+          }
           try {
             const cache = await caches.open(SHARE_CACHE_NAME);
             let destination = null;
@@ -1069,20 +1110,17 @@
               // turn would just be a scramble ending on the last.
               if (trace && !destination) destination = trace;
             }
-            if (!destination) return null;
-            this.flyToStart(
-              destination.centerLat, destination.centerLon, destination.bearing,
-              { unlessStartedThere: true });
-            // Resolves [sharedTraceStart]: the viewer is waiting on this to
-            // decide where to start.
-            return {
-              lat: destination.centerLat,
-              lon: destination.centerLon,
-              bearing: destination.bearing,
-            };
+            // Announced before the flight is started: the viewer needs the
+            // answer to start there, and the flight stands down if it did.
+            this.announceStart(destination, shareWasTheWayIn());
+            if (destination) {
+              this.flyToStart(
+                destination.centerLat, destination.centerLon, destination.bearing,
+                { unlessStartedThere: true });
+            }
           } catch (e) {
             console.error('Failed to read shared GPX files:', e);
-            return null;
+            this.announceStart(null, shareWasTheWayIn());
           }
         }
 
