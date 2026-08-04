@@ -242,14 +242,13 @@
       border-color: #4f46e5;
     }
 
-    /* GPX Trace List */
+    /* GPX Trace List. Deliberately not a scroller of its own: the whole panel
+       scrolls, as in the location menu, so the list grows to the space the
+       .menu has instead of being capped inside it. */
     .gpx-list {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      max-height: 280px;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
     }
 
     .gpx-item {
