@@ -559,18 +559,19 @@ let load_compressed_detail_map ctx tid =
             Gl.active_texture ctx Gl.texture5;
             Gl.bind_texture ctx Gl.texture_2d (Some tid);
             let data = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buffer in
-            for level = 0 to level_count - 1 do
-              let idx = 80 + (level * 24) in
-              let offset = get_u64_low idx in
-              let length = get_u64_low (idx + 8) in
-              let level_data =
-                Brr.Tarray.sub data ~start:offset ~stop:(offset + length)
-              in
-              let w = max 1 (pixel_width lsr level) in
-              let h = max 1 (pixel_height lsr level) in
-              Gl.compressed_tex_image2d ctx Gl.texture_2d level internal_fmt w h
-                0 level_data
-            done;
+            if false then
+              for level = 0 to level_count - 1 do
+                let idx = 80 + (level * 24) in
+                let offset = get_u64_low idx in
+                let length = get_u64_low (idx + 8) in
+                let level_data =
+                  Brr.Tarray.sub data ~start:offset ~stop:(offset + length)
+                in
+                let w = max 1 (pixel_width lsr level) in
+                let h = max 1 (pixel_height lsr level) in
+                Gl.compressed_tex_image2d ctx Gl.texture_2d level internal_fmt w
+                  h 0 level_data
+              done;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
               Gl.linear_mipmap_linear;
             Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
