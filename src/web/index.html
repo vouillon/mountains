@@ -630,6 +630,283 @@
       }
     }
 
+    /* Full screen map picker */
+    .map-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 300;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+      display: flex;
+      flex-direction: column;
+      background: #f2efe9;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    .map-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .map-viewport {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      /* The browser must not pan or zoom the page from gestures meant for the
+         map; every one of them is handled from pointer events. */
+      touch-action: none;
+      cursor: grab;
+      /* Belt and braces against the relief blend escaping the map: the tiles
+         isolate it individually, and this keeps it off the page behind the
+         overlay whatever else changes. The opaque light background is what shows
+         while tiles are still loading. Bounds, crosshair and controls are
+         painted after the layer, so they are never part of the blend. */
+      isolation: isolate;
+      background: #f2efe9;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .map-viewport:active {
+      cursor: grabbing;
+    }
+
+    .map-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    /* One per zoom level. The level being left behind is kept as a backdrop
+       under the one coming in until that has no gaps, so a zoom step never
+       blanks the map; later siblings paint on top, and the incoming level is
+       moved last. */
+    .map-level {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+    }
+
+    /* One tile holds its basemap image with the relief multiplied over it.
+       [isolation] confines that blend to the pair -- unlike opacity it does so
+       at opacity 1 too, which is where the tile ends up once loaded. */
+    .map-tile {
+      position: absolute;
+      width: 256px;
+      height: 256px;
+      isolation: isolate;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    .map-tile.loaded {
+      opacity: 1;
+    }
+
+    /* A pixel wider and taller than the 256 the tile occupies. The layer is
+       scaled by a fractional factor between zoom levels, which lands tile edges
+       between device pixels and leaves hairline seams showing the background
+       through; overlapping the neighbour by a pixel covers them. Whichever of
+       the two ends up on top, the overlap is a pixel of the same ground drawn
+       from one tile instead of the other. */
+    .map-tile img {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 257px;
+      height: 257px;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    .map-tile-relief {
+      opacity: 0.25;
+      mix-blend-mode: multiply;
+    }
+
+    /* Outlines the selectable rectangle and, with one very wide shadow, dims
+       everything outside it. Clipped by the viewport's overflow. */
+    .map-bounds {
+      position: absolute;
+      box-sizing: border-box;
+      border: 2px solid rgba(79, 70, 229, 0.9);
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+    }
+
+    .map-crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 30px;
+      height: 30px;
+      margin: -15px 0 0 -15px;
+      pointer-events: none;
+    }
+
+    .map-crosshair::before,
+    .map-crosshair::after {
+      content: '';
+      position: absolute;
+      background: #e11d48;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+    }
+
+    .map-crosshair::before {
+      left: 14px;
+      top: 0;
+      width: 2px;
+      height: 30px;
+    }
+
+    .map-crosshair::after {
+      top: 14px;
+      left: 0;
+      height: 2px;
+      width: 30px;
+    }
+
+    .map-zoom {
+      position: absolute;
+      right: calc(12px + env(safe-area-inset-right));
+      top: calc(12px + env(safe-area-inset-top));
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .map-zoom-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      color: #4f46e5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .map-zoom-btn svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .map-zoom-btn:active {
+      background: rgba(230, 230, 230, 0.95);
+    }
+
+    .map-attribution {
+      position: absolute;
+      left: calc(8px + env(safe-area-inset-left));
+      bottom: 8px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.75);
+      font-size: 11px;
+      color: #444;
+      pointer-events: none;
+    }
+
+    .map-bar {
+      flex: none;
+      padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(0, 0, 0, 0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .map-regions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .map-region-btn {
+      flex: 1 1 auto;
+      min-height: 40px;
+      padding: 0 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      background: rgba(0, 0, 0, 0.04);
+      font-size: 14px;
+      color: #333;
+      cursor: pointer;
+      transition: background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .map-region-btn.active {
+      background: #e0e7ff;
+      border-color: #6366f1;
+      color: #3730a3;
+      font-weight: bold;
+    }
+
+    .map-coord {
+      font-variant-numeric: tabular-nums;
+      font-size: 15px;
+      color: #333;
+      text-align: center;
+    }
+
+    .map-error {
+      display: none;
+      margin: 0;
+      color: #b3261e;
+      font-size: 14px;
+      text-align: center;
+    }
+
+    .map-error.visible {
+      display: block;
+    }
+
+    .map-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .map-btn {
+      flex: 1;
+      min-height: 48px;
+      border: none;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.06);
+      font-size: 15px;
+      color: #333;
+      cursor: pointer;
+      transition: background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .map-btn:active {
+      background: rgba(0, 0, 0, 0.12);
+    }
+
+    .map-btn-primary {
+      background: #6366f1;
+      color: white;
+      font-weight: bold;
+    }
+
+    .map-btn-primary:active {
+      background: #4f46e5;
+    }
+
     /* Cinematic Startup Overlay */
     .startup-overlay {
       position: fixed;

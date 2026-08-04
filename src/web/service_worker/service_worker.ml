@@ -31,6 +31,30 @@ let is_tile url =
   || String.ends_with ~suffix:".tif" url
   || is_hd_dem url
 
+let contains_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec from i = i + m <= n && (String.sub s i m = sub || from (i + 1)) in
+  m = 0 || from 0
+
+(* The map picker's basemap and its relief shading come from the same host as
+   the elevation tiles, but must not be treated like them. Panning walks an
+   unbounded set of URLs, one per tile at every level visited, and the data cache
+   has no eviction: cached like the rest they would grow it without end and
+   crowd out the elevation and land cover tiles that have to survive offline.
+
+   Passing them straight through does not mean they are fetched twice. The
+   service answers these with [cache-control: private, max-age=1814400], three
+   weeks, so the browser's own HTTP cache holds them: measured at 6.5 MB over the
+   network on a first view of a screen of tiles and zero bytes for the same view
+   after a reload. What is given up is only the Cache Storage copy, and with it
+   the map alone offline -- picking a location is an online act anyway, whereas
+   the terrain the picked location loads still has to work without a network. *)
+let is_map_basemap url =
+  is_hd_dem url
+  && (contains_sub url "LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2"
+     || contains_sub url
+          "LAYER=IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW")
+
 (* [Cache.Storage.match'] searches every cache, so application caches from
    previous builds must be dropped, not just left unused. *)
 let delete_old_caches () =
@@ -265,7 +289,8 @@ let () =
               if is_share_target request then handle_share_target request
               else
                 let url = Jstr.to_string url in
-                if is_hd_dem url then
+                if is_map_basemap url then Brr_io.Fetch.request request
+                else if is_hd_dem url then
                   use_cache_first ~serve_not_found:true request
                 else if
                   is_tile url

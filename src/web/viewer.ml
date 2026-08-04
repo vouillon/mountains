@@ -3500,6 +3500,58 @@ let in_range ~size ~lat ~lon =
   || Dem_loader.in_range ~size ~min_lat:(-22) ~max_lat:(-20) ~min_lon:54
        ~max_lon:57 ~lat ~lon
 
+(* Rectangles the map picker confines itself to: the boxes above, shrunk by the
+   half extent [in_range] requires around a position (0.57 degrees at
+   size = 4096), intersected with where the IGN basemap and its relief shading
+   actually have tiles. That coverage is roughly France-shaped -- a buffer into
+   Italy is served, Switzerland past the border is not, Corsica is a detached
+   patch -- so it takes several rectangles rather than one, and they are
+   deliberately conservative: a position the picker offers must be one the
+   renderer can load, hence a strict subset of [in_range], which stays the
+   authority. Measured by probing the service on a grid, so extend them if IGN
+   extends coverage.
+
+   Left out: the latitudes above 46 around Lake Geneva and the Jura, which the
+   basemap only serves west of longitude 7 and so cannot share a rectangle with
+   the eastern Alps; and southern Corsica, already outside the elevation boxes.
+   La Reunion is narrowed to the island, the basemap reaching to lat -20.65 and
+   lon 54.90 .. 56.10 over open ocean.
+
+   The view points are where each region opens: the Ecrins, the Agriates and the
+   Tenda massif -- the Corsican rectangle bounds a diagonal coast, so its middle
+   is at sea, and Cap Corse would start hard against the eastern edge -- and the
+   Piton des Neiges. *)
+let map_regions =
+  [
+    {
+      Map_picker.name = "Alps";
+      min_lat = 43.25;
+      max_lat = 46.00;
+      min_lon = 4.60;
+      max_lon = 8.25;
+      view_lat = 44.85;
+      view_lon = 6.35;
+    };
+    {
+      Map_picker.name = "Corsica";
+      min_lat = 42.58;
+      max_lat = 43.00;
+      min_lon = 8.55;
+      max_lon = 9.42;
+      view_lat = 42.70;
+      view_lon = 9.15;
+    };
+    {
+      Map_picker.name = "La R\u{00E9}union";
+      min_lat = -21.43;
+      max_lat = -20.80;
+      min_lon = 55.12;
+      max_lon = 55.94;
+      view_lat = -21.09;
+      view_lon = 55.48;
+    };
+  ]
+
 let get_url_position ~size =
   let uri = Brr.Window.location Brr.G.window in
   let params = Brr.Uri.query_params uri in
@@ -3652,6 +3704,51 @@ let get_shared_trace_position ~size =
             Some (lat, lon, alpha, 90., clamp_zoom 1.0)
         | _ -> None)
     | Some (Ok _) | Some (Error _) | None -> None
+
+(* Whether offering the device position is worth it, for the one case that has
+   not already found out: a startup position taken from the URL never consults
+   the device, so nothing has established whether it could have answered.
+
+   Decided without ever prompting. A refused permission settles it on its own,
+   and a granted one can be read from cache for the price of a coarse fix. A
+   permission still unasked is left alone -- resolving it would mean putting the
+   browser's prompt up, and whether to draw a button is no reason to. Absent a
+   Permissions API, likewise: leave it. Being wrong here costs at worst an entry
+   that reports "out of range or unavailable" when used. *)
+let geolocation_offerable () =
+  let open Fut.Syntax in
+  let permissions = Jv.get (Jv.get Jv.global "navigator") "permissions" in
+  if Jv.is_none permissions then Fut.return true
+  else
+    let query =
+      Jv.call permissions "query"
+        [| Jv.obj [| ("name", Jv.of_string "geolocation") |] |]
+    in
+    let* status = Fut.of_promise ~ok:(fun v -> v) query in
+    match status with
+    | Error _ -> Fut.return true
+    | Ok status -> (
+        match Jv.to_string (Jv.get status "state") with
+        | "denied" -> Fut.return false
+        | "granted" -> (
+            let open Brr_io.Geolocation in
+            let+ coarse =
+              get
+                ~opts:
+                  (opts ~high_accuracy:false ~maximum_age_ms:600_000
+                     ~timeout_ms:4_000 ())
+                (of_navigator Brr.G.navigator)
+            in
+            (* Same test as [get_current_position]: only a fix outside coverage
+               by more than its own accuracy plus a margin is conclusive, coarse
+               fixes being an IP guess often enough. *)
+            match coarse with
+            | Ok pos ->
+                distance_to_coverage ~lat:(Pos.latitude pos)
+                  ~lon:(Pos.longitude pos)
+                <= Pos.accuracy pos +. 10_000.
+            | Error _ -> true)
+        | _ -> Fut.return true)
 
 type location_source = Url | Geolocation | Preset
 
@@ -3859,6 +3956,32 @@ let create_location_ui ~size =
          ())
        (Brr.El.as_target current_loc_btn));
 
+  (* Pick on a map *)
+  let open_map =
+    Map_picker.create ~regions:map_regions
+      ~in_range:(fun ~lat ~lon -> in_range ~size ~lat ~lon)
+      ~on_select:(fun ~lat ~lon ->
+        (* In place, like the coordinate input: no navigation, so fullscreen
+           mode survives the switch. The camera is left alone, the map saying
+           nothing about which way to look. *)
+        close_menu ();
+        !switch_location ~push:true ~camera:None ~lat ~lon)
+  in
+  let map_btn =
+    Brr.El.div
+      ~at:Brr.At.[ class' (Jstr.v "location-item"); tabindex 0 ]
+      [
+        Brr.El.span
+          ~at:Brr.At.[ class' (Jstr.v "location-icon") ]
+          [ Brr.El.txt (Jstr.v "\u{1F5FA}\u{FE0F}") ];
+        Brr.El.txt (Jstr.v "Pick on Map");
+      ]
+  in
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ -> open_map ~lat:!current_lat ~lon:!current_lon)
+       (Brr.El.as_target map_btn));
+
   (* Featured Locations *)
   let location_list =
     Brr.El.ul ~at:Brr.At.[ class' (Jstr.v "location-list") ] []
@@ -3891,7 +4014,9 @@ let create_location_ui ~size =
       featured_locations
   in
 
-  let focusables = [ input; btn_go; current_loc_btn ] @ featured_items in
+  let focusables =
+    [ input; btn_go; map_btn; current_loc_btn ] @ featured_items
+  in
   let n = List.length focusables in
   List.iteri
     (fun i el ->
@@ -3941,6 +4066,7 @@ let create_location_ui ~size =
       input_group;
       input_error;
       quick_select_header;
+      map_btn;
       current_loc_btn;
       Brr.El.div
         ~at:Brr.At.[ class' (Jstr.v "section-title") ]
@@ -3948,11 +4074,11 @@ let create_location_ui ~size =
       location_list;
     ];
 
+  (* Only the geolocation entry goes away when the device position was of no
+     use; the section header stays, "Pick on Map" still being under it. *)
   fun visible ->
     let disp = Jstr.v (if visible then "flex" else "none") in
-    let disp_header = Jstr.v (if visible then "block" else "none") in
-    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn;
-    Brr.El.set_inline_style (Jstr.v "display") disp_header quick_select_header
+    Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn
 
 let update_fab_orientation angle =
   List.iter
@@ -4635,7 +4761,12 @@ let main () =
      redirect to the resolved location. *)
   (match source with
   | Preset -> set_loc_visible false
-  | Url -> ()
+  | Url ->
+      (* The device was never asked, so the entry's usefulness is still open;
+         settle it off to one side rather than leave an option that cannot
+         work. *)
+      Fut.await (geolocation_offerable ()) (fun offerable ->
+          if not offerable then set_loc_visible false)
   | _ ->
       let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
       if Brr.Uri.Params.mem (Jstr.v "lat") params then
