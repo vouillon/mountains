@@ -653,6 +653,8 @@
   <script>
     (function() {
       const STORAGE_KEY = 'mountains_gpx_traces_v1';
+      // Kept in sync with [share_cache_name] in service_worker.ml.
+      const SHARE_CACHE_NAME = 'shared-gpx';
 
       function escapeHtml(str) {
         return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -921,9 +923,36 @@
             });
           }
 
-          // 2. Web Share Target API check
+          // 2. Web Share Target API. The service worker answered the share
+          // POST by stashing the files in a cache of its own (see
+          // service_worker.ml) and redirecting here; the query parameter only
+          // marks that navigation, so drop it from the history.
           if (window.location.search.includes('share_received=1')) {
             window.history.replaceState(null, '', window.location.pathname);
+          }
+          // Draining unconditionally, rather than on the parameter alone,
+          // recovers files whose redirect never made it to a document.
+          this.drainSharedFiles();
+        }
+
+        // The stashed file name travels in the query string of the cache entry:
+        // a cache has nowhere else to keep it.
+        async drainSharedFiles() {
+          if (!('caches' in window)) return;
+          try {
+            const cache = await caches.open(SHARE_CACHE_NAME);
+            for (const request of await cache.keys()) {
+              const response = await cache.match(request);
+              const text = response ? await response.text() : null;
+              // Dropped before the trace is added: a file that fails to parse
+              // must not come back on every startup.
+              await cache.delete(request);
+              if (!text) continue;
+              const name = new URL(request.url).searchParams.get('name');
+              await this.addTrace(name || 'shared.gpx', text);
+            }
+          } catch (e) {
+            console.error('Failed to read shared GPX files:', e);
           }
         }
 

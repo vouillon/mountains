@@ -10,6 +10,10 @@ open Fut.Result_syntax
 let app_cache_name = Jstr.v ("mountains-" ^ Sw_version.version)
 let data_cache_name = Jstr.v "v1"
 
+(* Files handed over by the Web Share Target below. Neither shell nor tiles,
+   hence a third cache; entries live only until the page has read them. *)
+let share_cache_name = Jstr.v "shared-gpx"
+
 let open_cache name =
   Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) name
 
@@ -37,7 +41,10 @@ let delete_old_caches () =
     Fut.of_list
       (List.filter_map
          (fun name ->
-           if Jstr.equal name app_cache_name || Jstr.equal name data_cache_name
+           if
+             Jstr.equal name app_cache_name
+             || Jstr.equal name data_cache_name
+             || Jstr.equal name share_cache_name
            then None
            else Some (Brr_io.Fetch.Cache.Storage.delete caches name))
          names)
@@ -153,6 +160,98 @@ let use_cache_on_error event request =
           | Some response -> Fut.return (Ok response)
           | None -> Fut.return (Ok (Brr_io.Fetch.Response.error ()))))
 
+(* Web Share Target ([share_target] in manifest.json): a share arrives as a
+   [multipart/form-data] POST navigation to [share-target], and no document can
+   read the body of a navigation. Only the worker can, so it answers the POST
+   itself -- moving the files into [share_cache_name] and redirecting to the
+   application, which drains that cache on startup (see [drainSharedFiles] in
+   index.html). Without this handler the POST goes to the network, where
+   nothing serves it, which is what made sharing fail. *)
+(* Not [Brr_io.Fetch.Request.method']: up to brr 0.0.8 it reads a property
+   named "method'", stray apostrophe included, and so is always undefined. *)
+let request_method request =
+  Jv.Jstr.get (Brr_io.Fetch.Request.to_jv request) "method"
+
+let is_share_target request =
+  Jstr.equal (request_method request) (Jstr.v "POST")
+  &&
+  match Brr.Uri.of_jstr (Brr_io.Fetch.Request.url request) with
+  | Ok uri ->
+      String.ends_with ~suffix:"/share-target"
+        (Jstr.to_string (Brr.Uri.path uri))
+  | Error _ -> false
+
+(* A cache entry is a request/response pair, so the URL is the only place left
+   to keep the file name. Entries are numbered from those already in the cache:
+   a share the page has not read yet -- its navigation was cancelled, say --
+   must not be overwritten by the next one. *)
+let share_entry_request ~base ~index file =
+  let name =
+    match Brr.Uri.encode_component (Brr.File.name file) with
+    | Ok name -> name
+    | Error _ -> Jstr.empty
+  in
+  let path = Jstr.(v "shared-gpx/" + of_int index + v "?name=" + name) in
+  match Brr.Uri.of_jstr ~base path with
+  | Ok uri -> Some (Brr_io.Fetch.Request.v (Brr.Uri.to_jstr uri))
+  | Error _ -> None
+
+(* Every file entry is taken, whatever its field name: the manifest asks for
+   [gpx_file], but that is a request to the browser, not a guarantee. *)
+let stash_shared_files request =
+  let base = Brr_io.Fetch.Request.url request in
+  let* form =
+    Brr_io.Fetch.Body.form_data (Brr_io.Fetch.Request.as_body request)
+  in
+  let files =
+    List.filter_map
+      (fun (_, value) ->
+        match value with `File file -> Some file | `String _ -> None)
+      (Brr_io.Form.Data.to_assoc form)
+  in
+  match files with
+  | [] -> Fut.return (Ok 0)
+  | files ->
+      let* cache = open_cache share_cache_name in
+      let* pending = Brr_io.Fetch.Cache.keys cache in
+      let first = List.length pending in
+      let open Fut.Syntax in
+      let+ _ =
+        Fut.of_list
+          (List.mapi
+             (fun i file ->
+               match share_entry_request ~base ~index:(first + i) file with
+               | None -> Fut.return (Ok ())
+               | Some entry ->
+                   let blob = Brr.Blob.of_jv (Brr.File.to_jv file) in
+                   Brr_io.Fetch.Cache.put cache entry
+                     (Brr_io.Fetch.Response.v
+                        ~body:(Brr_io.Fetch.Body.of_blob blob)
+                        ()))
+             files)
+      in
+      Ok (List.length files)
+
+(* The user must end up in the application whatever happens, never on an error
+   page: a share that yielded no file just opens it. 303 so that the browser
+   follows up with a GET, which the cache-on-error path then serves. *)
+let handle_share_target request =
+  let base = Brr_io.Fetch.Request.url request in
+  let redirect target =
+    match Brr.Uri.of_jstr ~base (Jstr.v target) with
+    | Ok uri ->
+        Ok (Brr_io.Fetch.Response.redirect ~status:303 (Brr.Uri.to_jstr uri))
+    | Error _ -> Ok (Brr_io.Fetch.Response.error ())
+  in
+  let open Fut.Syntax in
+  let+ stashed = stash_shared_files request in
+  match stashed with
+  | Ok count when count > 0 -> redirect "./?share_received=1"
+  | Ok _ -> redirect "./"
+  | Error e ->
+      Brr.Console.(warn [ Jstr.v "Share target failed:"; Jv.Error.message e ]);
+      redirect "./"
+
 let () =
   ignore
     (Brr.Ev.listen Brr_io.Fetch.Ev.fetch
@@ -163,15 +262,17 @@ let () =
          Brr_io.Fetch.Ev.respond_with ev
            (let open Fut.Syntax in
             let* response =
-              let url = Jstr.to_string url in
-              if is_hd_dem url then
-                use_cache_first ~serve_not_found:true request
-              else if
-                is_tile url
-                || String.ends_with ~suffix:"worker.bc.js" url
-                || String.ends_with ~suffix:"decompress_tile.wasm" url
-              then use_cache_first ~query_opts:match_opts request
-              else use_cache_on_error ev request
+              if is_share_target request then handle_share_target request
+              else
+                let url = Jstr.to_string url in
+                if is_hd_dem url then
+                  use_cache_first ~serve_not_found:true request
+                else if
+                  is_tile url
+                  || String.ends_with ~suffix:"worker.bc.js" url
+                  || String.ends_with ~suffix:"decompress_tile.wasm" url
+                then use_cache_first ~query_opts:match_opts request
+                else use_cache_on_error ev request
             in
             match response with
             | Ok _ -> Fut.return response
