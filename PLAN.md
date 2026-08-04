@@ -2361,3 +2361,44 @@ azimuths and take, for each sector, the max over it and its neighbours -- which
 is O(N x 300) instead of O(rays x 300) and beats the current cost for N well
 below 4813. That is an approximation needing a safety margin, not a conservative
 bound, so it would have to be justified by measurement rather than by argument.
+
+## 1.19 m from the LIDAR HD WMS: the data is genuine (measured 2026-08-05)
+
+One footprint-aligned bbox at Mont Blanc (45.833, 6.865; steep, 3861-4652 m over
+1.2 km), fetched at 256/512/1024 px = 4.77/2.38/1.19 m.
+
+- **Not replicated.** 0 of 262144 2x2 blocks of the 1.19 m grid are constant, and
+  row-to-row differences are the same on even and odd rows (0.6678 / 0.6664 m):
+  no nearest-neighbour signature. RGE ALTI below level 14 was 100% replicated, so
+  this had to be checked rather than assumed.
+- **Exactly box-consistent.** The 2.38 m output is the 2x2 box mean of the 1.19 m
+  output to float32 rounding: RMS 0.000185 m, max 0.000488 m. Same property the
+  512/1024 pair has, so the two nest with no product discrepancy and a fade
+  between them hides nothing.
+- **The step is worth about 55% of the previous one**, and that ratio is stable:
+  at this footprint 4.77 -> 2.38 m is RMS 1.304 m and 2.38 -> 1.19 m is 0.711 m
+  (ratio 0.55); the four-location averages were 0.693 and 0.423 (ratio 0.61).
+  Absolute detail is roughly twice the four-location average on terrain this
+  steep.
+
+### Recommendation: upgrade the inner ring, do not add a fourth
+
+`lidar_2m` is `steps:2, size:1024`. Making it `steps:2, size:2048` gives 1.19 m
+over the *same* +-1.22 km extent, and costs nothing structurally: `HD_SLOTS`
+stays 3, no new vertex-stage sampler, no new varying, no texture unit past 13, no
+extra publish -- and therefore no extra relief bake, normal pass or **594 ms
+visibility pass**, which is now the dominant marginal cost of a ring.
+
+Price: 4.0 -> 16.0 MB on the wire (4 GetMaps instead of 1, the endpoint does not
+compress) and 5.33 -> 21.33 MiB of GPU. The latency that made 16 MB unattractive
+in the earlier analysis is what 9d09924 fixed: the inner ring can take its ~4 s
+and publish when ready without holding the others.
+
+Quantisation is fine at that spacing thanks to per-grid scales: ~1.23 cm steps
+over 1.19 m is a 0.59 degree normal error, inside the 0.87 degree bar L13 shipped
+with. It would not have worked before per-grid quantisation.
+
+Still to check before committing the bytes: LIDAR HD MNT coverage at the featured
+locations (gaps already cost tiles at the forest viewpoint), and that four
+concurrent 1024^2 GetMaps do not trip the 40 requests/second WMS limit alongside
+the other rings.
