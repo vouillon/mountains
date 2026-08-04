@@ -3951,6 +3951,29 @@ let create_location_ui ~size =
   let open_map =
     Map_picker.create ~regions:map_regions
       ~in_range:(fun ~lat ~lon -> in_range ~size ~lat ~lon)
+      ~traces:(fun () ->
+        (* The same string the terrain draws from, so the map shows exactly the
+           traces that are active. Parsed again rather than shared: it happens
+           once per opening, and the parse is cheap next to fetching a screen of
+           tiles. *)
+        match !current_gpx_str with
+        | None -> []
+        | Some str -> (
+            match Gpx_loader.parse str with
+            | { Gpx_loader.tracks; _ } ->
+                List.filter_map
+                  (fun (t : Gpx_loader.track) ->
+                    match t.points with
+                    | [] | [ _ ] -> None
+                    | points ->
+                        Some
+                          (Array.of_list
+                             (List.map
+                                (fun (p : Gpx_loader.trackpoint) ->
+                                  (p.lat, p.lon))
+                                points)))
+                  tracks
+            | exception _ -> []))
       ~on_select:(fun ~lat ~lon ->
         (* In place, like the coordinate input: no navigation, so fullscreen
            mode survives the switch. The camera is left alone, the map saying

@@ -730,6 +730,62 @@
       mix-blend-mode: multiply;
     }
 
+    /* GPX tracks over the tiles. The stroke widths hold at every zoom thanks to
+       vector-effect="non-scaling-stroke" on the paths, the group being scaled. */
+    .map-trace {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .map-trace-casing {
+      stroke: rgba(255, 255, 255, 0.9);
+      stroke-width: 8px;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    /* The crimson the terrain draws traces in (u_color in render_state.ml), so
+       the same line is recognisable in both views. */
+    .map-trace-line {
+      stroke: #b31433;
+      stroke-width: 3.5px;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    /* A CSS pixel is physically smaller on a phone than on a desktop monitor, so
+       a line of the same nominal width reads as a hairline there. Keyed on the
+       pointer rather than the width: what matters is holding a device at arm's
+       length, not how many pixels it reports. */
+    @media (pointer: coarse) {
+      .map-trace-casing { stroke-width: 11px; }
+      .map-trace-line { stroke-width: 5px; }
+
+      /* The crosshair by the same argument, and it now has to stay findable
+         against a much bolder trace. */
+      .map-crosshair {
+        width: 42px;
+        height: 42px;
+        margin: -21px 0 0 -21px;
+      }
+
+      .map-crosshair::before {
+        left: 19px;
+        width: 3px;
+        height: 42px;
+      }
+
+      .map-crosshair::after {
+        top: 19px;
+        height: 3px;
+        width: 42px;
+      }
+    }
+
     /* Outlines the selectable rectangle and, with one very wide shadow, dims
        everything outside it. Clipped by the viewport's overflow. */
     .map-bounds {

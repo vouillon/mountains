@@ -32,6 +32,7 @@ type region = {
 val create :
   regions:region list ->
   in_range:(lat:float -> lon:float -> bool) ->
+  traces:(unit -> (float * float) array list) ->
   on_select:(lat:float -> lon:float -> unit) ->
   lat:float ->
   lon:float ->
@@ -43,6 +44,11 @@ val create :
     Each region remembers where it was last left, scale included, so reopening
     the map or switching back to a region resumes there rather than starting
     over. Only the centre is overridden on opening, by the position asked for.
+
+    [traces] gives the tracks to draw over the map, each as its points in
+    latitude and longitude, and is read afresh on every opening. Drawing the
+    loaded GPX traces is what lets a location be chosen against them -- a
+    viewpoint over a route rather than a bare coordinate.
 
     [in_range] gates the confirmation as the authority on what the renderer can
     actually load. [regions] are expected to be inside it already, so a

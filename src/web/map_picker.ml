@@ -92,7 +92,7 @@ type tile_level = {
   mutable oy : float;
 }
 
-let create ~regions ~in_range ~on_select =
+let create ~regions ~in_range ~traces ~on_select =
   let first_region =
     match regions with
     | r :: _ -> r
@@ -147,6 +147,25 @@ let create ~regions ~in_range ~on_select =
      come after the layer and are therefore never part of that blend. *)
   let viewport = El.div ~at:At.[ class' (Jstr.v "map-viewport") ] [] in
   let layer_el = El.div ~at:At.[ class' (Jstr.v "map-layer") ] [] in
+  (* The tracks, over the tiles but under the bounds rectangle, so the part of a
+     trace outside the selectable area is dimmed along with the map beneath it.
+     Built from markup because [El.v] calls [createElement], and SVG needs
+     [createElementNS]; the group's transform is set per render like a tile
+     level's, and the root clips to the viewport, which is exactly the part worth
+     drawing. *)
+  let trace_host = El.div ~at:At.[ class' (Jstr.v "map-trace") ] [] in
+  Jv.set (El.to_jv trace_host) "innerHTML"
+    (Jv.of_string
+       {|<svg width="100%" height="100%"><g><path class="map-trace-casing" fill="none" vector-effect="non-scaling-stroke"/><path class="map-trace-line" fill="none" vector-effect="non-scaling-stroke"/></g></svg>|});
+  let query sel =
+    Jv.call (El.to_jv trace_host) "querySelector" [| Jv.of_string sel |]
+  in
+  let trace_group = query "g" in
+  let trace_shapes = [ query ".map-trace-casing"; query ".map-trace-line" ] in
+  let set_attr node name v =
+    ignore (Jv.call node "setAttribute" [| Jv.of_string name; Jv.of_string v |])
+  in
+
   let bounds = El.div ~at:At.[ class' (Jstr.v "map-bounds") ] [] in
   let crosshair = El.div ~at:At.[ class' (Jstr.v "map-crosshair") ] [] in
   let attribution =
@@ -187,7 +206,7 @@ let create ~regions ~in_range ~on_select =
       ]
   in
   El.append_children viewport
-    [ layer_el; bounds; crosshair; zoom_box; attribution ];
+    [ layer_el; trace_host; bounds; crosshair; zoom_box; attribution ];
   El.append_children overlay [ viewport; bar ];
   El.append_children (Brr.Document.body Brr.G.document) [ overlay ];
 
@@ -199,11 +218,18 @@ let create ~regions ~in_range ~on_select =
 
   let is_open () = El.class' (Jstr.v "visible") overlay in
 
-  let viewport_size () =
+  (* Cached rather than read per render. Reading [clientWidth] after a render has
+     written styles forces a synchronous layout, and a drag pays it every frame;
+     a [ResizeObserver] costs nothing and catches every reason the viewport
+     changes -- the window, a rotation, the bar reflowing, the error line
+     appearing -- not just the window resizing. *)
+  let vp_w = ref 0. and vp_h = ref 0. in
+  let measure_viewport () =
     let jv = El.to_jv viewport in
-    ( Jv.to_float (Jv.get jv "clientWidth"),
-      Jv.to_float (Jv.get jv "clientHeight") )
+    vp_w := Jv.to_float (Jv.get jv "clientWidth");
+    vp_h := Jv.to_float (Jv.get jv "clientHeight")
   in
+  let viewport_size () = (!vp_w, !vp_h) in
 
   (* Zoom at which the region just covers the viewport: zooming further out
      would only add area that cannot be selected. *)
@@ -231,6 +257,66 @@ let create ~regions ~in_range ~on_select =
   let current_scale () = Float.pow 2. (!zoom -. float (current_level ())) in
 
   let clear_error () = El.set_class (Jstr.v "visible") false error_msg in
+
+  (* Tracks as read when the map was opened, and their projection for one zoom
+     level: (level, anchor x, anchor y, path data). Projecting once per level and
+     leaving panning to the transform is what keeps a long trace affordable --
+     reprojecting some thousands of points every frame of a glide would cost more
+     than the tiles do. The anchor is the first point, so the coordinates stay
+     near the trace rather than out at the Mercator origin. *)
+  let traces_now = ref [] in
+  let trace_path = ref None in
+
+  let project_traces level =
+    match List.find_opt (fun pts -> Array.length pts > 0) !traces_now with
+    | None -> None
+    | Some first ->
+        let lat0, lon0 = first.(0) in
+        let ax = Float.round (lon_to_px ~level lon0) in
+        let ay = Float.round (lat_to_px ~level lat0) in
+        let b = Buffer.create 4096 in
+        List.iter
+          (fun pts ->
+            let n = Array.length pts in
+            if n >= 2 then begin
+              let lx = ref 0. and ly = ref 0. in
+              Array.iteri
+                (fun i (lat, lon) ->
+                  let x = lon_to_px ~level lon -. ax in
+                  let y = lat_to_px ~level lat -. ay in
+                  (* Points landing within a pixel of the last one kept are
+                     dropped: zoomed out, a dense track is thousands of them
+                     inside a few hundred pixels. The ends are always kept, so
+                     the line still starts and finishes where the track does. *)
+                  if
+                    i = 0
+                    || i = n - 1
+                    || Float.abs (x -. !lx) +. Float.abs (y -. !ly) >= 1.
+                  then begin
+                    Buffer.add_string b
+                      (Printf.sprintf "%c%.1f %.1f "
+                         (if i = 0 then 'M' else 'L')
+                         x y);
+                    lx := x;
+                    ly := y
+                  end)
+                pts
+            end)
+          !traces_now;
+        if Buffer.length b = 0 then None
+        else Some (level, ax, ay, Buffer.contents b)
+  in
+
+  let refresh_traces level =
+    let stale =
+      match !trace_path with Some (l, _, _, _) -> l <> level | None -> true
+    in
+    if stale then begin
+      trace_path := project_traces level;
+      let d = match !trace_path with Some (_, _, _, d) -> d | None -> "" in
+      List.iter (fun shape -> set_attr shape "d" d) trace_shapes
+    end
+  in
 
   let loaded_class = Jstr.v "loaded" in
 
@@ -277,72 +363,76 @@ let create ~regions ~in_range ~on_select =
 
   let update_layer lv ~level ~x0 ~x1 ~y0 ~y1 ~ox ~oy =
     let wanted = Hashtbl.create 64 in
+    (* Tile positions are relative to the level's origin, which only moves when
+       the visible range crosses a tile boundary -- a handful of frames out of a
+       drag. Rewriting them regardless cost two style writes per image per frame,
+       the largest slice of a drag's script time. *)
+    let moved_origin = lv.ox <> ox || lv.oy <> oy in
+    let place el x y =
+      El.set_inline_style (Jstr.v "left") (px (float (x * tile_px) -. ox)) el;
+      El.set_inline_style (Jstr.v "top") (px (float (y * tile_px) -. oy)) el
+    in
     for x = x0 to x1 do
       for y = y0 to y1 do
         let key = (x, y) in
         Hashtbl.replace wanted key ();
-        let el =
-          match Hashtbl.find_opt lv.tiles key with
-          | Some el -> el
-          | None ->
-              let el = El.div ~at:At.[ class' (Jstr.v "map-tile") ] [] in
-              (* The two images are revealed together: relief shaded straight
+        match Hashtbl.find_opt lv.tiles key with
+        | Some el -> if moved_origin then place el x y
+        | None ->
+            let el = El.div ~at:At.[ class' (Jstr.v "map-tile") ] [] in
+            (* The two images are revealed together: relief shaded straight
                  onto the empty background, its basemap tile not yet in, reads as
                  a blank grey block. Both are always requested, so the count is
                  fixed rather than incremented as they are built -- an image load
                  cannot complete before this returns, but it costs nothing to not
                  depend on that. *)
-              let pending = ref 2 in
-              let settle () =
-                decr pending;
-                if !pending <= 0 then begin
-                  El.set_class loaded_class true el;
-                  (* This tile may have been the last gap the level below was
+            let pending = ref 2 in
+            let settle () =
+              decr pending;
+              if !pending <= 0 then begin
+                El.set_class loaded_class true el;
+                (* This tile may have been the last gap the level below was
                      still showing through. *)
-                  prune_levels ()
-                end
+                prune_levels ()
+              end
+            in
+            let image l cls =
+              let img =
+                El.img
+                  ~at:
+                    At.
+                      [
+                        class' (Jstr.v cls);
+                        src (Jstr.v (tile_url l ~level ~row:y ~col:x));
+                      ]
+                  ()
               in
-              let image l cls =
-                let img =
-                  El.img
-                    ~at:
-                      At.
-                        [
-                          class' (Jstr.v cls);
-                          src (Jstr.v (tile_url l ~level ~row:y ~col:x));
-                        ]
-                    ()
-                in
-                El.set_at (Jstr.v "draggable") (Some (Jstr.v "false")) img;
-                El.set_at (Jstr.v "decoding") (Some (Jstr.v "async")) img;
-                El.set_at (Jstr.v "alt") (Some Jstr.empty) img;
-                ignore
-                  (Ev.listen Ev.load (fun _ -> settle ()) (El.as_target img));
-                (* A tile outside coverage answers 404 and requests fail
+              El.set_at (Jstr.v "draggable") (Some (Jstr.v "false")) img;
+              El.set_at (Jstr.v "decoding") (Some (Jstr.v "async")) img;
+              El.set_at (Jstr.v "alt") (Some Jstr.empty) img;
+              ignore (Ev.listen Ev.load (fun _ -> settle ()) (El.as_target img));
+              (* A tile outside coverage answers 404 and requests fail
                    transiently; either way hide the image, so the browser's
                    broken-image glyph never shows, and let the tile through --
                    the relief is absent over much of the country, LiDAR HD being
                    a survey still under way. *)
-                ignore
-                  (Ev.listen img_error_ev
-                     (fun _ ->
-                       El.set_inline_style (Jstr.v "visibility")
-                         (Jstr.v "hidden") img;
-                       settle ())
-                     (El.as_target img));
-                img
-              in
-              El.append_children el
-                [
-                  image base_layer "map-tile-base";
-                  image relief_layer "map-tile-relief";
-                ];
-              El.append_children lv.container [ el ];
-              Hashtbl.replace lv.tiles key el;
-              el
-        in
-        El.set_inline_style (Jstr.v "left") (px (float (x * tile_px) -. ox)) el;
-        El.set_inline_style (Jstr.v "top") (px (float (y * tile_px) -. oy)) el
+              ignore
+                (Ev.listen img_error_ev
+                   (fun _ ->
+                     El.set_inline_style (Jstr.v "visibility") (Jstr.v "hidden")
+                       img;
+                     settle ())
+                   (El.as_target img));
+              img
+            in
+            El.append_children el
+              [
+                image base_layer "map-tile-base";
+                image relief_layer "map-tile-relief";
+              ];
+            El.append_children lv.container [ el ];
+            Hashtbl.replace lv.tiles key el;
+            place el x y
       done
     done;
     lv.ox <- ox;
@@ -422,23 +512,43 @@ let create ~regions ~in_range ~on_select =
       levels;
     prune_levels ();
 
-    (* The bounds rectangle lives in untransformed viewport pixels so its
-       outline keeps its width at every zoom. Zoomed in it dwarfs the viewport
-       and only the dimming around it shows, hence the clamp. *)
+    (* Same transform as a tile level, about the trace's own anchor. Unitless:
+       this is SVG's transform attribute, which rejects px. *)
+    refresh_traces level;
+    (match !trace_path with
+    | Some (_, ax, ay, _) ->
+        set_attr trace_group "transform"
+          (Printf.sprintf
+             "translate(%.2f %.2f) scale(%.5f) translate(%.2f %.2f)" (vw /. 2.)
+             (vh /. 2.) scale (ax -. cx) (ay -. cy))
+    | None -> ());
+
+    (* The bounds rectangle lives in untransformed viewport pixels so its outline
+       keeps its width at every zoom.
+
+       Clamped to just beyond the viewport rather than to some large number: the
+       dimming is a very wide shadow around this element, so wherever the element
+       is, moving it invalidates the whole screen -- which on a drag meant a full
+       repaint every frame, the largest single cost there was. Held just outside,
+       an edge that is off screen stays off screen, and once the region covers the
+       viewport the element covers it too and no dimming shows, which is the
+       correct picture and costs nothing to paint. The margin only has to exceed
+       the border width. *)
     let screen_x lon = (vw /. 2.) +. ((lon_to_px ~level lon -. cx) *. scale) in
     let screen_y lat = (vh /. 2.) +. ((lat_to_px ~level lat -. cy) *. scale) in
-    let limit = 20000. in
-    let bl = clampf (-.limit) limit (screen_x r.min_lon) in
-    let br = clampf (-.limit) limit (screen_x r.max_lon) in
-    let bt = clampf (-.limit) limit (screen_y r.max_lat) in
-    let bb = clampf (-.limit) limit (screen_y r.min_lat) in
+    let margin = 8. in
+    let bl = clampf (-.margin) (vw +. margin) (screen_x r.min_lon) in
+    let br = clampf (-.margin) (vw +. margin) (screen_x r.max_lon) in
+    let bt = clampf (-.margin) (vh +. margin) (screen_y r.max_lat) in
+    let bb = clampf (-.margin) (vh +. margin) (screen_y r.min_lat) in
     El.set_inline_style (Jstr.v "left") (px bl) bounds;
     El.set_inline_style (Jstr.v "top") (px bt) bounds;
     El.set_inline_style (Jstr.v "width") (px (Float.max 0. (br -. bl))) bounds;
     El.set_inline_style (Jstr.v "height") (px (Float.max 0. (bb -. bt))) bounds;
 
-    El.set_children coord
-      [ El.txt (Jstr.v (Printf.sprintf "%.5f, %.5f" !center_lat !center_lon)) ];
+    (* [set_children] would build and swap a text node every frame. *)
+    Jv.set (El.to_jv coord) "textContent"
+      (Jv.of_string (Printf.sprintf "%.5f, %.5f" !center_lat !center_lon));
 
     (* After [clamp_view], so what is remembered is a view that can be returned
        to rather than one the region would immediately pull back. *)
@@ -796,10 +906,21 @@ let create ~regions ~in_range ~on_select =
          end)
        (Brr.Document.as_target Brr.G.document));
 
-  ignore
-    (Ev.listen Ev.resize
-       (fun _ -> if is_open () then render ())
-       (Brr.Window.as_target Brr.G.window));
+  (* Observing the element rather than listening for window resizes: the viewport
+     also changes when the bar reflows or the error line appears, neither of which
+     resizes the window, and this is what keeps [vp_w]/[vp_h] true without a read
+     per render. *)
+  let observer_cb =
+    (* [Jv.callback], not [Jv.repr]: the latter hands the OCaml closure over as a
+       value, which is not a callable JS function. *)
+    Jv.callback ~arity:1 (fun _entries ->
+        measure_viewport ();
+        if is_open () then render ())
+  in
+  let observer =
+    Jv.new' (Jv.get Jv.global "ResizeObserver") [| observer_cb |]
+  in
+  ignore (Jv.call observer "observe" [| El.to_jv viewport |]);
 
   fun ~lat ~lon ->
     let r =
@@ -817,11 +938,17 @@ let create ~regions ~in_range ~on_select =
             (fun best r -> if score r < score best then r else best)
             first_region regions
     in
+    (* Read afresh: traces are added and toggled from a panel the map covers, so
+       between two openings the set can be anything. *)
+    traces_now := traces ();
+    trace_path := None;
     (restore_focus :=
        let active = Jv.get (Jv.get Jv.global "document") "activeElement" in
        if Jv.is_none active then None else Some active);
     El.set_class (Jstr.v "visible") true overlay;
     El.set_has_focus true overlay;
+    (* Before the first render, in case the observer has not reported yet. *)
+    measure_viewport ();
     (* No zoom reset: [enter_at] takes the region's remembered scale, so the map
        reopens where the last look at that region left off. *)
     enter_at r ~lat ~lon
