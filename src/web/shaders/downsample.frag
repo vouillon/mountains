@@ -4,6 +4,10 @@ uniform sampler2D source_texture;
 uniform vec2 source_size;
 uniform float k;
 uniform int level;
+// Metres per normalised unit, i.e. the grid's metres-per-u16-step times 255,
+// since [decode] leaves values in u16/255. Only differences of decoded heights
+// are weighted here, so the offset never enters.
+uniform float height_scale_n;
 in vec2 uv;
 out vec2 frag_color;
 
@@ -42,7 +46,7 @@ void main() {
   float h11 = decode(h11_v);
 
   float max_h = max(max(h00, h10), max(h01, h11));
-  float h_scale = (1.0 / 257.0) * 9500.0;
+  float h_scale = height_scale_n;
 
   float w00 = exp(k * (h00 - max_h) * h_scale);
   float w10 = exp(k * (h10 - max_h) * h_scale);

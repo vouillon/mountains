@@ -135,9 +135,19 @@ let lidar_2m =
    the base alone. *)
 let timeout_s = 25.
 
-(* u16 quantisation shared with the .dem pipeline (Corine/compress_dem.ml),
-   [Dem_loader.get_height] and HEIGHT_SCALE in the shaders. *)
-let u16_of_metres h = (h +. 500.) *. (65535. /. 9500.)
+(* The base grid's u16 quantisation, shared with the .dem pipeline
+   (Corine/compress_dem.ml) and [Dem_loader.get_height]: 9500 m over 65536 steps,
+   so 14.5 cm.
+
+   A refinement covers about a kilometre of ground and a few hundred metres of
+   height, so spending that range on the whole habitable envelope wastes most of
+   the resolution -- and precision matters more here than for the base, because
+   the relief bake differentiates the grid and divides by a spacing four to
+   twelve times finer. Each blended grid therefore gets its own scale, spanning
+   only what it actually holds; [base_height_scale] is what the base tile
+   happens to use. *)
+let base_height_scale = 9500. /. 65535.
+let base_height_offset = -500.
 
 let wmts_url ~matrix_level ~row ~col =
   Printf.sprintf
@@ -443,7 +453,16 @@ type t = {
   grid : Dem_loader.t;
   origin_x : float;
   origin_y : float;
+  height_scale : float; (* metres per u16 step of [grid] *)
+  height_offset : float; (* metres at u16 zero *)
 }
+
+(* [grid] carries its own quantisation, so it must not be read through
+   [Dem_loader.get_height], which assumes the base one. *)
+let get_height (t : t) row col =
+  let low = t.grid.Dem_loader.data.{row, col * 2} in
+  let high = t.grid.Dem_loader.data.{row, (col * 2) + 1} in
+  (float_of_int ((high lsl 8) lor low) *. t.height_scale) +. t.height_offset
 
 (* The surface a refinement is mixed into: any u16 grid with a known origin and
    spacing, so the layers can be chained (base -> L13 -> finer). The fields are
@@ -457,6 +476,8 @@ type source = {
   src_origin_x : float; (* arcseconds from the anchor to sample column 0 *)
   src_origin_y : float; (* arcseconds from the anchor to the southernmost row *)
   src_px_arcsec : float;
+  src_height_scale : float; (* metres per u16 step *)
+  src_height_offset : float; (* metres at u16 zero *)
 }
 
 (* The base DEM: one arcsecond per sample, with the anchor arcsecond at index
@@ -464,7 +485,14 @@ type source = {
    tile west and south of it. *)
 let base_source (grid : Dem_loader.t) =
   let o = -.float (grid.Dem_loader.size / 2) in
-  { src_grid = grid; src_origin_x = o; src_origin_y = o; src_px_arcsec = 1.0 }
+  {
+    src_grid = grid;
+    src_origin_x = o;
+    src_origin_y = o;
+    src_px_arcsec = 1.0;
+    src_height_scale = base_height_scale;
+    src_height_offset = base_height_offset;
+  }
 
 (* A blended grid used in turn as the surface for a finer layer. *)
 let as_source (t : t) =
@@ -473,6 +501,8 @@ let as_source (t : t) =
     src_origin_x = t.origin_x;
     src_origin_y = t.origin_y;
     src_px_arcsec = t.layer.px_arcsec;
+    src_height_scale = t.height_scale;
+    src_height_offset = t.height_offset;
   }
 
 (* Build the blended grid: [source] resampled onto the refinement's grid, plus
@@ -501,10 +531,13 @@ let blend ~lat ~(source : source) (raw : raw) =
     let fade_nodata = Float.min fade_x fade_y in
     let bsize = source.src_grid.Dem_loader.size in
     let bdata = source.src_grid.Dem_loader.data in
+    (* In metres, decoded with the source's own quantisation: the surface beneath
+       may itself be a refinement with a scale of its own. *)
     let get_base row col =
       let low = Array2.unsafe_get bdata row (col * 2) in
       let high = Array2.unsafe_get bdata row ((col * 2) + 1) in
-      float_of_int ((high lsl 8) lor low)
+      (float_of_int ((high lsl 8) lor low) *. source.src_height_scale)
+      +. source.src_height_offset
     in
     (* Fine sample [j] sits [raw.origin_x + j * px_arcsec] arcseconds from the
        anchor; the source's own origin and spacing turn that into a source index.
@@ -531,7 +564,13 @@ let blend ~lat ~(source : source) (raw : raw) =
       bx.(j) <- int_of_float b - col_lo;
       fx.(j) <- c -. b
     done;
-    let out = Array1.create int8_unsigned c_layout (size * size * 2) in
+    (* Blended heights in metres, then quantised in a second pass once the range
+       they actually occupy is known. Holding them costs 4 MB at 1024 samples and
+       16 MB at 2048, transient; quantising as we go would mean either the base
+       grid's coarse scale or computing the range by blending everything twice,
+       and the blend is the expensive part. *)
+    let metres = Array1.create float32 c_layout (size * size) in
+    let lo = ref infinity and hi = ref neg_infinity in
     (* One base row pair resampled per base row rather than per sample. *)
     let rowa = Array.make (n_cols + 1) 0. in
     let rowb = Array.make (n_cols + 1) 0. in
@@ -560,7 +599,7 @@ let blend ~lat ~(source : source) (raw : raw) =
       (* Row 0 of the raster is the northernmost one, row 0 of a DEM tile the
          southernmost. *)
       let src_row = (size - 1 - u) * size in
-      let dst_row = u * size * 2 in
+      let dst_row = u * size in
       for j = 0 to size - 1 do
         let k = bx.(j) in
         let b = rowv.(k) +. (fx.(j) *. (rowv.(k + 1) -. rowv.(k))) in
@@ -576,17 +615,33 @@ let blend ~lat ~(source : source) (raw : raw) =
                   Float.min t
                     (float (Array1.unsafe_get d (src_row + j)) /. fade_nodata)
             in
-            b +. (smoothstep t *. (u16_of_metres h -. b))
+            b +. (smoothstep t *. (h -. b))
         in
-        let v = int_of_float (v +. 0.5) in
-        let v = if v < 0 then 0 else if v > 65535 then 65535 else v in
-        Array1.unsafe_set out (dst_row + (2 * j)) (v land 0xff);
-        Array1.unsafe_set out (dst_row + (2 * j) + 1) (v lsr 8)
+        if v < !lo then lo := v;
+        if v > !hi then hi := v;
+        Array1.unsafe_set metres (dst_row + j) v
       done
     done;
-    Format.eprintf "RGE ALTI blended in %.0f ms (missing tiles: %d)@."
+    (* One step of the output covers this much height. A perfectly flat patch
+       would give a zero range and a degenerate scale, hence the floor. *)
+    let height_offset = !lo in
+    let height_scale = Float.max 1e-6 ((!hi -. !lo) /. 65535.) in
+    let inv = 1. /. height_scale in
+    let out = Array1.create int8_unsigned c_layout (size * size * 2) in
+    for i = 0 to (size * size) - 1 do
+      let v =
+        int_of_float
+          (((Array1.unsafe_get metres i -. height_offset) *. inv) +. 0.5)
+      in
+      let v = if v < 0 then 0 else if v > 65535 then 65535 else v in
+      Array1.unsafe_set out (2 * i) (v land 0xff);
+      Array1.unsafe_set out ((2 * i) + 1) (v lsr 8)
+    done;
+    Format.eprintf
+      "RGE ALTI blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
+       steps)@."
       (Brr.(Performance.now_ms G.performance) -. t0)
-      raw.missing;
+      raw.missing (!hi -. !lo) (height_scale *. 100.);
     Some
       {
         layer = raw.layer;
@@ -597,6 +652,8 @@ let blend ~lat ~(source : source) (raw : raw) =
           };
         origin_x = raw.origin_x;
         origin_y = raw.origin_y;
+        height_scale;
+        height_offset;
       }
   end
 

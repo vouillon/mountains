@@ -96,6 +96,8 @@ type terrain_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
@@ -140,6 +142,8 @@ type shadow_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -156,6 +160,8 @@ type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
   uv_scale : Gl.uniform_location;
+  height_scale : Gl.uniform_location;
+  height_offset : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
@@ -164,6 +170,7 @@ type downsample_uniforms = {
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
   level : Gl.uniform_location;
+  height_scale_n : Gl.uniform_location;
 }
 (** Cached uniform locations for the downsample shader. *)
 
@@ -248,6 +255,11 @@ let init_terrain_uniforms ctx pid =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
     hd_max_lod =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
+    hd_height_scale_n =
+      Array.init hd_slots (fun i ->
+          u (Printf.sprintf "hd_height_scale_n[%d]" i));
+    hd_height_offset =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
     hd_half_texel =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_half_texel[%d]" i));
     ao = u "ao";
@@ -292,6 +304,11 @@ let init_shadow_uniforms ctx pid =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
     hd_max_lod =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
+    hd_height_scale_n =
+      Array.init hd_slots (fun i ->
+          u (Printf.sprintf "hd_height_scale_n[%d]" i));
+    hd_height_offset =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
   }
 
 (** Initialize sky uniform locations. Call once after program creation. *)
@@ -308,7 +325,13 @@ let init_sky_uniforms ctx pid =
 (** Initialize relief uniform locations. Call once after program creation. *)
 let init_relief_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
-  { size = u "size"; delta = u "delta"; uv_scale = u "uv_scale" }
+  {
+    size = u "size";
+    delta = u "delta";
+    uv_scale = u "uv_scale";
+    height_scale = u "height_scale";
+    height_offset = u "height_offset";
+  }
 
 (** Initialize downsample uniform locations. Call once after program creation.
 *)
@@ -319,6 +342,7 @@ let init_downsample_uniforms ctx pid =
     source_texture = u "source_texture";
     source_size = u "source_size";
     level = u "level";
+    height_scale_n = u "height_scale_n";
   }
 
 (** Initialize AO bake uniform locations. Call once after program creation. *)
@@ -399,6 +423,8 @@ let upload_texture_units_shadow ctx (u : shadow_uniforms) =
 type hd_params = {
   hd_size : int;  (** samples per side *)
   hd_px_arcsec : float;  (** arcseconds per sample *)
+  hd_height_scale : float;  (** metres per u16 step of this ring's grid *)
+  hd_height_offset : float;  (** metres at u16 zero *)
   hd_origin : float * float;
       (** arcseconds from the anchor arcsecond to sample (0, 0) *)
 }
@@ -408,8 +434,15 @@ type hd_params = {
    (c - origin) / extent, written so the shader keeps the shape of the base path.
    A ring with no data yields [valid = 0] and is skipped by the shader. *)
 let hd_slot_values = function
-  | None -> (0, 0., 0., 0., 0., 0, 0.)
-  | Some { hd_size; hd_px_arcsec; hd_origin = ox, oy } ->
+  | None -> (0, 0., 0., 0., 0., 0, 0., 0., 0.)
+  | Some
+      {
+        hd_size;
+        hd_px_arcsec;
+        hd_origin = ox, oy;
+        hd_height_scale;
+        hd_height_offset;
+      } ->
       let scale = 1. /. (hd_px_arcsec *. float hd_size) in
       ( 1,
         scale,
@@ -417,7 +450,11 @@ let hd_slot_values = function
         -.oy *. scale,
         Float.log2 (1. /. hd_px_arcsec),
         Web_utils.log2 hd_size,
-        0.5 /. float hd_size )
+        0.5 /. float hd_size,
+        (* The shader decodes from u16/255, so it wants metres per normalised
+           unit rather than per step. *)
+        hd_height_scale *. 255.,
+        hd_height_offset )
 
 (** Upload the rings' geometry to the terrain and shadow programs, innermost
     first. Slots past the end of [hd] are disabled, which restores exactly the
@@ -427,7 +464,7 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
   let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
   Gl.use_program ctx terrain_pid;
   for i = 0 to hd_slots - 1 do
-    let valid, scale, bx, by, lod_bias, max_lod, half_texel =
+    let valid, scale, bx, by, lod_bias, max_lod, half_texel, hscale, hoffset =
       hd_slot_values (slot i)
     in
     Gl.uniform1i ctx u.hd_valid.(i) valid;
@@ -435,16 +472,22 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     Gl.uniform2f ctx u.hd_bias.(i) bx by;
     Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
     Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
-    Gl.uniform1f ctx u.hd_half_texel.(i) half_texel
+    Gl.uniform1f ctx u.hd_half_texel.(i) half_texel;
+    Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
+    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset
   done;
   Gl.use_program ctx shadow_pid;
   for i = 0 to hd_slots - 1 do
-    let valid, scale, bx, by, lod_bias, max_lod, _ = hd_slot_values (slot i) in
+    let valid, scale, bx, by, lod_bias, max_lod, _, hscale, hoffset =
+      hd_slot_values (slot i)
+    in
     Gl.uniform1i ctx shadow_u.hd_valid.(i) valid;
     Gl.uniform1f ctx shadow_u.hd_scale.(i) scale;
     Gl.uniform2f ctx shadow_u.hd_bias.(i) bx by;
     Gl.uniform1f ctx shadow_u.hd_lod_bias.(i) lod_bias;
-    Gl.uniform1i ctx shadow_u.hd_max_lod.(i) max_lod
+    Gl.uniform1i ctx shadow_u.hd_max_lod.(i) max_lod;
+    Gl.uniform1f ctx shadow_u.hd_height_scale_n.(i) hscale;
+    Gl.uniform1f ctx shadow_u.hd_height_offset.(i) hoffset
   done
 
 (** Upload session-static uniforms. Call once after computing initial values.
@@ -557,6 +600,8 @@ type path_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
 }
 
 let init_path_uniforms ctx pid =
@@ -587,6 +632,11 @@ let init_path_uniforms ctx pid =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
     hd_max_lod =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
+    hd_height_scale_n =
+      Array.init hd_slots (fun i ->
+          u (Printf.sprintf "hd_height_scale_n[%d]" i));
+    hd_height_offset =
+      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
   }
 
 let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
@@ -616,12 +666,16 @@ let upload_path_session ctx (u : path_uniforms) ~w ~lat ~x ~y ~lon =
 let upload_path_hd_params ctx (u : path_uniforms) (hd : hd_params option list) =
   let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
   for i = 0 to hd_slots - 1 do
-    let valid, scale, bx, by, lod_bias, max_lod, _ = hd_slot_values (slot i) in
+    let valid, scale, bx, by, lod_bias, max_lod, _, hscale, hoffset =
+      hd_slot_values (slot i)
+    in
     Gl.uniform1i ctx u.hd_valid.(i) valid;
     Gl.uniform1f ctx u.hd_scale.(i) scale;
     Gl.uniform2f ctx u.hd_bias.(i) bx by;
     Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
-    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod
+    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
+    Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
+    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset
   done
 
 let anisotropy_ext = ref None

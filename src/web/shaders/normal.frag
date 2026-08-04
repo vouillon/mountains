@@ -3,6 +3,12 @@ uniform vec2 size;
 uniform vec2 delta;
 uniform vec2 uv_scale;
 uniform sampler2D tile;
+// The grid's own quantisation. Each blended refinement spans only the height
+// range it holds, so this is not the base tile's 9500 m over 65536 steps; see
+// [Hd_dem.blend]. Decoded and re-encoded with the same pair, so the pyramid
+// inherits the grid's scale.
+uniform highp float height_scale;  // metres per u16 step
+uniform highp float height_offset; // metres at u16 zero
 in vec2 uv;
 // Two render targets: heights (16-bit fixed point, little-endian) and the
 // encoded normal go to separate RG8 textures. Every consumer reads only one of
@@ -18,8 +24,7 @@ float get_z(vec2 offset) {
   // Samples are in [0, 1], need to multiply by 255 to get 0..255
   vec2 rg = texture(tile, ((tileCoord + offset) / size) * uv_scale).rg * 255.0;
   float h_val = rg.g * 256.0 + rg.r;
-  // Convert back to meters: u16 range maps to -500 to 9000
-  return h_val * (9500.0 / 65535.0) - 500.0;
+  return h_val * height_scale + height_offset;
 }
 
 void main() {
@@ -45,8 +50,7 @@ void main() {
   // Encode Normal (xy components to [0,1])
   vec2 encN = n.xy * 0.5 + 0.5;
 
-  // Encode Height (-500 to 9000 -> 0 to 1)
-  float h_val = (c + 500.0) / 9500.0 * 65535.0;
+  float h_val = (c - height_offset) / height_scale;
   float h_high = floor(h_val / 256.0) / 255.0;
   float h_low = mod(h_val, 256.0) / 255.0;
 

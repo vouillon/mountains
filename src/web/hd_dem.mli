@@ -64,7 +64,19 @@ type t = {
   grid : Dem_loader.t;  (** blended heights, row 0 southernmost *)
   origin_x : float;  (** arcseconds from the anchor to sample column 0 *)
   origin_y : float;  (** arcseconds from the anchor to the southernmost row *)
+  height_scale : float;
+      (** metres per u16 step of {!grid}. Each grid is quantised over only the
+          height range it holds -- a few hundred metres rather than the base
+          tile's 9500 -- because the relief bake differentiates it and divides
+          by a spacing several times finer, so the base scale showed in the
+          normals. {!grid} must therefore not be read through
+          [Dem_loader.get_height]: use {!get_height}. *)
+  height_offset : float;  (** metres at u16 zero *)
 }
+
+val get_height : t -> int -> int -> float
+(** [get_height t row col] in metres, decoded with this grid's own quantisation.
+*)
 
 val prefetch : layer -> lat:float -> lon:float -> unit Lwt.t
 (** Warm the persistent tile cache for offline use with a block twice the

@@ -937,8 +937,15 @@ let downsample_k _level = 0.25
    from the observer. The high-resolution pyramid's rim lands a few kilometres
    away, in plain view, where such a ring reads as a wall of downward spikes:
    it is filled with real heights instead. *)
-let compute_relief ?(spacing_scale = 1.0) ?(border = true) ctx width height lat
-    triangle_geo tile_texture normal_pid downsample_pid
+(* [height_scale] / [height_offset] are the source grid's quantisation, defaulting
+   to the .dem pipeline's 9500 m over 65536 steps. The pyramid is written back
+   with the same pair, so it inherits the grid's scale and every consumer decodes
+   it the same way -- a refinement's grid spans a few hundred metres of height,
+   and baking it through the base scale put 14.5 cm steps into normals that are
+   divided by a spacing several times finer. *)
+let compute_relief ?(spacing_scale = 1.0) ?(border = true)
+    ?(height_scale = 9500. /. 65535.) ?(height_offset = -500.) ctx width height
+    lat triangle_geo tile_texture normal_pid downsample_pid
     (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
@@ -946,6 +953,13 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true) ctx width height lat
   (* Not used in shader explicitly yet, using pow directly *)
   let max_level = Web_utils.log2 (max width height) in
   let levels = max_level + 1 in
+  (* Uniforms belong to the program rather than the draw, so the quantisation
+     goes up once. [downsample.frag] decodes to u16/255, hence the 255. *)
+  Gl.use_program ctx normal_pid;
+  Gl.uniform1f ctx u.height_scale height_scale;
+  Gl.uniform1f ctx u.height_offset height_offset;
+  Gl.use_program ctx downsample_pid;
+  Gl.uniform1f ctx downsample_u.height_scale_n (height_scale *. 255.);
 
   (* Heights and encoded normals live in two RG8 pyramids instead of one RGBA8:
      every consumer used to discard half of every texel. [filtered] tells them
@@ -2550,7 +2564,7 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
    full-resolution height, so a POI anchored there would float above the
    rendered silhouette. [inv_avg_delta] is per texel of [tile], so passing the
    finer grid's value is what shifts the LOD selection with it. *)
-let rendered_height tile ~(radial_params : Render_state.radial_params)
+let rendered_height ~get_height ~(radial_params : Render_state.radial_params)
     ~inv_avg_delta ~size ~r ~gx ~gy =
   let grid_spacing =
     radial_params.Render_state.grid_k
@@ -2560,9 +2574,7 @@ let rendered_height tile ~(radial_params : Render_state.radial_params)
   let lod = min (int_of_float lod_f) (Web_utils.log2 size) in
   begin
     let get row col =
-      Dem_loader.get_height tile
-        (max 0 (min (size - 1) row))
-        (max 0 (min (size - 1) col))
+      get_height (max 0 (min (size - 1) row)) (max 0 (min (size - 1) col))
     in
     (* Value of the level-[l] pyramid cell (cx, cy); the soft-max is
        shift-invariant, so working in metres matches the shader's encoded
@@ -3083,7 +3095,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             && gy >= 0.
             && gy <= float (g.layer.size - 2)
           then begin
-            let get_h = Dem_loader.get_height g.grid in
+            let get_h = Hd_dem.get_height g in
             let bx = int_of_float (floor gx) and by = int_of_float (floor gy) in
             let fx = gx -. float bx and fy = gy -. float by in
             let h00 = get_h by bx in
@@ -3137,6 +3149,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let hd_relief_texture, hd_relief_normal_texture =
               time_gpu ctx "compute_relief_hd" (fun () ->
                   compute_relief ~spacing_scale:g.layer.px_arcsec ~border:false
+                    ~height_scale:g.height_scale ~height_offset:g.height_offset
                     ctx g.layer.size g.layer.size lat triangle_geo tex
                     normal_pid downsample_pid relief_uniforms
                     downsample_uniforms)
@@ -3179,6 +3192,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               {
                 Render_state.hd_size = g.layer.size;
                 hd_px_arcsec = g.layer.px_arcsec;
+                hd_height_scale = g.height_scale;
+                hd_height_offset = g.height_offset;
                 hd_origin = (g.origin_x, g.origin_y);
               })
           hd_grids
@@ -3225,7 +3240,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       let refinements =
         List.map
           (fun (g : Hd_dem.t) ->
-            let get_h = Dem_loader.get_height g.grid in
+            let get_h = Hd_dem.get_height g in
             let limit = float (g.layer.size - 2) in
             {
               Visibility.step = 0.5 *. g.layer.px_arcsec;
@@ -3320,7 +3335,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                   && hd_y <= float (g.layer.size - 1)
                 then
                   Some
-                    (rendered_height g.grid ~radial_params
+                    (rendered_height ~get_height:(Hd_dem.get_height g)
+                       ~radial_params
                        ~inv_avg_delta:(inv_avg_delta /. g.layer.px_arcsec)
                        ~size:g.layer.size ~r ~gx:hd_x ~gy:hd_y)
                 else None
@@ -3328,8 +3344,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               match List.find_map from_ring hd_grids with
               | Some z -> z
               | None ->
-                  rendered_height tile ~radial_params ~inv_avg_delta ~size:w ~r
-                    ~gx:x' ~gy:y'
+                  rendered_height
+                    ~get_height:(Dem_loader.get_height tile)
+                    ~radial_params ~inv_avg_delta ~size:w ~r ~gx:x' ~gy:y'
             in
             let z = z -. Visibility.curvature_drop r2 in
             let h =

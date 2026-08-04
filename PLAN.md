@@ -1797,3 +1797,40 @@ Corrected while checking: the `nodata_limit` comment attributed -99999 to IGN.
 That is this module's own pre-fill for a request that never arrives; IGN's
 out-of-coverage value is -9999. Both are below the limit, so nothing was broken,
 but anyone tightening it on the strength of that comment would have been.
+
+## Per-grid height quantisation — DONE (2026-08-04)
+
+The last item from L14-4. Every blended grid now carries its own `height_scale` /
+`height_offset`, spanning only the height range it holds instead of the .dem
+pipeline's 9500 m, and the relief pyramid is baked and decoded through the same
+pair. Measured at the Mont Blanc vista:
+
+| grid | height range | step | was |
+| --- | --- | --- | --- |
+| l13, +-9.8 km | 3972 m | 6.06 cm | 14.50 cm |
+| ring 1, +-2.44 km | 1960 m | 2.99 cm | 14.50 cm |
+| ring 0, +-1.22 km | 1080 m | 1.65 cm | 14.50 cm |
+
+So 2.4x to 8.8x finer, including l13, which sat exactly at the 0.87 deg
+acceptance bar and is now well inside it.
+
+**The stated justification for doing it was wrong, and is worth recording.** Ring
+1 was described as "~2.5 deg of normal error", from `atan(14.5 cm / 3.31 m)` --
+the worst-case single-step bound, which the section above had *already*
+established is about 4x pessimistic against a measured mean. Ring 1's realistic
+figure was ~0.6 deg, i.e. already inside the bar. This was cleanup throughout,
+as the earlier measurements said, not a fix for anything over the line.
+
+Scope, for anyone touching the height encoding: `Hd_dem.source` and `Hd_dem.t`
+carry the pair; `blend` computes in metres into a float32 scratch (4 MB at 1024
+samples, 16 MB at 2048) and quantises in a second pass once the range is known;
+`Hd_dem.get_height` must be used for a ring grid rather than
+`Dem_loader.get_height`, which assumes the base scale; `rendered_height` takes an
+accessor rather than a grid; `compute_relief` takes the pair and uploads it to
+normal.frag and downsample.frag; `sampleReliefHeight` takes it as parameters, the
+base path passing constants; and `hd_params` carries it per ring. `Dem_loader` is
+untouched, so the base path is bit-identical by construction.
+
+Verified: renders indistinguishable from the global-scale build (RMSE 0.2-5.9%,
+consistent with sub-decimetre height changes and no artefacts), all three rings
+loading, blend cost unchanged.

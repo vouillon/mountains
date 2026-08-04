@@ -33,6 +33,13 @@ uniform highp float hd_scale[HD_SLOTS]; // 1 / extent of the ring, in arcseconds
 uniform highp vec2 hd_bias[HD_SLOTS];   // normalized position of the anchor
 uniform highp float hd_lod_bias[HD_SLOTS]; // log2 of refinement over the base
 uniform highp int hd_max_lod[HD_SLOTS];
+uniform highp float hd_height_scale_n[HD_SLOTS];
+uniform highp float hd_height_offset[HD_SLOTS];
+
+// The base pyramid's quantisation: 9500 m over 65536 steps, the .dem
+// pipeline's.
+const highp float BASE_SCALE_N = (1.0 / 257.0) * 9500.0;
+const highp float BASE_OFFSET = -500.0;
 
 // Output structure for radial vertex computation
 struct RadialVertex {
@@ -47,8 +54,12 @@ struct RadialVertex {
 // texel j sits at level-0 index j << l) that [rendered_height] replicates on
 // the CPU. Shared by the base and high-resolution paths so that they cannot
 // drift apart.
+// [scale_n] is metres per normalised unit (the pyramid's metres-per-u16-step
+// times 255) and [offset] the metres at zero: each refinement pyramid carries
+// its own, the base pyramid the pipeline's.
 highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
-                               int lod) {
+                               int lod, highp float scale_n,
+                               highp float offset) {
   ivec2 tex_size = textureSize(tex, lod);
 
   // Texel position for manual bilinear interpolation
@@ -66,12 +77,11 @@ highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
   highp vec2 s11 =
       texelFetch(tex, min(base + ivec2(1, 1), tex_size - 1), lod).rg;
 
-  // Decode heights: high*256 + low, scaled to [-500, 9000]
-  const highp float HEIGHT_SCALE = (1.0 / 257.0) * 9500.0;
+  // Decode heights: high*256 + low, through this pyramid's own quantisation.
   highp vec4 H = vec4(dot(s00, vec2(1.0, 256.0)), dot(s10, vec2(1.0, 256.0)),
                       dot(s01, vec2(1.0, 256.0)), dot(s11, vec2(1.0, 256.0))) *
-                     HEIGHT_SCALE -
-                 500.0;
+                     scale_n +
+                 offset;
 
   return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 }
@@ -97,19 +107,23 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
   if (insideHd(0, c0))
     return sampleReliefHeight(
         hd_relief[0], c0,
-        min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]));
+        min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]),
+        hd_height_scale_n[0], hd_height_offset[0]);
   highp vec2 c1 = coord * hd_scale[1] + hd_bias[1];
   if (insideHd(1, c1))
     return sampleReliefHeight(
         hd_relief[1], c1,
-        min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]));
+        min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]),
+        hd_height_scale_n[1], hd_height_offset[1]);
   highp vec2 c2 = coord * hd_scale[2] + hd_bias[2];
   if (insideHd(2, c2))
     return sampleReliefHeight(
         hd_relief[2], c2,
-        min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]));
+        min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]),
+        hd_height_scale_n[2], hd_height_offset[2]);
   return sampleReliefHeight(relief, norm_coord,
-                            min(int(max(0.0, lod_raw)), max_lod));
+                            min(int(max(0.0, lod_raw)), max_lod), BASE_SCALE_N,
+                            BASE_OFFSET);
 }
 
 // Compute radial grid vertex position and sample terrain height

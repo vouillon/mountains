@@ -57,6 +57,8 @@ type terrain_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
@@ -93,6 +95,8 @@ type shadow_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -109,6 +113,8 @@ type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
   uv_scale : Gl.uniform_location;
+  height_scale : Gl.uniform_location;
+  height_offset : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
@@ -117,6 +123,7 @@ type downsample_uniforms = {
   source_texture : Gl.uniform_location;
   source_size : Gl.uniform_location;
   level : Gl.uniform_location;
+  height_scale_n : Gl.uniform_location;
 }
 (** Cached uniform locations for the downsample shader. *)
 
@@ -174,6 +181,10 @@ val upload_texture_units_shadow : Gl.t -> shadow_uniforms -> unit
 type hd_params = {
   hd_size : int;  (** samples per side *)
   hd_px_arcsec : float;  (** arcseconds per sample *)
+  hd_height_scale : float;
+      (** metres per u16 step of this ring's grid: each is quantised over the
+          height range it holds rather than the base pipeline's 9500 m *)
+  hd_height_offset : float;  (** metres at u16 zero *)
   hd_origin : float * float;
       (** arcseconds from the anchor arcsecond to sample (0, 0) *)
 }
@@ -248,6 +259,8 @@ type path_uniforms = {
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
+  hd_height_scale_n : Gl.uniform_location array;
+  hd_height_offset : Gl.uniform_location array;
 }
 
 val init_path_uniforms : Gl.t -> Gl.program -> path_uniforms
