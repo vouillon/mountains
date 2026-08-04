@@ -641,6 +641,9 @@
         <button id="btn-add-gpx" class="btn-go" style="padding: 10px 18px; font-size: 14px; width: 100%;">+ Add GPX Trace</button>
       </div>
 
+      <!-- Files that could not be used, one line each -->
+      <div id="gpx-error" class="input-error"></div>
+
       <!-- Saved Traces List -->
       <div class="section-title">Saved Traces</div>
       <div id="gpx-list" class="gpx-list">
@@ -660,56 +663,82 @@
         return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       }
 
-      function parseGpxSummary(xmlString) {
-        let pointCount = 0;
-        let firstLat = null, firstLon = null;
-        let secondLat = null, secondLon = null;
-        let name = '';
+      const toRadians = degrees => degrees * Math.PI / 180;
 
-        const nameMatch = xmlString.match(/<name>([^<]+)<\/name>/i);
-        if (nameMatch) name = nameMatch[1].trim();
+      function distanceMeters(lat1, lon1, lat2, lon2) {
+        const deltaLat = toRadians(lat2 - lat1);
+        const deltaLon = toRadians(lon2 - lon1);
+        const a = Math.sin(deltaLat / 2) ** 2 +
+          Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
+          Math.sin(deltaLon / 2) ** 2;
+        return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
 
-        const trkptRegex = /<trkpt\s+[^>]*lat=["']([^"']+)["']\s+[^>]*lon=["']([^"']+)["']/gi;
-        const trkptRegex2 = /<trkpt\s+[^>]*lon=["']([^"']+)["']\s+[^>]*lat=["']([^"']+)["']/gi;
+      // What the renderer draws (see Gpx_loader.parse): track points, or route
+      // points where a container has none, plus standalone waypoints. Reading
+      // the same set here is what keeps validation honest -- a file accepted
+      // for having points the renderer ignores would just come out invisible.
+      // Tag names are matched unprefixed, as Gpx_loader matches them.
+      const POINT_TAGS = ['trkpt', 'rtept', 'wpt'];
 
-        const distanceMeters = (lat1, lon1, lat2, lon2) => {
-          const toRadians = degrees => degrees * Math.PI / 180;
-          const deltaLat = toRadians(lat2 - lat1);
-          const deltaLon = toRadians(lon2 - lon1);
-          const a = Math.sin(deltaLat / 2) ** 2 +
-            Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
-            Math.sin(deltaLon / 2) ** 2;
-          return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        };
-        const addPoint = (lat, lon) => {
-          if (pointCount === 0) {
-            firstLat = lat;
-            firstLon = lon;
-          } else if (secondLat === null &&
-                     distanceMeters(firstLat, firstLon, lat, lon) >= 10) {
-            secondLat = lat;
-            secondLon = lon;
+      function findPoints(doc) {
+        for (const tag of POINT_TAGS) {
+          const points = [];
+          for (const el of doc.getElementsByTagName(tag)) {
+            const lat = parseFloat(el.getAttribute('lat'));
+            const lon = parseFloat(el.getAttribute('lon'));
+            if (Number.isFinite(lat) && Number.isFinite(lon) &&
+                Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+              points.push({ lat, lon });
+            }
           }
-          pointCount++;
-        };
+          if (points.length) return points;
+        }
+        return [];
+      }
 
-        let match;
-        while ((match = trkptRegex.exec(xmlString)) !== null) {
-          addPoint(parseFloat(match[1]), parseFloat(match[2]));
+      // Either { doc, points } for a file the renderer can draw, or { error }
+      // with a reason short enough to show as is. Every path that takes a file
+      // in -- the picker, a drop, a file-handler launch, a share -- goes
+      // through here, so a bad file is reported rather than silently dropped.
+      function validateGpx(xmlString) {
+        if (!xmlString || !xmlString.trim()) return { error: 'File is empty' };
+        let doc;
+        try {
+          doc = new DOMParser().parseFromString(xmlString, 'application/xml');
+        } catch (e) {
+          return { error: 'Not valid XML' };
         }
-        if (pointCount === 0) {
-          while ((match = trkptRegex2.exec(xmlString)) !== null) {
-            addPoint(parseFloat(match[2]), parseFloat(match[1]));
-          }
+        // A parse error is reported in-band, as a <parsererror> element rather
+        // than an exception.
+        if (!doc.documentElement ||
+            doc.getElementsByTagName('parsererror').length > 0) {
+          return { error: 'Not valid XML' };
         }
+        // localName ignores any namespace prefix: <gpx:gpx> is still GPX.
+        if (doc.documentElement.localName.toLowerCase() !== 'gpx') {
+          return { error: 'Not a GPX file' };
+        }
+        const points = findPoints(doc);
+        if (points.length === 0) {
+          return { error: 'No track points, route points or waypoints' };
+        }
+        return { doc, points };
+      }
+
+      // Bearing comes from the first point at least 10 m out: consecutive
+      // samples can be a metre apart, where the bearing is mostly GPS noise.
+      function gpxSummary(doc, points) {
+        const nameEl = doc.getElementsByTagName('name')[0];
+        const first = points[0];
+        const away = points.find(
+          p => distanceMeters(first.lat, first.lon, p.lat, p.lon) >= 10);
 
         let bearing = null;
-        if (firstLat !== null && secondLat !== null &&
-            (firstLat !== secondLat || firstLon !== secondLon)) {
-          const toRadians = degrees => degrees * Math.PI / 180;
-          const lat1 = toRadians(firstLat);
-          const lat2 = toRadians(secondLat);
-          const deltaLon = toRadians(secondLon - firstLon);
+        if (away) {
+          const lat1 = toRadians(first.lat);
+          const lat2 = toRadians(away.lat);
+          const deltaLon = toRadians(away.lon - first.lon);
           const y = Math.sin(deltaLon) * Math.cos(lat2);
           const x = Math.cos(lat1) * Math.sin(lat2) -
             Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
@@ -717,12 +746,18 @@
         }
 
         return {
-          name,
-          pointCount,
-          centerLat: firstLat,
-          centerLon: firstLon,
+          name: nameEl ? nameEl.textContent.trim() : '',
+          pointCount: points.length,
+          centerLat: first.lat,
+          centerLon: first.lon,
           bearing
         };
+      }
+
+      // For traces already saved, which were validated when they were added.
+      function parseGpxSummary(xmlString) {
+        const result = validateGpx(xmlString);
+        return result.error ? null : gpxSummary(result.doc, result.points);
       }
 
       class GpxManager {
@@ -758,9 +793,16 @@
           }
         }
 
+        // Returns whether the file was usable; a rejected one is reported and
+        // never stored, so the saved list cannot hold a trace that draws
+        // nothing.
         async addTrace(name, xmlString) {
-          if (!xmlString || !xmlString.trim()) return;
-          const summary = parseGpxSummary(xmlString);
+          const validated = validateGpx(xmlString);
+          if (validated.error) {
+            this.showError(name, validated.error);
+            return false;
+          }
+          const summary = gpxSummary(validated.doc, validated.points);
           const traceName = name || summary.name || ('Trace ' + (this.traces.length + 1) + '.gpx');
 
           const trace = {
@@ -778,6 +820,26 @@
           this.save();
           this.renderUI();
           this.updateMap();
+          return true;
+        }
+
+        // The manager is where the message goes, and it is opened to carry it:
+        // a share or a file-handler launch arrives with it closed, and those
+        // are the paths where a rejected file would otherwise vanish without a
+        // trace. Messages accumulate, so a batch reports every file it lost.
+        showError(name, reason) {
+          if (!this.errorEl) return;
+          const line = document.createElement('div');
+          line.textContent = name ? `${name} — ${reason}` : reason;
+          this.errorEl.appendChild(line);
+          this.errorEl.classList.add('visible');
+          this.modal.classList.add('visible');
+        }
+
+        clearErrors() {
+          if (!this.errorEl) return;
+          this.errorEl.textContent = '';
+          this.errorEl.classList.remove('visible');
         }
 
         toggleTrace(id) {
@@ -800,9 +862,12 @@
         flyTo(id) {
           const trace = this.traces.find(t => t.id === id);
           if (trace && trace.centerLat && trace.centerLon && window.flyToCoords) {
+            // Traces saved before the bearing was recorded have to be reparsed;
+            // [parseGpxSummary] returns null if that no longer works, and
+            // [flyToCoords] takes a null bearing as "keep the current one".
             const bearing = Number.isFinite(trace.bearing)
               ? trace.bearing
-              : parseGpxSummary(trace.content || '').bearing;
+              : (parseGpxSummary(trace.content || '') || {}).bearing;
             this.modal.classList.remove('visible');
             window.flyToCoords(trace.centerLat, trace.centerLon, bearing);
           }
@@ -833,13 +898,16 @@
           this.dropZone = document.getElementById('gpx-drop-zone');
           this.fileInput = document.getElementById('gpx-file-input');
           this.listEl = document.getElementById('gpx-list');
+          this.errorEl = document.getElementById('gpx-error');
 
           this.renderUI();
         }
 
         setupEvents() {
-          // Open Modal
+          // Open Modal. Messages are about the last batch of files, so they go
+          // when the manager is opened afresh.
           this.fab.addEventListener('click', () => {
+            this.clearErrors();
             this.modal.classList.add('visible');
           });
 
@@ -867,6 +935,7 @@
           // File Input Selection
           this.fileInput.addEventListener('change', (e) => {
             const files = Array.from(e.target.files);
+            this.clearErrors();
             files.forEach(file => {
               const reader = new FileReader();
               reader.onload = (evt) => {
@@ -894,8 +963,12 @@
             });
           });
 
+          // Not filtered on name or type: a file dropped here was meant as a
+          // trace, so let validation say what is wrong with it rather than
+          // ignoring it for having the wrong extension.
           this.dropZone.addEventListener('drop', (e) => {
-            const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.gpx') || f.type.includes('gpx') || f.type.includes('xml'));
+            const files = Array.from(e.dataTransfer.files);
+            this.clearErrors();
             files.forEach(file => {
               const reader = new FileReader();
               reader.onload = (evt) => {
