@@ -32,4 +32,5 @@
     %{dep:../worker.bc.js}
     %{dep:../decompress_tile.wasm}
     %{dep:../decode_clc.wasm}
+    %{dep:../blend.wasm}
     %{dep:../../../assets/details_bc7.ktx2}))))

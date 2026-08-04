@@ -498,7 +498,7 @@ let blend ~lat ~(source : source) (raw : raw) =
     }
   in
   let win = source_window source (Blend_core.geometry p) in
-  match Blend_core.run p ~samples:raw.samples ~win with
+  match Blend_wasm.run p ~samples:raw.samples ~win with
   | None -> None
   | Some { data; height_scale; height_offset; range } ->
       Format.eprintf

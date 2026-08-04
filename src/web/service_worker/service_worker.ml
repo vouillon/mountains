@@ -312,6 +312,7 @@ let () =
                   is_tile url
                   || String.ends_with ~suffix:"worker.bc.js" url
                   || String.ends_with ~suffix:"decompress_tile.wasm" url
+                  || String.ends_with ~suffix:"blend.wasm" url
                 then use_cache_first ~query_opts:match_opts request
                 else use_cache_on_error ev request
             in
@@ -375,6 +376,7 @@ let () =
                     "worker.bc.js";
                     "decompress_tile.wasm";
                     "decode_clc.wasm";
+                    "blend.wasm";
                     "assets/details_bc7.ktx2";
                   ]
                  (* Loaded before the service worker claims the page, so the

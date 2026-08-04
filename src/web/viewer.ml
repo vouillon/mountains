@@ -5016,6 +5016,9 @@ let main () =
   Lwt.return_unit
 
 let () =
+  (* Well before the first blend can happen: it needs a DEM tile and a
+     refinement block, both off the network. *)
+  Blend_wasm.start ();
   Lwt.async (fun () ->
       Lwt.catch main (fun e ->
           (match e with Jv.Error e -> Brr.Console.error [ e ] | _ -> ());
