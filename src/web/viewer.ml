@@ -3561,7 +3561,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
 
 let featured_locations =
   [
-    ("Col Girardin", 44.6078064, 6.8210935, 220., 90., 1.0);
+    ("Col Girardin", 44.60768, 6.82107, 220., 90., 1.0);
     ("Col du Blainon", 44.209067, 6.9423065, -150., 96., 1.0);
     ("Lacs de Morgon", 44.336516, 6.913906, 64., 88., 1.0);
     ("Roc Diolon (Orcières)", 44.73339, 6.36308, -130., 80., 0.5);
