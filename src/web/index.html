@@ -330,6 +330,33 @@
     .btn-icon.delete:hover { background: #fee2e2; color: #ef4444; }
     .btn-icon.delete:active { background: #fca5a5; color: #dc2626; }
 
+    /* Deleting is confirmed in the row itself: the panel is already a modal and
+       fills the screen on a phone, leaving a dialog on top of it nowhere to go,
+       and the row is what names the trace being deleted anyway. */
+    .gpx-item.confirming {
+      background: #fef2f2;
+      border-color: #fca5a5;
+    }
+
+    .btn-text {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      min-height: 40px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #6b7280;
+      transition: background 0.2s, color 0.2s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    .btn-text:hover { background: rgba(0, 0, 0, 0.06); color: #111827; }
+    .btn-text:active { transform: scale(0.96); }
+    .btn-text.danger { color: #dc2626; }
+    .btn-text.danger:hover { background: #fee2e2; }
+
     .input-group {
       display: flex;
       gap: 8px;
@@ -763,6 +790,8 @@
       class GpxManager {
         constructor() {
           this.traces = [];
+          // The trace whose deletion is waiting on an answer, if any.
+          this.confirmingId = null;
           this.load();
           this.setupUI();
           this.setupEvents();
@@ -841,6 +870,17 @@
           this.errorEl.classList.remove('visible');
         }
 
+        // Nothing half-asked outlives closing or reopening the panel: neither a
+        // message about the last batch of files nor a delete waiting on an
+        // answer.
+        resetPrompts() {
+          this.clearErrors();
+          if (this.confirmingId) {
+            this.confirmingId = null;
+            this.renderUI();
+          }
+        }
+
         toggleTrace(id) {
           const trace = this.traces.find(t => t.id === id);
           if (trace) {
@@ -852,6 +892,7 @@
         }
 
         deleteTrace(id) {
+          this.confirmingId = null;
           this.traces = this.traces.filter(t => t.id !== id);
           this.save();
           this.renderUI();
@@ -936,20 +977,21 @@
         }
 
         setupEvents() {
-          // Open Modal. Messages are about the last batch of files, so they go
-          // when the manager is opened afresh.
+          // Open Modal, afresh: see [resetPrompts].
           this.fab.addEventListener('click', () => {
-            this.clearErrors();
+            this.resetPrompts();
             this.modal.classList.add('visible');
           });
 
           // Close Modal
           this.closeBtn.addEventListener('click', () => {
+            this.resetPrompts();
             this.modal.classList.remove('visible');
           });
 
           this.modal.addEventListener('click', (e) => {
             if (e.target === this.modal) {
+              this.resetPrompts();
               this.modal.classList.remove('visible');
             }
           });
@@ -1136,24 +1178,34 @@
 
           this.traces.forEach(t => {
             const item = document.createElement('div');
-            item.className = 'gpx-item';
+            // The row asks the question in place of its own subtitle and
+            // actions, so nothing is added to a list that has to fit a phone.
+            const confirming = this.confirmingId === t.id;
+            item.className = confirming ? 'gpx-item confirming' : 'gpx-item';
+            const meta = confirming
+              ? 'Delete this trace?'
+              : (t.points ? t.points + ' points' : 'GPX track');
+            const actions = confirming
+              ? `<button class="btn-text danger confirm-btn">Delete</button>
+                 <button class="btn-text cancel-btn">Cancel</button>`
+              : `${t.centerLat ? `<button class="btn-icon fly-btn" title="Fly to trace center">✈️</button>` : ''}
+                 <label class="switch" title="Toggle 3D visibility">
+                   <input type="checkbox" ${t.active ? 'checked' : ''}>
+                   <span class="slider"></span>
+                 </label>
+                 <button class="btn-icon delete delete-btn" title="Delete trace">🗑️</button>`;
             item.innerHTML = `
               <div class="gpx-item-info">
                 <div class="gpx-item-title" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
-                <div class="gpx-item-meta">${t.points ? t.points + ' points' : 'GPX track'}</div>
+                <div class="gpx-item-meta">${meta}</div>
               </div>
-              <div class="gpx-item-actions">
-                ${t.centerLat ? `<button class="btn-icon fly-btn" title="Fly to trace center">✈️</button>` : ''}
-                <label class="switch" title="Toggle 3D visibility">
-                  <input type="checkbox" ${t.active ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
-                <button class="btn-icon delete delete-btn" title="Delete trace">🗑️</button>
-              </div>
+              <div class="gpx-item-actions">${actions}</div>
             `;
 
             const checkbox = item.querySelector('input[type="checkbox"]');
-            checkbox.addEventListener('change', () => this.toggleTrace(t.id));
+            if (checkbox) {
+              checkbox.addEventListener('change', () => this.toggleTrace(t.id));
+            }
 
             const flyBtn = item.querySelector('.fly-btn');
             if (flyBtn) {
@@ -1163,9 +1215,21 @@
             const deleteBtn = item.querySelector('.delete-btn');
             if (deleteBtn) {
               deleteBtn.addEventListener('click', () => {
-                if (confirm(`Delete trace "${t.name}"?`)) {
-                  this.deleteTrace(t.id);
-                }
+                this.confirmingId = t.id;
+                this.renderUI();
+              });
+            }
+
+            const confirmBtn = item.querySelector('.confirm-btn');
+            if (confirmBtn) {
+              confirmBtn.addEventListener('click', () => this.deleteTrace(t.id));
+            }
+
+            const cancelBtn = item.querySelector('.cancel-btn');
+            if (cancelBtn) {
+              cancelBtn.addEventListener('click', () => {
+                this.confirmingId = null;
+                this.renderUI();
               });
             }
 
