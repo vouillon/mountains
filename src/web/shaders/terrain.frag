@@ -365,6 +365,20 @@ highp float IGN(highp vec2 p) {
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 
+// Sun against sky, on a slope facing the sun: about 7 to 1, which is what a
+// clear day at altitude measures. Both terms end up multiplied by the albedo,
+// so their ratio is what sets how far a shaded slope falls below a lit one, and
+// it used to be 1 to 1 -- see the ambient term itself, further down, for what
+// that cost.
+//
+// AMBIENT_LIGHT is not the lever it looks like: raising it barely touches the
+// slopes in shade, which the sky reflection in [reflectivity] lights far more
+// than this does. DIRECT_LIGHT is the one that moves them, and it moves them by
+// moving everything the sun reaches instead, so turning it down buys open
+// shadows with relief.
+const float DIRECT_LIGHT = 1.0;
+const float AMBIENT_LIGHT = 0.15;
+
 void main() {
   // Define fog color early for use in water reflection.
   // Blend toward the zenith colour above the eye line exactly as sky.frag
@@ -690,7 +704,13 @@ void main() {
   vec3 ground_color =
       vec3(0.08, 0.07, 0.05); // Deeper ground bounce for contrast
   float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
-  vec3 ambient = mix(ground_color, sky_color, sky_factor) * 0.5;
+  // The two used to arrive in equal measure, which cost the picture the whole
+  // of its relief: sunlit and shaded ground came out within a factor of two of
+  // each other, every slope carried the blue of the sky more strongly than the
+  // colour of its own material, and a band of ridges spanned a fifth of the
+  // display range -- little enough to disappear entirely under sunlight falling
+  // on the screen. See AMBIENT_LIGHT against the direct term below.
+  vec3 ambient = mix(ground_color, sky_color, sky_factor) * AMBIENT_LIGHT;
 
   // Rectified Geometric Normal for Micro-AO comparison
   // Use flat normal (0,0,1) for water to avoid dark artifacts at shorelines
@@ -718,7 +738,7 @@ void main() {
   ambient *= finalMicroAO;
 
   vec3 sun_color = vec3(1.0, 0.95, 0.9);
-  vec3 direct = sun_color * final_l * shadow_val * 0.5;
+  vec3 direct = sun_color * final_l * shadow_val * DIRECT_LIGHT;
   // Baked AO measures sky visibility: it attenuates the ambient term and the
   // sky reflection, not the direct sun, which the shadow map already handles
   // (multiplying the whole color darkened sunlit couloirs twice).
@@ -743,8 +763,9 @@ void main() {
 
   vec3 final_color = mix(fog_color, lit, fog_coeff);
 
-  // Gamma correction, then a +/-0.5/255 dither in output space to break up
-  // banding
+  // Tone curve and gamma correction, then a +/-0.5/255 dither in output space
+  // to break up banding
   highp float noise = IGN(gl_FragCoord.xy);
-  color = vec4(pow(final_color, vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
+  color = vec4(
+      pow(tone_map(final_color), vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
 }

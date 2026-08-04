@@ -1,4 +1,4 @@
-#version 300 es
+// Prefixed with common_header.frag, for [tone_map] and the version directive.
 precision mediump float;
 uniform highp mat4 inv_view;
 uniform highp vec3 u_lightDir;
@@ -60,9 +60,12 @@ void main() {
   sky = mix(sky, vec3(1.0, 0.95, 0.8) * 20.0,
             smoothstep(disc_outer, disc_inner, cos_gamma));
 
-  // Gamma Correction (Linear -> sRGB), then a +/-0.5/255 dither to prevent
-  // banding. The dither must come after the pow: in linear space one output LSB
-  // is worth 2-5x more noise in the dark blue zenith and ~2x less near the sun.
+  // Tone curve -- the same one the terrain applies, so the horizon they share
+  // stays continuous -- then gamma correction (Linear -> sRGB), then a
+  // +/-0.5/255 dither to prevent banding. The dither must come after the pow:
+  // in linear space one output LSB is worth 2-5x more noise in the dark blue
+  // zenith and ~2x less near the sun.
   highp float noise = IGN(gl_FragCoord.xy);
-  color = vec4(pow(sky, vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
+  color =
+      vec4(pow(tone_map(sky), vec3(1.0 / 2.2)) + (noise - 0.5) / 255.0, 1.0);
 }

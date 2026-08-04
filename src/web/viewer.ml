@@ -327,7 +327,7 @@ let water_raster_program =
 let sky_program =
   {
     vertex_shader = [%blob "shaders/sky.vert"];
-    fragment_shader = [%blob "shaders/sky.frag"];
+    fragment_shader = common_fragment_header ^ [%blob "shaders/sky.frag"];
     attributes = [];
   }
 
