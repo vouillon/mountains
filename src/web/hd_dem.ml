@@ -32,10 +32,12 @@ type kind =
   | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
       (** A block of tiles from a WGS84G matrix level, centred on the tile
           holding the location. *)
-  | Wms of { wms_name : string; step_arcsec : float; steps : int }
-      (** One GetMap over a bbox aligned to a [step_arcsec] grid and spanning
+  | Wms of { wms_name : string; step_arcsec : float; steps : int; split : int }
+      (** GetMap over a bbox aligned to a [step_arcsec] grid and spanning
           [steps] steps, centred on the grid corner nearest the location.
-          Arbitrary resolution: the matrix levels do not bound it. *)
+          Arbitrary resolution: the matrix levels do not bound it. Fetched as
+          [split] x [split] requests, which is exact rather than a compromise --
+          see [plan]. *)
 
 type layer = {
   kind : kind;
@@ -58,10 +60,11 @@ let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
     fade_metres;
   }
 
-let wms_layer ~wms_name ~step_arcsec ~steps ~size ~fade_metres =
+let wms_layer ~wms_name ~step_arcsec ~steps ~split ~size ~fade_metres =
   assert (steps mod 2 = 0);
+  assert (size mod split = 0);
   {
-    kind = Wms { wms_name; step_arcsec; steps };
+    kind = Wms { wms_name; step_arcsec; steps; split };
     px_arcsec = step_arcsec *. float steps /. float size;
     size;
     fade_metres;
@@ -86,8 +89,8 @@ let footprint_arcsec = 360. /. 32768. *. 3600.
 
 (* The innermost ring: LIDAR HD bare earth at 0.0772 arcseconds (2.38 m N-S,
    1.66 m E-W at 46 degrees), 1024 samples over 2 x 2 footprints, i.e.
-   +-1.22 x 0.87 km. One GetMap, 4.0 MB on the wire (the WMS endpoint does not
-   compress), ~1 s.
+   +-1.22 x 0.87 km. 2 x 2 GetMaps of 512^2, 4.0 MB on the wire in total (the WMS
+   endpoint does not compress), ~1 s.
 
    RGE ALTI cannot serve this: below level 14 its WMS output is
    nearest-neighbour replication of the 4.77 m grid (100% of 4x4 blocks
@@ -102,7 +105,7 @@ let footprint_arcsec = 360. /. 32768. *. 3600.
    hundred, not tens over kilometres. *)
 let lidar_2m =
   wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
-    ~step_arcsec:footprint_arcsec ~steps:2 ~size:1024 ~fade_metres:300.
+    ~step_arcsec:footprint_arcsec ~steps:2 ~split:2 ~size:1024 ~fade_metres:300.
 
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
@@ -188,7 +191,7 @@ let plan layer ~lat ~lon =
           (List.init block_tiles Fun.id)
       in
       (origin_x, origin_y, reqs)
-  | Wms { wms_name; step_arcsec; steps } ->
+  | Wms { wms_name; step_arcsec; steps; split } ->
       let alat = Web_utils.arcsec_floor lat
       and alon = Web_utils.arcsec_floor lon in
       (* Centre on the nearest grid *corner*, not on the step holding the
@@ -202,17 +205,42 @@ let plan layer ~lat ~lon =
       let lon_min = (corner (float alon) -. half) *. step_arcsec in
       let lat_min = (corner (float alat) -. half) *. step_arcsec in
       let span = float steps *. step_arcsec in
-      let url =
-        wms_url ~wms_name ~size:layer.size ~lat_min:(lat_min /. 3600.)
-          ~lon_min:(lon_min /. 3600.)
-          ~lat_max:((lat_min +. span) /. 3600.)
-          ~lon_max:((lon_min +. span) /. 3600.)
+      (* Fetched in [split] x [split] pieces so that one failed request costs a
+         quadrant rather than the whole ring -- the missing piece stays at nodata,
+         which the blend fades into the surface beneath exactly as it does a
+         failed WMTS tile. The bytes are the same, and it costs no accuracy: a
+         piece of [size / split] pixels over [span / split] has precisely the
+         pitch of [size] over [span], so the pieces tile the same sample grid
+         with no resampling and no seam. Each URL is still a deterministic
+         function of the corner and the piece, so nearby locations share them and
+         the service worker can now hit on a subset. *)
+      let px = layer.size / split in
+      let piece = span /. float split in
+      let reqs =
+        List.concat_map
+          (fun qr ->
+            List.map
+              (fun qc ->
+                (* Raster row 0 is the northernmost, so the piece at [dst_row] 0
+                   is the *top* band: its southern edge is the highest. *)
+                let lon0 = lon_min +. (float qc *. piece) in
+                let lat0 = lat_min +. (float (split - 1 - qr) *. piece) in
+                {
+                  url =
+                    wms_url ~wms_name ~size:px ~lat_min:(lat0 /. 3600.)
+                      ~lon_min:(lon0 /. 3600.)
+                      ~lat_max:((lat0 +. piece) /. 3600.)
+                      ~lon_max:((lon0 +. piece) /. 3600.);
+                  px;
+                  dst_row = qr * px;
+                  dst_col = qc * px;
+                })
+              (List.init split Fun.id))
+          (List.init split Fun.id)
       in
       let origin_x = lon_min +. (0.5 *. layer.px_arcsec) -. float alon in
       let origin_y = lat_min +. (0.5 *. layer.px_arcsec) -. float alat in
-      ( origin_x,
-        origin_y,
-        [ { url; px = layer.size; dst_row = 0; dst_col = 0 } ] )
+      (origin_x, origin_y, reqs)
 
 type raw = {
   layer : layer;

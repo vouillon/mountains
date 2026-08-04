@@ -11,10 +11,13 @@ type kind =
   | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
       (** A block of tiles from a WGS84G matrix level, centred on the tile
           holding the location. *)
-  | Wms of { wms_name : string; step_arcsec : float; steps : int }
-      (** One GetMap over a bbox aligned to a [step_arcsec] grid and spanning
+  | Wms of { wms_name : string; step_arcsec : float; steps : int; split : int }
+      (** GetMap over a bbox aligned to a [step_arcsec] grid and spanning
           [steps] steps, centred on the grid corner nearest the location.
-          Resolution is free-form: the matrix levels do not bound it. *)
+          Resolution is free-form: the matrix levels do not bound it. Fetched as
+          [split] x [split] pieces, so one failed request costs a quadrant
+          rather than the ring; exact, because a piece has the same pixel pitch
+          as the whole. *)
 
 type layer = {
   kind : kind;

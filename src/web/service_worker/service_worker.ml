@@ -134,16 +134,31 @@ let match_opts =
    wasted requests and at worst -- on a weak connection -- tiles that hang
    until [Hd_dem]'s timeout instead of resolving instantly. *)
 let use_cache_first ?(serve_not_found = false) ?query_opts request =
-  let* response =
-    Brr_io.Fetch.Cache.Storage.match' ?query_opts (Brr_io.Fetch.caches ())
-      request
+  (* A failed *lookup* is a miss, not an error. Binding it with the error-
+     propagating [let*] meant any hiccup in the Cache API short-circuited to
+     [Error], which the fetch handler turns into [Response.error ()] -- a hard
+     network failure for the page, without ever having tried the network.
+
+     Reachable rather than theoretical: with the disk near full, [Cache.put]
+     starts answering "Unexpected internal error", and a lookup can fail the same
+     way. Losing the cache should cost latency, never the response. *)
+  let response =
+    let open Fut.Syntax in
+    let+ found =
+      Brr_io.Fetch.Cache.Storage.match' ?query_opts (Brr_io.Fetch.caches ())
+        request
+    in
+    match found with Ok r -> r | Error _ -> None
   in
+  let open Fut.Syntax in
+  let* response = response in
   match response with
   | Some response
     when Brr_io.Fetch.Response.ok response
          || (serve_not_found && Brr_io.Fetch.Response.status response = 404) ->
       Fut.return (Ok response)
   | _ ->
+      let open Fut.Result_syntax in
       let* response = Brr_io.Fetch.request request in
       let* () = put_in_cache request response in
       Fut.return (Ok response)
