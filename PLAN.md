@@ -2215,3 +2215,37 @@ Remaining, in order: the `scan` phase (~11 ms of the 37, a clean f32x4 candidate
 that stays bit-identical), then the `slow` spans and the range scan. The 13 ms of
 copying in and out is now a third of the total rather than a tenth, but the
 lifetime and memory costs of removing it have not changed.
+
+## Rejected: an f32x4 scan (2026-08-04)
+
+The phase profile put `scan` at 11 ms of the l13 blend's 37, and it is the most
+vectorisable loop in the file: 4M f32 loads with three comparisons. Implemented
+as `f32x4`, with nodata lanes replaced by +/-inf so they cannot win, and `pmin`
+and `pmax` -- whose "return the accumulator if either side is NaN" behaviour is
+exactly what `if x < lo then lo := x` does, so the accumulators can never become
+NaN and the vector and scalar versions agree even on input the service should
+never produce. The nodata bounding box was tracked per four-lane group rather
+than per sample, which is sound because the box only has to *contain* the nodata.
+
+Byte-identical, `height_scale` and `height_offset` included. But the measured
+gain, in the two rounds where the machine was quiet enough for the paired
+measurements to be comparable, was **2-3% of the l13 blend** -- against a
+predicted 15-20%. Six interleaved rounds never converged: the best `span` figure
+was 48.6 ms and the best `simd` figure 34.4, but the round that produced 34.4
+measured 90.0 for `span`, and the cleanest paired round gave 48.8 against 49.8.
+
+Reverted. Not because it is wrong -- it is verified -- but because a gain that
+cannot be demonstrated above the noise floor does not pay for eighty lines of
+hand-written SIMD, plus a scalar fallback path, in the least reviewable file in
+the repository.
+
+The likely reason the phase profile overstated the opportunity: the scan streams
+all 16 MB of samples, so it is bounded by getting them into the core rather than
+by the arithmetic done on each one, and issuing four comparisons at a time does
+not make the bytes arrive faster. If that is right, no amount of work on this
+loop pays, and the same caution applies to the range scan.
+
+What that leaves, if the blend needs to be faster again: the `slow` spans (still
+the largest phase), or moving the whole thing off the main thread -- which buys
+latency rather than throughput, and is still blocked on `chain` being called from
+a synchronous publish block.
