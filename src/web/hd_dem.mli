@@ -41,11 +41,10 @@ val lidar_5m : layer
     {!lidar_2m} nests inside it, exactly box-consistent with it. *)
 
 val lidar_2m : layer
-(** LIDAR HD bare earth over WMS: 0.0386 arcsec (1.19 m N-S, 0.83 m E-W at 46
-    degrees), 2048 samples over 2 x 2 level-14 footprints, i.e. +-1.22 x 0.87
-    km. 2 x 2 GetMaps of 1024^2, 16.0 MB (the WMS endpoint does not compress).
-    Exactly box-consistent with {!lidar_5m}, both being resolutions of one
-    layer. *)
+(** LIDAR HD bare earth over WMS: 0.0772 arcsec (2.38 m N-S, 1.66 m E-W at 46
+    degrees), 1024 samples over 2 x 2 level-14 footprints, i.e. +-1.22 x 0.87
+    km. One GetMap, 4.0 MB (the WMS endpoint does not compress). Nests inside
+    {!l13}. *)
 
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the

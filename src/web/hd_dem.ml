@@ -84,19 +84,10 @@ let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
    exact in binary and the formatted URL is stable. *)
 let footprint_arcsec = 360. /. 32768. *. 3600.
 
-(* The innermost ring: LIDAR HD bare earth at 0.0386 arcseconds (1.19 m N-S,
-   0.83 m E-W at 46 degrees), 2048 samples over 2 x 2 footprints, i.e. the same
-   +-1.22 x 0.87 km as the 2.38 m grid it replaces, at twice the resolution.
-   2 x 2 GetMaps of 1024^2, 16.0 MB on the wire in total (the WMS endpoint does
-   not compress), ~4 s.
-
-   Measured worth doing (PLAN.md): the service's output at this depth is genuine
-   rather than replicated -- no constant 2x2 block in 262144 -- and the 2.38 m
-   output is its exact 2x2 box mean, so nothing is lost by the two being drawn
-   from one layer. The step adds 0.711 m RMS over 2.38 m on terrain this steep,
-   about 55% of what the 4.77 -> 2.38 m step added. It costs no extra shader slot,
-   no extra publish and no extra visibility pass, being a resolution change to a
-   ring that already exists.
+(* The innermost ring: LIDAR HD bare earth at 0.0772 arcseconds (2.38 m N-S,
+   1.66 m E-W at 46 degrees), 1024 samples over 2 x 2 footprints, i.e.
+   +-1.22 x 0.87 km. 2 x 2 GetMaps of 512^2, 4.0 MB on the wire in total (the WMS
+   endpoint does not compress), ~1 s.
 
    RGE ALTI cannot serve this: below level 14 its WMS output is
    nearest-neighbour replication of the 4.77 m grid (100% of 4x4 blocks
@@ -126,7 +117,7 @@ let lidar_5m =
 
 let lidar_2m =
   wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
-    ~step_arcsec:footprint_arcsec ~steps:2 ~split:2 ~size:2048 ~fade_metres:300.
+    ~step_arcsec:footprint_arcsec ~steps:2 ~split:2 ~size:1024 ~fade_metres:300.
 
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
