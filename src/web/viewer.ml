@@ -2888,6 +2888,13 @@ let update_gpx_path ctx ~radial_params =
    avoid. *)
 let hd_grace_s = 1.5
 
+(* How long a refinement publish waits for its neighbours once one ring has
+   arrived. Rings that arrive together must stay a single publish -- see the note
+   at [hd_grace_s] for why publishing is not free -- but a ring whose requests
+   stall neither succeeds nor fails fast, and waiting for it must not hold a
+   finished coarser ring behind [Hd_dem]'s timeout. *)
+let hd_settle_s = 0.75
+
 (* Radius, in metres, of the terrain the eye must clear. The eye sits 2 m above
    the surface, which was safe while the finest grid under it was l13's 9.5 m:
    the surface barely varies within a couple of metres at that spacing. At the
@@ -3000,7 +3007,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     let still_pending p =
       match Lwt.state p with Lwt.Sleep -> true | _ -> false
     in
-    let in_time = chain (List.map (fun (_, p) -> settled p) hd_fetches) in
+    let settled_raws () = List.map (fun (_, p) -> settled p) hd_fetches in
+    let arrived raws = List.length (List.filter Option.is_some raws) in
+    let first_raws = settled_raws () in
+    let in_time = chain first_raws in
     let refine_later = List.exists (fun (_, p) -> still_pending p) hd_fetches in
     (* The previous location's textures are dead from here on: the bakes below
        overwrite every unit they were bound to. Deleting first keeps the peak
@@ -3404,20 +3414,39 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           }
     in
     publish ~hd_grids:in_time;
-    if refine_later then
-      Lwt.async (fun () ->
-          let* raws = Lwt.all (List.map snd hd_fetches) in
-          if !location_epoch <> epoch then Lwt.return_unit
-          else
-            match chain raws with
-            | [] -> Lwt.return_unit
-            | hd_grids ->
-                (* [Hd_dem.blend] is synchronous, so the epoch test above still
-                   holds here: no [draw] has run since. *)
-                publish ~hd_grids;
-                let* () = Web_utils.on_gpu_finished ctx in
-                force_redraw := true;
-                Lwt.return_unit);
+    if refine_later then begin
+      (* Wait for the next ring to land, let a burst of them coalesce, publish
+         what is in hand, and go round again. Waiting for *all* of them instead
+         would be simpler, but a single stalled ring then keeps a ring that
+         finished seconds ago off the screen until [Hd_dem]'s timeout expires --
+         which is exactly what happens on a bad connection, where the coarsest
+         ring is the one worth having. *)
+      let shown = ref (arrived first_raws) in
+      let rec refine () =
+        match List.filter (fun (_, p) -> still_pending p) hd_fetches with
+        | [] -> Lwt.return_unit
+        | pending ->
+            let* _ = Lwt.nchoose_split (List.map snd pending) in
+            let* () = sleep hd_settle_s in
+            if !location_epoch <> epoch then Lwt.return_unit
+            else
+              let raws = settled_raws () in
+              if arrived raws <= !shown then refine ()
+              else begin
+                shown := arrived raws;
+                match chain raws with
+                | [] -> refine ()
+                | hd_grids ->
+                    (* [Hd_dem.blend] is synchronous, so the epoch test above
+                       still holds here: no [draw] has run since. *)
+                    publish ~hd_grids;
+                    let* () = Web_utils.on_gpu_finished ctx in
+                    force_redraw := true;
+                    refine ()
+              end
+      in
+      Lwt.async refine
+    end;
     let* () = Web_utils.on_gpu_finished ctx in
     force_redraw := true;
     (* A switch started while the GPU was draining owns the screen now. *)
