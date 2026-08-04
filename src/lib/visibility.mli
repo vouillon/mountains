@@ -29,11 +29,21 @@ val bilinear_height : (int -> int -> float) -> x:float -> y:float -> float
 (** Bilinear interpolation of a height grid at fractional coordinates. Reads the
     (x+1, y+1) neighbours, so the caller must keep them inside the grid. *)
 
+type refinement = {
+  sample : float -> float -> float option;
+      (** height at a fractional base-grid position, [None] outside this grid *)
+  step : float;
+      (** finest useful walk step over this grid, in base-grid pixels: half its
+          sample spacing. Keeps a grazing ray from being walked far finer than
+          the data it is reading. *)
+}
+(** One finer grid covering part of the ray (see [Hd_dem]). *)
+
 val test_precise :
   (int -> int -> float) ->
   ?src_h:float ->
   ?curvature:float * float ->
-  ?fine:(float -> float -> float option) ->
+  ?fine:refinement list ->
   off_x:float ->
   off_y:float ->
   src_x:int ->
@@ -43,9 +53,13 @@ val test_precise :
   unit ->
   bool
 (** Precise visibility test. Tests visibility from (src_x + off_x, src_y +
-    off_y) to (dst_x, dst_y). Walks the ray in 0.02-pixel steps (~0.6 m) with
-    bilinear interpolation for the first 6 pixels (~185 m), then delegates to
-    [test]. The source's 1-pixel neighbourhood must lie inside the height grid.
+    off_y) to (dst_x, dst_y).
+
+    Marches the ray with bilinear interpolation, taking each step from the
+    clearance between the ray and the terrain below it: tight where the ray
+    grazes the ground, long where it flies high, bounded by one pixel so it is
+    never coarser than the whole-pixel walk it replaces. The source's 1-pixel
+    neighbourhood must lie inside the height grid.
     @param get_height function to get height at (row, col)
     @param src_h
       optional override for source elevation (defaults to terrain + 2m)
@@ -54,10 +68,11 @@ val test_precise :
       observer-anchored frame lowered by the Earth-curvature drop, in which
       sight lines are straight (see {!curvature_drop})
     @param fine
-      [fine x y] is the terrain height at the fractional grid position (x, y) as
-      read from a finer grid covering part of the ray, or [None] outside it.
-      Heights are raw: the curvature drop is applied here. Used by the bilinear
-      phase only, which is exactly where the ray hugs the terrain.
+      finer grids covering part of the ray, finest first. Heights are raw: the
+      curvature drop is applied here. Consulted along the whole ray, so a
+      near-field grid contributes to occlusion everywhere it reaches; each one's
+      [step] bounds how finely it is walked. Past them all the walk hands over
+      to {!test}.
     @param off_x fractional X offset from src_x (in pixels/meters)
     @param off_y fractional Y offset from src_y (in pixels/meters)
     @param src_x source column (integer)

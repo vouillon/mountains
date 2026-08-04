@@ -3210,23 +3210,28 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          [~fine] lets the near phase, where the ray hugs the terrain, sample it
          at its own 0.31 arcsec. Without HD both collapse to exactly the
          previous call. *)
-      let hd_at =
-        (* Sampler per ring, prepared once; the innermost that covers the point
-           wins, exactly as in the shader. *)
-        let samplers =
-          List.map
-            (fun (g : Hd_dem.t) ->
-              let get_h = Dem_loader.get_height g.grid in
-              let limit = float (g.layer.size - 2) in
-              fun bx by ->
-                let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
-                let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
-                if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
-                  Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
-                else None)
-            hd_grids
-        in
-        fun bx by -> List.find_map (fun f -> f bx by) samplers
+      (* One refinement per ring, innermost first, exactly the order the shader
+         tests them in. [step] is half the ring's spacing in base pixels, which
+         keeps a grazing ray from being walked finer than the data it reads. *)
+      let refinements =
+        List.map
+          (fun (g : Hd_dem.t) ->
+            let get_h = Dem_loader.get_height g.grid in
+            let limit = float (g.layer.size - 2) in
+            {
+              Visibility.step = 0.5 *. g.layer.px_arcsec;
+              sample =
+                (fun bx by ->
+                  let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
+                  let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
+                  if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+                    Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+                  else None);
+            })
+          hd_grids
+      in
+      let hd_at bx by =
+        List.find_map (fun r -> r.Visibility.sample bx by) refinements
       in
       let ray_height =
         let base = Dem_loader.get_height tile in
@@ -3236,25 +3241,32 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           | Some h -> h
           | None -> base row col
       in
-      let fine = if hd_grids = [] then None else Some hd_at in
+      let fine = refinements in
       let points =
+        let t_vis = Brr.(Performance.now_ms G.performance) in
         let off_x = Render_state.compute_sub_arcsec_offset lon in
         let off_y = Render_state.compute_sub_arcsec_offset lat in
-        List.filter
-          (fun (_, (gx, gy)) ->
-            let dx = (gx -. float x) *. deltax in
-            let dy = (gy -. float y) *. deltay in
-            let dist_sq = (dx *. dx) +. (dy *. dy) in
-            if dist_sq > 4900000000. then false
-            else
-              (* The test walks whole texels; its summit exemption (10 texels)
+        let kept =
+          List.filter
+            (fun (_, (gx, gy)) ->
+              let dx = (gx -. float x) *. deltax in
+              let dy = (gy -. float y) *. deltay in
+              let dist_sq = (dx *. dx) +. (dy *. dy) in
+              if dist_sq > 4900000000. then false
+              else
+                (* The test walks whole texels; its summit exemption (10 texels)
                  dwarfs the half-texel rounding of the destination. *)
-              let dst_x = int_of_float (Float.round gx) in
-              let dst_y = int_of_float (Float.round gy) in
-              Visibility.test_precise ray_height ~src_h:(height +. 2.)
-                ~curvature:(deltax, deltay) ?fine ~off_x ~off_y ~src_x:x
-                ~src_y:y ~dst_x ~dst_y ())
-          poi
+                let dst_x = int_of_float (Float.round gx) in
+                let dst_y = int_of_float (Float.round gy) in
+                Visibility.test_precise ray_height ~src_h:(height +. 2.)
+                  ~curvature:(deltax, deltay) ~fine ~off_x ~off_y ~src_x:x
+                  ~src_y:y ~dst_x ~dst_y ())
+            poi
+        in
+        Format.eprintf "visibility: %d/%d POIs in %.0f ms@." (List.length kept)
+          (List.length poi)
+          (Brr.(Performance.now_ms G.performance) -. t_vis);
+        kept
       in
       let points =
         let off_x = Render_state.compute_sub_arcsec_offset lon in
