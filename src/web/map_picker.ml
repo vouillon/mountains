@@ -92,6 +92,55 @@ type tile_level = {
   mutable oy : float;
 }
 
+(* How far the drawn line may stray from the recorded one, in pixels. Well inside
+   the stroke, which is 3.5 pixels at its thinnest, so the simplification is not
+   visible; the reduction it buys is. *)
+let simplify_eps = 0.75
+
+(* Ramer-Douglas-Peucker over [a..b] of a projected track, marking in [keep] the
+   points that carry the shape to within [simplify_eps].
+
+   It replaces dropping points that fall within a pixel of the last one kept.
+   That test cannot tell a straight run from a corner, so it kept a point every
+   pixel along the straights that make up most of a recorded track, while RDP
+   spends points where the line actually bends.
+
+   An explicit stack rather than recursion: the recursion depth is the number of
+   points it decides to keep, which for a noisy track is not small. *)
+let simplify xs ys a b keep =
+  keep.(a) <- true;
+  keep.(b) <- true;
+  let rec loop = function
+    | [] -> ()
+    | (a, b) :: rest when b - a < 2 -> loop rest
+    | (a, b) :: rest ->
+        let x0 = xs.(a) and y0 = ys.(a) in
+        let dx = xs.(b) -. x0 and dy = ys.(b) -. y0 in
+        let len2 = (dx *. dx) +. (dy *. dy) in
+        let best = ref (-1) and best_d = ref 0. in
+        for i = a + 1 to b - 1 do
+          (* Twice the triangle's area over the base length is the perpendicular
+             distance. A degenerate base -- the ends coincide, as they do on a
+             loop -- has no direction, so measure from the end instead. *)
+          let d =
+            if len2 = 0. then Float.hypot (xs.(i) -. x0) (ys.(i) -. y0)
+            else
+              Float.abs (((xs.(i) -. x0) *. dy) -. ((ys.(i) -. y0) *. dx))
+              /. sqrt len2
+          in
+          if d > !best_d then begin
+            best_d := d;
+            best := i
+          end
+        done;
+        if !best >= 0 && !best_d > simplify_eps then begin
+          keep.(!best) <- true;
+          loop ((a, !best) :: (!best, b) :: rest)
+        end
+        else loop rest
+  in
+  loop [ (a, b) ]
+
 (* What the drawn track geometry currently represents: a zoom level, and a window
    of that level's pixels outside which nothing was drawn. Only the part of the
    tracks that can be on screen is emitted, so the work follows the visible
@@ -304,35 +353,36 @@ let create ~regions ~in_range ~traces ~on_select =
           (* A subpath per run of segments through the window: without the break,
              leaving it and re-entering would be joined by a straight line across
              ground the track never covered. *)
-          let drawing = ref false in
-          let lx = ref 0. and ly = ref 0. in
-          for i = 0 to n - 2 do
-            if visible xs.(i) ys.(i) xs.(i + 1) ys.(i + 1) then begin
-              if not !drawing then begin
-                Buffer.add_string b
-                  (Printf.sprintf "M%.1f %.1f " (xs.(i) -. ax) (ys.(i) -. ay));
-                drawing := true;
-                lx := xs.(i);
-                ly := ys.(i)
-              end;
-              (* Points within a pixel of the last one kept add nothing: zoomed
-                 out, a dense track is thousands of them across a few hundred
-                 pixels. The final segment is always drawn, so the line reaches
-                 the end of the track. *)
-              if
-                i = n - 2
-                || Float.abs (xs.(i + 1) -. !lx) +. Float.abs (ys.(i + 1) -. !ly)
-                   >= 1.
-              then begin
-                Buffer.add_string b
-                  (Printf.sprintf "L%.1f %.1f "
-                     (xs.(i + 1) -. ax)
-                     (ys.(i + 1) -. ay));
-                lx := xs.(i + 1);
-                ly := ys.(i + 1)
-              end
+          (* Each run is simplified on its own, so the points where it meets the
+             window are always kept and the line reaches the edge. *)
+          let keep = Array.make n false in
+          let i = ref 0 in
+          while !i <= n - 2 do
+            if visible xs.(!i) ys.(!i) xs.(!i + 1) ys.(!i + 1) then begin
+              let a = !i in
+              let j = ref (!i + 1) in
+              while
+                !j <= n - 2 && visible xs.(!j) ys.(!j) xs.(!j + 1) ys.(!j + 1)
+              do
+                incr j
+              done;
+              (* Segments a .. !j-1 are visible, so the run spans points a..!j and
+                 segment !j is not visible, if it exists at all. *)
+              simplify xs ys a !j keep;
+              let started = ref false in
+              for k = a to !j do
+                if keep.(k) then begin
+                  Buffer.add_string b
+                    (Printf.sprintf "%c%.1f %.1f "
+                       (if !started then 'L' else 'M')
+                       (xs.(k) -. ax)
+                       (ys.(k) -. ay));
+                  started := true
+                end
+              done;
+              i := !j + 1
             end
-            else drawing := false
+            else incr i
           done
         end)
       !traces_now;
