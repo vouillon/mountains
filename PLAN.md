@@ -2130,12 +2130,41 @@ the nodata is still confined to part of it.
   and order-independent, so it stays bit-identical). The nodata bounding box can
   be tracked per 4-lane group rather than per sample -- a box that merely
   *contains* the nodata box is still exact, just marginally larger.
-- **The resample** has a large easy win that is *not* provably bit-identical:
-  wherever `t >= 1` (about 66% of an l13 block, the interior) `smoothstep` is
-  exactly 1 and the result is `b + (h - b)`, so the horizontal interpolation and
-  the smoothstep could both be skipped and `v` set to `h` -- but `b + (h - b)`
-  equals `h` only up to rounding. Sterbenz's lemma makes it exact for any two
-  terrain heights within a factor of two of each other, which is every real case,
-  and a 1-ulp difference would have to land within 1e-12 of a quantisation
-  boundary to change even one byte. Worth doing, but it would have to be reported
-  as empirically identical rather than provably so.
+- **The resample's interior fast path: tried, byte-identical, and not faster.**
+  See below.
+
+## Rejected: the resample's interior fast path (2026-08-04)
+
+Wherever `t >= 1` -- about 66% of an l13 block and 49% of each ring, the interior
+inside the fade annulus -- `smoothstep` is exactly 1, so the blended value is
+`b + 1.0 * (h - b)`, i.e. just the refinement. Skipping the horizontal
+interpolation and the smoothstep there looked like the obvious next win.
+
+**It is byte-identical.** The worry was that `b + (h - b)` equals `h` only up to
+rounding; in practice Sterbenz's lemma applies (any two terrain heights in one
+block are within a factor of two of each other), and the diff confirmed it: zero
+differing bytes across all nine blends of the three views, 12.6 MB of output.
+
+**But it is not faster.** Within-process minima of ten calls on identical data,
+only `blend.wasm` swapped between two servers:
+
+| ring | box only | + interior fast path |
+| --- | --- | --- |
+| l13 2048^2 | 51.3 | 50.4 |
+| 4.77 m 1024^2 | **17.7** | 21.7 |
+| 2.38 m 1024^2 | **12.6** | 15.7 |
+
+Neutral on l13, about 25% worse on the two 1024 rings, reproduced by a
+page-load-level A/B as well. The lesson is where the cost actually sits: the
+interpolation it skips is four loads and three flops from a 5 kB `rowv` that is
+L1-resident throughout, which is nearly free, while the per-sample branch it adds
+divides the loop body into two divergent paths and costs more than that. Reverted.
+
+**The way to have it both ways** is to hoist the branch out of the inner loop
+entirely rather than test per sample. `edge_x[j] >= 1` holds on one contiguous
+column range `[flo, fhi]` (the array is unimodal), and `edge_y >= 1` is a
+per-row scalar, so a row that is vertically interior and clear of the nodata box
+splits into three spans -- slow, fast, slow -- each a branch-free loop. That
+needs the per-row state (`src_row`, `dst`, `edge_y`) lifted into globals so two
+span functions can share it, which is a moderate restructuring of the wat, for a
+predicted 15-20% of the blend. Not attempted.
