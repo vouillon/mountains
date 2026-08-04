@@ -50,9 +50,21 @@ val prefetch : layer -> lat:float -> lon:float -> unit Lwt.t
     cached (a cached 404 included) are not requested again; failures are
     ignored. *)
 
-val blend : lat:float -> base:Dem_loader.t -> raw -> t option
-(** [blend ~lat ~base raw] resamples [base] onto [raw]'s grid and mixes the
-    high-resolution correction into it, fading it out at the edge of the extent
-    and around nodata. The result equals the base upsample wherever the
-    correction is absent. [None] when the patch holds no valid sample at all
-    (outside French coverage). *)
+type source
+(** The surface a refinement is mixed into: any u16 grid with a known origin and
+    spacing, so that layers can be chained (base -> {!l13} -> finer). *)
+
+val base_source : Dem_loader.t -> source
+(** The base DEM as a source: one arcsecond per sample, anchor arcsecond at
+    index [size / 2] on both axes. *)
+
+val as_source : t -> source
+(** A blended grid used in turn as the surface for a finer layer. *)
+
+val blend : lat:float -> source:source -> raw -> t option
+(** [blend ~lat ~source raw] resamples [source] onto [raw]'s grid and mixes the
+    refinement into it, fading it out at the edge of the extent and around
+    nodata. The result equals the source upsample wherever the correction is
+    absent, which is what lets the renderer switch between layers on a plain
+    extent test. [None] when the patch holds no valid sample at all (outside
+    French coverage). *)

@@ -290,16 +290,45 @@ type t = {
   origin_y : float;
 }
 
-(* Build the blended grid: the base tile resampled onto the high-resolution
-   grid, plus [fade] times the high-resolution correction. [fade] is 1 in the
-   interior, ramps to 0 over [fade_metres] at the edge of the extent and around
-   nodata, and is 0 on nodata itself, so the result is exactly the base upsample
-   there.
+(* The surface a refinement is mixed into: any u16 grid with a known origin and
+   spacing, so the layers can be chained (base -> L13 -> finer). The fields are
+   prefixed because [t] and [raw] carry same-named ones and OCaml resolves record
+   fields by the last type defined -- an unprefixed [origin_x] here would silently
+   pick the wrong record.
+
+   Rows count from the south on both sides, matching [Dem_loader]. *)
+type source = {
+  src_grid : Dem_loader.t;
+  src_origin_x : float; (* arcseconds from the anchor to sample column 0 *)
+  src_origin_y : float; (* arcseconds from the anchor to the southernmost row *)
+  src_px_arcsec : float;
+}
+
+(* The base DEM: one arcsecond per sample, with the anchor arcsecond at index
+   [size / 2] on both axes (see [Dem_loader.load]), i.e. sample 0 sits half the
+   tile west and south of it. *)
+let base_source (grid : Dem_loader.t) =
+  let o = -.float (grid.Dem_loader.size / 2) in
+  { src_grid = grid; src_origin_x = o; src_origin_y = o; src_px_arcsec = 1.0 }
+
+(* A blended grid used in turn as the surface for a finer layer. *)
+let as_source (t : t) =
+  {
+    src_grid = t.grid;
+    src_origin_x = t.origin_x;
+    src_origin_y = t.origin_y;
+    src_px_arcsec = t.layer.px_arcsec;
+  }
+
+(* Build the blended grid: [source] resampled onto the refinement's grid, plus
+   [fade] times the refinement's correction. [fade] is 1 in the interior, ramps
+   to 0 over [fade_metres] at the edge of the extent and around nodata, and is 0
+   on nodata itself, so the result is exactly the source upsample there.
 
    Returns [None] when the patch holds no valid sample at all (a location
-   outside French coverage), which keeps such locations on the pure base path
+   outside French coverage), which keeps such locations on the source alone
    rather than on a bilinear upsample of it. *)
-let blend ~lat ~(base : Dem_loader.t) (raw : raw) =
+let blend ~lat ~(source : source) (raw : raw) =
   let { px_arcsec; size; fade_metres; _ } = raw.layer in
   let t0 = Brr.(Performance.now_ms G.performance) in
   let src = raw.samples in
@@ -315,21 +344,28 @@ let blend ~lat ~(base : Dem_loader.t) (raw : raw) =
     let fade_y = fade_metres /. (deltay *. px_arcsec) in
     let dist = if !has_nodata then Some (nodata_distance ~size src) else None in
     let fade_nodata = Float.min fade_x fade_y in
-    let bsize = base.Dem_loader.size in
-    let bdata = base.Dem_loader.data in
+    let bsize = source.src_grid.Dem_loader.size in
+    let bdata = source.src_grid.Dem_loader.data in
     let get_base row col =
       let low = Array2.unsafe_get bdata row (col * 2) in
       let high = Array2.unsafe_get bdata row ((col * 2) + 1) in
       float_of_int ((high lsl 8) lor low)
     in
-    (* The anchor arcsecond sits at base index [bsize / 2] on both axes (see
-       [Dem_loader.load]); the high-resolution samples fall between base
-       samples, at a fixed fractional step. *)
-    let half = float (bsize / 2) in
+    (* Fine sample [j] sits [raw.origin_x + j * px_arcsec] arcseconds from the
+       anchor; the source's own origin and spacing turn that into a source index.
+       The refinement's samples fall between the source's, at a fixed fractional
+       step, so neither grid need be a power-of-two multiple of the other.
+
+       Written so that the base case is bit-identical to the hardcoded form it
+       replaces: subtracting a negative origin is exactly adding, addition is
+       commutative in IEEE754, the grouping is unchanged, and dividing by a
+       spacing of 1.0 is exact. *)
     let clamp_base v = Float.max 0. (Float.min (float (bsize - 2)) v) in
-    let col_of j =
-      clamp_base (half +. raw.origin_x +. (float j *. px_arcsec))
+    let index_of origin o j =
+      clamp_base
+        ((o -. origin +. (float j *. px_arcsec)) /. source.src_px_arcsec)
     in
+    let col_of j = index_of source.src_origin_x raw.origin_x j in
     let col_lo = int_of_float (floor (col_of 0)) in
     let col_hi = int_of_float (floor (col_of (size - 1))) + 1 in
     let n_cols = col_hi - col_lo + 1 in
@@ -352,7 +388,7 @@ let blend ~lat ~(base : Dem_loader.t) (raw : raw) =
       edge_x.(j) <- float (min j (size - 1 - j)) /. fade_x
     done;
     for u = 0 to size - 1 do
-      let cby = clamp_base (half +. raw.origin_y +. (float u *. px_arcsec)) in
+      let cby = index_of source.src_origin_y raw.origin_y u in
       let by = int_of_float (floor cby) in
       let fy = cby -. float by in
       if by <> !cur_by then begin

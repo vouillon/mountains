@@ -2926,7 +2926,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     (* The blended near-field grid equals the base upsample wherever the
        high-resolution data is missing, so the renderer can switch to it on a
        plain extent test. *)
-    let blend_hd raw = Option.bind raw (Hd_dem.blend ~lat ~base:tile) in
+    let blend_hd raw =
+      Option.bind raw (Hd_dem.blend ~lat ~source:(Hd_dem.base_source tile))
+    in
     (* [Hd_dem.fetch] never fails, so [Fail] is unreachable; it is folded into
        "no near-field data" rather than left to raise inside the refinement. *)
     let in_time, refine_later =
