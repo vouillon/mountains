@@ -1,10 +1,9 @@
 MISC
 ====
-- Adjust contrast
+- Speed-up visibility?
 
 RENDERING
 =========
-- High precision elevation at short distances
 - CLC water data bleeding (over large / missing islands)
   => remove CLC water / jump flood on the GPU before drawing the OSM water
   => or fix the features in the tiles?
