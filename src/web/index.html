@@ -677,13 +677,14 @@
       // points where a container has none, plus standalone waypoints. Reading
       // the same set here is what keeps validation honest -- a file accepted
       // for having points the renderer ignores would just come out invisible.
-      // Tag names are matched unprefixed, as Gpx_loader matches them.
+      // Matched on local name in any namespace, as Gpx_loader matches them:
+      // <gpx:trkpt> is a track point as much as <trkpt> is.
       const POINT_TAGS = ['trkpt', 'rtept', 'wpt'];
 
       function findPoints(doc) {
         for (const tag of POINT_TAGS) {
           const points = [];
-          for (const el of doc.getElementsByTagName(tag)) {
+          for (const el of doc.getElementsByTagNameNS('*', tag)) {
             const lat = parseFloat(el.getAttribute('lat'));
             const lon = parseFloat(el.getAttribute('lon'));
             if (Number.isFinite(lat) && Number.isFinite(lon) &&
@@ -728,7 +729,7 @@
       // Bearing comes from the first point at least 10 m out: consecutive
       // samples can be a metre apart, where the bearing is mostly GPS noise.
       function gpxSummary(doc, points) {
-        const nameEl = doc.getElementsByTagName('name')[0];
+        const nameEl = doc.getElementsByTagNameNS('*', 'name')[0];
         const first = points[0];
         const away = points.find(
           p => distanceMeters(first.lat, first.lon, p.lat, p.lon) >= 10);

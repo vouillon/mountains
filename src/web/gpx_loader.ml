@@ -49,70 +49,134 @@ let extract_attr name str =
   in
   find_name 0
 
+(* Elements may be written with a namespace prefix -- <gpx:trkpt> as much as
+   <trkpt> -- which belongs to how the document spells the name, not to the
+   element's identity. A prefix is an XML name followed by ':', so a tag is
+   recognised by skipping one when it is there and comparing what follows.
+   Attributes need no such care: [extract_attr] looks for the name anywhere
+   inside the tag, so gpx:lat would be found as readily as lat. *)
+let is_name_char = function
+  | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+  | _ -> false
+
+let is_ws = function ' ' | '\t' | '\r' | '\n' -> true | _ -> false
+
+(* [tag_at tag ~ok str pos] is the position just after [tag], had [str] the name
+   [tag] at [pos] -- just past a '<' or a '</' -- prefixed or not. [ok] decides
+   whether what comes next ends the name, which is what tells <trk> from
+   <trkpt>. Both spellings are offered to it, so a prefix that happens to
+   repeat the local name cannot hide the element. [tag] must be lowercase. *)
+let tag_at tag ~ok str pos =
+  let len = String.length str in
+  let tag_len = String.length tag in
+  let candidate p =
+    if
+      p + tag_len <= len
+      && String.lowercase_ascii (String.sub str p tag_len) = tag
+      && ok (p + tag_len)
+    then Some (p + tag_len)
+    else None
+  in
+  match candidate pos with
+  | Some stop -> Some stop
+  | None -> (
+      (* Skip a prefix, if that is what stands here: name characters up to ':' *)
+      let rec prefix p =
+        if p < len && is_name_char str.[p] then prefix (p + 1)
+        else if p > pos && p < len && str.[p] = ':' then candidate (p + 1)
+        else None
+      in
+      match prefix pos with Some stop -> Some stop | None -> None)
+
+(* [close_tag_at tag str pos] is the position just past the '>' of a closing tag
+   for [tag] starting at [pos]. *)
+let close_tag_at tag str pos =
+  let len = String.length str in
+  let rec skip_ws p = if p < len && is_ws str.[p] then skip_ws (p + 1) else p in
+  let terminator stop =
+    let p = skip_ws stop in
+    if p < len && str.[p] = '>' then Some (p + 1) else None
+  in
+  if pos + 1 >= len || str.[pos] <> '<' || str.[pos + 1] <> '/' then None
+  else
+    match
+      tag_at tag ~ok:(fun stop -> terminator stop <> None) str (pos + 2)
+    with
+    | Some stop -> terminator stop
+    | None -> None
+
+(* GPX does not nest any of the elements read here, so the first closing tag is
+   the one that closes this element. *)
+let close_tag_from tag str pos =
+  let len = String.length str in
+  let rec search p =
+    if p >= len then None
+    else
+      match close_tag_at tag str p with
+      | Some stop -> Some stop
+      | None -> search (p + 1)
+  in
+  search pos
+
 let extract_tag tag str =
-  let open_tag = "<" ^ String.lowercase_ascii tag ^ ">" in
-  let close_tag = "</" ^ String.lowercase_ascii tag ^ ">" in
-  let str_lower = String.lowercase_ascii str in
-  let len_o = String.length open_tag in
-  let len_c = String.length close_tag in
-  let len_str = String.length str_lower in
+  let len = String.length str in
+  let tag = String.lowercase_ascii tag in
   let rec search pos =
-    if pos + len_o > len_str then None
-    else if String.sub str_lower pos len_o = open_tag then
-      let start_val = pos + len_o in
-      match String.index_from_opt str_lower start_val '<' with
-      | Some cpos ->
-          if
-            cpos + len_c <= len_str
-            && String.sub str_lower cpos len_c = close_tag
-          then Some (String.sub str start_val (cpos - start_val))
-          else None
-      | None -> None
-    else search (pos + 1)
+    if pos >= len then None
+    else if str.[pos] <> '<' then search (pos + 1)
+    else
+      (* The elements read this way (<ele>, <name>, <desc>) carry no attributes,
+         so the name runs straight into '>'. *)
+      match
+        tag_at tag ~ok:(fun stop -> stop < len && str.[stop] = '>') str (pos + 1)
+      with
+      | None -> search (pos + 1)
+      | Some stop -> (
+          let start_val = stop + 1 in
+          match String.index_from_opt str start_val '<' with
+          | Some cpos ->
+              (* The value has to run into the closing tag: these elements hold
+                 text, and something with children is not one of them. *)
+              if close_tag_at tag str cpos <> None then
+                Some (String.sub str start_val (cpos - start_val))
+              else None
+          | None -> None)
   in
   search 0
 
 let find_all_elements tag xml_str =
-  let open_prefix = "<" ^ tag in
-  let close_tag = "</" ^ tag ^ ">" in
-  let prefix_len = String.length open_prefix in
-  let close_len = String.length close_tag in
   let str_len = String.length xml_str in
-  let str_lower = String.lowercase_ascii xml_str in
-  let prefix_lower = String.lowercase_ascii open_prefix in
-  let close_lower = String.lowercase_ascii close_tag in
+  let tag = String.lowercase_ascii tag in
   let acc = ref [] in
   let is_tag_boundary = function
     | ' ' | '\t' | '\r' | '\n' | '>' | '/' -> true
     | _ -> false
   in
+  let ends_name p = p = str_len || is_tag_boundary xml_str.[p] in
   let rec search pos =
-    if pos + prefix_len > str_len then ()
-    else if
-      String.sub str_lower pos prefix_len = prefix_lower
-      && (pos + prefix_len = str_len
-         || is_tag_boundary str_lower.[pos + prefix_len])
-    then
-      let start_val = pos in
-      match String.index_from_opt str_lower (start_val + prefix_len) '>' with
-      | None -> ()
-      | Some open_end ->
-          if open_end > start_val && str_lower.[open_end - 1] = '/' then (
-            let end_val = open_end + 1 in
-            acc := String.sub xml_str start_val (end_val - start_val) :: !acc;
-            search end_val)
-          else
-            let rec search_close cpos =
-              if cpos + close_len > str_len then ()
-              else if String.sub str_lower cpos close_len = close_lower then (
-                let end_val = cpos + close_len in
+    if pos >= str_len then ()
+    else if xml_str.[pos] <> '<' then search (pos + 1)
+    else
+      match tag_at tag ~ok:ends_name xml_str (pos + 1) with
+      | None -> search (pos + 1)
+      | Some stop -> (
+          let start_val = pos in
+          match String.index_from_opt xml_str stop '>' with
+          | None -> ()
+          | Some open_end -> (
+              if open_end > start_val && xml_str.[open_end - 1] = '/' then begin
+                let end_val = open_end + 1 in
                 acc :=
                   String.sub xml_str start_val (end_val - start_val) :: !acc;
-                search end_val)
-              else search_close (cpos + 1)
-            in
-            search_close (open_end + 1)
-    else search (pos + 1)
+                search end_val
+              end
+              else
+                match close_tag_from tag xml_str (open_end + 1) with
+                | None -> ()
+                | Some end_val ->
+                    acc :=
+                      String.sub xml_str start_val (end_val - start_val) :: !acc;
+                    search end_val))
   in
   search 0;
   List.rev !acc
