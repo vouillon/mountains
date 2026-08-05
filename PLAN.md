@@ -2412,5 +2412,57 @@ everywhere inside its own extent -- so 1.19 m sits below the display's Nyquist
 limit except with the camera almost on the ground, where it also has to compete
 with its own 0.83 degree quantisation error and with the procedural bump and
 triplanar detail. The four-location analysis that chose 2.38 m had it right; a
-terrain-space residual cannot see a screen-space limit. Do not revisit without a
-screen-space argument.
+terrain-space residual cannot see a screen-space limit.
+
+**Superseded the same day** -- see "1.19 m is masked, not absent" below. The
+detail is there; the textures hide it.
+
+## 1.19 m is masked, not absent (2026-08-05)
+
+Jérôme rendered the same ground with the textures removed: the 1.19 m grid
+carries **a lot** more visible detail than 2.38 m. So the revert above drew the
+right observation and the wrong conclusion. What hides the extra resolution is
+the procedural detail in `terrain.frag` -- the same machinery whose aliasing
+`ac8ddc5` fixed -- not any limit of the display, and not the data.
+
+That also explains the earlier confusion in both directions: my screen-space
+argument for the revert was simply wrong (inside its own extent the ring is
+*coarser* than a pixel, not finer -- see the footprint table in the
+grazing-angle investigation), and the reason the difference was invisible was
+never geometric.
+
+**Method worth reusing:** to judge whether DEM resolution is worth anything at a
+given range, render with the procedural detail off. With it on, the shading is
+dominated by noise and the comparison is meaningless.
+
+### The quantisation artefacts are the bounded range, not the sample count
+
+Visible at 44.33652,6.91391 alpha=10 beta=82 zoom=0.50. `Blend_core` bounds the
+output range instead of measuring it, deliberately, to avoid a second pass: it
+takes the union of the refinement's range with the **source window's**. For the
+innermost ring that bound is much looser than the truth, because the window spans
+the whole +-1.22 km extent and so a large height range, while the ring's own
+terrain may span little. Measured at Mont Blanc the bound cost 7.98 cm steps
+against the 6.06 cm an exact range gives -- a third of the quantum wasted.
+
+At 1.19 m spacing that waste lands on the normals: 1.72 cm over 1.19 m is a
+**0.83 degree** normal error against the 0.87 degree bar L13 shipped with, i.e.
+no headroom left. Which is where the artefacts come from, and they are visible at
+2.38 m today.
+
+So the fix is a tighter range, not more samples: measure the true range, or bound
+it against only the part of the source window the ring actually covers. That buys
+back about a third of the quantum and is the precondition for 1.19 m being worth
+landing.
+
+### Order of work
+
+1. **Tighten the blend's output range** for refinement rings. Self-contained, and
+   it attacks artefacts visible at 2.38 m now.
+2. **Reduce the procedural bump's amplitude at close range.** `ac8ddc5` fixed its
+   aliasing, not its dominance; the amplitude is an aesthetic choice.
+3. **Then re-land 1.19 m** (`size:2048` on `lidar_2m`), where it will be visible.
+   Everything needed is measured: the service's output at that depth is genuine
+   and exactly box-consistent (4609c4d), and the costs are known -- 16 MB on the
+   wire, 42 ms of blend, 16 MiB of GPU, and visibility back to ~877 ms because
+   `near_step` follows the finest grid.
