@@ -901,7 +901,8 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
 
   (* Pointer handling: down on the viewport, move and up on the document, so a
      drag released outside the window cannot leave a pointer stuck down. Only
-     pointers that started on the viewport are ever tracked. *)
+     pointers that started on the viewport are ever tracked. Fingers take a
+     separate route, on touch events; see the note further down. *)
   let pointers : (int, float * float) Hashtbl.t = Hashtbl.create 4 in
   let pinch = ref None in
 
@@ -911,68 +912,60 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
     | _ -> None
   in
 
-  ignore
-    (Ev.listen Ev.pointerdown
-       (fun ev ->
-         let p = Ev.as_type ev in
-         let m = Ev.Pointer.as_mouse p in
-         Ev.prevent_default ev;
-         Ev.stop_propagation ev;
-         (* Touching the map catches it, as grabbing a spinning thing does. This
-            also clears the velocity, so a pinch -- whose moves never measure one
-            -- cannot be released into a fling left over from an earlier drag. *)
-         stop_glide ();
-         last_move_ms := now_ms ();
-         Hashtbl.replace pointers (Ev.Pointer.id p)
-           (Ev.Mouse.client_x m, Ev.Mouse.client_y m);
-         pinch :=
-           if Hashtbl.length pointers >= 2 then
-             match pointer_span () with
-             | Some d when d > 0. -> Some (d, !zoom)
-             | _ -> None
-           else None)
-       (El.as_target viewport));
+  (* The gesture itself, keyed by whatever identifies the pointer that carries
+     it: [pointerId] for a mouse or a pen, the touch identifier for a finger.
+     The two event families below both come through here, and their identifier
+     spaces cannot be confused because a gesture is driven by one or the other,
+     never by both at once. *)
+  let press ~id ~x ~y =
+    (* Touching the map catches it, as grabbing a spinning thing does. This also
+       clears the velocity, so a pinch -- whose moves never measure one --
+       cannot be released into a fling left over from an earlier drag. *)
+    stop_glide ();
+    last_move_ms := now_ms ();
+    Hashtbl.replace pointers id (x, y);
+    pinch :=
+      if Hashtbl.length pointers >= 2 then
+        match pointer_span () with
+        | Some d when d > 0. -> Some (d, !zoom)
+        | _ -> None
+      else None
+  in
 
-  ignore
-    (Ev.listen Ev.pointermove
-       (fun ev ->
-         let p = Ev.as_type ev in
-         let id = Ev.Pointer.id p in
-         match Hashtbl.find_opt pointers id with
-         | None -> ()
-         | Some (prev_x, prev_y) ->
-             Ev.stop_propagation ev;
-             let m = Ev.Pointer.as_mouse p in
-             let x = Ev.Mouse.client_x m and y = Ev.Mouse.client_y m in
-             Hashtbl.replace pointers id (x, y);
-             if Hashtbl.length pointers >= 2 then
-               begin match (!pinch, pointer_span ()) with
-               | Some (d0, z0), Some d when d > 0. ->
-                   zoom := z0 +. Float.log2 (d /. d0);
-                   render ()
-               | _ -> ()
-               end
-             else begin
-               let dx = x -. prev_x and dy = y -. prev_y in
-               let t = now_ms () in
-               let dt = t -. !last_move_ms in
-               last_move_ms := t;
-               (* Smoothed over a 50 ms window rather than taken from the last
-                  pair of samples, so an uneven pointer rate does not turn into
-                  an erratic fling. *)
-               if dt > 0. then begin
-                 let a = 1. -. exp (-.dt /. 50.) in
-                 vel_x := (dx /. dt *. a) +. (!vel_x *. (1. -. a));
-                 vel_y := (dy /. dt *. a) +. (!vel_y *. (1. -. a))
-               end;
-               pan_by ~dx ~dy;
-               render ()
-             end)
-       (Brr.Document.as_target Brr.G.document));
+  (* [true] if this pointer is one of ours, which is what tells the caller the
+     event was consumed and the browser must not act on it too. *)
+  let move ~id ~x ~y =
+    match Hashtbl.find_opt pointers id with
+    | None -> false
+    | Some (prev_x, prev_y) ->
+        Hashtbl.replace pointers id (x, y);
+        if Hashtbl.length pointers >= 2 then
+          begin match (!pinch, pointer_span ()) with
+          | Some (d0, z0), Some d when d > 0. ->
+              zoom := z0 +. Float.log2 (d /. d0);
+              render ()
+          | _ -> ()
+          end
+        else begin
+          let dx = x -. prev_x and dy = y -. prev_y in
+          let t = now_ms () in
+          let dt = t -. !last_move_ms in
+          last_move_ms := t;
+          (* Smoothed over a 50 ms window rather than taken from the last pair
+             of samples, so an uneven pointer rate does not turn into an erratic
+             fling. *)
+          if dt > 0. then begin
+            let a = 1. -. exp (-.dt /. 50.) in
+            vel_x := (dx /. dt *. a) +. (!vel_x *. (1. -. a));
+            vel_y := (dy /. dt *. a) +. (!vel_y *. (1. -. a))
+          end;
+          pan_by ~dx ~dy;
+          render ()
+        end;
+        true
+  in
 
-  let release ev =
-    let p = Ev.as_type ev in
-    let id = Ev.Pointer.id p in
+  let release ~id =
     if Hashtbl.mem pointers id then begin
       Hashtbl.remove pointers id;
       (* Dropping to one finger restarts the drag from where it is rather than
@@ -983,10 +976,107 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
       if Hashtbl.length pointers = 0 then start_glide ()
     end
   in
+
+  (* Fingers are left to the touch events below rather than taken here. In a PWA
+     installed on iOS, WebKit loses the [pointermove]s of a drag that starts
+     moving straight away: the pointer is only delivered once the finger has
+     been held still for about half a second, which is not how anyone pans a
+     map, so the map simply did not follow. Touch events are unaffected -- they
+     are what the terrain view is dragged with on the same device -- while
+     pointer events remain the better path for a mouse or a pen, being the ones
+     that keep coming when a drag leaves the window. *)
+  let is_touch p = Jstr.equal (Ev.Pointer.type' p) (Jstr.v "touch") in
+
   ignore
-    (Ev.listen Ev.pointerup release (Brr.Document.as_target Brr.G.document));
+    (Ev.listen Ev.pointerdown
+       (fun ev ->
+         let p = Ev.as_type ev in
+         if not (is_touch p) then begin
+           let m = Ev.Pointer.as_mouse p in
+           Ev.prevent_default ev;
+           Ev.stop_propagation ev;
+           press ~id:(Ev.Pointer.id p) ~x:(Ev.Mouse.client_x m)
+             ~y:(Ev.Mouse.client_y m)
+         end)
+       (El.as_target viewport));
+
   ignore
-    (Ev.listen Ev.pointercancel release (Brr.Document.as_target Brr.G.document));
+    (Ev.listen Ev.pointermove
+       (fun ev ->
+         let p = Ev.as_type ev in
+         if not (is_touch p) then begin
+           let m = Ev.Pointer.as_mouse p in
+           if
+             move ~id:(Ev.Pointer.id p) ~x:(Ev.Mouse.client_x m)
+               ~y:(Ev.Mouse.client_y m)
+           then Ev.stop_propagation ev
+         end)
+       (Brr.Document.as_target Brr.G.document));
+
+  let pointer_release ev =
+    let p = Ev.as_type ev in
+    if not (is_touch p) then release ~id:(Ev.Pointer.id p)
+  in
+  ignore
+    (Ev.listen Ev.pointerup pointer_release
+       (Brr.Document.as_target Brr.G.document));
+  ignore
+    (Ev.listen Ev.pointercancel pointer_release
+       (Brr.Document.as_target Brr.G.document));
+
+  (* Touch events, which Brr does not bind, hence [Jv]. Listened on the viewport
+     and not on the document: a touch is delivered to the element it started on
+     for the whole of its life, so there is nothing to catch elsewhere -- and
+     with the tiles out of hit testing (see [pointer-events] in index.html) that
+     element is the viewport itself, which, unlike a tile, is never removed
+     from under a moving finger. *)
+  let touchstart = Ev.Type.create (Jstr.v "touchstart") in
+  let touchmove = Ev.Type.create (Jstr.v "touchmove") in
+  let touchend = Ev.Type.create (Jstr.v "touchend") in
+  let touchcancel = Ev.Type.create (Jstr.v "touchcancel") in
+
+  (* [changedTouches] rather than [touches]: it is the fingers this particular
+     event is about, which is exactly the set of presses, moves or releases to
+     apply, and it is the only one populated on a release. *)
+  let changed_touches ev f =
+    let ts = Jv.get (Ev.as_type ev) "changedTouches" in
+    let n = Jv.to_int (Jv.get ts "length") in
+    for i = 0 to n - 1 do
+      let t = Jv.call ts "item" [| Jv.of_int i |] in
+      f
+        ~id:(Jv.to_int (Jv.get t "identifier"))
+        ~x:(Jv.to_float (Jv.get t "clientX"))
+        ~y:(Jv.to_float (Jv.get t "clientY"))
+    done
+  in
+
+  ignore
+    (Ev.listen touchstart
+       (fun ev ->
+         (* Not defaulted away: the touch must still become a click for the zoom
+            buttons, which are inside the viewport. Scrolling and zooming the
+            page are ruled out by [touch-action: none], not from here. *)
+         Ev.stop_propagation ev;
+         changed_touches ev (fun ~id ~x ~y -> press ~id ~x ~y))
+       (El.as_target viewport));
+
+  ignore
+    (Ev.listen touchmove
+       (fun ev ->
+         let ours = ref false in
+         changed_touches ev (fun ~id ~x ~y ->
+             if move ~id ~x ~y then ours := true);
+         if !ours then begin
+           Ev.prevent_default ev;
+           Ev.stop_propagation ev
+         end)
+       (El.as_target viewport));
+
+  let touch_release ev =
+    changed_touches ev (fun ~id ~x:_ ~y:_ -> release ~id)
+  in
+  ignore (Ev.listen touchend touch_release (El.as_target viewport));
+  ignore (Ev.listen touchcancel touch_release (El.as_target viewport));
 
   ignore
     (Ev.listen Ev.wheel

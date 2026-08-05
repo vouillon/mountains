@@ -669,16 +669,29 @@
       isolation: isolate;
       background: #f2efe9;
       -webkit-tap-highlight-color: transparent;
+      /* A touch on the map is a gesture, never the start of a selection: iOS
+         decides that from the element under the finger, and a drag is no longer
+         defaulted away at [touchstart] (map_picker.ml explains why), so a press
+         held over the map must not raise a callout or a selection of its own. */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
 
     .map-viewport:active {
       cursor: grabbing;
     }
 
+    /* Out of hit testing, tiles and all: a touch is delivered to the element it
+       started on for as long as it lasts, and a tile scrolled off the screen is
+       removed mid-drag -- which would take the rest of the gesture with it. The
+       viewport underneath, where the handlers are, is always there. Nothing in
+       here answers a gesture anyway. */
     .map-layer {
       position: absolute;
       top: 0;
       left: 0;
+      pointer-events: none;
     }
 
     /* One per zoom level. The level being left behind is kept as a backdrop
