@@ -1042,7 +1042,12 @@
       border-top-color: white;
       border-radius: 50%;
       animation: rotate 1s linear infinite;
+      /* Pairs with the notice's own auto margin: the free space is split
+         between the two, which keeps the spinner and status optically centred
+         in whatever room the notice leaves rather than in the whole overlay. */
+      margin-top: auto;
       margin-bottom: 24px;
+      flex: none;
     }
 
     .status-text {
@@ -1057,16 +1062,29 @@
       color: #ffb300;
     }
 
+    /* In the flex flow rather than absolutely positioned. The attribution is
+       nearly 300px tall, so out of flow it was invisible to the overlay's
+       vertical centring and rose straight through the spinner and status text
+       on any viewport under about 700px. As a flex item with an auto top margin
+       it pushes itself to the bottom and still takes part in the layout, so no
+       amount of attribution can overlap the status again. */
     .startup-overlay .notice {
-      position: absolute;
-      bottom: env(safe-area-inset-bottom);
-      padding: 0 20px;
+      align-self: stretch;
+      margin-top: auto;
+      padding: 0 20px env(safe-area-inset-bottom);
       background: transparent;
       color: white;
       opacity: 0.4;
-      right: 0;
-      left: 0;
+      /* Fine print: it inherited 16px, which is what made it tall enough to
+         collide on a phone in the first place. */
+      font-size: 12px;
+      line-height: 1.35;
       pointer-events: none;
+    }
+
+    .startup-overlay .notice ul {
+      margin: 4px 0 0;
+      padding-left: 18px;
     }
 
     @keyframes rotate {
