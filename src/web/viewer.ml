@@ -4524,8 +4524,12 @@ let setup_events canvas =
       last_tap_time := 0.
     end
     else begin
-      (* First tap - toggle fullscreen only in Sensor mode *)
-      if !input_mode = Sensor then switch_to_fullscreen ();
+      (* First tap - enter fullscreen, whatever the input mode. Chrome draws
+         into the display cutout only for element fullscreen, never for a
+         fullscreen-display-mode WebAPK, so without this a tap in Manual mode
+         leaves the punch-hole band letterboxed black for the whole session.
+         Entering is idempotent, so an already-fullscreen tap costs nothing. *)
+      switch_to_fullscreen ();
       last_tap_time := now
     end
   in
