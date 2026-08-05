@@ -4408,6 +4408,16 @@ let request_orientation_permission () =
 let compass_button = ref None
 let orientation_permission_granted = ref false
 
+(* Set as soon as an orientation event carrying real data arrives, which on iOS
+   is proof that motion permission is already ours. *)
+let orientation_event_seen = ref false
+
+(* How long to wait for that first event before concluding the permission really
+   is missing. Events arrive every frame or so once the sensor is live, so this
+   is generous; it only ever delays the button, never the sensor. *)
+let orientation_probe_delay = 0.5 (* s *)
+let orientation_probe_pending = ref false
+
 let remove_compass_button () =
   match !compass_button with
   | Some b ->
@@ -4443,10 +4453,27 @@ let show_compass_button () =
   Brr.El.append_children (Brr.Document.body Brr.G.document) [ btn ];
   compass_button := Some btn
 
-(* Shows the button only on iOS and only while permission is still missing. *)
+(* Shows the button only on iOS and only while permission is still missing. A
+   grant outlives the page, so the events may already be flowing -- or be about
+   to, the sensor taking a moment to spin up. Wait [orientation_probe_delay] and
+   let an arriving event answer the question, rather than asking the user for
+   something we already have. The mode is re-checked when the wait ends: a probe
+   started in Sensor mode must not drop a button over a Manual-mode canvas. *)
 let maybe_show_compass_button () =
-  if needs_orientation_permission () && not !orientation_permission_granted then
-    show_compass_button ()
+  let missing =
+    needs_orientation_permission () && not !orientation_permission_granted
+  in
+  if missing && !orientation_event_seen then
+    orientation_permission_granted := true
+  else if missing && not !orientation_probe_pending then begin
+    orientation_probe_pending := true;
+    Lwt.async (fun () ->
+        let* () = sleep orientation_probe_delay in
+        orientation_probe_pending := false;
+        if !orientation_event_seen then orientation_permission_granted := true
+        else if !input_mode = Sensor then show_compass_button ();
+        Lwt.return ())
+  end
 
 (* Mode transitions. Entering Sensor mode (re-)prompts for permission when it is
    still missing; leaving it drops the prompt so it never lingers over the
@@ -4549,6 +4576,15 @@ let setup_events canvas =
   let handle_orientation ~absolute ev =
     if absolute then got_absolute := true;
     let evt = Brr.Ev.as_type ev in
+    (* Any event with real data means the sensor is live and, on iOS, that
+       permission was granted: enough to keep the compass button away. Tested
+       before the absolute/relative filtering below, since a merely relative
+       event still proves the permission. Chrome desktop fires an all-null event
+       with no sensor at all, which proves nothing. *)
+    if
+      (not (Jv.is_none (Jv.get evt "webkitCompassHeading")))
+      || not (Jv.is_null (Jv.get evt "alpha"))
+    then orientation_event_seen := true;
     (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
        heading is in [webkitCompassHeading], measured clockwise from north. The
        two frames differ by a rotation about the world vertical, so rather than
