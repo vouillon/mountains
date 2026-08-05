@@ -4367,6 +4367,13 @@ let create_location_ui ~size =
     let disp = Jstr.v (if visible then "flex" else "none") in
     Brr.El.set_inline_style (Jstr.v "display") disp current_loc_btn
 
+(* [angle] is the world vertical's clockwise offset from screen up, so it is
+   positive when the phone has been turned counter-clockwise. The class names
+   are read as "which quarter turn the row of buttons takes to stay on the same
+   world edge", not as the glyph's own rotation: the two run opposite ways, and
+   the CSS accordingly pairs .rot90 with rotate(270deg) and .rot270 with
+   rotate(90deg). Keep the two in step -- swapping only one pair leaves the
+   glyphs upside down in landscape while the buttons still look right. *)
 let update_fab_orientation angle =
   List.iter
     (fun fab ->
