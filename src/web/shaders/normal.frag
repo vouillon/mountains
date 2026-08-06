@@ -1,6 +1,13 @@
 
 uniform vec2 size;
 uniform vec2 delta;
+// Takes the gradient this shader measures along the grid's own axes to one
+// along east and north. Identity for a grid on the graticule; for one in a
+// projected CRS its axes are turned by that CRS's grid convergence -- 2.44
+// degrees at 6.36 E -- and without undoing it the ring's normals sit that far
+// round from those of the surface beyond its edge, which the renderer's hard
+// switch at the boundary shows as a seam.
+uniform highp mat2 grad_rot;
 uniform vec2 uv_scale;
 uniform sampler2D tile;
 // The grid's own quantisation. Each blended refinement spans only the height
@@ -45,7 +52,8 @@ void main() {
   // Normal vector
   // Note: dX is dHeight/dPixelX * 8 (scaling of Sobel).
   // We divide by (8 * deltax) to get slope.
-  vec3 n = normalize(vec3(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y), 1.0));
+  vec2 slope = grad_rot * vec2(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y));
+  vec3 n = normalize(vec3(slope, 1.0));
 
   // Encode Normal (xy components to [0,1])
   vec2 encN = n.xy * 0.5 + 0.5;

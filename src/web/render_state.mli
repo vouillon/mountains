@@ -118,6 +118,7 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
+  grad_rot : Gl.uniform_location;
   uv_scale : Gl.uniform_location;
   height_scale : Gl.uniform_location;
   height_offset : Gl.uniform_location;
@@ -202,6 +203,13 @@ type hd_params = {
 
 val hd_slots : int
 (** Number of nested refinement rings the shaders declare. *)
+
+val upload_grad_rot :
+  Gl.t -> relief_uniforms -> col:float * float -> row:float * float -> unit
+(** Set the matrix taking a gradient measured along a grid's own axes to one
+    along east and north: the unit column and row steps as its columns. Identity
+    for a graticule-aligned grid, a rotation by the grid convergence for one in
+    a projected CRS. *)
 
 val upload_hd_params :
   Gl.t ->

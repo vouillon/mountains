@@ -165,6 +165,7 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
+  grad_rot : Gl.uniform_location;
   uv_scale : Gl.uniform_location;
   height_scale : Gl.uniform_location;
   height_offset : Gl.uniform_location;
@@ -336,6 +337,7 @@ let init_relief_uniforms ctx pid =
   {
     size = u "size";
     delta = u "delta";
+    grad_rot = u "grad_rot";
     uv_scale = u "uv_scale";
     height_scale = u "height_scale";
     height_offset = u "height_offset";
@@ -470,6 +472,19 @@ let hd_slot_values = function
            unit rather than per step. *)
         hd_height_scale *. 255.,
         hd_height_offset )
+
+(* Takes a gradient measured along the grid's own axes to one along east and
+   north. Identity for a graticule-aligned grid, a rotation by the CRS's grid
+   convergence for a projected one. Columns are the unit axes, so the matrix is
+   [(col, row)] as columns and [grad_rot * g] recombines the two directional
+   derivatives. *)
+let upload_grad_rot ctx (u : relief_uniforms) ~col:(cx, cy) ~row:(rx, ry) =
+  let buf = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 4 in
+  buf.{0} <- cx;
+  buf.{1} <- cy;
+  buf.{2} <- rx;
+  buf.{3} <- ry;
+  Gl.uniform_matrix2fv ctx u.grad_rot false (Brr.Tarray.of_bigarray1 buf)
 
 (* A [mat2] uniform is column-major, so the columns are (a, d) and (b, e) and
    [hd_mat * vec2 (u, v)] is [(a u + b v, d u + e v)]. The translation goes

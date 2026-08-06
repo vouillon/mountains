@@ -2725,6 +2725,60 @@ What is genuinely new and visible is **faceting** on smooth near ground, which
 the corduroy was hiding. It belongs with the procedural bump's amplitude as an
 appearance item, not with this change.
 
+### Seams at the ring boundaries
+
+Reported after the switch, and worth separating into three things.
+
+**Heights are continuous to the last bit.** At sample 0 the edge fade is exactly
+zero, so the blended grid must equal the source's bilinear upsample there; it
+does, to mean 0.9 cm and max 1.7 cm, which is half a quantum of each grid
+(3.46/2, 2.25/2, 1.03/2). Nothing to fix.
+
+**One real bug: the ring's normals were turned from north.** `normal.frag`
+differentiates along the grid's own axes and `terrain.frag` reads the result as
+east and north, which is the same thing only for a grid on the graticule. A
+projected ring's normals came out rotated by the CRS's grid convergence -- 2.44
+degrees at 6.36 E -- against everything beyond its edge. Fixed by handing the
+bake the grid's axes as east/north displacements rather than two step lengths,
+and rotating the gradient back; the matrix is the identity for the base and l13,
+so their bake is untouched. Measured as the angle between the normal a grid gives
+at its border and the one the surface beneath gives at the same ground point,
+interpolated the way the renderer's filtered fetch does:
+
+| boundary | before | after |
+| --- | --- | --- |
+| 5 m ring over l13 (projected over graticule) | 0.99 deg | **0.288 deg** |
+
+Inside the 0.87 degree bar, from twice over it. The whole render moves by mean
+0.65 grey levels, max 4 -- the right size for 2.44 degrees.
+
+**One that remains, and is not what it looks like: 1.29 deg mean at the 1 m over
+5 m boundary** (max 22 deg). Both grids are in the same CRS, so the rotation fix
+does not touch it. The obvious suspect was the resolution ratio, which this
+change took from 2.38:4.77 to 1:5 -- **tested and wrong, twice**: at 1:2.5 the
+inner seam moves only 1.292 -> 1.242 deg, while the outer one gets *worse*,
+0.288 -> 0.629 deg, because the middle ring then sits 3.8x from l13 instead of
+1.9x. Reverted to 5 m.
+
+What separates the two boundaries is not the ratio but what the coarse surface
+holds. Where the 5 m ring fades into l13, l13 at 9.5 m is smooth and there is
+nothing to disagree about. Where the 1 m ring fades into the 5 m one, the coarse
+surface carries real LIDAR detail, and the two describe it differently: inside,
+a 1 m difference of the bilinear upsample; outside, a 5 m difference of the grid
+itself. Fading to a bilinear upsample makes the heights agree, and cannot make
+the derivatives agree, because differentiating an interpolant at a finer scale is
+not the same operator. That is a property of the design rather than of this
+change -- the same mismatch existed at 2.38 over 4.77 -- and the corduroy was
+covering it.
+
+Options, none tried: upsample the source with a smoother kernel than bilinear
+near the border, so its 1 m derivative matches the coarse one; or blend the
+normals over a narrow band in the shader instead of switching hard, which is the
+honest admission that the fade cannot reconcile derivatives. A caution for
+whoever measures this next: comparing the fine normal against the *nearest*
+coarse sample rather than an interpolated one measures terrain curvature over
+the offset and reads about 2.2 deg whatever is going on.
+
 A caution learned twice over: a warm capture profile serves the previous
 `blend.wasm` from the service worker's app cache while running the new viewer,
 which is a silent parameter mismatch and produced a 5 889 564 m height range

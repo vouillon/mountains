@@ -62,7 +62,14 @@ type frame = {
       (** sample pitch in arcseconds: the mip level the mesh reads and how
           finely a sight line is walked are both measured against the
           one-arcsecond base grid *)
-  step_x_m : float;  (** metres on the ground per column step *)
+  axis_x : float * float;
+      (** one column step as an east/north displacement in metres. Not along
+          east for a projected grid, whose axes are turned by the CRS's grid
+          convergence; orthogonal to {!axis_y} on the ground all the same, these
+          projections being conformal. The relief bake needs it to express the
+          normal it computes in the grid's axes in east/north instead. *)
+  axis_y : float * float;
+  step_x_m : float;  (** their lengths: metres on the ground per step *)
   step_y_m : float;
 }
 (** Where a refinement's samples sit. Rows count from the south, as everywhere

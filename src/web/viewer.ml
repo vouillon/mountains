@@ -1049,7 +1049,7 @@ let downsample_k _level = 0.25
    it the same way -- a refinement's grid spans a few hundred metres of height,
    and baking it through the base scale put 14.5 cm steps into normals that are
    divided by a spacing several times finer. *)
-let compute_relief ?spacing_m ?(border = true) ?(height_scale = 9500. /. 65535.)
+let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
     ?(height_offset = -500.) ctx width height lat triangle_geo tile_texture
     normal_pid downsample_pid (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
@@ -1130,17 +1130,25 @@ let compute_relief ?spacing_m ?(border = true) ?(height_scale = 9500. /. 65535.)
   Gl.uniform2f ctx u.size (float width) (float height);
 
   (* Use the provided latitude for normals *)
-  (* Ground metres between samples. The base pyramid derives them from the
-     latitude; a refinement passes its own, which for a grid in a projected CRS
-     is not a multiple of the base spacing at all. *)
-  let deltax, deltay =
-    match spacing_m with
-    | Some (mx, my) -> (mx, my)
+  (* One grid step as an east/north displacement in metres. The base pyramid's
+     axes are east and north by construction; a refinement passes its own, which
+     for a grid in a projected CRS are turned by that CRS's grid convergence.
+     [normal.frag] differentiates along the grid, so it is handed both the step
+     lengths and the rotation that takes the result back to east/north -- without
+     which a ring's normals sit 2.44 degrees round from those of the surface
+     beyond its edge, and the boundary shows. *)
+  let (ax, ay), (bx, by) =
+    match axes with
+    | Some a -> a
     | None ->
         let dx, dy, _ = Render_state.compute_deltas ~lat in
-        (dx, dy)
+        ((dx, 0.), (0., dy))
   in
+  let deltax = Float.hypot ax ay and deltay = Float.hypot bx by in
   Gl.uniform2f ctx u.delta deltax deltay;
+  Render_state.upload_grad_rot ctx u
+    ~col:(ax /. deltax, ay /. deltax)
+    ~row:(bx /. deltay, by /. deltay);
   (* Level 0 samples full tile texture *)
   Gl.uniform2f ctx u.uv_scale 1.0 1.0;
 
@@ -3305,7 +3313,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let hd_relief_texture, hd_relief_normal_texture =
               time_gpu ctx "compute_relief_hd" (fun () ->
                   compute_relief
-                    ~spacing_m:(g.frame.step_x_m, g.frame.step_y_m)
+                    ~axes:(g.frame.axis_x, g.frame.axis_y)
                     ~border:false ~height_scale:g.height_scale
                     ~height_offset:g.height_offset ctx g.layer.size g.layer.size
                     lat triangle_geo tex normal_pid downsample_pid
