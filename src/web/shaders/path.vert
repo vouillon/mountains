@@ -9,9 +9,12 @@ uniform float u_linewidth;
 
 out vec4 v_color;
 
+// Shape of the radial mesh this trace is draped over, from the same
+// [radial_params] the terrain program is fed.
+uniform float sector_angle; // angle between two adjacent sectors
+uniform int last_ring;      // index of the outermost ring
+
 const float PI = 3.14159265359;
-const float SECTOR_ANGLE = PI / 1024.0;
-const int LAST_RING = 1023;
 
 struct TerrainSurface {
   vec3 position;
@@ -52,14 +55,14 @@ vec3 barycentric(vec2 p, vec2 a, vec2 b, vec2 c) {
 TerrainSurface terrainSurface(vec2 pos_plane) {
   float radius = length(pos_plane);
   float ring_float = log((radius / grid_scale) + 1.0) / grid_k;
-  int ring = clamp(int(floor(ring_float)), 0, LAST_RING - 1);
+  int ring = clamp(int(floor(ring_float)), 0, last_ring - 1);
   float angle = atan(pos_plane.y, pos_plane.x);
   float local_angle = mod(angle - PI / 4.0, PI / 2.0);
   if (local_angle < 0.0)
     local_angle += PI / 2.0;
-  float sector_fraction = fract(local_angle / SECTOR_ANGLE);
-  float angle0 = angle - sector_fraction * SECTOR_ANGLE;
-  float angle1 = angle0 + SECTOR_ANGLE;
+  float sector_fraction = fract(local_angle / sector_angle);
+  float angle0 = angle - sector_fraction * sector_angle;
+  float angle1 = angle0 + sector_angle;
   float radius0 = radialDistance(ring);
   float radius1 = radialDistance(ring + 1);
 

@@ -61,10 +61,16 @@ type radial_params = {
   w_mask : int;
   w_shift : int;
   inv_sectors_div : float;
+  sector_angle : float;
+  last_ring : int;
   grid_k : float;
   grid_scale : float;
 }
-(** Pre-computed radial grid parameters. These are constant for the session. *)
+(** Pre-computed radial grid parameters. These are constant for the session.
+    [sector_angle] is the angle between two adjacent sectors and [last_ring] the
+    index of the outermost ring: whoever walks the mesh on the CPU or resolves a
+    position against it in a shader needs the grid's shape, not just its
+    exponential radial law. *)
 
 type terrain_uniforms = {
   (* Radial grid *)
@@ -217,6 +223,10 @@ let compute_radial_params ~n_sectors ~n_rings =
     w_mask;
     w_shift;
     inv_sectors_div = 1. /. float n_sectors;
+    (* The grid spans a quarter turn (see radial_common.vert); numerically this
+       equals [grid_k], which is what makes the cells asymptotically square. *)
+    sector_angle = Web_utils.pi /. 2. /. float n_sectors;
+    last_ring = n_rings - 1;
     grid_k;
     grid_scale;
   }
@@ -585,6 +595,8 @@ type path_uniforms = {
   u_color : Gl.uniform_location;
   u_viewport : Gl.uniform_location;
   u_linewidth : Gl.uniform_location;
+  sector_angle : Gl.uniform_location;
+  last_ring : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   center_offset : Gl.uniform_location;
@@ -612,6 +624,8 @@ let init_path_uniforms ctx pid =
     u_color = u "u_color";
     u_viewport = u "u_viewport";
     u_linewidth = u "u_linewidth";
+    sector_angle = u "sector_angle";
+    last_ring = u "last_ring";
     grid_k = u "grid_k";
     grid_scale = u "grid_scale";
     center_offset = u "center_offset";
@@ -640,6 +654,8 @@ let init_path_uniforms ctx pid =
   }
 
 let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
+  Gl.uniform1f ctx u.sector_angle p.sector_angle;
+  Gl.uniform1i ctx u.last_ring p.last_ring;
   Gl.uniform1f ctx u.grid_k p.grid_k;
   Gl.uniform1f ctx u.grid_scale p.grid_scale;
   Gl.uniform1i ctx u.relief 1;

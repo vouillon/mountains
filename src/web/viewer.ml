@@ -2667,7 +2667,8 @@ let split_gpx_segment ~(radial_params : Render_state.radial_params)
     ((x0, y0, _) as start) ((x1, y1, _) as finish) =
   let grid_k = radial_params.Render_state.grid_k in
   let grid_scale = radial_params.Render_state.grid_scale in
-  let sector_angle = pi /. 1024. in
+  let sector_angle = radial_params.Render_state.sector_angle in
+  let last_ring = radial_params.Render_state.last_ring in
   let cross (ax, ay) (bx, by) = (ax *. by) -. (ay *. bx) in
   let radius ring = grid_scale *. (exp (grid_k *. float ring) -. 1.) in
   let barycentric (px, py) (ax, ay) (bx, by) (cx, cy) =
@@ -2683,7 +2684,8 @@ let split_gpx_segment ~(radial_params : Render_state.radial_params)
   let triangle_at (px, py) =
     let r = sqrt ((px *. px) +. (py *. py)) in
     let ring =
-      min (n_rings - 2)
+      (* Same clamp as [terrainSurface] in path.vert. *)
+      min (last_ring - 1)
         (max 0 (int_of_float (floor (log ((r /. grid_scale) +. 1.) /. grid_k))))
     in
     let angle = atan2 py px in

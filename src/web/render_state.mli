@@ -27,10 +27,16 @@ type radial_params = {
   w_mask : int;
   w_shift : int;
   inv_sectors_div : float;
+  sector_angle : float;
+  last_ring : int;
   grid_k : float;
   grid_scale : float;
 }
-(** Pre-computed radial grid parameters. These are constant for the session. *)
+(** Pre-computed radial grid parameters. These are constant for the session.
+    [sector_angle] is the angle between two adjacent sectors and [last_ring] the
+    index of the outermost ring: whoever walks the mesh on the CPU or resolves a
+    position against it in a shader needs the grid's shape, not just its
+    exponential radial law. *)
 
 type terrain_uniforms = {
   w_shift : Gl.uniform_location;
@@ -244,6 +250,8 @@ type path_uniforms = {
   u_color : Gl.uniform_location;
   u_viewport : Gl.uniform_location;
   u_linewidth : Gl.uniform_location;
+  sector_angle : Gl.uniform_location;
+  last_ring : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   center_offset : Gl.uniform_location;
