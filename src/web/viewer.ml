@@ -3112,11 +3112,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       let now = Jv.to_float (Jv.call date_ctor "now" [||]) /. 1000. in
       let sx, sy, sz = Sun.position ~lat ~lon ~time:now in
       let sx, sy, sz =
-        if sz < 0.2 then
+        if true || sz < 0.2 then
           let date = Jv.new' date_ctor [||] in
-          let _ = Jv.call date "setMonth" [| Jv.of_int 6 |] in
-          let _ = Jv.call date "setHours" [| Jv.of_int 10 |] in
-          let _ = Jv.call date "setMinutes" [| Jv.of_int 0 |] in
+          let _ = Jv.call date "setMonth" [| Jv.of_int 7 |] in
+          let _ = Jv.call date "setDate" [| Jv.of_int 12 |] in
+          let _ = Jv.call date "setHours" [| Jv.of_int 20 |] in
+          let _ = Jv.call date "setMinutes" [| Jv.of_int 22 |] in
           let t = Jv.to_float (Jv.call date "valueOf" [||]) /. 1000. in
           Sun.position ~lat ~lon ~time:t
         else (sx, sy, sz)
