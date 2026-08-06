@@ -2725,6 +2725,36 @@ What is genuinely new and visible is **faceting** on smooth near ground, which
 the corduroy was hiding. It belongs with the procedural bump's amplitude as an
 appearance item, not with this change.
 
+### The white sawtooth on a shadowed crest is not the shadow map
+
+Reported at 44.73339,6.36308 alpha=-129 beta=86 zoom=3.00: a bright zigzag
+running along a ridge inside a dark slope. Two measurements settle what it is.
+
+**It is not the shadow.** Rendering `shadow_val` alone shows it at essentially 1
+across the whole region -- nothing there is shadowed at all. The dark slope is
+the diffuse term, facing away from a low sun, and the bright line is where the
+terminator crosses a crest.
+
+**It is new.** Building f3fda0d into a separate build dir and capturing the same
+view from it: no trace of the line. So this one is not "the boundaries moved and
+it was always there" -- unlike the ring seams, where that is exactly right.
+
+What changed is the relationship between the mesh and the normal map. The vertex
+LOD instrumentation from the last round measured the near field reading **level 1
+of the 1 m ring, i.e. 2 m**, while the fragment normal reads **level 0, 1 m**.
+Before, the ring was 2.38 m and both read its level 0 -- geometry and shading at
+the same scale. Now the shading is twice as fine as the geometry, so each 2 m
+facet carries normals that vary across it; at a grazing sun that turns the
+terminator into a sawtooth of lit facets. The crest also has to be crisp for it
+to show, which the 1 m data makes it and the 1.19 m WGS84G data, with its
+corduroy, did not.
+
+So it is the same family as the faceting noted above -- geometry coarser than
+what is shaded on it -- with the sun angle making it obvious. Fixes worth
+weighing: let the mesh read the level the normals do near the camera; or accept
+that a ring finer than the mesh is normal mapping and soften the terminator.
+Not addressed here.
+
 ### Seams at the ring boundaries
 
 Reported after the switch, and worth separating into three things.
