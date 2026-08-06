@@ -59,7 +59,7 @@ type terrain_uniforms = {
   hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
   hd_relief_normal : Gl.uniform_location array;
-  hd_scale : Gl.uniform_location array;
+  hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
@@ -97,7 +97,7 @@ type shadow_uniforms = {
   shadow_view_proj : Gl.uniform_location;
   hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_scale : Gl.uniform_location array;
+  hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
@@ -186,13 +186,17 @@ val upload_texture_units_shadow : Gl.t -> shadow_uniforms -> unit
 
 type hd_params = {
   hd_size : int;  (** samples per side *)
-  hd_px_arcsec : float;  (** arcseconds per sample *)
+  hd_to_index : Affine.t;
+      (** arcseconds from the anchor arcsecond to a fractional sample index.
+          Off-diagonal for a ring on a projected grid, whose axes are turned
+          from north by its CRS's grid convergence. *)
+  hd_arcsec_step : float;
+      (** sample pitch in arcseconds, which selects the mip level the mesh reads
+      *)
   hd_height_scale : float;
       (** metres per u16 step of this ring's grid: each is quantised over the
           height range it holds rather than the base pipeline's 9500 m *)
   hd_height_offset : float;  (** metres at u16 zero *)
-  hd_origin : float * float;
-      (** arcseconds from the anchor arcsecond to sample (0, 0) *)
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
 
@@ -263,7 +267,7 @@ type path_uniforms = {
   relief : Gl.uniform_location;
   hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_scale : Gl.uniform_location array;
+  hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;

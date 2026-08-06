@@ -26,19 +26,31 @@ let tile_px = 256
    ratio to the 1-arcsecond base grid, which is why consumers must read it
    rather than assume one. *)
 type kind =
-  | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
+  | Wmts of {
+      matrix_level : int;
+      tiles_per_axis : int;
+      block_tiles : int;
+      px_arcsec : float;
+    }
       (** A block of tiles from a WGS84G matrix level, centred on the tile
           holding the location. *)
-  | Wms of { wms_name : string; step_arcsec : float; steps : int; split : int }
-      (** GetMap over a bbox aligned to a [step_arcsec] grid and spanning
-          [steps] steps, centred on the grid corner nearest the location.
-          Arbitrary resolution: the matrix levels do not bound it. Fetched as
-          [split] x [split] requests, which is exact rather than a compromise --
-          see [plan]. *)
+  | Wms_projected of { stem : string; metres : float; split : int }
+      (** GetMap in the CRS the product is actually stored in, so that the
+          service never reprojects it. That is worth a grid whose axes are not
+          north and east: asked for the same ground in WGS84G, the geoplateforme
+          returns something 4.29 degrees of normal error away from a clean
+          resample of its own data (PLAN.md), a woven corduroy that is plainly
+          visible once the procedural detail is off.
+
+          [stem] is the layer name without its CRS suffix; {!Projection}
+          supplies the suffix, the [CRS=] code and the projection, one per
+          territory. The bbox spans [metres * size] and is aligned to half that,
+          in the CRS's own metres, so nearby locations share URLs exactly as
+          they share a WMTS tile. Square by construction, and 1 m needs no
+          reprojection at all. *)
 
 type layer = {
   kind : kind;
-  px_arcsec : float; (* sample spacing *)
   size : int; (* samples per side of the block *)
   fade_metres : float;
       (* width of the annulus over which the refinement is faded back into the
@@ -47,25 +59,75 @@ type layer = {
          boundary lands where the two agree. *)
 }
 
+(* Where a refinement's samples sit, as an affine map both ways between
+   arcseconds from the anchor arcsecond and a fractional sample index. Rows count
+   from the south, as everywhere else.
+
+   Both directions are stored because both are wanted and neither is cheap to
+   keep in step by hand: the mesh, the shadow pass, POI anchoring, visibility and
+   the eye height all want an index from an offset, while [Blend_core] wants an
+   offset from an index so it can compose with the frame of the surface beneath.
+   Deriving one from the other in a single constructor is what stops them
+   drifting.
+
+   For a graticule-aligned grid this is exactly the [(offset - origin) /
+   px_arcsec] it replaces, with the off-diagonal terms zero. For a grid served in
+   its own projected CRS they are not zero: its axes are turned from north by
+   that CRS's grid convergence -- 2.44 degrees at 6.36 E, 0.55 at La Reunion. *)
+type frame = {
+  to_index : Affine.t;
+  of_index : Affine.t;
+  arcsec_step : float;
+      (* sample pitch in arcseconds: sets the mip level the mesh reads and how
+         finely a sight line is walked, both of which are measured against the
+         one-arcsecond base grid *)
+  step_x_m : float; (* metres on the ground per column step *)
+  step_y_m : float;
+}
+
+(* Ground metres per step along each axis, from the frame itself rather than
+   passed in beside it, so a projected grid's scale factor -- its projected metre
+   is not quite a ground metre -- is accounted for without anything special. *)
+let frame_of_index of_index ~arcsec_step ~lat =
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let axis u v =
+    let x, y = Affine.apply of_index u v
+    and ox, oy = Affine.apply of_index 0. 0. in
+    Float.hypot ((x -. ox) *. deltax) ((y -. oy) *. deltay)
+  in
+  {
+    to_index = Affine.inverse of_index;
+    of_index;
+    arcsec_step;
+    step_x_m = axis 1. 0.;
+    step_y_m = axis 0. 1.;
+  }
+
+(* A graticule-aligned block: one scale for both axes, in arcseconds. *)
+let geographic_frame ~px_arcsec ~origin_x ~origin_y ~lat =
+  frame_of_index
+    (Affine.diagonal ~sx:px_arcsec ~sy:px_arcsec ~tx:origin_x ~ty:origin_y)
+    ~arcsec_step:px_arcsec ~lat
+
 let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
   (* Level L has 2^(L+1) tiles across 360 degrees: level 0 is two tiles wide. *)
   let tiles_per_axis = 1 lsl (matrix_level + 1) in
   {
-    kind = Wmts { matrix_level; tiles_per_axis; block_tiles };
-    px_arcsec = 360. /. float tiles_per_axis /. float tile_px *. 3600.;
+    kind =
+      Wmts
+        {
+          matrix_level;
+          tiles_per_axis;
+          block_tiles;
+          px_arcsec = 360. /. float tiles_per_axis /. float tile_px *. 3600.;
+        };
     size = tile_px * block_tiles;
     fade_metres;
   }
 
-let wms_layer ~wms_name ~step_arcsec ~steps ~split ~size ~fade_metres =
-  assert (steps mod 2 = 0);
+let wms_projected_layer ~stem ~metres ~split ~size ~fade_metres =
   assert (size mod split = 0);
-  {
-    kind = Wms { wms_name; step_arcsec; steps; split };
-    px_arcsec = step_arcsec *. float steps /. float size;
-    size;
-    fade_metres;
-  }
+  { kind = Wms_projected { stem; metres; split }; size; fade_metres }
 
 (* Level 13, 8 x 8 tiles: 0.309 arcseconds per sample (9.5 m north-south, a bit
    over three times the base grid), 2048 samples per side -- a power of two, so
@@ -77,56 +139,46 @@ let wms_layer ~wms_name ~step_arcsec ~steps ~split ~size ~fade_metres =
    connection. *)
 let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
 
-(* One level-14 tile, 39.55078125 arcseconds. Used as the alignment grid for the
-   WMS blocks below so that nearby locations share a bbox exactly as they share
-   tile URLs -- without which the service worker's cache-first rule and the
-   offline story would not apply to them at all. Dyadic, so the bbox corners are
-   exact in binary and the formatted URL is stable. *)
-let footprint_arcsec = 360. /. 32768. *. 3600.
+(* The two LIDAR HD rings, fetched in the CRS the product is stored in --
+   Lambert-93 over metropolitan France, RGR92 / UTM 40S over La Reunion -- rather
+   than in the WGS84G reprojection the service also offers. Measured (PLAN.md):
+   the reprojection costs 4.29 degrees of normal error against a clean resample of
+   IGN's own data, a woven corduroy that dominates the shading once the procedural
+   detail is off, and it is absent from the native grid. It also makes the
+   graticule-aligned +-1.22 x 0.87 km anisotropic grid a square one.
 
-(* The innermost ring: LIDAR HD bare earth at 0.0386 arcseconds (1.19 m N-S,
-   0.83 m E-W at 46 degrees), 2048 samples over 2 x 2 footprints, i.e. the same
-   +-1.22 x 0.87 km as the 2.38 m grid it replaces, at twice the resolution.
-   2 x 2 GetMaps of 1024^2, 16.0 MB on the wire in total (the WMS endpoint does
-   not compress), ~4 s.
+   [stem] is shared: one product, two resolutions of it, and the coarser output is
+   the exact 2 x 2 box mean of the finer, so the inner ring's fade onto the middle
+   one hides no product difference at all. Only the middle ring's fade onto l13
+   crosses products, and it has 600 m of annulus for a 3 m worst case.
 
-   Measured worth doing (PLAN.md): the service's output at this depth is genuine
-   rather than replicated -- no constant 2x2 block in 262144 -- and the 2.38 m
-   output is its exact 2x2 box mean, so nothing is lost by the two being drawn
-   from one layer. The step adds 0.711 m RMS over 2.38 m on terrain this steep,
-   about 55% of what the 4.77 -> 2.38 m step added. It costs no extra shader slot,
-   no extra publish and no extra visibility pass, being a resolution change to a
-   ring that already exists.
+   The middle ring: 5 m, 1024 samples, so 5120 m per side. Sized by reach rather
+   than by spacing: with the alignment rule below it covers at least 1920 m in
+   every direction, against the 1832 m worst case of the +-2.44 x 1.70 km ring it
+   replaces, and what lies beyond it falls through to l13 at 9.5 m. 2 x 2 GetMaps
+   of 512^2, 4.0 MB. *)
+let lidar_5m =
+  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
+    ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:600.
+
+(* The innermost ring: 1 m -- the product's own resolution, so no resampling of it
+   happens anywhere -- 2048 samples, 2048 m per side against the +-1.22 x 0.87 km
+   it replaces. 2 x 2 GetMaps of 1024^2, 16.0 MB (this endpoint does not
+   compress).
+
+   [fade_metres] is 300 rather than [l13]'s 1500: the extent is a sixteenth of the
+   width and the surface underneath is the same product, so the annulus has to
+   hide nothing at all here, only the quantisation change.
 
    RGE ALTI cannot serve this: below level 14 its WMS output is
    nearest-neighbour replication of the 4.77 m grid (100% of 4x4 blocks
    bit-identical), so LIDAR HD is the only real sub-5 m bare-earth source. Its
    water is unrectified, which does not matter because terrain.frag replaces the
    DEM normal with the procedural water normal wherever the cover map says
-   water.
-
-   [fade_metres] is 300 rather than [l13]'s 1500: the extent is a sixteenth of
-   the width, and the surface underneath is a different product (0.098 m RMS,
-   3.14 m worst case), so the annulus has to hide a few metres over a few
-   hundred, not tens over kilometres. *)
-(* The middle ring: the same LIDAR HD source at 0.1545 arcseconds (4.77 m N-S,
-   3.31 m E-W at 46 degrees), 1024 samples over 4 x 4 footprints, i.e.
-   +-2.44 x 1.70 km. Fills the band between [lidar_2m]'s edge and l13, which was
-   served at 9.54 m.
-
-   Being the same layer as [lidar_2m] at half its resolution, the two are exactly
-   box-consistent -- the service's 512-pixel output is the 2 x 2 box mean of its
-   1024-pixel output, verified -- so the inner ring's fade onto this one hides no
-   product difference at all. Only this ring's fade onto l13 crosses products, and
-   at 600 m it has four times the annulus of the inner ring for the same 3 m
-   worst case. *)
-let lidar_5m =
-  wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
-    ~step_arcsec:footprint_arcsec ~steps:4 ~split:2 ~size:1024 ~fade_metres:600.
-
+   water. *)
 let lidar_2m =
-  wms_layer ~wms_name:"IGNF_LIDAR-HD_MNT_ELEVATION.MIXED.WGS84G"
-    ~step_arcsec:footprint_arcsec ~steps:2 ~split:2 ~size:2048 ~fade_metres:300.
+  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
+    ~metres:1.0 ~split:2 ~size:2048 ~fade_metres:300.
 
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
@@ -155,13 +207,15 @@ let wmts_url ~matrix_level ~row ~col =
     "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES&STYLE=normal&FORMAT=image/x-bil;bits=32&TILEMATRIXSET=WGS84G&TILEMATRIX=%d&TILEROW=%d&TILECOL=%d"
     matrix_level row col
 
-(* WMS 1.3.0 with CRS=EPSG:4326 takes BBOX in latitude,longitude order. Fixed
-   precision keeps the string stable for a given block, which is what makes the
-   URL shareable between nearby locations. *)
-let wms_url ~wms_name ~size ~lat_min ~lon_min ~lat_max ~lon_max =
+(* WMS 1.3.0 takes BBOX in the CRS's own axis order. EPSG:2154 and EPSG:2975 both
+   declare easting first, unlike EPSG:4326 above. Three decimals of a metre keeps
+   the string stable while leaving room for an alignment grid that is not a whole
+   number of metres. *)
+let wms_projected_url ~stem ~crs ~size ~x_min ~y_min ~x_max ~y_max =
   Printf.sprintf
-    "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=%s&STYLES=&CRS=EPSG:4326&FORMAT=image/x-bil;bits=32&BBOX=%.9f,%.9f,%.9f,%.9f&WIDTH=%d&HEIGHT=%d"
-    wms_name lat_min lon_min lat_max lon_max size size
+    "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=%s.%s&STYLES=&CRS=%s&FORMAT=image/x-bil;bits=32&BBOX=%.3f,%.3f,%.3f,%.3f&WIDTH=%d&HEIGHT=%d"
+    stem (Projection.name crs) (Projection.epsg crs) x_min y_min x_max y_max
+    size size
 
 let to_lwt f =
   let t, u = Lwt.task () in
@@ -184,27 +238,27 @@ let anchor_tile ~tiles_per_axis ~lat ~lon =
    the partial-block handling below are written once. *)
 type request = { url : string; px : int; dst_row : int; dst_col : int }
 
-(* Where the block sits and what to fetch for it. [origin_x]/[origin_y] are
-   arcseconds from the anchor arcsecond to sample column 0 and to the
-   *southernmost* row; sample centres sit half a sample inside the block's
-   edge on both axes. *)
+(* Where the block sits, as a {!frame}, and what to fetch for it. Sample centres
+   sit half a sample inside the block's edge on both axes, on every kind.
+
+   [None] when the layer cannot serve this location at all, which today means a
+   projected layer outside every territory {!Projection} knows: the caller treats
+   it exactly like a block whose every request failed, and the blend falls back
+   to the coarser surface. *)
 let plan layer ~lat ~lon =
   match layer.kind with
-  | Wmts { matrix_level; tiles_per_axis; block_tiles } ->
+  | Wmts { matrix_level; tiles_per_axis; block_tiles; px_arcsec } ->
       let alat, alon, anchor_row, anchor_col =
         anchor_tile ~tiles_per_axis ~lat ~lon
       in
       let row0 = anchor_row - (block_tiles / 2) in
       let col0 = anchor_col - (block_tiles / 2) in
       let origin_x =
-        -648000.
-        +. ((float (col0 * tile_px) +. 0.5) *. layer.px_arcsec)
-        -. float alon
+        -648000. +. ((float (col0 * tile_px) +. 0.5) *. px_arcsec) -. float alon
       in
       let origin_y =
         324000.
-        -. (float ((row0 * tile_px) + layer.size - 1) +. 0.5)
-           *. layer.px_arcsec
+        -. ((float ((row0 * tile_px) + layer.size - 1) +. 0.5) *. px_arcsec)
         -. float alat
       in
       let reqs =
@@ -221,70 +275,91 @@ let plan layer ~lat ~lon =
               (List.init block_tiles Fun.id))
           (List.init block_tiles Fun.id)
       in
-      (origin_x, origin_y, reqs)
-  | Wms { wms_name; step_arcsec; steps; split } ->
-      let alat = Web_utils.arcsec_floor lat
-      and alon = Web_utils.arcsec_floor lon in
-      (* Centre on the nearest grid *corner*, not on the step holding the
-         location: over a block this small, anchoring on the step would leave the
-         location a couple of hundred metres from an edge on average, in the very
-         direction it is likely looking. Rounding to a corner keeps it at least
-         half a step from every edge, and stays deterministic so the URL is still
-         shared. *)
-      let half = float (steps / 2) in
-      let corner v = Float.round (v /. step_arcsec) in
-      let lon_min = (corner (float alon) -. half) *. step_arcsec in
-      let lat_min = (corner (float alat) -. half) *. step_arcsec in
-      let span = float steps *. step_arcsec in
-      (* Fetched in [split] x [split] pieces so that one failed request costs a
-         quadrant rather than the whole ring -- the missing piece stays at nodata,
-         which the blend fades into the surface beneath exactly as it does a
-         failed WMTS tile. The bytes are the same, and it costs no accuracy: a
-         piece of [size / split] pixels over [span / split] has precisely the
-         pitch of [size] over [span], so the pieces tile the same sample grid
-         with no resampling and no seam. Each URL is still a deterministic
-         function of the corner and the piece, so nearby locations share them and
-         the service worker can now hit on a subset.
-
-         Budget for anyone raising [split] or adding rings: unlike the WMTS, this
-         endpoint *is* rate limited -- over 40 requests in one second and it
-         answers 400 to everything for the next five. A location load spends
-         [split * split] of that allowance, so 4 here against a ceiling of 40.
-         Development 400s came from test traffic outside the app, not from this. *)
-      let px = layer.size / split in
-      let piece = span /. float split in
-      let reqs =
-        List.concat_map
-          (fun qr ->
-            List.map
-              (fun qc ->
-                (* Raster row 0 is the northernmost, so the piece at [dst_row] 0
-                   is the *top* band: its southern edge is the highest. *)
-                let lon0 = lon_min +. (float qc *. piece) in
-                let lat0 = lat_min +. (float (split - 1 - qr) *. piece) in
-                {
-                  url =
-                    wms_url ~wms_name ~size:px ~lat_min:(lat0 /. 3600.)
-                      ~lon_min:(lon0 /. 3600.)
-                      ~lat_max:((lat0 +. piece) /. 3600.)
-                      ~lon_max:((lon0 +. piece) /. 3600.);
-                  px;
-                  dst_row = qr * px;
-                  dst_col = qc * px;
-                })
-              (List.init split Fun.id))
-          (List.init split Fun.id)
-      in
-      let origin_x = lon_min +. (0.5 *. layer.px_arcsec) -. float alon in
-      let origin_y = lat_min +. (0.5 *. layer.px_arcsec) -. float alat in
-      (origin_x, origin_y, reqs)
+      Some (geographic_frame ~px_arcsec ~origin_x ~origin_y ~lat, reqs)
+  | Wms_projected { stem; metres; split } -> (
+      match Projection.of_location ~lat ~lon with
+      | None -> None
+      | Some crs ->
+          let alat = Web_utils.arcsec_floor lat
+          and alon = Web_utils.arcsec_floor lon in
+          let anchor_lat = float alat /. 3600.
+          and anchor_lon = float alon /. 3600. in
+          let xa, ya = Projection.forward crs ~lat:anchor_lat ~lon:anchor_lon in
+          let span = float layer.size *. metres in
+          (* A quarter of the span, so the anchor lands within an eighth of it
+             of the centre and the block reaches at least three eighths of a span
+             in every direction. Measured the hard way: at half a span the anchor
+             can sit a quarter off centre, and the ring then reached 1292 m north
+             of a camera looking north -- against the 1832 m worst case of the
+             layer it replaces -- so the mid field fell through to l13 at 9.5 m
+             and visibly lost its detail. Still one bbox per quarter-span, so
+             nearby locations share URLs. *)
+          let align = span /. 4. in
+          let corner v = Float.round (v /. align) *. align in
+          let x0 = corner xa -. (span /. 2.)
+          and y0 = corner ya -. (span /. 2.) in
+          (* Arcseconds from the anchor to projected metres from the anchor, from
+             the local derivative of the projection: conformal, so over a couple
+             of kilometres this is a rotation and a scale to within centimetres
+             (0.008 degrees of turn and a part in a million of scale across the
+             block). *)
+          let j11, j12, j21, j22 =
+            Projection.jacobian crs ~lat:anchor_lat ~lon:anchor_lon
+          in
+          let per_arcsec =
+            {
+              Affine.a = j11 /. 3600.;
+              b = j12 /. 3600.;
+              c = 0.;
+              d = j21 /. 3600.;
+              e = j22 /. 3600.;
+              f = 0.;
+            }
+          in
+          let of_index =
+            Affine.compose
+              (Affine.inverse per_arcsec)
+              (Affine.diagonal ~sx:metres ~sy:metres
+                 ~tx:(x0 -. xa +. (0.5 *. metres))
+                 ~ty:(y0 -. ya +. (0.5 *. metres)))
+          in
+          let px = layer.size / split in
+          let piece = span /. float split in
+          let reqs =
+            List.concat_map
+              (fun qr ->
+                List.map
+                  (fun qc ->
+                    (* Raster row 0 is the northernmost, so the piece at
+                       [dst_row] 0 is the top band and takes the highest
+                       northings. *)
+                    let x = x0 +. (float qc *. piece) in
+                    let y = y0 +. (float (split - 1 - qr) *. piece) in
+                    {
+                      url =
+                        wms_projected_url ~stem ~crs ~size:px ~x_min:x ~y_min:y
+                          ~x_max:(x +. piece) ~y_max:(y +. piece);
+                      px;
+                      dst_row = qr * px;
+                      dst_col = qc * px;
+                    })
+                  (List.init split Fun.id))
+              (List.init split Fun.id)
+          in
+          (* One sample covers [metres] square in projected metres; the pitch in
+             arcseconds is what the mip selection and the ray walk want, and the
+             area per sample gives it without picking an axis. *)
+          Some
+            ( frame_of_index of_index
+                ~arcsec_step:(sqrt (Float.abs (Affine.det of_index)))
+                ~lat,
+              reqs ))
 
 type raw = {
   layer : layer;
   samples : (float, float32_elt, c_layout) Array1.t;
       (* [layer.size] x [layer.size], row 0 northernmost *)
-  origin_x : float; (* arcseconds from the anchor to sample column 0 *)
-  origin_y : float; (* arcseconds from the anchor to the southernmost row *)
+  frame : frame;
   missing : int;
 }
 
@@ -315,101 +390,101 @@ let fetch_one req =
    parallel. Never fails: [None] means "render from the base tile alone". *)
 let fetch layer ~lat ~lon : raw option Lwt.t =
   let size = layer.size in
-  let origin_x, origin_y, reqs = plan layer ~lat ~lon in
-  let full = Brr.Tarray.create Brr.Tarray.Float32 (size * size) in
-  (* Below [Blend_core.nodata_limit], so a request that never arrives reads
+  match plan layer ~lat ~lon with
+  | None -> Lwt.return None
+  | Some (frame, reqs) ->
+      let full = Brr.Tarray.create Brr.Tarray.Float32 (size * size) in
+      (* Below [Blend_core.nodata_limit], so a request that never arrives reads
      exactly like ground outside IGN's coverage (which answers -9999): both are
      faded back into the surface beneath, and a viewpoint on the frontier
      degrades by the same path as one whose fetch half failed. *)
-  Brr.Tarray.fill (-99999.) full;
-  let total = List.length reqs in
-  (* Counting the tiles that arrived, not the ones that failed: on the timeout
+      Brr.Tarray.fill (-99999.) full;
+      let total = List.length reqs in
+      (* Counting the tiles that arrived, not the ones that failed: on the timeout
      path the requests still in flight are neither, and it is the arrived count
      that says whether the block is worth publishing. *)
-  let arrived = ref 0 in
-  (* Set as soon as [full] is handed out. A tile arriving after that must not be
+      let arrived = ref 0 in
+      (* Set as soon as [full] is handed out. A tile arriving after that must not be
      blitted: the raw block is published by reference, and the late write would
      land in a buffer the caller has already started reading. The request itself
      is not cancelled, so its response still reaches the service worker's cache
      and the next visit to this location gets it for free. *)
-  let published = ref false in
-  let t0 = Brr.(Performance.now_ms G.performance) in
-  (* Every request is issued at once: the browser multiplexes them over one
+      let published = ref false in
+      let t0 = Brr.(Performance.now_ms G.performance) in
+      (* Every request is issued at once: the browser multiplexes them over one
      HTTP/2 connection. *)
-  let tasks =
-    List.map
-      (fun req ->
-        Lwt.catch
-          (fun () ->
-            let* tile = fetch_one req in
-            if not !published then begin
-              (* Blit row by row: the response is contiguous, the destination is
+      let tasks =
+        List.map
+          (fun req ->
+            Lwt.catch
+              (fun () ->
+                let* tile = fetch_one req in
+                if not !published then begin
+                  (* Blit row by row: the response is contiguous, the destination is
                  strided by the width of the whole block. *)
-              for i = 0 to req.px - 1 do
-                Brr.Tarray.set_tarray full
-                  ~dst:(((req.dst_row + i) * size) + req.dst_col)
-                  (Brr.Tarray.sub tile ~start:(i * req.px)
-                     ~stop:((i + 1) * req.px))
-              done;
-              incr arrived
-            end;
-            Lwt.return ())
-          (fun _ -> Lwt.return ()))
-      reqs
-  in
-  let publish () =
-    published := true;
-    if !arrived = 0 then None
-    else
-      Some
-        {
-          layer;
-          samples = Brr.Tarray.to_bigarray1 full;
-          origin_x;
-          origin_y;
-          missing = total - !arrived;
-        }
-  in
-  let all =
-    let* () = Lwt.join tasks in
-    (* The timeout got there first; [Lwt.choose] discards this. *)
-    if !published then Lwt.return None
-    else begin
-      if !arrived = 0 then
-        Brr.Console.error
-          [ Jstr.v "High-resolution elevation: no tile could be fetched" ]
-      else
-        Format.eprintf "RGE ALTI: %d/%d tiles in %.0f ms@." !arrived total
-          (Brr.(Performance.now_ms G.performance) -. t0);
-      Lwt.return (publish ())
-    end
-  in
-  let timeout =
-    let t, w = Lwt.task () in
-    ignore
-      (Brr.G.set_timeout
-         ~ms:(truncate (timeout_s *. 1000.))
-         (fun () ->
-           if not !published then begin
-             if !arrived = 0 then
-               Brr.Console.error
-                 [ Jstr.v "High-resolution elevation: request timed out" ]
-             else
-               Format.eprintf
-                 "RGE ALTI: timed out with %d/%d tiles after %.0f ms@." !arrived
-                 total
-                 (Brr.(Performance.now_ms G.performance) -. t0);
-             Lwt.wakeup_later w (publish ())
-           end));
-    t
-  in
-  Lwt.choose [ all; timeout ]
+                  for i = 0 to req.px - 1 do
+                    Brr.Tarray.set_tarray full
+                      ~dst:(((req.dst_row + i) * size) + req.dst_col)
+                      (Brr.Tarray.sub tile ~start:(i * req.px)
+                         ~stop:((i + 1) * req.px))
+                  done;
+                  incr arrived
+                end;
+                Lwt.return ())
+              (fun _ -> Lwt.return ()))
+          reqs
+      in
+      let publish () =
+        published := true;
+        if !arrived = 0 then None
+        else
+          Some
+            {
+              layer;
+              samples = Brr.Tarray.to_bigarray1 full;
+              frame;
+              missing = total - !arrived;
+            }
+      in
+      let all =
+        let* () = Lwt.join tasks in
+        (* The timeout got there first; [Lwt.choose] discards this. *)
+        if !published then Lwt.return None
+        else begin
+          if !arrived = 0 then
+            Brr.Console.error
+              [ Jstr.v "High-resolution elevation: no tile could be fetched" ]
+          else
+            Format.eprintf "RGE ALTI: %d/%d tiles in %.0f ms@." !arrived total
+              (Brr.(Performance.now_ms G.performance) -. t0);
+          Lwt.return (publish ())
+        end
+      in
+      let timeout =
+        let t, w = Lwt.task () in
+        ignore
+          (Brr.G.set_timeout
+             ~ms:(truncate (timeout_s *. 1000.))
+             (fun () ->
+               if not !published then begin
+                 if !arrived = 0 then
+                   Brr.Console.error
+                     [ Jstr.v "High-resolution elevation: request timed out" ]
+                 else
+                   Format.eprintf
+                     "RGE ALTI: timed out with %d/%d tiles after %.0f ms@."
+                     !arrived total
+                     (Brr.(Performance.now_ms G.performance) -. t0);
+                 Lwt.wakeup_later w (publish ())
+               end));
+        t
+      in
+      Lwt.choose [ all; timeout ]
 
 type t = {
   layer : layer;
   grid : Dem_loader.t;
-  origin_x : float;
-  origin_y : float;
+  frame : frame;
   height_scale : float; (* metres per u16 step of [grid] *)
   height_offset : float; (* metres at u16 zero *)
 }
@@ -430,9 +505,9 @@ let get_height (t : t) row col =
    Rows count from the south on both sides, matching [Dem_loader]. *)
 type source = {
   src_grid : Dem_loader.t;
-  src_origin_x : float; (* arcseconds from the anchor to sample column 0 *)
-  src_origin_y : float; (* arcseconds from the anchor to the southernmost row *)
-  src_px_arcsec : float;
+  src_to_index : Affine.t;
+      (* arcseconds from the anchor to a fractional sample index of this grid,
+         the same map a [frame] carries; a source needs no more than that *)
   src_height_scale : float; (* metres per u16 step *)
   src_height_offset : float; (* metres at u16 zero *)
 }
@@ -444,9 +519,7 @@ let base_source (grid : Dem_loader.t) =
   let o = -.float (grid.Dem_loader.size / 2) in
   {
     src_grid = grid;
-    src_origin_x = o;
-    src_origin_y = o;
-    src_px_arcsec = 1.0;
+    src_to_index = Affine.inverse (Affine.diagonal ~sx:1.0 ~sy:1.0 ~tx:o ~ty:o);
     src_height_scale = base_height_scale;
     src_height_offset = base_height_offset;
   }
@@ -455,9 +528,7 @@ let base_source (grid : Dem_loader.t) =
 let as_source (t : t) =
   {
     src_grid = t.grid;
-    src_origin_x = t.origin_x;
-    src_origin_y = t.origin_y;
-    src_px_arcsec = t.layer.px_arcsec;
+    src_to_index = t.frame.to_index;
     src_height_scale = t.height_scale;
     src_height_offset = t.height_offset;
   }
@@ -486,24 +557,37 @@ let source_window (source : source) (g : Blend_core.geometry) =
   done;
   win
 
-let blend ~lat ~(source : source) (raw : raw) =
-  let { px_arcsec; size; fade_metres; _ } = raw.layer in
+(* Two rings in one projected CRS do share axes, but the composition below cannot
+   quite say so: it goes out through one frame and back in through the other, and
+   a projection composed with a numerical inverse of itself leaves off-diagonal
+   terms of order 1e-17 instead of zero. Snapped here, where the rounding is
+   introduced, so that [Blend_core.axis_aligned] stays an exact test rather than a
+   tolerance shared by two implementations -- and so the fast path is not lost to
+   noise. The term dropped displaces a sample by under 1e-6 of one, against the
+   ~20 samples a genuine 2.44-degree turn displaces. *)
+let snap_axes (m : Affine.t) ~size =
+  let negligible v = Float.abs v *. float size < 1e-6 in
+  if negligible m.Affine.b && negligible m.Affine.d then
+    { m with Affine.b = 0.; d = 0. }
+  else m
+
+let blend ~lat:_ ~(source : source) (raw : raw) =
+  let { size; fade_metres; _ } = raw.layer in
   let t0 = Brr.(Performance.now_ms G.performance) in
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let p =
     {
       Blend_core.size;
-      px_arcsec;
-      raw_origin_x = raw.origin_x;
-      raw_origin_y = raw.origin_y;
+      (* Refinement index to source index: out to arcseconds through the
+         refinement's own frame, back in through the source's. Both being
+         affine, so is the composition, whether or not the two grids share
+         axes. *)
+      to_src =
+        snap_axes (Affine.compose source.src_to_index raw.frame.of_index) ~size;
       src_size = source.src_grid.Dem_loader.size;
-      src_origin_x = source.src_origin_x;
-      src_origin_y = source.src_origin_y;
-      src_px_arcsec = source.src_px_arcsec;
       src_height_scale = source.src_height_scale;
       src_height_offset = source.src_height_offset;
-      fade_x = fade_metres /. (deltax *. px_arcsec);
-      fade_y = fade_metres /. (deltay *. px_arcsec);
+      fade_x = fade_metres /. raw.frame.step_x_m;
+      fade_y = fade_metres /. raw.frame.step_y_m;
     }
   in
   let win = source_window source (Blend_core.geometry p) in
@@ -524,8 +608,7 @@ let blend ~lat ~(source : source) (raw : raw) =
                 reshape_2 (genarray_of_array1 data) size (size * 2);
               size;
             };
-          origin_x = raw.origin_x;
-          origin_y = raw.origin_y;
+          frame = raw.frame;
           height_scale;
           height_offset;
         }
@@ -548,8 +631,8 @@ let rec prefetch layer ~lat ~lon =
      roaming against the ~40 MB that buys ~10 km for [l13], which is the wrong
      trade. Their absence offline is invisible -- the blend falls back to the
      coarser surface. *)
-  | Wms _ -> Lwt.return_unit
-  | Wmts { matrix_level; tiles_per_axis; block_tiles } ->
+  | Wms_projected _ -> Lwt.return_unit
+  | Wmts { matrix_level; tiles_per_axis; block_tiles; _ } ->
       prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon
 
 and prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon =

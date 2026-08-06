@@ -2450,19 +2450,299 @@ At 1.19 m spacing that waste lands on the normals: 1.72 cm over 1.19 m is a
 no headroom left. Which is where the artefacts come from, and they are visible at
 2.38 m today.
 
-So the fix is a tighter range, not more samples: measure the true range, or bound
-it against only the part of the source window the ring actually covers. That buys
-back about a third of the quantum and is the precondition for 1.19 m being worth
-landing.
+So the fix looked like a tighter range: measure the true range, or bound it
+against only the part of the source window the ring actually covers. **Measured,
+and wrong -- see the next section.**
+
+### The range bound is already exact to 1%, and the 7.98 cm figure was not slack
+
+`Blend_core.measure` (temporary, reverted) recomputed each blend without storing
+it, reporting every candidate bound side by side. At 44.73339,6.36308:
+
+| ring | h range | source window | source under the fade only | exact output | step now | step exact |
+| --- | --- | --- | --- | --- | --- | --- |
+| l13 2048 | 2264.6 m | 2186.7 | 2186.7 | 2251.9 | 3.46 cm | 3.44 cm |
+| 4.77 m 1024 | 1142.0 | 1134.1 | 1134.1 | 1128.3 | 1.75 | 1.72 |
+| 1.19 m 2048 | 731.7 | 730.3 | 730.3 | 729.9 | 1.12 | 1.11 |
+
+The bound is within **1%** of the exact range on all three. It could not be
+otherwise: the refinement and the surface beneath are the same terrain, so their
+ranges nearly coincide, and the union of two nearly equal intervals is not much
+wider than either. Restricting the source scan to the fade frame -- the change
+the section above proposed -- gains nothing at all: `b_frame` equals `b_all` to
+the metre, because the extreme source values sit near the edges anyway.
+
+The 7.98-vs-6.06 cm comparison that motivated this was not measuring slack. Those
+are two different Mont Blanc runs, and the difference is the nodata region on the
+Italian side: there the output *is* the base, so those base heights belong in the
+range and an exact pass would keep them. There is nothing to buy here. Anyone
+tempted again should re-run the measurement rather than trust either figure.
+
+### The corrugation on smooth slopes is IGN's data, not the pipeline
+
+Reported at 44.73339,6.36308 alpha=34 beta=77 zoom=0.88, with the procedural
+detail off: a fine diagonal corduroy across every smooth slope, uniform pitch,
+crossing terrain features rather than following them. Three things ruled out by
+measurement, in order:
+
+- **Not the height quantisation.** The blend's own step is 1.12 cm there, and it
+  enters the Sobel as independent rounding: `q/6.64` = 1.7 mm of slope noise, or
+  0.10 deg. Noise, and an order of magnitude below what is visible.
+- **Not the RG8 normal encoding**, which was the best remaining suspect: the
+  relief pyramid stores `n.xy * 0.5 + 0.5` in two bytes, so one LSB is
+  2/255 = **0.449 deg** of tilt, a systematic staircase rather than noise, and
+  half the 0.87 deg bar. Rebuilt the normal pyramid as RG16F holding raw `n.xy`
+  (8x finer near flat, and `EXT_color_buffer_float` for renderability): the
+  render changed by RMSE **0.15%** and the corduroy was pixel-for-pixel intact.
+  Recorded because the reasoning was sound and the answer was still no -- 0.449
+  deg is real headroom, just not what is visible here.
+- **Not the shading.** Writing the decoded normal straight to the framebuffer
+  shows the corduroy in the normal itself.
+
+It is in what the WMS returns: fetching the four GetMaps with `curl` and shading
+the raw float32 offline reproduces it before anything of ours touches it. I read
+that as flight-line striping in the DTM and said so. **Wrong** -- see below.
+
+### It is the geoplateforme's own reprojection, and the fix is to stop asking for WGS84G
+
+The observation that settled it (the user's): the
+`IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW` WMTS layer, a hillshade
+of the same product, has no corduroy at all. A hillshade is computed on the native
+grid and only the *image* is reprojected, so anything that survives our path but
+not that one is introduced between the two.
+
+LIDAR HD is 1 m in Lambert-93. The capabilities list a native layer,
+`IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93`, which serves it in
+`CRS=EPSG:2154` with no reprojection. Fetching the same ground both ways, warping
+both onto one 1 m raster and shading them identically: the Lambert grid is clean,
+the WGS84G grid is woven. Measured over 500 x 500 m:
+
+| comparison | height | normal |
+| --- | --- | --- |
+| WGS84G against the native grid | 0.156 m RMS | **3.06 deg RMS** |
+| WGS84G against a prefiltered reference resample | 0.174 m | **4.39 deg** |
+| our own plain *bilinear* reprojection against the same reference | 0.020 m | **0.82 deg** |
+
+So a naive bilinear reprojection done by us is five times better than what the
+service returns. The error field peaks at a 2.72 m wavelength running -16 deg,
+which is the second harmonic of the beat between the 1 m Lambert grid and the
+WGS84G level-16 grid it is resampled onto (1.193 m N-S, 0.846 m E-W: beats of
+6.18 m and 5.49 m). Whatever the server does, it is not filtering.
+
+Two things follow. The 3-4 deg it adds is four times the 0.87 deg bar, which is
+why it is visible at all; and it is *not* a reason to stay at 2.38 m -- the
+2 x 2 box mean only attenuates it. Our 1024-sample request lands exactly on WMTS
+level 16 (`5062.5 / 2^(L+1)` arcsec, so `L = 16`), which is also why the 512 and
+1024 outputs are exactly box-consistent: the pyramid is theirs, and we have been
+sampling it at its deepest level.
+
+The change: request `...ELEVATIONGRIDCOVERAGE.LAMB93` in EPSG:2154 at 1 m, on a
+bbox aligned to a fixed Lambert grid so nearby locations still share URLs (a
+1024 m grid is as deterministic as today's footprint rule, and dyadic in metres),
+and resample it ourselves in the blend. Costs: a Lambert-93 forward projection
+(~40 lines, GRS80 LCC 2SP, the constants are fixed), and a resample from a grid
+that is rotated by the meridian convergence (2.37 deg at 6.36 E) rather than
+axis-aligned -- the mapping is smooth, so a per-row linear approximation is exact
+to well under a sample and no transcendental need run per sample. ~17 MB for the
+current inner extent at 1 m against 16 MB today. Unmeasured: how much of this the
+4.77 m ring and l13 carry.
+
+**One projected grid will not do for every territory, and does not need to.**
+`...LAMB93` advertises `EPSG:2154` alone, over -5.16..9.57 E / 41.33..51.09 N:
+metropolitan France only. La Reunion has its own native layer,
+`...ELEVATIONGRIDCOVERAGE.RGR92UTM40S`, `EPSG:2975` alone, 55.21..55.84 E /
+-21.39..-20.86. Checked there too, at Piton des Neiges: the native UTM grid is
+clean and the WGS84G one carries a heavy rectangular stripe grid -- the same
+defect, worse than in the Alps.
+
+What makes this cheap is that every one of these projections is conformal, so
+over a ring the map from the projected metre grid to the world tangent frame is a
+*similarity*: rotation by the grid convergence, times a uniform scale. The
+renderer, the blend, visibility and POI anchoring therefore only ever need a
+rotation, a scale and an origin per ring, and never learn which projection
+produced them. Per territory the new code is a layer name, a CRS code, and one
+`forward : lat -> lon -> x * y` -- LCC 2SP and Transverse Mercator, both on
+GRS80, twenty to thirty lines each. Convergence and scale come from
+finite-differencing that forward at the ring centre; no analytic formula for
+either is needed.
+
+The similarity holds to far below a sample. At 6.36 E the convergence is 2.37 deg
+and varies by 0.008 deg across the ring, i.e. 0.17 m at its edge, with the scale
+factor moving by ~1e-6; at 55.48 E in zone 40 (central meridian 57 E) the
+convergence is 0.54 deg and varies by centimetres over the same span.
+
+Two consequences worth having in mind before writing it. If **both** LIDAR rings
+live in the same projected frame, the inner ring's blend onto the middle one stays
+axis-aligned and nothing in its addressing changes; only the outer LIDAR ring's
+blend onto l13 crosses frames, which is exactly the fade the annulus already
+exists to hide. And that one blend loses the row-pair cache -- 2.4 deg over 2048
+samples drifts 86 source rows across a single output row -- though an affine map
+still gives constant per-sample increments, so the loop stays incremental. The
+grid also becomes square, 1 x 1 m instead of 1.19 x 0.85, which makes the relief
+Sobel isotropic. The native layers advertise `MinScaleDenominator` 1785.7, i.e.
+0.5 m per pixel, so 1 m is well inside what they serve.
+
+### Implementing it
+
+Measured before starting, each candidate against a dense 36-tap reference on the
+same grid, so this is resampling error alone and nothing else:
+
+| | height | normal |
+| --- | --- | --- |
+| IGN WGS84G, what we fetch today | 0.172 m | **4.29 deg** |
+| our own plain bilinear | 0.011 m | 0.44 deg |
+| our own 4-tap box | 0.009 m | 0.39 deg |
+| our own 9-tap box | 0.006 m | **0.25 deg** |
+
+So reprojecting ourselves onto the existing graticule-aligned ring would recover
+about 94% of what is there, and keeping the ring on the projected grid recovers
+the rest and makes it square. The second was chosen. The two turned out to cost
+about the same, for a reason worth recording: **only one of the three blends
+crosses frames.** l13 over the base stays lat/lon to lat/lon; the inner LIDAR
+ring over the middle one is projected to projected in the *same* CRS, hence still
+axis-aligned; only the middle ring over l13 mixes the two. So `blend.wat` needs
+an added path rather than surgery, and its existing one stays bit-identical and
+still serves two blends out of three. Reprojecting in `Hd_dem` instead would have
+needed a resample kernel of its own -- 4M samples cannot run in OCaml on the
+fetch path, the blend's own resample being 448 ms there against 13.5 ms in wat.
+
+Staged so that every step is verifiable on its own:
+
+1. **`Projection`** (`src/lib`): LCC 2SP for Lambert-93, Transverse Mercator for
+   RGR92 / UTM 40S, both GRS80, plus the local Jacobian by differencing the
+   forward. Adding a territory is a forward projection and a bounding box.
+   *Done.* Checked against an independent implementation: 966189.32 / 6409476.24
+   at 44.73339,6.36308 and 341921.30 / 7666150.88 at Piton des Neiges,
+   convergence 2.44 deg and 0.55 deg, negative west of the central meridian, and
+   `None` outside both territories.
+2. **`Affine`** (`src/lib`) and **`Hd_dem.frame`**: one affine both ways between
+   arcseconds from the anchor and a fractional sample index, replacing the
+   origin-and-spacing every consumer was computing with. *Done*, along with the
+   six consumers -- eye height, POI anchoring, visibility, the relief bake's
+   spacing, and `hd_scale` becoming a `mat2` in `radial_common.vert`. Verified as
+   a no-op: **RMSE 0 and zero differing pixels** over the terrain at
+   44.73339,6.36308, with all three rings loading and blending to the same ranges
+   and steps as before. (The only difference in the frame was the service
+   worker's own "new version available" toast.)
+3. **`Blend_core`**: general affine addressing, with `Blend_wasm` using the
+   existing wat when the map is axis-aligned and the OCaml path otherwise. That
+   keeps `blend.wat` out of the critical path entirely -- the one rotated blend is
+   1024^2, which the OCaml path did in ~65 ms before it was ported. A rotated wat
+   path is then an optimisation to take or leave.
+4. **`Hd_dem`**: the projected layer kind -- bbox in the CRS's own metres aligned
+   to a fixed metre grid so URLs stay shared and cacheable, frame from the
+   Jacobian at the anchor. *Done.*
+5. Switch the two LIDAR rings over. *Done.*
+
+### Verifying it, and one real bug found on the way
+
+The two LIDAR rings now fetch `...ELEVATIONGRIDCOVERAGE.LAMB93` in EPSG:2154 and
+the corduroy is gone. Everything up to the grid is verified:
+
+- the four GetMaps return real data, 0% nodata, ranges matching what `curl`
+  returns for the same bboxes;
+- the blended grid's mean neighbour difference equals the samples' to four
+  decimals (1.6381 vs 1.6379 m on the middle ring), so the refinement is in the
+  grid and the fade is not eating it;
+- the wat and the OCaml reference agree on every blend, and the new general
+  (turned-axes) loop in `Blend_core` is **byte-identical** to the axis-aligned one
+  when given a diagonal map, checked natively.
+
+The render came out smoother, which looked like a regression and took a long
+chase to disprove. Ruled out along the way, each with a capture -- recorded
+because every one of them is a place a future change could genuinely break:
+
+- **not coverage.** First suspicion, and a real bug that was fixed: an alignment
+  grid of half the span let the anchor sit a quarter-span off centre, and the
+  middle ring then reached only 1292 m north of a camera looking north. Now a
+  quarter-span, and the middle ring is 5 m x 1024 for at least 1920 m of reach
+  against the 1832 m worst case of the ring it replaces. The detail did not come
+  back, and the nearest ground was never outside the inner ring anyway.
+- **not the blend, the fetch or the bake input**, per the three checks above.
+- **not the ring selection.** Colouring fragments by which slot they take shows
+  the rings being chosen exactly where they should be, and the normalised
+  coordinates ramp across the view at the right rate.
+- **not the relief bake's spacing.** It gets (0.997, 1.000) m and (4.988, 5.001)
+  m, against (21.9, 30.9) x px_arcsec before -- same magnitude.
+
+- **not the level the pyramid is read at.** Instrumented: `lod_raw` and the
+  chosen level passed out of `computeRadialVertex` as a varying, plus the
+  fragment's own automatic LOD from the derivative of `hdReliefCoord`. Down the
+  middle of the frame:
+
+  | screen y | slot | `lod_raw` | level | ground | fragment LOD |
+  | --- | --- | --- | --- | --- | --- |
+  | 780-600 | 0 (1 m) | -3.51 | 1 | 2 m | 0 |
+  | 540 | 0 | -2.50 | 2 | 4 m | 0.5 |
+  | 480 | 0 | -2.44 | 2 | 4 m | 0.2 |
+  | <=420 | 1 (5 m) | <=-2.38 | 0 | 5 m | 0 |
+
+  Correct, and *finer* than what it replaces: at the bottom the old ring computes
+  `max(0, -3.51 + 3.695) = 0.18`, i.e. level 0 of a 2.38 m grid, against 2 m now;
+  at y=480 it gets 4.77 m against 4 m. `hd_lod_bias` and `arcsec_step` are
+  exonerated -- they were the leading hypothesis and they are wrong.
+
+- **not the bake.** Read back out of the GPU rather than inferred: a framebuffer
+  over each baked texture, `readPixels` of the central 256^2, decoded.
+
+  | ring | input tile | baked height level 0 | normal sd (x, y) |
+  | --- | --- | --- | --- |
+  | inner, 1 m | 0.650 m mean \|dx\| | **0.650 m** | 0.456, 0.193 |
+  | middle, 5 m | 1.795 m | **1.795 m** | 0.349, 0.256 |
+  | l13, 9.5 m | 2.414 m | **2.414 m** | 0.338, 0.350 |
+
+  The height pyramid reproduces its input exactly and the normal textures carry
+  strong relief. Nothing is being smoothed.
+
+### There was no regression: the detail that went missing was IGN's noise
+
+Every link measured correct, which was the cue to doubt the premise rather than
+keep bisecting. Comparing the two products directly on the same ground, over the
+600^2 centre of the same footprint:
+
+| | mean \|dh\|/m, across / along | residual after a 3-tap smooth |
+| --- | --- | --- |
+| native Lambert, 1 m | 0.2180 / 0.2503 -> 12.30 / 14.05 deg | **0.0518 m rms** |
+| IGN WGS84G | 0.2215 / 0.2733 -> 12.49 / 15.29 deg | **0.0790 m rms** |
+
+The real terrain slope is the same in both. What the WGS84G grid has and the
+native one does not is **52% more energy at the very finest scale** -- which is
+exactly the corduroy, 0.172 m of height error and 4.29 degrees of normal error.
+So the render is smoother because the noise that was reading as detail is gone,
+and no real detail was lost. Same lesson as the procedural bump masking the
+1.19 m data, running the other way: a high-frequency artefact reads as
+resolution.
+
+Two cautions worth keeping. Screen-space high-pass energy is **not** a measure of
+detail -- it scored l13 alone above the 5 m ring, because facet edges and
+quantisation steps are high-frequency too; compare grids, not renders. And a warm
+capture profile serves the previous `blend.wasm` from the service worker's app
+cache while running the new viewer, a silent parameter mismatch that produced a
+5 889 564 m height range before it was noticed. The capture script now drops the
+`mountains-*` caches and keeps `v1`, so tiles stay warm and the shell does not.
+
+What is genuinely new and visible is **faceting** on smooth near ground, which
+the corduroy was hiding. It belongs with the procedural bump's amplitude as an
+appearance item, not with this change.
+
+A caution learned twice over: a warm capture profile serves the previous
+`blend.wasm` from the service worker's app cache while running the new viewer,
+which is a silent parameter mismatch and produced a 5 889 564 m height range
+before it was noticed. The capture script now drops the `mountains-*` caches and
+keeps `v1`, so the tiles stay warm and the shell does not.
+
+
+
+Sizing at step 4: 1 m square, 2048 samples for the inner ring (2048 m per side,
+against +-1.22 x 0.87 km today) and 1024 at 4 m for the middle (4096 m, against
++-2.44 x 1.70 km). Alignment 1024 m and 2048 m, both exact in the URL. Same
+number of GetMaps and the same bytes as today.
 
 ### Order of work
 
-1. **Tighten the blend's output range** for refinement rings. Self-contained, and
-   it attacks artefacts visible at 2.38 m now.
+1. **Move the LIDAR rings to the LAMB93 layer** and reproject in the blend. This
+   is what the user is seeing today, and it makes 1.19 m worth having rather than
+   a trade.
 2. **Reduce the procedural bump's amplitude at close range.** `ac8ddc5` fixed its
    aliasing, not its dominance; the amplitude is an aesthetic choice.
-3. **Then re-land 1.19 m** (`size:2048` on `lidar_2m`), where it will be visible.
-   Everything needed is measured: the service's output at that depth is genuine
-   and exactly box-consistent (4609c4d), and the costs are known -- 16 MB on the
-   wire, 42 ms of blend, 16 MiB of GPU, and visibility back to ~877 ms because
-   `near_step` follows the finest grid.
+3. Tightening the blend's range is **closed**, measured: no slack to recover.

@@ -1,27 +1,19 @@
 (** Near-field high-resolution elevation (IGN RGE ALTI, live WMTS fetch).
 
-    A grid is a square block of WGS84G tiles, {!layer.size} samples per side at
-    {!layer.px_arcsec} arcseconds per sample, centred on the tile holding the
-    location. Its position is not tied to the anchor arcsecond, so consumers
-    must use the origin returned by {!blend}. Several layers can be nested, so
-    nothing here is a global constant: read the spacing and the sample count off
-    the {!layer} carried by the grid in hand. *)
+    A grid is a square block of {!layer.size} samples per side, positioned by
+    the {!frame} that {!blend} returns. Its axes are not necessarily north and
+    east and its position is not tied to the anchor arcsecond, so consumers must
+    go through that frame rather than assume either. Several layers can be
+    nested, so nothing here is a global constant: read the frame and the sample
+    count off the grid in hand. *)
 
-type kind =
-  | Wmts of { matrix_level : int; tiles_per_axis : int; block_tiles : int }
-      (** A block of tiles from a WGS84G matrix level, centred on the tile
-          holding the location. *)
-  | Wms of { wms_name : string; step_arcsec : float; steps : int; split : int }
-      (** GetMap over a bbox aligned to a [step_arcsec] grid and spanning
-          [steps] steps, centred on the grid corner nearest the location.
-          Resolution is free-form: the matrix levels do not bound it. Fetched as
-          [split] x [split] pieces, so one failed request costs a quadrant
-          rather than the ring; exact, because a piece has the same pixel pitch
-          as the whole. *)
+type kind
+(** How a block is fetched: a WGS84G tile matrix, a geographic GetMap, or a
+    GetMap in the CRS the product is stored in. Opaque -- only the layers below
+    build one, and consumers have no reason to tell them apart. *)
 
 type layer = {
   kind : kind;
-  px_arcsec : float;  (** sample spacing; derived, never a power of two *)
   size : int;  (** samples per side *)
   fade_metres : float;
       (** width of the annulus over which the refinement is faded back into the
@@ -35,17 +27,19 @@ val l13 : layer
     samples per side, 19.5 x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)
 
 val lidar_5m : layer
-(** LIDAR HD bare earth over WMS: 0.1545 arcsec (4.77 m N-S, 3.31 m E-W at 46
-    degrees), 1024 samples over 4 x 4 level-14 footprints, i.e. +-2.44 x 1.70
-    km. 2 x 2 GetMaps of 512^2, 4.0 MB in total. Nests inside {!l13};
-    {!lidar_2m} nests inside it, exactly box-consistent with it. *)
+(** LIDAR HD bare earth, in the CRS the product is stored in: 4 m square, 1024
+    samples, 4096 m per side. 2 x 2 GetMaps of 512^2, 4.0 MB in total. Nests
+    inside {!l13}; {!lidar_2m} nests inside it, exactly box-consistent with it.
+*)
 
 val lidar_2m : layer
-(** LIDAR HD bare earth over WMS: 0.0386 arcsec (1.19 m N-S, 0.83 m E-W at 46
-    degrees), 2048 samples over 2 x 2 level-14 footprints, i.e. +-1.22 x 0.87
-    km. 2 x 2 GetMaps of 1024^2, 16.0 MB (the WMS endpoint does not compress).
-    Exactly box-consistent with {!lidar_5m}, both being resolutions of one
-    layer. *)
+(** LIDAR HD bare earth at the product's own 1 m, so nothing resamples it: 2048
+    samples, 2048 m per side. 2 x 2 GetMaps of 1024^2, 16.0 MB (this endpoint
+    does not compress). Exactly box-consistent with {!lidar_5m}, both being
+    resolutions of one layer.
+
+    Absent, like {!lidar_5m}, wherever {!Projection} has no CRS for the
+    location: {!fetch} answers [None] and the blend falls back to {!l13}. *)
 
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the
@@ -60,11 +54,31 @@ val fetch : layer -> lat:float -> lon:float -> raw option Lwt.t
     flight when the deadline expires -- are nodata, which {!blend} turns back
     into the coarser surface. *)
 
+type frame = {
+  to_index : Affine.t;
+      (** arcseconds from the anchor arcsecond to a fractional (column, row) *)
+  of_index : Affine.t;  (** and back *)
+  arcsec_step : float;
+      (** sample pitch in arcseconds: the mip level the mesh reads and how
+          finely a sight line is walked are both measured against the
+          one-arcsecond base grid *)
+  step_x_m : float;  (** metres on the ground per column step *)
+  step_y_m : float;
+}
+(** Where a refinement's samples sit. Rows count from the south, as everywhere
+    else.
+
+    For a graticule-aligned block this is exactly the
+    [(offset - origin) / px_arcsec] that consumers used to compute themselves.
+    For a block served in its own projected CRS the off-diagonal terms are not
+    zero, because its axes are turned from north by that CRS's grid convergence
+    -- 2.44 degrees at 6.36 E. Reading the frame rather than an origin and a
+    spacing is what lets both kinds share one path. *)
+
 type t = {
   layer : layer;  (** the layer this grid came from *)
   grid : Dem_loader.t;  (** blended heights, row 0 southernmost *)
-  origin_x : float;  (** arcseconds from the anchor to sample column 0 *)
-  origin_y : float;  (** arcseconds from the anchor to the southernmost row *)
+  frame : frame;  (** where those samples sit *)
   height_scale : float;
       (** metres per u16 step of {!grid}. Each grid is quantised over only the
           height range it holds -- a few hundred metres rather than the base

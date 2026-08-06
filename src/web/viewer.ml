@@ -1049,10 +1049,9 @@ let downsample_k _level = 0.25
    it the same way -- a refinement's grid spans a few hundred metres of height,
    and baking it through the base scale put 14.5 cm steps into normals that are
    divided by a spacing several times finer. *)
-let compute_relief ?(spacing_scale = 1.0) ?(border = true)
-    ?(height_scale = 9500. /. 65535.) ?(height_offset = -500.) ctx width height
-    lat triangle_geo tile_texture normal_pid downsample_pid
-    (u : Render_state.relief_uniforms)
+let compute_relief ?spacing_m ?(border = true) ?(height_scale = 9500. /. 65535.)
+    ?(height_offset = -500.) ctx width height lat triangle_geo tile_texture
+    normal_pid downsample_pid (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
 
@@ -1131,8 +1130,16 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true)
   Gl.uniform2f ctx u.size (float width) (float height);
 
   (* Use the provided latitude for normals *)
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-  let deltax = deltax *. spacing_scale and deltay = deltay *. spacing_scale in
+  (* Ground metres between samples. The base pyramid derives them from the
+     latitude; a refinement passes its own, which for a grid in a projected CRS
+     is not a multiple of the base spacing at all. *)
+  let deltax, deltay =
+    match spacing_m with
+    | Some (mx, my) -> (mx, my)
+    | None ->
+        let dx, dy, _ = Render_state.compute_deltas ~lat in
+        (dx, dy)
+  in
   Gl.uniform2f ctx u.delta deltax deltay;
   (* Level 0 samples full tile texture *)
   Gl.uniform2f ctx u.uv_scale 1.0 1.0;
@@ -3238,8 +3245,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            it is looking out of. Read the eye height off the grid that is
            drawn. *)
         let from_ring (g : Hd_dem.t) =
-          let gx = (off_x -. g.origin_x) /. g.layer.px_arcsec in
-          let gy = (off_y -. g.origin_y) /. g.layer.px_arcsec in
+          let gx, gy = Affine.apply g.frame.to_index off_x off_y in
           if
             gx >= 0.
             && gx <= float (g.layer.size - 2)
@@ -3259,8 +3265,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             (* Then lift to clear the neighbourhood: see [eye_clearance_m]. The
                window always contains the four samples the interpolation used, so
                this can only raise the eye, never lower it into the ground. *)
-            let mx = deltax *. g.layer.px_arcsec
-            and my = deltay *. g.layer.px_arcsec in
+            let mx = g.frame.step_x_m and my = g.frame.step_y_m in
             let rx = int_of_float (ceil (eye_clearance_m /. mx))
             and ry = int_of_float (ceil (eye_clearance_m /. my)) in
             let highest = ref interpolated in
@@ -3299,11 +3304,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let tex = make_tile_texture ctx g.grid in
             let hd_relief_texture, hd_relief_normal_texture =
               time_gpu ctx "compute_relief_hd" (fun () ->
-                  compute_relief ~spacing_scale:g.layer.px_arcsec ~border:false
-                    ~height_scale:g.height_scale ~height_offset:g.height_offset
-                    ctx g.layer.size g.layer.size lat triangle_geo tex
-                    normal_pid downsample_pid relief_uniforms
-                    downsample_uniforms)
+                  compute_relief
+                    ~spacing_m:(g.frame.step_x_m, g.frame.step_y_m)
+                    ~border:false ~height_scale:g.height_scale
+                    ~height_offset:g.height_offset ctx g.layer.size g.layer.size
+                    lat triangle_geo tex normal_pid downsample_pid
+                    relief_uniforms downsample_uniforms)
             in
             (* Nothing reads the source grid on the GPU after the bake. *)
             Gl.delete_texture ctx tex;
@@ -3342,10 +3348,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             Some
               {
                 Render_state.hd_size = g.layer.size;
-                hd_px_arcsec = g.layer.px_arcsec;
+                hd_to_index = g.frame.to_index;
+                hd_arcsec_step = g.frame.arcsec_step;
                 hd_height_scale = g.height_scale;
                 hd_height_offset = g.height_offset;
-                hd_origin = (g.origin_x, g.origin_y);
               })
           hd_grids
       in
@@ -3394,11 +3400,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let get_h = Hd_dem.get_height g in
             let limit = float (g.layer.size - 2) in
             {
-              Visibility.step = 0.5 *. g.layer.px_arcsec;
+              Visibility.step = 0.5 *. g.frame.arcsec_step;
               sample =
                 (fun bx by ->
-                  let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
-                  let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
+                  let hx, hy =
+                    Affine.apply g.frame.to_index (bx -. float x) (by -. float y)
+                  in
                   if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
                     Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
                   else None);
@@ -3473,12 +3480,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                LOD selection shifted by its refinement factor. *)
             let z =
               let r = sqrt r2 in
-              let hd_pos (l : Hd_dem.layer) gc o =
-                (gc -. float (w / 2) -. o) /. l.px_arcsec
-              in
               let from_ring (g : Hd_dem.t) =
-                let hd_x = hd_pos g.layer x' g.origin_x
-                and hd_y = hd_pos g.layer y' g.origin_y in
+                let hd_x, hd_y =
+                  Affine.apply g.frame.to_index
+                    (x' -. float (w / 2))
+                    (y' -. float (w / 2))
+                in
                 if
                   hd_x >= 0.
                   && hd_x <= float (g.layer.size - 1)
@@ -3488,7 +3495,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                   Some
                     (rendered_height ~get_height:(Hd_dem.get_height g)
                        ~radial_params
-                       ~inv_avg_delta:(inv_avg_delta /. g.layer.px_arcsec)
+                       ~inv_avg_delta:(inv_avg_delta /. g.frame.arcsec_step)
                        ~size:g.layer.size ~r ~gx:hd_x ~gy:hd_y)
                 else None
               in

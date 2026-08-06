@@ -46,8 +46,6 @@
   (global $g_edge_y (mut f64) (f64.const 0))
 
   ;; The refinement-to-source mapping.
-  (global $g_px (mut f64) (f64.const 0))
-  (global $g_spx (mut f64) (f64.const 0))
   (global $g_src_max (mut f64) (f64.const 0)) ;; f64(src_size - 2)
 
   ;; Height in metres of source sample (row, col), absolute indices, decoded
@@ -80,14 +78,16 @@
   ;; Fractional source index of refinement sample [j] along one axis, clamped so
   ;; the bilinear pair [i], [i+1] stays inside the grid. Same grouping as the
   ;; OCaml: ((o - origin) + j * px) / spx.
-  (func $index_of (param $origin f64) (param $o f64) (param $j i32) (result f64)
+;; Fractional source index along one axis, clamped so the bilinear pair stays
+  ;; inside the grid: [$m] is the source samples per refinement sample and [$k]
+  ;; the source index of refinement sample zero, i.e. one row of the affine map
+  ;; [Blend_core.to_src]. Only reached with axes that agree -- the caller runs
+  ;; the OCaml path when they do not -- so one index per axis is enough.
+  (func $index_of (param $m f64) (param $k f64) (param $j i32) (result f64)
     (f64.max (f64.const 0)
       (f64.min (global.get $g_src_max)
-        (f64.div
-          (f64.add (f64.sub (local.get $o) (local.get $origin))
-                   (f64.mul (f64.convert_i32_s (local.get $j))
-                            (global.get $g_px)))
-          (global.get $g_spx))))
+        (f64.add (f64.mul (local.get $m) (f64.convert_i32_s (local.get $j)))
+                 (local.get $k))))
   )
 
   (func $smoothstep (param $t f64) (result f64)
@@ -363,12 +363,10 @@
     (param $row_lo i32)
     (param $n_cols i32)
     (param $n_rows i32)
-    (param $px f64)
-    (param $spx f64)
-    (param $rox f64)
-    (param $roy f64)
-    (param $sox f64)
-    (param $soy f64)
+    (param $m_col f64)   ;; source columns per refinement column
+    (param $k_col f64)   ;; source column of refinement column zero
+    (param $m_row f64)   ;; source rows per refinement row
+    (param $k_row f64)   ;; source row of refinement row zero
     (param $shs f64)
     (param $sho f64)
     (param $fade_x f64)
@@ -398,8 +396,6 @@
     (global.set $g_col_lo (local.get $col_lo))
     (global.set $g_hs (local.get $shs))
     (global.set $g_ho (local.get $sho))
-    (global.set $g_px (local.get $px))
-    (global.set $g_spx (local.get $spx))
     (global.set $g_src_max
       (f64.convert_i32_s (i32.sub (local.get $src_size) (i32.const 2))))
 
@@ -501,7 +497,7 @@
     ;; ---- per-column source index, fraction and edge fade
     (local.set $j (i32.const 0))
     (loop $pre
-      (local.set $c (call $index_of (local.get $sox) (local.get $rox)
+      (local.set $c (call $index_of (local.get $m_col) (local.get $k_col)
                                     (local.get $j)))
       (local.set $bfl (f64.floor (local.get $c)))
       (i32.store (i32.add (local.get $bx_p)
@@ -572,7 +568,7 @@
     (local.set $cur_by (i32.const -1))
     (local.set $u (i32.const 0))
     (loop $row_loop
-      (local.set $cby (call $index_of (local.get $soy) (local.get $roy)
+      (local.set $cby (call $index_of (local.get $m_row) (local.get $k_row)
                                       (local.get $u)))
       (local.set $by (i32.trunc_sat_f64_s (f64.floor (local.get $cby))))
       (local.set $fy (f64.sub (local.get $cby)

@@ -29,8 +29,12 @@ uniform highp sampler2D relief;
 #define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief[HD_SLOTS];
-uniform highp float hd_scale[HD_SLOTS]; // 1 / extent of the ring, in arcseconds
-uniform highp vec2 hd_bias[HD_SLOTS];   // normalized position of the anchor
+// Arcseconds from the anchor to a position normalized over the ring. A ring on
+// a projected grid has axes turned from north by its CRS's grid convergence, so
+// this is a 2x2 rather than one scale per axis; the translation is separate
+// because GLSL ES 3.0 has no mat3x2.
+uniform highp mat2 hd_mat[HD_SLOTS];
+uniform highp vec2 hd_bias[HD_SLOTS];
 uniform highp float hd_lod_bias[HD_SLOTS]; // log2 of refinement over the base
 uniform highp int hd_max_lod[HD_SLOTS];
 uniform highp float hd_height_scale_n[HD_SLOTS];
@@ -103,19 +107,19 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
   // The bias is relative to the base spacing, and applies before the clamp to
   // level 0: near the camera the mesh is finer than the base grid, which is
   // precisely where the extra levels pay off.
-  highp vec2 c0 = coord * hd_scale[0] + hd_bias[0];
+  highp vec2 c0 = hd_mat[0] * coord + hd_bias[0];
   if (insideHd(0, c0))
     return sampleReliefHeight(
         hd_relief[0], c0,
         min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]),
         hd_height_scale_n[0], hd_height_offset[0]);
-  highp vec2 c1 = coord * hd_scale[1] + hd_bias[1];
+  highp vec2 c1 = hd_mat[1] * coord + hd_bias[1];
   if (insideHd(1, c1))
     return sampleReliefHeight(
         hd_relief[1], c1,
         min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]),
         hd_height_scale_n[1], hd_height_offset[1]);
-  highp vec2 c2 = coord * hd_scale[2] + hd_bias[2];
+  highp vec2 c2 = hd_mat[2] * coord + hd_bias[2];
   if (insideHd(2, c2))
     return sampleReliefHeight(
         hd_relief[2], c2,
@@ -160,9 +164,9 @@ RadialVertex computeRadialVertex() {
 
   // Normalized coordinate (no flip: row 0 is south, see [Dem_loader.load])
   v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
-  v.hd_coord[0] = vec2(coord.x, coord.y) * hd_scale[0] + hd_bias[0];
-  v.hd_coord[1] = vec2(coord.x, coord.y) * hd_scale[1] + hd_bias[1];
-  v.hd_coord[2] = vec2(coord.x, coord.y) * hd_scale[2] + hd_bias[2];
+  v.hd_coord[0] = hd_mat[0] * vec2(coord.x, coord.y) + hd_bias[0];
+  v.hd_coord[1] = hd_mat[1] * vec2(coord.x, coord.y) + hd_bias[1];
+  v.hd_coord[2] = hd_mat[2] * vec2(coord.x, coord.y) + hd_bias[2];
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
 
   // Earth curvature with standard atmospheric refraction folded in

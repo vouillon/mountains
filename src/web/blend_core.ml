@@ -26,34 +26,33 @@ let smoothstep t =
    samples arrive north-up, which the resampling loop accounts for. *)
 type params = {
   size : int; (* samples per side of the refinement *)
-  px_arcsec : float; (* its sample spacing *)
-  raw_origin_x : float; (* arcseconds from the anchor to its column 0 *)
-  raw_origin_y : float; (* ... and to its southernmost row *)
+  to_src : Affine.t;
+      (* refinement sample index to fractional source sample index. One map
+         rather than an origin and a spacing per axis, because a refinement
+         served in its own projected CRS sits on a grid whose axes are turned
+         from the source's -- see [Hd_dem.frame]. The graticule-aligned case is
+         this with [b] and [d] zero, which is what [Blend_wasm] tests for. *)
   src_size : int; (* samples per side of the surface beneath *)
-  src_origin_x : float;
-  src_origin_y : float;
-  src_px_arcsec : float;
   src_height_scale : float; (* metres per u16 step of the source *)
   src_height_offset : float; (* metres at source u16 zero *)
   fade_x : float; (* fade width, in refinement samples, per axis *)
   fade_y : float;
 }
 
-(* Fine sample [j] sits [o + j * px_arcsec] arcseconds from the anchor; the
-   source's own origin and spacing turn that into a fractional source index,
-   clamped so the bilinear pair [i], [i + 1] stays inside the grid. The
-   refinement's samples fall between the source's at a fixed fractional step, so
-   neither grid need be a power-of-two multiple of the other.
+(* Fractional source index of refinement sample [(j, u)], clamped so the
+   bilinear pair [i], [i + 1] stays inside the grid on both axes. The two grids
+   need not be power-of-two multiples of one another, or even share axes. *)
+let source_index p j u =
+  let c, r = Affine.apply p.to_src (float j) (float u) in
+  let lim = float (p.src_size - 2) in
+  (Float.max 0. (Float.min lim c), Float.max 0. (Float.min lim r))
 
-   Written so that the base case is bit-identical to the hardcoded form this
-   replaced: subtracting a negative origin is exactly adding, addition is
-   commutative in IEEE754, the grouping is unchanged, and dividing by a spacing
-   of 1.0 is exact. *)
-let source_index p origin o j =
-  Float.max 0.
-    (Float.min
-       (float (p.src_size - 2))
-       ((o -. origin +. (float j *. p.px_arcsec)) /. p.src_px_arcsec))
+(* True when columns depend only on [j] and rows only on [u], so the resampling
+   loop can hoist one source row pair per source row and precompute the column
+   indices once for the whole grid. Every blend but one is like this: the base
+   and l13 are on the graticule, and two rings in the same projected CRS share
+   axes with each other. *)
+let axis_aligned p = p.to_src.Affine.b = 0. && p.to_src.Affine.d = 0.
 
 (* The rectangle of the source that a blend reads: the bilinear window, plus the
    one row and column beyond it that the range scan reaches. This is what has to
@@ -70,12 +69,28 @@ type geometry = {
 
 let geometry p =
   let last = p.src_size - 1 in
-  let col_of j = source_index p p.src_origin_x p.raw_origin_x j in
-  let col_lo = int_of_float (floor (col_of 0)) in
-  let col_hi = int_of_float (floor (col_of (p.size - 1))) + 1 in
-  let row_of u = source_index p p.src_origin_y p.raw_origin_y u in
-  let row_lo = int_of_float (floor (row_of 0)) in
-  let row_hi = int_of_float (floor (row_of (p.size - 1))) + 1 in
+  (* An affine map takes a rectangle to a parallelogram, whose extreme
+     coordinates are attained at the corners; the clamp in [source_index] is
+     monotone, so it cannot move an interior sample outside the corners' box
+     either. Four corners therefore bound the whole grid, turned or not. *)
+  let e = p.size - 1 in
+  let corners =
+    [
+      source_index p 0 0;
+      source_index p e 0;
+      source_index p 0 e;
+      source_index p e e;
+    ]
+  in
+  let extent f =
+    ( List.fold_left (fun a c -> Float.min a (f c)) infinity corners,
+      List.fold_left (fun a c -> Float.max a (f c)) neg_infinity corners )
+  in
+  let col_min, col_max = extent fst and row_min, row_max = extent snd in
+  let col_lo = int_of_float (floor col_min) in
+  let col_hi = int_of_float (floor col_max) + 1 in
+  let row_lo = int_of_float (floor row_min) in
+  let row_hi = int_of_float (floor row_max) + 1 in
   {
     col_lo;
     row_lo;
@@ -203,7 +218,7 @@ let run p ~(samples : (float, float32_elt, c_layout) Array1.t)
       (float_of_int ((high lsl 8) lor low) *. p.src_height_scale)
       +. p.src_height_offset
     in
-    let col_of j = source_index p p.src_origin_x p.raw_origin_x j in
+    let col_of j = fst (source_index p j 0) in
     let bx = Array.make size 0 and fx = Array.make size 0. in
     for j = 0 to size - 1 do
       let c = col_of j in
@@ -232,58 +247,88 @@ let run p ~(samples : (float, float32_elt, c_layout) Array1.t)
     let height_scale = Float.max 1e-6 ((!hi -. !lo) /. 65535.) in
     let inv = 1. /. height_scale in
     let out = Array1.create int8_unsigned c_layout (size * size * 2) in
-    (* One base row pair resampled per base row rather than per sample. *)
-    let rowa = Array.make (g.n_cols + 1) 0. in
-    let rowb = Array.make (g.n_cols + 1) 0. in
-    let rowv = Array.make (g.n_cols + 1) 0. in
-    let cur_by = ref (-1) in
     (* Per-column edge fade, hoisted out of the inner loop. *)
     let edge_x = Array.make size 0. in
     for j = 0 to size - 1 do
       edge_x.(j) <- float (min j (size - 1 - j)) /. p.fade_x
     done;
-    for u = 0 to size - 1 do
-      let cby = source_index p p.src_origin_y p.raw_origin_y u in
-      let by = int_of_float (floor cby) in
-      let fy = cby -. float by in
-      if by <> !cur_by then begin
-        cur_by := by;
+    (* The fade and the store, shared by the two resampling loops below so there
+       is one copy of them however the source is addressed. *)
+    let emit ~b ~ex ~edge_y ~src_row ~dst_row j =
+      let h = Array1.unsafe_get src (src_row + j) in
+      let v =
+        if h < nodata_limit then b
+        else
+          let t = Float.min ex edge_y in
+          let t =
+            match dist with
+            | None -> t
+            | Some d ->
+                Float.min t
+                  (float (Char.code (Bytes.unsafe_get d (src_row + j)))
+                  /. fade_nodata)
+          in
+          b +. (smoothstep t *. (h -. b))
+      in
+      let q = int_of_float (((v -. height_offset) *. inv) +. 0.5) in
+      let q = if q < 0 then 0 else if q > 65535 then 65535 else q in
+      Array1.unsafe_set out (dst_row + (2 * j)) (q land 0xff);
+      Array1.unsafe_set out (dst_row + (2 * j) + 1) (q lsr 8)
+    in
+    (* Row 0 of the raster is the northernmost one, row 0 of a DEM tile the
+       southernmost. *)
+    let src_row u = (size - 1 - u) * size and dst_row u = u * size * 2 in
+    let edge_y u = float (min u (size - 1 - u)) /. p.fade_y in
+    if axis_aligned p then begin
+      (* One base row pair resampled per base row rather than per sample, and
+         the column indices from the precomputed table. This is the arithmetic
+         [blend.wat] reproduces, so it is written the way the wat is. *)
+      let rowa = Array.make (g.n_cols + 1) 0. in
+      let rowb = Array.make (g.n_cols + 1) 0. in
+      let rowv = Array.make (g.n_cols + 1) 0. in
+      let cur_by = ref (-1) in
+      for u = 0 to size - 1 do
+        let cby = snd (source_index p 0 u) in
+        let by = int_of_float (floor cby) in
+        let fy = cby -. float by in
+        if by <> !cur_by then begin
+          cur_by := by;
+          for k = 0 to g.n_cols - 1 do
+            rowa.(k) <- get_base by (g.col_lo + k);
+            rowb.(k) <- get_base (by + 1) (g.col_lo + k)
+          done
+        end;
         for k = 0 to g.n_cols - 1 do
-          rowa.(k) <- get_base by (g.col_lo + k);
-          rowb.(k) <- get_base (by + 1) (g.col_lo + k)
+          rowv.(k) <- rowa.(k) +. (fy *. (rowb.(k) -. rowa.(k)))
+        done;
+        let edge_y = edge_y u and src_row = src_row u and dst_row = dst_row u in
+        for j = 0 to size - 1 do
+          let k = bx.(j) in
+          let b = rowv.(k) +. (fx.(j) *. (rowv.(k + 1) -. rowv.(k))) in
+          emit ~b ~ex:edge_x.(j) ~edge_y ~src_row ~dst_row j
         done
-      end;
-      for k = 0 to g.n_cols - 1 do
-        rowv.(k) <- rowa.(k) +. (fy *. (rowb.(k) -. rowa.(k)))
-      done;
-      let edge_y = float (min u (size - 1 - u)) /. p.fade_y in
-      (* Row 0 of the raster is the northernmost one, row 0 of a DEM tile the
-         southernmost. *)
-      let src_row = (size - 1 - u) * size in
-      let dst_row = u * size * 2 in
-      for j = 0 to size - 1 do
-        let k = bx.(j) in
-        let b = rowv.(k) +. (fx.(j) *. (rowv.(k + 1) -. rowv.(k))) in
-        let h = Array1.unsafe_get src (src_row + j) in
-        let v =
-          if h < nodata_limit then b
-          else
-            let t = Float.min edge_x.(j) edge_y in
-            let t =
-              match dist with
-              | None -> t
-              | Some d ->
-                  Float.min t
-                    (float (Char.code (Bytes.unsafe_get d (src_row + j)))
-                    /. fade_nodata)
-            in
-            b +. (smoothstep t *. (h -. b))
-        in
-        let q = int_of_float (((v -. height_offset) *. inv) +. 0.5) in
-        let q = if q < 0 then 0 else if q > 65535 then 65535 else q in
-        Array1.unsafe_set out (dst_row + (2 * j)) (q land 0xff);
-        Array1.unsafe_set out (dst_row + (2 * j) + 1) (q lsr 8)
       done
-    done;
+    end
+    else
+      (* Turned axes: the source row under a sample changes along the row, so
+         there is no row pair to hoist and every sample pays a full bilinear.
+         Only one blend in the chain is like this -- the outermost ring on a
+         projected grid over the graticule-aligned surface beneath it -- and it
+         is the smaller of the two projected ones. *)
+      for u = 0 to size - 1 do
+        let edge_y = edge_y u and src_row = src_row u and dst_row = dst_row u in
+        for j = 0 to size - 1 do
+          let c, r = source_index p j u in
+          let fc = floor c and fr = floor r in
+          let ic = int_of_float fc and ir = int_of_float fr in
+          let tc = c -. fc and tr = r -. fr in
+          let h00 = get_base ir ic and h10 = get_base ir (ic + 1) in
+          let h01 = get_base (ir + 1) ic and h11 = get_base (ir + 1) (ic + 1) in
+          let b0 = h00 +. (tc *. (h10 -. h00)) in
+          let b1 = h01 +. (tc *. (h11 -. h01)) in
+          let b = b0 +. (tr *. (b1 -. b0)) in
+          emit ~b ~ex:edge_x.(j) ~edge_y ~src_row ~dst_row j
+        done
+      done;
     Some { data = out; height_scale; height_offset; range = !hi -. !lo }
   end
