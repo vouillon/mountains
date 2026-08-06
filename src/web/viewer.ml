@@ -215,7 +215,11 @@ type program = Web_utils.program_spec = {
 }
 
 let n_sectors = 512
-let n_rings = 1024
+let n_rings = 1754
+(*
+let k = 3.14 /. 2. /. float n_sectors;;
+log (70000. *. (exp(k) -. 1.) +. 1.) /. k +. 1.;;
+*)
 
 (* The index buffer built by [build_indices] is block-major: [n_index_blocks]
    contiguous runs of equal size, block [b] covering the sector range
