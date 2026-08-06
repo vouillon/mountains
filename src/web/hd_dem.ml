@@ -81,7 +81,14 @@ type frame = {
       (* sample pitch in arcseconds: sets the mip level the mesh reads and how
          finely a sight line is walked, both of which are measured against the
          one-arcsecond base grid *)
-  step_x_m : float; (* metres on the ground per column step *)
+  axis_x : float * float;
+      (* one column step as an east/north displacement in metres. Not along east
+         for a projected grid: its axes are turned by the CRS's grid
+         convergence, which the relief bake has to undo or the ring's normals
+         come out rotated against the surface around it. Orthogonal to [axis_y]
+         on the ground, these projections being conformal. *)
+  axis_y : float * float;
+  step_x_m : float; (* their lengths: metres on the ground per step *)
   step_y_m : float;
 }
 
@@ -93,14 +100,17 @@ let frame_of_index of_index ~arcsec_step ~lat =
   let axis u v =
     let x, y = Affine.apply of_index u v
     and ox, oy = Affine.apply of_index 0. 0. in
-    Float.hypot ((x -. ox) *. deltax) ((y -. oy) *. deltay)
+    ((x -. ox) *. deltax, (y -. oy) *. deltay)
   in
+  let ((ax, ay) as axis_x) = axis 1. 0. and ((bx, by) as axis_y) = axis 0. 1. in
   {
     to_index = Affine.inverse of_index;
     of_index;
     arcsec_step;
-    step_x_m = axis 1. 0.;
-    step_y_m = axis 0. 1.;
+    axis_x;
+    axis_y;
+    step_x_m = Float.hypot ax ay;
+    step_y_m = Float.hypot bx by;
   }
 
 (* A graticule-aligned block: one scale for both axes, in arcseconds. *)
