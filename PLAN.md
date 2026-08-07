@@ -2830,3 +2830,110 @@ number of GetMaps and the same bytes as today.
 2. **Reduce the procedural bump's amplitude at close range.** `ac8ddc5` fixed its
    aliasing, not its dominance; the amplitude is an aesthetic choice.
 3. Tightening the blend's range is **closed**, measured: no slack to recover.
+
+### The streaks between the rings and the crest sawtooth, isolated (2026-08-06)
+
+Reported at 44.73339,6.36308: strong smeared artifacts "between the 5 m and 1 m
+rings" (alpha=24 beta=65 zoom=2.54) and faceting inside the 1 m ring
+(alpha=-129 beta=86 zoom=3.00). Both reproduced headlessly with `Date.now`
+frozen to 2026-07-06 08:00 UTC — a night-time visit takes the sun fallback
+(`viewer.ml` swaps in month=July, 10:00 local, keeping the day), so that one
+timestamp reproduces the lighting of an evening screenshot exactly. Two debug
+builds: one wrote `shadow_val` / `cosTheta` (geometric N·L) / `final_l` into
+R/G/B of one capture; the other tinted fragments by the ring slot the normal
+comes from.
+
+- **The shadow map is blameless in both views.** `shadow_val` is essentially 1
+  over the whole streaked region and along the sawtooth crest (the sawtooth is
+  lit facets at the terminator, as recorded in abb0e38).
+- **All of the streaking is in the relief normal field** — `cosTheta` alone
+  carries it pixel-for-pixel. The dark bands are real couloirs running down
+  the slope, elongated by the grazing view; in the 5 m ring they are magnified
+  several-fold transversally at this zoom, so they render as soft airbrushed
+  smears directly against pixel-crisp 1 m ground. A resolution cliff, not a
+  rendering defect.
+- **The 1 m ring's boundary runs along the reported crest at this alpha**
+  (slot tint), which is why the cliff reads as "an artifact between the
+  rings": the worst smears sit on ground just past the crest, seen
+  near-tangent, where every metre of transverse resolution shows.
+- The detail map is still disabled (2aa56ad, `if false` in
+  `load_compressed_detail_map`), so both artifacts are being judged naked; by
+  the f3fda0d lesson the texture/bump masks much of the 5 m smoothness.
+
+Options, none tried, for the cliff: re-enable the textures and re-judge before
+spending anything (the disable is temporary instrumentation); scale the
+procedural bump with the local data footprint so synthetic detail fills the
+5 m ring and yields inside the 1 m one; a finer middle ring (5 m → 2–2.5 m,
+~4x its bytes) if real detail is wanted at telephoto zooms. For the sawtooth
+family (shading finer than the mesh): damp `direct` by a geometry-scale N·L
+(computed per vertex at the level the mesh reads, one varying) — coarse
+self-shadowing, but it also dims honestly grazing-lit ridges; or let the
+vertex stage read one level finer near the camera and accept the
+undersampling risk (static camera makes it worth an experiment).
+
+### The bump now yields to the data that outresolves it (2026-08-07, uncommitted)
+
+With the detail map re-enabled (2aa56ad reverted in the working tree) the
+texture masked the ring artifacts and buried the 1 m relief with them. The
+bump's job is to stand in for relief the data cannot hold, so it now scales
+with the sample pitch of whatever the fragment's normal comes from:
+`hd_params` gained `hd_step_m` (the coarser axis of `frame.step_{x,y}_m`),
+`Render_state.hd_bump_scale` maps it to `min 1 (step/8)` — 1 m ring 0.125,
+5 m ring 0.625, l13 and base 1.0 — and the fragment multiplies the factor
+(`hd_bump[slot]`, picked in the existing normal-selection chain) into
+`bumpStrength`. Verified headlessly at the two reported views, rings
+confirmed in-frame: the 1 m rock bands, gullies and crest read through where
+before there was only texture speckle; ground outside the LIDAR rings is
+**bit-identical (RMSE exactly 0)** by construction (factor 1.0). The 8 m knee
+and the linear ramp are aesthetic choices to tune on a real GPU — SwiftShader
+renders the BC7 detail map far more harshly than hardware at grazing
+telephoto views, so judge amplitudes on device, only structure here. One
+harness note: the GPU timing logs flush lazily (queries resolve on later
+frames), so `compute_relief_hd` counts in the console are not a readiness
+signal — and neither is `draw_shadows`, for the same reason. The synchronous
+"RGE ALTI blended in" lines are the signal: three of them (l13 + both LIDAR
+rings) mean the publishes are imminent. **Caveat discovered the next day**:
+the view-1 "before" capture of this section had only l13 published (see the
+dropped-publish race below), so its dramatic before/after overstated the
+bump factor's effect; the factor itself and the far-field RMSE 0 stand.
+
+### Rings that arrive during the first publish were never shown (2026-08-07, uncommitted)
+
+Found because headless captures of the same view kept splitting into two
+populations: runs with all three "RGE ALTI blended in" lines, and runs with
+exactly one (l13), where the 1 m and 5 m rings never appeared — not late,
+*never*, still absent at 125 s with every tile fetched. The refine loop in
+`load_location` began with `List.filter still_pending hd_fetches` and
+returned when nothing was pending. But the first publish is synchronous and
+spans awaits (its GPU bakes take seconds on a slow device), so a ring whose
+fetch completed during that window was already settled — not pending — when
+`refine` first ran: with no other ring in flight the loop exited without ever
+publishing it. Fixed by restructuring `refine` to first publish anything
+settled beyond `shown`, and only then wait (`refine`/`wait` mutual
+recursion, same epoch discipline). The window is the whole first-publish
+duration, so a phone with a fast network and slow GPU hits this on real
+loads; it is not a SwiftShader artefact — SwiftShader only widened it to
+~50% of runs.
+
+### The seam and the smooth-to-harsh switch at the ring borders (2026-08-07, uncommitted)
+
+Reported at alpha=-146 beta=83 zoom=3 (seam line despite the texture) and
+alpha=31 beta=69 zoom=3 (hard switch from the 1 m ring's quiet surface to the
+5 m ring's busy one). Both are the same defect: the normal source *and* the
+per-ring bump factor switched hard on the extent test. Now `ringFade` gives
+each ring a weight — 1 inside, fading to 0 over the outer 2% of its extent —
+and both `encodedN` and `bump_scale` composite outside-in through it. The
+common case still costs one fetch (fast paths for weight exactly 1 with all
+finer rings at 0); only border-band fragments walk the mix chain. Verified
+at both reported views with all rings confirmed blended in-frame: the razor
+line is gone in both, differences confined to the bands (RMSE 1.3% / 4.6%
+against a zero-width-band control from the same build).
+
+Two constants to tune on a real GPU, both deliberate first guesses: the band
+width (0.02 of each extent — a 6% band measured as swallowing the *entire*
+visible ring-0 area at the reported telephoto views, where all visible fine
+ground sits within ~130 m of the ring edge; 2% ≈ 41 m ≈ 15-40 px there) and
+the `min 1 (step/8)` bump mapping. The remaining texture-character contrast
+between rings is the data-resolution difference itself, spread over the band
+rather than a line; if it still reads as a defect on device, lower the 5 m
+ring's bump share before touching the band.
