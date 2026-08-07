@@ -66,6 +66,7 @@ type terrain_uniforms = {
   hd_height_scale_n : Gl.uniform_location array;
   hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
+  hd_bump : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
@@ -198,6 +199,9 @@ type hd_params = {
       (** metres per u16 step of this ring's grid: each is quantised over the
           height range it holds rather than the base pipeline's 9500 m *)
   hd_height_offset : float;  (** metres at u16 zero *)
+  hd_step_m : float;
+      (** sample pitch in metres, the coarser axis: sets how much of the
+          procedural bump the ring keeps *)
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
 

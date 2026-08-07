@@ -11,6 +11,10 @@ uniform highp sampler2D relief_normal;
 #define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
+// How much of the procedural bump each ring keeps (1.0 over the base data):
+// the bump stands in for relief the data cannot hold, so a fine ring, whose
+// normals carry the real thing, dials it down (see [Render_state]).
+uniform mediump float hd_bump[HD_SLOTS];
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
@@ -227,6 +231,19 @@ vec4 triplanarCombine(Triplanar t) {
          (mix(vec4(0.5), t.d_yz, t.fade_x) * t.blend.x);
 }
 
+// A ring's weight at this fragment: 1 well inside its extent, fading to 0
+// over the outer band, 0 outside (or when the slot is empty). Both the
+// normal source and the bump amplitude switch rings through this fade: the
+// data's own edge blend makes the *heights* agree at a ring border, but not
+// the derivatives (PLAN.md 2026-08-05), so a hard switch leaves a seam line,
+// and the per-ring bump amplitude would step with it.
+mediump float ringFade(bool valid, highp vec2 c) {
+  if (!valid)
+    return 0.0;
+  highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
+  return smoothstep(0.0, 0.02, d);
+}
+
 float computeHeight(vec4 noise, vec4 weights) {
   const vec4 heightWeight =
       vec4(3. /* rock */, 0.3 /* grass */, 5. /* forest */, 3. /* ice */);
@@ -280,7 +297,7 @@ highp vec3 triplanarHeightGrad(Triplanar t, highp vec3 pos, float scale,
 // Procedural normal perturbation based on detail noise. [tri] is the macro
 // material-blend sample from main, reused as finite-difference centers.
 vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
-                   vec4 detailWeights) {
+                   vec4 detailWeights, float bumpScale) {
   // Determine roughness
   const vec4 roughnessWeights =
       vec4(0.6 /* rock */, 0.9 /* grass */, 0.85 /* forest */, 0.2 /* ice */);
@@ -292,7 +309,7 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
     material_roughness = min(material_roughness, 0.3);
   }
 
-  float bumpStrength = 4.0 * material_roughness;
+  float bumpStrength = 4.0 * material_roughness * bumpScale;
 
   // Distance fades and masks for the three noise scales (skipping fetches
   // where a scale contributes nothing)
@@ -496,18 +513,44 @@ void main() {
   // high-resolution one inside its extent (quad-coherent branch: neighbouring
   // fragments are on the same side of a boundary kilometres away, and both
   // sources derive from the same heights there).
+  mediump float f0 = ringFade(hd_valid[0], hdReliefCoord0);
+  mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
+  mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
   mediump vec2 encodedN;
-  if (hd_valid[0] && all(greaterThanEqual(hdReliefCoord0, vec2(0.0))) &&
-      all(lessThanEqual(hdReliefCoord0, vec2(1.0))))
+  mediump float bump_scale;
+  if (f0 >= 1.0) {
     encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
-  else if (hd_valid[1] && all(greaterThanEqual(hdReliefCoord1, vec2(0.0))) &&
-           all(lessThanEqual(hdReliefCoord1, vec2(1.0))))
+    bump_scale = hd_bump[0];
+  } else if (f1 >= 1.0 && f0 <= 0.0) {
     encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
-  else if (hd_valid[2] && all(greaterThanEqual(hdReliefCoord2, vec2(0.0))) &&
-           all(lessThanEqual(hdReliefCoord2, vec2(1.0))))
+    bump_scale = hd_bump[1];
+  } else if (f2 >= 1.0 && f1 <= 0.0 && f0 <= 0.0) {
     encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
-  else
+    bump_scale = hd_bump[2];
+  } else {
+    // A ring's border band (rare: the bands are ~6% of each extent), or
+    // outside every ring. Composite outside-in so each ring fades over the
+    // one beneath it; the fetch count is bounded by the fades that are
+    // actually open, and the branches stay quad-coherent away from the
+    // bands' own edges (the same acceptance as the selection above).
     encodedN = texture(relief_normal, reliefCoord).rg;
+    bump_scale = 1.0;
+    if (f2 > 0.0) {
+      encodedN =
+          mix(encodedN, texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);
+      bump_scale = mix(bump_scale, hd_bump[2], f2);
+    }
+    if (f1 > 0.0) {
+      encodedN =
+          mix(encodedN, texture(hd_relief_normal[1], hdReliefCoord1).rg, f1);
+      bump_scale = mix(bump_scale, hd_bump[1], f1);
+    }
+    if (f0 > 0.0) {
+      encodedN =
+          mix(encodedN, texture(hd_relief_normal[0], hdReliefCoord0).rg, f0);
+      bump_scale = mix(bump_scale, hd_bump[0], f0);
+    }
+  }
   vec3 normal;
   normal.xy = encodedN * 2.0 - 1.0;
   normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -623,7 +666,8 @@ void main() {
   terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
 
   // Procedural normal perturbation (replaces rock_normal_map)
-  final_normal = perturbNormal(normal, tri, surface.roughness, finalWeights);
+  final_normal =
+      perturbNormal(normal, tri, surface.roughness, finalWeights, bump_scale);
 
   // Water Wave Logic
   if (waterMask > 0.01) {

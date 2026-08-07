@@ -3359,6 +3359,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                 hd_arcsec_step = g.frame.arcsec_step;
                 hd_height_scale = g.height_scale;
                 hd_height_offset = g.height_offset;
+                hd_step_m = Float.max g.frame.step_x_m g.frame.step_y_m;
               })
           hd_grids
       in

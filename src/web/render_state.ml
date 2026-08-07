@@ -105,6 +105,7 @@ type terrain_uniforms = {
   hd_height_scale_n : Gl.uniform_location array;
   hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
+  hd_bump : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   (* Lighting *)
@@ -272,6 +273,7 @@ let init_terrain_uniforms ctx pid =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
     hd_half_texel =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_half_texel[%d]" i));
+    hd_bump = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bump[%d]" i));
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_lightDir = u "u_lightDir";
@@ -437,8 +439,18 @@ type hd_params = {
   hd_arcsec_step : float;  (** sample pitch in arcseconds *)
   hd_height_scale : float;  (** metres per u16 step of this ring's grid *)
   hd_height_offset : float;  (** metres at u16 zero *)
+  hd_step_m : float;  (** sample pitch in metres, the coarser axis *)
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
+
+(* How much of the procedural bump a ring keeps. The bump stands in for relief
+   the data cannot hold: over the 30 m base it is all there is, while on a
+   metre grid it mostly buries the real detail it duplicates (PLAN.md,
+   2026-08-06). Proportional to the sample pitch, full strength from 8 m up;
+   the fragment shader multiplies it into its [bumpStrength]. *)
+let hd_bump_scale = function
+  | None -> 1.
+  | Some { hd_step_m; _ } -> Float.min 1. (hd_step_m /. 8.)
 
 (* The shader wants the same map normalised to [0, 1] over the ring, as a 2x2 and
    a translation: a ring on a projected grid has axes turned from north, so this
@@ -453,6 +465,7 @@ let hd_slot_values = function
         hd_arcsec_step;
         hd_height_scale;
         hd_height_offset;
+        hd_step_m = _;
       } ->
       let s = 1. /. float hd_size in
       let m = hd_to_index in
@@ -516,7 +529,8 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
     Gl.uniform1f ctx u.hd_half_texel.(i) half_texel;
     Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
-    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset
+    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset;
+    Gl.uniform1f ctx u.hd_bump.(i) (hd_bump_scale (slot i))
   done;
   Gl.use_program ctx shadow_pid;
   for i = 0 to hd_slots - 1 do
