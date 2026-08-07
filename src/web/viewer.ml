@@ -3577,28 +3577,35 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          which is exactly what happens on a bad connection, where the coarsest
          ring is the one worth having. *)
       let shown = ref (arrived first_raws) in
+      (* Publish whatever has settled beyond [shown] before waiting for more.
+         The order matters: the first publish is synchronous but spans awaits
+         (and seconds, on a slow GPU), so a ring whose fetch completes while
+         it runs is already settled here. Starting with the wait -- as this
+         loop originally did -- finds nothing pending when the last ring
+         landed during that window, and returns with rings arrived but never
+         published. *)
       let rec refine () =
+        let raws = settled_raws () in
+        if arrived raws > !shown then begin
+          shown := arrived raws;
+          match chain raws with
+          | [] -> wait ()
+          | hd_grids ->
+              (* [Hd_dem.blend] is synchronous, so the epoch test that guarded
+                 entry still holds: no [draw] has run since. *)
+              publish ~hd_grids;
+              let* () = Web_utils.on_gpu_finished ctx in
+              force_redraw := true;
+              wait ()
+        end
+        else wait ()
+      and wait () =
         match List.filter (fun (_, p) -> still_pending p) hd_fetches with
         | [] -> Lwt.return_unit
         | pending ->
             let* _ = Lwt.nchoose_split (List.map snd pending) in
             let* () = sleep hd_settle_s in
-            if !location_epoch <> epoch then Lwt.return_unit
-            else
-              let raws = settled_raws () in
-              if arrived raws <= !shown then refine ()
-              else begin
-                shown := arrived raws;
-                match chain raws with
-                | [] -> refine ()
-                | hd_grids ->
-                    (* [Hd_dem.blend] is synchronous, so the epoch test above
-                       still holds here: no [draw] has run since. *)
-                    publish ~hd_grids;
-                    let* () = Web_utils.on_gpu_finished ctx in
-                    force_redraw := true;
-                    refine ()
-              end
+            if !location_epoch <> epoch then Lwt.return_unit else refine ()
       in
       Lwt.async refine
     end;
