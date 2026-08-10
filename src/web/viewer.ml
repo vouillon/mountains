@@ -1781,6 +1781,14 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
+(* Width of the GPX trace, as a fraction of the canvas height -- the same rule
+   the POI labels follow, and for the same reason. A width fixed in device
+   pixels is a width fixed in nothing a viewer can see: a phone packs two or
+   three of them into the length a desktop spends on one, so the five pixels
+   that draw a clear line on a monitor draw a hairline on a handset. Tuned to
+   land back on those five over a 1080-pixel-high desktop canvas. *)
+let path_width = 0.0046
+
 (* Scratch matrix for the per-POI transforms (see [text_transform]). *)
 let poi_transform : Matrix.t = Array.make 16 0.
 
@@ -2159,6 +2167,8 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
       Gl.uniform_matrix4fv ctx path_uniforms.Render_state.u_proj false proj_ta;
       Gl.uniform2f ctx path_uniforms.Render_state.u_viewport
         (float canvas_width) (float canvas_height);
+      Gl.uniform1f ctx path_uniforms.Render_state.u_linewidth
+        (path_width *. float canvas_height);
       Gl.bind_vertex_array ctx (Some vao);
       Gl.draw_arrays ctx Gl.triangle_strip 0 (count * 4)
   | None -> ());

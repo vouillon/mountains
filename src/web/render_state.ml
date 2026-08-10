@@ -662,8 +662,8 @@ let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.hd_relief.(0) 6;
   Gl.uniform1i ctx u.hd_relief.(1) 10;
   Gl.uniform1i ctx u.hd_relief.(2) 12;
-  Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0;
-  Gl.uniform1f ctx u.u_linewidth 5.0
+  Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0
+(* [u_linewidth] follows the canvas, so it is uploaded per frame instead. *)
 
 let upload_path_session ctx (u : path_uniforms) ~w ~lat ~x ~y ~lon =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
