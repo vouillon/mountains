@@ -212,6 +212,23 @@ float computeHeight(vec4 noise, vec4 weights) {
   return dot((noise - 0.5) * heightWeight, weights);
 }
 
+// World-XY gradient of the blended detail height at [scale], by forward
+// differences of the bilinear-filtered height: continuous and per-pixel where
+// dFdx/dFdy of a sample is constant across each 2x2 quad (visibly blocky up
+// close). Holding [weights] fixed across the three taps also keeps material-
+// boundary weight gradients from reading as bumps. [eps] is in world meters;
+// the constant offset leaves the implicit-LOD derivatives unchanged, so all
+// three taps hit the same mip.
+vec2 detailHeightGrad(highp vec2 pos, float scale, vec4 weights,
+                      highp float eps) {
+  float h0 = computeHeight(texture(u_detailMap, pos * scale, 1.), weights);
+  float hx = computeHeight(
+      texture(u_detailMap, (pos + vec2(eps, 0.)) * scale, 1.), weights);
+  float hy = computeHeight(
+      texture(u_detailMap, (pos + vec2(0., eps)) * scale, 1.), weights);
+  return vec2(hx - h0, hy - h0) / eps;
+}
+
 // Procedural normal perturbation based on detail noise
 // Uses screen-space derivatives for directional bump mapping
 vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
@@ -234,15 +251,18 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
   float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist); // 10m noise
   float fade_mid = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
 
-  // Only sample when contribution is visible at this distance
-  vec4 texNoise2 = vec4(0.5);
-  vec4 texNoise3 = vec4(0.5);
-  if (fade_mid > 0.0)
-    texNoise2 = texture(u_detailMap, v_world_pos.xy * 0.014, 1.);
-  if (fade_fine > 0.0)
-    texNoise3 = texture(u_detailMap, v_world_pos.xy * 0.1, 1.);
+  // These two scales sample an XY projection only, which stretches into
+  // vertical stripes on steep faces (one texel row spans many meters of
+  // wall), so any bump derived from it reads as banding there. Fade them out
+  // with slope -- walls keep the triplanar macro bump -- and let the gates
+  // below skip the fetches. [geomNormal] interpolates smoothly, so the
+  // branches stay quad-coherent.
+  float xyProj = 1.0 - smoothstep(0.5, 0.7, 1.0 - geomNormal.z);
+  fade_fine *= xyProj;
+  fade_mid *= xyProj;
 
-  // Compute projection basis once
+  // Compute projection basis once (before the gated fetches: no dFdx inside
+  // non-uniform control flow)
   highp vec3 dPdx = dFdx(v_world_pos);
   highp vec3 dPdy = dFdy(v_world_pos);
   highp vec3 r1 = cross(dPdy, geomNormal);
@@ -251,13 +271,35 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
   float signDet = (det > 0.0) ? 1.0 : -1.0;
   highp float invDet = signDet / (abs(det) + 1e-12);
 
-  // Per-scale: compute scalar height derivatives
+  // Finite-difference step: the pixel footprint in the world XY plane, so the
+  // gradient has the same frequency response as the dFdx it replaces, floored
+  // at one mip-0 texel (gen_textures.sh bakes 1024x1024) so 8-bit quantization
+  // noise is not amplified by a tiny divisor.
+  highp float fp = max(length(dPdx.xy), length(dPdy.xy));
+
+  // Only sample when contribution is visible at this distance
+  vec2 grad2 = vec2(0.);
+  vec2 grad3 = vec2(0.);
+  if (fade_mid > 0.0)
+    grad2 = detailHeightGrad(v_world_pos.xy, 0.014, detailWeights,
+                             max(fp, 1. / (0.014 * 1024.)));
+  if (fade_fine > 0.0)
+    grad3 = detailHeightGrad(v_world_pos.xy, 0.1, detailWeights,
+                             max(fp, 1. / (0.1 * 1024.)));
+
+  // Per-scale: scalar height derivatives along the screen axes. The macro
+  // scale keeps dFdx/dFdy: it only fades in beyond 175 m (mask_macro) where
+  // mip filtering has already smoothed the height, and finite differences
+  // would cost six extra triplanar fetches. The mid/fine gradients live in
+  // world XY, so the chain rule (dot with dPdx/dPdy) yields the same
+  // screen-space quantity dFdx measured -- masks and divisors below still
+  // apply unchanged.
   highp float dHdx1 = dFdx(computeHeight(texNoise, detailWeights));
   highp float dHdy1 = dFdy(computeHeight(texNoise, detailWeights));
-  highp float dHdx2 = dFdx(computeHeight(texNoise2, detailWeights));
-  highp float dHdy2 = dFdy(computeHeight(texNoise2, detailWeights));
-  highp float dHdx3 = dFdx(computeHeight(texNoise3, detailWeights));
-  highp float dHdy3 = dFdy(computeHeight(texNoise3, detailWeights));
+  highp float dHdx2 = dot(grad2, dPdx.xy);
+  highp float dHdy2 = dot(grad2, dPdy.xy);
+  highp float dHdx3 = dot(grad3, dPdx.xy);
+  highp float dHdy3 = dot(grad3, dPdy.xy);
 
   // Distance-based attenuation masks
   float mask_macro = smoothstep(175., 280., v_dist);
