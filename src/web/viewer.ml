@@ -108,6 +108,13 @@ module Gpu_timer = struct
         Brr_canvas.Gl.end_query ctx ext.time_elapsed_ext;
         pending_queries := pq :: !pending_queries
     | _ -> ()
+
+  (* A lost context takes its query objects down with it, and the results they
+     were waiting on will never arrive: drop them rather than poll forever.
+     [init] runs again on the restored context, so the extension goes too. *)
+  let reset () =
+    pending_queries := [];
+    extension := None
 end
 
 (** Time a GPU operation. Uses extension if available, otherwise glFinish. *)
@@ -492,8 +499,26 @@ let compressed_texture_file = function
 
 let force_redraw = ref true
 
+(* The GPU can take the context away at any point -- the driver resetting, the
+   system reclaiming memory from a backgrounded tab -- and hands back one whose
+   every texture, buffer, program and query is gone. The context object itself
+   survives, so [ctx] stays the right handle throughout; what has to be rebuilt
+   is everything ever created from it.
+
+   [context_generation] is bumped by each loss. Work that outlives the context
+   that started it -- the frame loop, an asynchronous upload -- carries the
+   generation it began in and stands down when it no longer matches, rather
+   than writing into handles that name nothing or running alongside the loop
+   the restore starts. [context_lost] covers the interval between the two
+   events, during which drawing is pointless. *)
+let context_generation = ref 0
+let context_lost = ref false
+
 (* Load compressed KTX2 texture asynchronously *)
 let load_compressed_detail_map ctx tid =
+  (* [tid] belongs to the context of this moment; a loss before the fetch
+     returns leaves it naming nothing, and the restore has made its own. *)
+  let generation = !context_generation in
   match detect_compressed_format ctx with
   | None -> Format.eprintf "No compressed texture format supported@."
   | Some fmt ->
@@ -512,6 +537,7 @@ let load_compressed_detail_map ctx tid =
         | Error e ->
             Format.eprintf "Failed to load %s: %s@." file
               (Jv.Error.message e |> Jstr.to_string)
+        | Ok _ when !context_generation <> generation -> ()
         | Ok buffer ->
             (* Parse KTX2 header using DataView *)
             let view = Brr.Tarray.Data_view.of_buffer buffer in
@@ -867,6 +893,41 @@ let init_graphics ctx =
     path_pid;
     path_uniforms;
   }
+
+type gpu_state = {
+  detail_map : Gl.texture;
+  graphics : graphics_resources;
+  palette_texture : Gl.texture;
+}
+(** Everything the session owns on the GPU, as opposed to the per-location
+    textures [session] holds. Held behind a ref so that a context restore can
+    replace the lot in one assignment: the closures that reach for it -- the
+    frame loop, [load], the GPX callback -- read it as they run rather than
+    capturing what was current when they were built. *)
+
+(* iOS/Safari color-manage the canvas to the display's wide (Display-P3) gamut,
+   while many Android devices send the raw sRGB values straight to a saturated
+   panel, looking more vivid. Opt into the wide gamut so both render
+   consistently and saturated rather than washed out on iOS. Safari and Chrome
+   honour this; browsers that don't simply ignore the assignment.
+   [Brr_canvas.Gl] does not expose the context as a [Jv.t], so re-fetch it from
+   the canvas ([getContext] returns the same context object). *)
+let set_drawing_buffer_color_space canvas =
+  Jv.set
+    (Jv.call (Brr.El.to_jv canvas) "getContext"
+       [| Jv.of_jstr (Jstr.v "webgl2") |])
+    "drawingBufferColorSpace"
+    (Jv.of_jstr (Jstr.v "display-p3"))
+
+(* The extensions are context state too, so they are re-fetched here rather
+   than once at startup. *)
+let make_gpu_state ctx =
+  init_anisotropic_filtering ctx;
+  let detail_map = make_detail_map ctx in
+  let graphics = init_graphics ctx in
+  let palette_texture = make_palette_texture ctx in
+  { detail_map; graphics; palette_texture }
+
 (* Rendering Passes *)
 
 let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
@@ -2347,7 +2408,10 @@ let double_tap_threshold = 300.
 let drag_threshold = 10.
 let last_frame_time = ref 0.
 
-let event_loop ctx draw =
+(* [generation] is the context generation this loop belongs to: it returns once
+   that is no longer the current one, leaving the field to the loop the restore
+   starts. *)
+let event_loop ~generation ctx draw =
   let calculate_tau () =
     let min_tau = 0.02 in
     let max_tau = 0.15 in
@@ -2446,7 +2510,9 @@ let event_loop ctx draw =
       angle_diff > angle_threshold || zoom_diff > 0.00001 || !force_redraw
     in
 
-    if should_draw then (
+    (* Drawing into a lost context is a sequence of silent no-ops, and the
+       timer queries [draw] posts would pile up unanswered. *)
+    if should_draw && not !context_lost then (
       force_redraw := false;
       draw ~orientation ctx);
 
@@ -2473,7 +2539,9 @@ let event_loop ctx draw =
     let* () = request_animation_frame () in
 
     (* If we drew this frame, update prev state. If not, keep old prev state to accumulate changes *)
-    if should_draw then loop orientation z else loop prev_orientation prev_zoom
+    if !context_generation <> generation then Lwt.return_unit
+    else if should_draw then loop orientation z
+    else loop prev_orientation prev_zoom
   in
   last_frame_time := now_ms ();
   loop !current_orientation (!zoom -. 1.)
@@ -3525,37 +3593,135 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     Lwt.return (!location_epoch = epoch)
   end
 
-(* One-time renderer setup: session-wide resources, the first location load,
-   then the render loop, which never returns. *)
-let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
-  let {
-    terrain_geo;
-    indices;
-    text_geo;
-    terrain_pid;
-    triangle_pid;
-    text_pid;
-    sky_pid;
-    sky_uniforms;
-    terrain_uniforms;
-    triangle_uniforms;
-    text_uniforms;
-    radial_params;
-    path_pid;
-    path_uniforms;
-    _;
-  } =
-    graphics
-  in
-  let index_count = Bigarray.Array1.dim indices in
-  (* The CLC palette is the fixed material table: location-independent. *)
-  let palette_texture = make_palette_texture ctx in
+(* One-time renderer setup: the first location load, then the render loop,
+   which returns only when the context it was drawing into is lost. *)
+let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
   let load ~lat ~lon =
+    let { detail_map; graphics; palette_texture } = !gpu in
     load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon
   in
-  let* _applied = load ~lat ~lon in
+  (* At most one loop per context generation. A restore that runs to completion
+     before [run_renderer] reaches its own first call -- a context lost while
+     the opening location is still baking, which is the heaviest moment the GPU
+     sees -- would otherwise leave two loops drawing the same scene. *)
+  let loop_generation = ref (-1) in
+  (* The scratch matrices are plain memory rather than context state, but they
+     belong to the loop that writes them, and a restore starts a new one. *)
+  let frame_loop () =
+    if !loop_generation = !context_generation then Lwt.return_unit
+    else begin
+      loop_generation := !context_generation;
+      let proj_ba =
+        Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+      in
+      let transform_ba =
+        Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+      in
+      let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
+      let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
+      let inv_view_ba =
+        Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+      in
+      let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
+      event_loop ~generation:!context_generation ctx (fun ~orientation ctx ->
+          (* [None] only before the first location is baked, and the loop
+             starts after it -- and again between a context loss and the
+             reload the restore runs. *)
+          match !session with
+          | None -> ()
+          | Some location ->
+              let {
+                terrain_geo;
+                indices;
+                text_geo;
+                terrain_pid;
+                triangle_pid;
+                text_pid;
+                sky_pid;
+                sky_uniforms;
+                terrain_uniforms;
+                triangle_uniforms;
+                text_uniforms;
+                radial_params;
+                path_pid;
+                path_uniforms;
+                _;
+              } =
+                !gpu.graphics
+              in
+              draw terrain_pid terrain_geo triangle_pid text_pid text_geo
+                path_pid ~terrain_uniforms ~triangle_uniforms ~text_uniforms
+                ~path_uniforms ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta
+                ~transform_ta ~inv_view_ta ~location ~orientation
+                ~index_count:(Bigarray.Array1.dim indices)
+                ~sky_pid ~sky_uniforms ~radial_params canvas ctx)
+    end
+  in
+  (* The overlay is raised the moment the context goes and taken down once the
+     rebuild has something to show. The two events are separate turns, so the
+     fade-in is held here for the restore to await: hiding an overlay still
+     fading in leaves it up for good. *)
+  let overlay_shown = ref Lwt.return_unit in
+  let restore () =
+    (* Every handle from the dead context is stale. They are dropped rather
+       than deleted: a delete against the restored context names nothing, and
+       the objects went with the context that held them. Bumping the epoch
+       retires any load still in flight, whose bake would otherwise publish
+       textures raised against a context that no longer exists. *)
+    session := None;
+    incr location_epoch;
+    Gpu_timer.reset ();
+    gpu := make_gpu_state ctx;
+    set_drawing_buffer_color_space canvas;
+    context_lost := false;
+    (* The camera, the zoom, the location and the GPX trace are all plain
+       state, untouched by any of this: reloading where we already are puts
+       the view back exactly as the user left it. *)
+    let* _applied = load ~lat:!current_lat ~lon:!current_lon in
+    let* () = !overlay_shown in
+    (* Unless the context went again while this rebuild was running, in which
+       case the overlay belongs to the restore that follows this one. *)
+    if not !context_lost then hide_startup_overlay ();
+    frame_loop ()
+  in
+  (* Installed before the first load rather than after it: the opening bake is
+     the heaviest demand this page ever makes of the GPU, and so among the
+     likelier moments to lose the context under it. *)
+  let webglcontextlost = Brr.Ev.Type.create (Jstr.v "webglcontextlost") in
+  let webglcontextrestored =
+    Brr.Ev.Type.create (Jstr.v "webglcontextrestored")
+  in
+  ignore
+    (Brr.Ev.listen webglcontextlost
+       (fun e ->
+         (* Without this the browser never attempts a restore, and the canvas
+            keeps its last frame for the life of the page. *)
+         Brr.Ev.prevent_default e;
+         context_lost := true;
+         (* Retires the frame loop this context was driving, so that the one
+            [restore] starts is the only one. *)
+         incr context_generation;
+         overlay_shown := show_startup_overlay "Restoring Terrain..." true)
+       (Brr.El.as_target canvas));
+  ignore
+    (Brr.Ev.listen webglcontextrestored
+       (fun _ ->
+         Lwt.async (fun () ->
+             Lwt.catch restore (fun e ->
+                 (match e with
+                 | Jv.Error e -> Brr.Console.error [ e ]
+                 | _ -> ());
+                 hide_startup_overlay ();
+                 display_temporary_message
+                   (Printf.sprintf "Could not restore the display: %s"
+                      (Printexc.to_string e));
+                 Lwt.return_unit)))
+       (Brr.El.as_target canvas));
+  let* applied = load ~lat ~lon in
   start ();
-  hide_startup_overlay ();
+  (* Not if a restore superseded this load: it raised the overlay and will take
+     it down itself once its own bake lands. *)
+  if applied then hide_startup_overlay ();
 
   (* From now on, locations are switched in place: the camera orientation, the
      zoom and every session-wide GPU resource are deliberately kept, so that
@@ -3599,7 +3765,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
              if String.length s = 0 then None else Some s
          in
          current_gpx_str := str;
-         update_gpx_path ctx ~radial_params));
+         update_gpx_path ctx ~radial_params:!gpu.graphics.radial_params));
 
   (* Installed alongside [setGpxContent], once a location is loaded and the
      camera means something: the share button reads the view from here. *)
@@ -3607,28 +3773,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~detail_map ~graphics ~start =
     (Jv.callback ~arity:1 (fun _ ->
          Jv.of_jstr (Brr.Uri.to_jstr (current_view_uri ()))));
 
-  let proj_ba = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16 in
-  let transform_ba =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
-  in
-  let proj_ta = Brr.Tarray.of_bigarray1 proj_ba in
-  let transform_ta = Brr.Tarray.of_bigarray1 transform_ba in
-  let inv_view_ba =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
-  in
-  let inv_view_ta = Brr.Tarray.of_bigarray1 inv_view_ba in
-
-  event_loop ctx (fun ~orientation ctx ->
-      (* [None] only before the first location is baked, and the loop starts
-         after it. *)
-      match !session with
-      | None -> ()
-      | Some location ->
-          draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
-            ~terrain_uniforms ~triangle_uniforms ~text_uniforms ~path_uniforms
-            ~proj_ba ~transform_ba ~inv_view_ba ~proj_ta ~transform_ta
-            ~inv_view_ta ~location ~orientation ~index_count ~sky_pid
-            ~sky_uniforms ~radial_params canvas ctx)
+  frame_loop ()
 (* Location & UI *)
 
 let featured_locations =
@@ -5112,24 +5257,11 @@ let main () =
          ~attrs:(Gl.Attrs.v ~alpha:false ())
          (Brr_canvas.Canvas.of_el canvas))
   in
-  (* iOS/Safari color-manage the canvas to the display's wide (Display-P3)
-     gamut, while many Android devices send the raw sRGB values straight to a
-     saturated panel, looking more vivid. Opt into the wide gamut so both render
-     consistently and saturated rather than washed out on iOS. Safari and Chrome
-     honour this; browsers that don't simply ignore the assignment.
-     [Brr_canvas.Gl] does not expose the context as a [Jv.t], so re-fetch it
-     from the canvas ([getContext] returns the same context object). *)
-  Jv.set
-    (Jv.call (Brr.El.to_jv canvas) "getContext"
-       [| Jv.of_jstr (Jstr.v "webgl2") |])
-    "drawingBufferColorSpace"
-    (Jv.of_jstr (Jstr.v "display-p3"));
-  (* Initialize anisotropic filtering early for the detail map *)
-  init_anisotropic_filtering ctx;
-  (* Start loading detail map immediately *)
-  let detail_map = make_detail_map ctx in
+  set_drawing_buffer_color_space canvas;
   Worker_pool.init ();
-  let graphics = init_graphics ctx in
+  (* Rebuilt wholesale by [run_renderer] when the context is lost and restored;
+     this is only the first of possibly several. *)
+  let gpu = ref (make_gpu_state ctx) in
   (* Use ResizeObserver to detect canvas size changes *)
   let observer_cb =
     Jv.callback ~arity:1 (fun entries ->
@@ -5226,8 +5358,7 @@ let main () =
   update_startup_status "Loading Terrain..." true;
 
   let* () =
-    run_renderer ~w:tile_width ~h:tile_height ~lat ~lon canvas ctx ~detail_map
-      ~graphics ~start
+    run_renderer ~w:tile_width ~h:tile_height ~lat ~lon canvas ctx ~gpu ~start
   in
   Lwt.return_unit
 
