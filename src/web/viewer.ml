@@ -4041,7 +4041,9 @@ let get_position ~size =
       | Some loc -> Ok (Geolocation, loc)
       | None -> Ok (Preset, get_preset_position ()))
 
-let create_location_ui ~size =
+(* [enter_sensor_mode] is passed in rather than called directly: it is defined
+   further down, once the compass button it drives exists. *)
+let create_location_ui ~size ~enter_sensor_mode =
   let body = Brr.Document.body Brr.G.document in
   let fab =
     let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab") ] [] in
@@ -4215,6 +4217,9 @@ let create_location_ui ~size =
            match res with
            | Some (lat, lon, _, _, _) ->
                close_menu ();
+               (* Standing where the view is centred, the device's own heading is
+                  the one the user means: point the phone and look. *)
+               enter_sensor_mode ();
                !switch_location ~push:true ~camera:None ~lat ~lon;
                Fut.return ()
            | None ->
@@ -5082,7 +5087,9 @@ let wait_for_service_worker =
 
 let main () =
   let tile_width = 4096 in
-  let set_loc_visible = create_location_ui ~size:tile_width in
+  let set_loc_visible =
+    create_location_ui ~size:tile_width ~enter_sensor_mode
+  in
   let tile_height = tile_width in
   (* Check that we are close to a power of two *)
   assert (tile_width land (tile_width - 1) = 0);
