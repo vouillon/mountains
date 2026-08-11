@@ -11,12 +11,19 @@ uniform highp float height_scale;  // metres per u16 step
 uniform highp float height_offset; // metres at u16 zero
 in vec2 uv;
 // Two render targets: heights (16-bit fixed point, little-endian) and the
-// encoded normal go to separate RG8 textures. Every consumer reads only one of
+// encoded normal go to separate textures. Every consumer reads only one of
 // the two pairs (heights via texelFetch in the vertex shaders and the AO
 // passes' NEAREST sampler, normals only through terrain.frag's filtered fetch),
 // so splitting halves the bytes per tap at identical total memory.
+//
+// The normal is written as a full xyz vec4 regardless of the target: the base
+// pyramid's RG8 attachment keeps rg and ignores the rest (extra components of
+// a fragment output are dropped; the reverse would be undefined), while the
+// ring pyramids' RGB10_A2 attachment also keeps z, so terrain.frag can decode
+// ring normals without the sqrt that amplifies rg quantization on steep
+// slopes. highp: an fp16 output would re-quantize the 10-bit channels.
 layout(location = 0) out mediump vec2 height_out;
-layout(location = 1) out mediump vec2 normal_out;
+layout(location = 1) out highp vec4 normal_out;
 
 float get_z(vec2 offset) {
   vec2 tileCoord = uv * (size - 1.0) + 0.5;
@@ -47,14 +54,13 @@ void main() {
   // We divide by (8 * deltax) to get slope.
   vec3 n = normalize(vec3(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y), 1.0));
 
-  // Encode Normal (xy components to [0,1])
-  vec2 encN = n.xy * 0.5 + 0.5;
-
   float h_val = (c - height_offset) / height_scale;
   float h_high = floor(h_val / 256.0) / 255.0;
   float h_low = mod(h_val, 256.0) / 255.0;
 
   // Little-Endian: R=Low, G=High
   height_out = vec2(h_low, h_high);
-  normal_out = encN;
+  // xy remapped to [0,1]; z stored unmapped (always > 0 for a heightfield),
+  // doubling its precision on targets that keep it
+  normal_out = vec4(n.xy * 0.5 + 0.5, n.z, 1.0);
 }
