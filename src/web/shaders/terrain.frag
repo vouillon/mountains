@@ -176,36 +176,46 @@ void applySlopeModification(inout Surface s, float slope) {
   }
 }
 
-// Triplanar sampling for packed RGBA detail map
-// Returns blended detail weights from all projection planes
-vec4 sampleTriplanarCombined(highp vec3 worldPos, vec3 normal, float scale) {
-  highp vec2 uv_xz = worldPos.xz * scale;
-  highp vec2 uv_xy = worldPos.xy * scale;
-  highp vec2 uv_yz = worldPos.yz * scale;
+// Triplanar sample of the packed RGBA detail map, kept per-plane: the raw
+// samples, the orientation blend and the side-projection fades survive so
+// that perturbNormal can reuse the fetches as finite-difference centers.
+// Everything else consumes the blend via [triplanarCombine].
+struct Triplanar {
+  vec4 d_xy, d_xz, d_yz; // raw plane samples (0.5 where a plane is faded out)
+  vec3 blend;
+  float fade_x, fade_y; // side-projection fade-ins
+};
 
-  vec3 blend = abs(normal);
-  blend /= (blend.x + blend.y + blend.z + 0.0001);
+Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale) {
+  Triplanar t;
+  t.blend = abs(normal);
+  t.blend /= (t.blend.x + t.blend.y + t.blend.z + 0.0001);
 
-  // Sample packed RGBA detail map from each projection plane. The side
-  // projections contribute nothing on near-horizontal terrain: fade them in
-  // with their blend weight (quad-coherent, like the distance gates in
-  // perturbNormal) and default to the neutral 0.5.
+  // Sample each projection plane. The side projections contribute nothing on
+  // near-horizontal terrain: fade them in with their blend weight
+  // (quad-coherent, like the distance gates in perturbNormal) and default to
+  // the neutral 0.5.
   float bias = 1.;
-  vec4 d_xy = texture(u_detailMap, uv_xy, bias);
-  vec4 d_xz = vec4(0.5);
-  float fade_y = smoothstep(0.003, 0.01, blend.y);
-  if (fade_y > 0.0)
-    d_xz = mix(vec4(0.5), texture(u_detailMap, uv_xz, bias), fade_y);
-  vec4 d_yz = vec4(0.5);
-  float fade_x = smoothstep(0.003, 0.01, blend.x);
-  if (fade_x > 0.0)
-    d_yz = mix(vec4(0.5), texture(u_detailMap, uv_yz, bias), fade_x);
+  t.d_xy = texture(u_detailMap, worldPos.xy * scale, bias);
+  t.d_xz = vec4(0.5);
+  t.fade_y = smoothstep(0.003, 0.01, t.blend.y);
+  if (t.fade_y > 0.0)
+    t.d_xz = texture(u_detailMap, worldPos.xz * scale, bias);
+  t.d_yz = vec4(0.5);
+  t.fade_x = smoothstep(0.003, 0.01, t.blend.x);
+  if (t.fade_x > 0.0)
+    t.d_yz = texture(u_detailMap, worldPos.yz * scale, bias);
+  return t;
+}
 
-  // Blend based on surface orientation (Corrected for Z-up)
-  // Top/Bottom (blend.z) -> XY projection
-  // Side-Y (blend.y)     -> XZ projection
-  // Side-X (blend.x)     -> YZ projection
-  return d_xy * blend.z + d_xz * blend.y + d_yz * blend.x;
+// Blend based on surface orientation (Corrected for Z-up)
+// Top/Bottom (blend.z) -> XY projection
+// Side-Y (blend.y)     -> XZ projection
+// Side-X (blend.x)     -> YZ projection
+vec4 triplanarCombine(Triplanar t) {
+  return (t.d_xy * t.blend.z) +
+         (mix(vec4(0.5), t.d_xz, t.fade_y) * t.blend.y) +
+         (mix(vec4(0.5), t.d_yz, t.fade_x) * t.blend.x);
 }
 
 float computeHeight(vec4 noise, vec4 weights) {
@@ -214,26 +224,50 @@ float computeHeight(vec4 noise, vec4 weights) {
   return dot((noise - 0.5) * heightWeight, weights);
 }
 
-// World-XY gradient of the blended detail height at [scale], by forward
-// differences of the bilinear-filtered height: continuous and per-pixel where
-// dFdx/dFdy of a sample is constant across each 2x2 quad (visibly blocky up
-// close). Holding [weights] fixed across the three taps also keeps material-
-// boundary weight gradients from reading as bumps. [eps] is in world meters;
-// the constant offset leaves the implicit-LOD derivatives unchanged, so all
-// three taps hit the same mip.
-vec2 detailHeightGrad(highp vec2 pos, float scale, vec4 weights,
-                      highp float eps) {
-  float h0 = computeHeight(texture(u_detailMap, pos * scale, 1.), weights);
-  float hx = computeHeight(
+// Forward-difference gradient of the detail height in one projection plane,
+// around an already-fetched (and already height-converted) center sample:
+// continuous and per-pixel where dFdx/dFdy of a sample is constant across
+// each 2x2 quad (visibly blocky up close). Holding [weights] fixed across
+// the taps also keeps material-boundary weight gradients from reading as
+// bumps. [eps] is in world meters; the constant offset leaves the
+// implicit-LOD derivatives unchanged, so the taps hit the center's mip.
+vec2 planeHeightGrad(highp vec2 pos, float scale, vec4 weights, float h0,
+                     highp float eps) {
+  float hu = computeHeight(
       texture(u_detailMap, (pos + vec2(eps, 0.)) * scale, 1.), weights);
-  float hy = computeHeight(
+  float hv = computeHeight(
       texture(u_detailMap, (pos + vec2(0., eps)) * scale, 1.), weights);
-  return vec2(hx - h0, hy - h0) / eps;
+  return vec2(hu - h0, hv - h0) / eps;
 }
 
-// Procedural normal perturbation based on detail noise
-// Uses screen-space derivatives for directional bump mapping
-vec3 perturbNormal(vec3 geomNormal, float roughness, vec4 detailWeights) {
+// Triplanar world-space gradient of the detail height at [scale]: the
+// per-plane forward differences, lifted onto each projection plane's axes
+// and combined with [t]'s orientation blend and fades held fixed. [t]'s raw
+// samples are the finite-difference centers -- for the macro scale they are
+// already paid for by the material blend; the mid/fine scales fetch their
+// own. Flat terrain leaves the side-plane gates closed (3 taps per scale,
+// what the XY-only version cost); a wall opens 2-3 planes (6-9 taps) within
+// the same distance gates, which used to skip walls entirely.
+highp vec3 triplanarHeightGrad(Triplanar t, highp vec3 pos, float scale,
+                               vec4 weights, highp float eps) {
+  highp vec3 g = vec3(0.);
+  g.xy = t.blend.z * planeHeightGrad(pos.xy, scale, weights,
+                                     computeHeight(t.d_xy, weights), eps);
+  if (t.fade_y > 0.0)
+    g.xz += t.blend.y * t.fade_y *
+            planeHeightGrad(pos.xz, scale, weights,
+                            computeHeight(t.d_xz, weights), eps);
+  if (t.fade_x > 0.0)
+    g.yz += t.blend.x * t.fade_x *
+            planeHeightGrad(pos.yz, scale, weights,
+                            computeHeight(t.d_yz, weights), eps);
+  return g;
+}
+
+// Procedural normal perturbation based on detail noise. [tri] is the macro
+// material-blend sample from main, reused as finite-difference centers.
+vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
+                   vec4 detailWeights) {
   // Determine roughness
   const vec4 roughnessWeights =
       vec4(0.6 /* rock */, 0.9 /* grass */, 0.85 /* forest */, 0.2 /* ice */);
@@ -254,15 +288,6 @@ vec3 perturbNormal(vec3 geomNormal, float roughness, vec4 detailWeights) {
   float mask_macro = smoothstep(175., 280., v_dist);        // 500m noise
   float mask_mid = smoothstep(25., 40., v_dist);
 
-  // The bump at every scale is derived from an XY projection, which
-  // stretches on steep faces (one texel row spans many meters of wall). With
-  // the continuous finite-difference gradients below this reads as smooth
-  // fall-line streaking and keeps the faces textured; a slope fade
-  // (multiplying the three factors above by a smoothstep of geomNormal.z)
-  // was tried and rejected -- it stripped cliffs down to the bare relief
-  // normals. The shading *rectangles* that motivated it came from dFdx of
-  // the mip-filtered macro sample, fixed since by the FD switch.
-
   // Compute projection basis once (before the gated fetches: no dFdx inside
   // non-uniform control flow)
   highp vec3 dPdx = dFdx(v_world_pos);
@@ -273,41 +298,46 @@ vec3 perturbNormal(vec3 geomNormal, float roughness, vec4 detailWeights) {
   float signDet = (det > 0.0) ? 1.0 : -1.0;
   highp float invDet = signDet / (abs(det) + 1e-12);
 
-  // Finite-difference step: the pixel footprint in the world XY plane, so the
-  // gradient has the same frequency response as the dFdx it replaces, floored
-  // at one mip-0 texel (gen_textures.sh bakes 1024x1024) so 8-bit quantization
-  // noise is not amplified by a tiny divisor.
-  highp float fp = max(length(dPdx.xy), length(dPdy.xy));
+  // Finite-difference step: the 3D pixel footprint, so the gradients have
+  // the same frequency response as the dFdx they replace, floored per scale
+  // at one mip-0 texel (gen_textures.sh bakes 1024x1024) so 8-bit
+  // quantization noise is not amplified by a tiny divisor.
+  highp float fp3 = max(length(dPdx), length(dPdy));
 
-  // Only sample when contribution is visible at this distance
-  vec2 grad1 = vec2(0.);
-  vec2 grad2 = vec2(0.);
-  vec2 grad3 = vec2(0.);
+  // All three scales take a triplanar world-space gradient, gated by their
+  // distance fades: walls get texture in proper proportion at every scale
+  // (an XY-only gradient smears down the fall line there, and a slope fade
+  // instead of it stripped cliffs down to the bare relief normals -- both
+  // tried and rejected). The macro centers are [tri]'s, already paid for by
+  // the material blend; mid and fine fetch their own, which on flat terrain
+  // (side-plane gates closed) costs what the XY-only version did.
+  highp vec3 grad1 = vec3(0.);
   if (mask_macro > 0.0)
-    grad1 = detailHeightGrad(v_world_pos.xy, 0.002, detailWeights,
-                             max(fp, 1. / (0.002 * 1024.)));
+    grad1 = triplanarHeightGrad(tri, v_world_pos, 0.002, detailWeights,
+                                max(fp3, 1. / (0.002 * 1024.)));
+  highp vec3 grad2 = vec3(0.);
   if (fade_mid > 0.0)
-    grad2 = detailHeightGrad(v_world_pos.xy, 0.014, detailWeights,
-                             max(fp, 1. / (0.014 * 1024.)));
+    grad2 = triplanarHeightGrad(
+        sampleTriplanar(v_world_pos, geomNormal, 0.014), v_world_pos, 0.014,
+        detailWeights, max(fp3, 1. / (0.014 * 1024.)));
+  highp vec3 grad3 = vec3(0.);
   if (fade_fine > 0.0)
-    grad3 = detailHeightGrad(v_world_pos.xy, 0.1, detailWeights,
-                             max(fp, 1. / (0.1 * 1024.)));
+    grad3 = triplanarHeightGrad(
+        sampleTriplanar(v_world_pos, geomNormal, 0.1), v_world_pos, 0.1,
+        detailWeights, max(fp3, 1. / (0.1 * 1024.)));
 
-  // Per-scale: scalar height derivatives along the screen axes. The
-  // gradients live in world XY, so the chain rule (dot with dPdx/dPdy)
-  // yields the same screen-space quantity dFdx used to measure -- the masks
-  // and divisors below apply unchanged. The macro scale was the last to
-  // switch from dFdx of the triplanar sample: differentiating the
-  // mip-filtered blend gave per-quad, per-mip-texel-plateau values whose
-  // grazing amplification was exactly the wall-rectangle artifact, and with
-  // the slope fade above, the triplanar projections (the reason to keep
-  // dFdx) no longer contribute where XY sampling is invalid anyway.
-  highp float dHdx1 = dot(grad1, dPdx.xy);
-  highp float dHdy1 = dot(grad1, dPdy.xy);
-  highp float dHdx2 = dot(grad2, dPdx.xy);
-  highp float dHdy2 = dot(grad2, dPdy.xy);
-  highp float dHdx3 = dot(grad3, dPdx.xy);
-  highp float dHdy3 = dot(grad3, dPdy.xy);
+  // Per-scale: scalar height derivatives along the screen axes via the chain
+  // rule, yielding the same screen-space quantity dFdx used to measure --
+  // the masks and divisors below apply unchanged. dFdx itself was retired at
+  // every scale: differentiating the mip-filtered sample gave per-quad,
+  // per-mip-texel-plateau values, whose grazing amplification rendered as
+  // shading rectangles on walls at the macro scale.
+  highp float dHdx1 = dot(grad1, dPdx);
+  highp float dHdy1 = dot(grad1, dPdy);
+  highp float dHdx2 = dot(grad2, dPdx);
+  highp float dHdy2 = dot(grad2, dPdy);
+  highp float dHdx3 = dot(grad3, dPdx);
+  highp float dHdy3 = dot(grad3, dPdy);
 
   // Combine in scalar space, then project once
   highp float combinedDHdx = dHdx1 * mask_macro +
@@ -491,7 +521,8 @@ void main() {
 
   // Sample packed detail map via triplanar projection
   highp float scale = 0.002; // ~500m per texture repeat
-  vec4 texNoise = sampleTriplanarCombined(v_world_pos, normal, scale);
+  Triplanar tri = sampleTriplanar(v_world_pos, normal, scale);
+  vec4 texNoise = triplanarCombine(tri);
 
   // -----------------------------------------------------------------------
   // STEP A: HEIGHT-BASED BLENDING ("Clumping")
@@ -586,7 +617,7 @@ void main() {
 
   // Procedural normal perturbation (replaces rock_normal_map)
   final_normal =
-      perturbNormal(normal, surface.roughness, finalWeights);
+      perturbNormal(normal, tri, surface.roughness, finalWeights);
 
   // Water Wave Logic
   if (waterMask > 0.01) {
