@@ -233,8 +233,7 @@ vec2 detailHeightGrad(highp vec2 pos, float scale, vec4 weights,
 
 // Procedural normal perturbation based on detail noise
 // Uses screen-space derivatives for directional bump mapping
-vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
-                   vec4 detailWeights) {
+vec3 perturbNormal(vec3 geomNormal, float roughness, vec4 detailWeights) {
   // Determine roughness
   const vec4 roughnessWeights =
       vec4(0.6 /* rock */, 0.9 /* grass */, 0.85 /* forest */, 0.2 /* ice */);
@@ -248,20 +247,21 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
 
   float bumpStrength = 4.0 * material_roughness;
 
-  // Distance fade-outs for detail noise (invisible at range, saves texture
-  // fetches)
+  // Distance fades and masks for the three noise scales (skipping fetches
+  // where a scale contributes nothing)
   float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist); // 10m noise
   float fade_mid = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
+  float mask_macro = smoothstep(175., 280., v_dist);        // 500m noise
+  float mask_mid = smoothstep(25., 40., v_dist);
 
-  // These two scales sample an XY projection only, which stretches into
-  // vertical stripes on steep faces (one texel row spans many meters of
-  // wall), so any bump derived from it reads as banding there. Fade them out
-  // with slope -- walls keep the triplanar macro bump -- and let the gates
-  // below skip the fetches. [geomNormal] interpolates smoothly, so the
-  // branches stay quad-coherent.
-  float xyProj = 1.0 - smoothstep(0.5, 0.7, 1.0 - geomNormal.z);
-  fade_fine *= xyProj;
-  fade_mid *= xyProj;
+  // The bump at every scale is derived from an XY projection, which
+  // stretches on steep faces (one texel row spans many meters of wall). With
+  // the continuous finite-difference gradients below this reads as smooth
+  // fall-line streaking and keeps the faces textured; a slope fade
+  // (multiplying the three factors above by a smoothstep of geomNormal.z)
+  // was tried and rejected -- it stripped cliffs down to the bare relief
+  // normals. The shading *rectangles* that motivated it came from dFdx of
+  // the mip-filtered macro sample, fixed since by the FD switch.
 
   // Compute projection basis once (before the gated fetches: no dFdx inside
   // non-uniform control flow)
@@ -280,8 +280,12 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
   highp float fp = max(length(dPdx.xy), length(dPdy.xy));
 
   // Only sample when contribution is visible at this distance
+  vec2 grad1 = vec2(0.);
   vec2 grad2 = vec2(0.);
   vec2 grad3 = vec2(0.);
+  if (mask_macro > 0.0)
+    grad1 = detailHeightGrad(v_world_pos.xy, 0.002, detailWeights,
+                             max(fp, 1. / (0.002 * 1024.)));
   if (fade_mid > 0.0)
     grad2 = detailHeightGrad(v_world_pos.xy, 0.014, detailWeights,
                              max(fp, 1. / (0.014 * 1024.)));
@@ -289,23 +293,21 @@ vec3 perturbNormal(vec3 geomNormal, vec4 texNoise, float roughness,
     grad3 = detailHeightGrad(v_world_pos.xy, 0.1, detailWeights,
                              max(fp, 1. / (0.1 * 1024.)));
 
-  // Per-scale: scalar height derivatives along the screen axes. The macro
-  // scale keeps dFdx/dFdy: it only fades in beyond 175 m (mask_macro) where
-  // mip filtering has already smoothed the height, and finite differences
-  // would cost six extra triplanar fetches. The mid/fine gradients live in
-  // world XY, so the chain rule (dot with dPdx/dPdy) yields the same
-  // screen-space quantity dFdx measured -- masks and divisors below still
-  // apply unchanged.
-  highp float dHdx1 = dFdx(computeHeight(texNoise, detailWeights));
-  highp float dHdy1 = dFdy(computeHeight(texNoise, detailWeights));
+  // Per-scale: scalar height derivatives along the screen axes. The
+  // gradients live in world XY, so the chain rule (dot with dPdx/dPdy)
+  // yields the same screen-space quantity dFdx used to measure -- the masks
+  // and divisors below apply unchanged. The macro scale was the last to
+  // switch from dFdx of the triplanar sample: differentiating the
+  // mip-filtered blend gave per-quad, per-mip-texel-plateau values whose
+  // grazing amplification was exactly the wall-rectangle artifact, and with
+  // the slope fade above, the triplanar projections (the reason to keep
+  // dFdx) no longer contribute where XY sampling is invalid anyway.
+  highp float dHdx1 = dot(grad1, dPdx.xy);
+  highp float dHdy1 = dot(grad1, dPdy.xy);
   highp float dHdx2 = dot(grad2, dPdx.xy);
   highp float dHdy2 = dot(grad2, dPdy.xy);
   highp float dHdx3 = dot(grad3, dPdx.xy);
   highp float dHdy3 = dot(grad3, dPdy.xy);
-
-  // Distance-based attenuation masks
-  float mask_macro = smoothstep(175., 280., v_dist);
-  float mask_mid = smoothstep(25., 40., v_dist);
 
   // Combine in scalar space, then project once
   highp float combinedDHdx = dHdx1 * mask_macro +
@@ -584,7 +586,7 @@ void main() {
 
   // Procedural normal perturbation (replaces rock_normal_map)
   final_normal =
-      perturbNormal(normal, texNoise, surface.roughness, finalWeights);
+      perturbNormal(normal, surface.roughness, finalWeights);
 
   // Water Wave Logic
   if (waterMask > 0.01) {
