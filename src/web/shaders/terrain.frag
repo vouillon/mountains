@@ -211,8 +211,7 @@ Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale) {
 // Side-Y (blend.y)     -> XZ projection
 // Side-X (blend.x)     -> YZ projection
 vec4 triplanarCombine(Triplanar t) {
-  return (t.d_xy * t.blend.z) +
-         (mix(vec4(0.5), t.d_xz, t.fade_y) * t.blend.y) +
+  return (t.d_xy * t.blend.z) + (mix(vec4(0.5), t.d_xz, t.fade_y) * t.blend.y) +
          (mix(vec4(0.5), t.d_yz, t.fade_x) * t.blend.x);
 }
 
@@ -315,14 +314,14 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
                                 max(fp3, 1. / (0.002 * 1024.)));
   highp vec3 grad2 = vec3(0.);
   if (fade_mid > 0.0)
-    grad2 = triplanarHeightGrad(
-        sampleTriplanar(v_world_pos, geomNormal, 0.014), v_world_pos, 0.014,
-        detailWeights, max(fp3, 1. / (0.014 * 1024.)));
+    grad2 = triplanarHeightGrad(sampleTriplanar(v_world_pos, geomNormal, 0.014),
+                                v_world_pos, 0.014, detailWeights,
+                                max(fp3, 1. / (0.014 * 1024.)));
   highp vec3 grad3 = vec3(0.);
   if (fade_fine > 0.0)
-    grad3 = triplanarHeightGrad(
-        sampleTriplanar(v_world_pos, geomNormal, 0.1), v_world_pos, 0.1,
-        detailWeights, max(fp3, 1. / (0.1 * 1024.)));
+    grad3 = triplanarHeightGrad(sampleTriplanar(v_world_pos, geomNormal, 0.1),
+                                v_world_pos, 0.1, detailWeights,
+                                max(fp3, 1. / (0.1 * 1024.)));
 
   // Per-scale: scalar height derivatives along the screen axes via the chain
   // rule, yielding the same screen-space quantity dFdx used to measure --
@@ -598,8 +597,7 @@ void main() {
   terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
 
   // Procedural normal perturbation (replaces rock_normal_map)
-  final_normal =
-      perturbNormal(normal, tri, surface.roughness, finalWeights);
+  final_normal = perturbNormal(normal, tri, surface.roughness, finalWeights);
 
   // Water Wave Logic
   if (waterMask > 0.01) {
