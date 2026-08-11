@@ -1,13 +1,11 @@
 precision mediump float; // Default mediump for mobile performance
 precision highp sampler2DArray;
 
-// Encoded normal only (RG8: xy, z reconstructed). The heights live in a
-// separate RG8 texture that the vertex stage declares as `relief`; this stage
-// never reads them.
+// Encoded normal only (RG8). The heights live in a separate RG8 texture that
+// the vertex stage declares as `relief`; this stage never reads them.
 uniform highp sampler2D relief_normal;
 // Encoded normals of the near-field refinement rings (see [Hd_dem]), innermost
-// first, RGB10_A2 with all three components stored (see [decodeHdNormal]).
-// Selected by the same extent tests as the vertex stage; [hd_valid] is
+// first. Selected by the same extent tests as the vertex stage; [hd_valid] is
 // shared with it, and bool needs no precision qualifier, so the two
 // declarations cannot disagree.
 #define HD_SLOTS 3
@@ -439,18 +437,6 @@ highp float IGN(highp vec2 p) {
   return fract(magic.z * fract(dot(p, magic.xy)));
 }
 
-// Ring normals store all three components (RGB10_A2; z unmapped, always > 0
-// for a heightfield): no z = sqrt(1 - |xy|^2) reconstruction, whose 1/z factor
-// amplified one rg quantum into visible shading steps on steep faces (~2.6
-// degrees of tilt per RG8 quantum at 80 degrees; flat rectangles where the
-// wall magnifies texel rows). Bilinear filtering shortens the vector between
-// texels that disagree, so renormalize -- filtered xyz + normalize is also a
-// more faithful interpolation than filtered xy + reconstruction. highp so
-// fp16 arithmetic does not re-quantize the 10-bit channels.
-highp vec3 decodeHdNormal(highp vec3 enc) {
-  return normalize(vec3(enc.rg * 2.0 - 1.0, enc.b));
-}
-
 // ========== Main ==========
 
 uniform vec3 u_fogColor;
@@ -485,26 +471,22 @@ void main() {
   // Decode normal from the relief normal texture, preferring the
   // high-resolution one inside its extent (quad-coherent branch: neighbouring
   // fragments are on the same side of a boundary kilometres away, and both
-  // sources derive from the same heights there). The two decodes differ: the
-  // rings store xyz in RGB10_A2, the base pyramid stays RG8 + z
-  // reconstruction -- its steeps sit kilometres away behind airlight where
-  // the quantization staircase never showed, and RGB10_A2 would double its
-  // 32 MiB.
-  vec3 normal;
+  // sources derive from the same heights there).
+  mediump vec2 encodedN;
   if (hd_valid[0] && all(greaterThanEqual(hdReliefCoord0, vec2(0.0))) &&
       all(lessThanEqual(hdReliefCoord0, vec2(1.0))))
-    normal = decodeHdNormal(texture(hd_relief_normal[0], hdReliefCoord0).rgb);
+    encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
   else if (hd_valid[1] && all(greaterThanEqual(hdReliefCoord1, vec2(0.0))) &&
            all(lessThanEqual(hdReliefCoord1, vec2(1.0))))
-    normal = decodeHdNormal(texture(hd_relief_normal[1], hdReliefCoord1).rgb);
+    encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
   else if (hd_valid[2] && all(greaterThanEqual(hdReliefCoord2, vec2(0.0))) &&
            all(lessThanEqual(hdReliefCoord2, vec2(1.0))))
-    normal = decodeHdNormal(texture(hd_relief_normal[2], hdReliefCoord2).rgb);
-  else {
-    highp vec2 encodedN = texture(relief_normal, reliefCoord).rg;
-    normal.xy = encodedN * 2.0 - 1.0;
-    normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
-  }
+    encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
+  else
+    encodedN = texture(relief_normal, reliefCoord).rg;
+  vec3 normal;
+  normal.xy = encodedN * 2.0 - 1.0;
+  normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
 
   vec3 lightDir = u_lightDir; // Pre-normalized on CPU
   float cosTheta = clamp(dot(normal, lightDir), 0.0, 1.0);

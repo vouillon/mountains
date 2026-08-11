@@ -987,17 +987,10 @@ let downsample_k _level = 0.25
    it the same way -- a refinement's grid spans a few hundred metres of height,
    and baking it through the base scale put 14.5 cm steps into normals that are
    divided by a spacing several times finer. *)
-(* [xyz_normals] stores all three normal components in RGB10_A2 instead of
-   RG8's xy + z-reconstruction: the sqrt's 1/z factor turns one 8-bit xy
-   quantum into ~2.6 degrees of tilt at 80 degrees of slope, which renders as
-   flat shading rectangles wherever a steep face magnifies texel rows. Used
-   for the near-field rings (a few MiB each); the base pyramid keeps RG8, as
-   its steeps sit kilometres away behind airlight and the upgrade would double
-   its 32 MiB. normal.frag always writes xyz; RG8 targets just drop z. *)
 let compute_relief ?(spacing_scale = 1.0) ?(border = true)
-    ?(height_scale = 9500. /. 65535.) ?(height_offset = -500.)
-    ?(xyz_normals = false) ctx width height lat triangle_geo tile_texture
-    normal_pid downsample_pid (u : Render_state.relief_uniforms)
+    ?(height_scale = 9500. /. 65535.) ?(height_offset = -500.) ctx width height
+    lat triangle_geo tile_texture normal_pid downsample_pid
+    (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
 
@@ -1012,13 +1005,14 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true)
   Gl.use_program ctx downsample_pid;
   Gl.uniform1f ctx downsample_u.height_scale_n (height_scale *. 255.);
 
-  (* Heights and encoded normals live in two pyramids instead of one RGBA8:
+  (* Heights and encoded normals live in two RG8 pyramids instead of one RGBA8:
      every consumer used to discard half of every texel. [filtered] tells them
      apart — the normal texture is the only one sampled through [texture()]
      (terrain.frag's fragment normal decode), while the height texture is only
      ever read by [texelFetch] (the vertex LOD system, which still needs the
-     full mip chain) or through the AO passes' NEAREST sampler object. *)
-  let create_pyramid ~filtered ~format =
+     full mip chain) or through the AO passes' NEAREST sampler object. Total
+     memory is unchanged; bytes per tap are halved on both paths. *)
+  let create_rg8_pyramid ~filtered =
     let id = Gl.create_texture ctx in
     Gl.bind_texture ctx Gl.texture_2d (Some id);
     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
@@ -1036,14 +1030,11 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true)
     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
     Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
     if filtered then apply_anisotropic_filtering ctx;
-    Gl.tex_storage2d ctx Gl.texture_2d levels format width height;
+    Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg8 width height;
     id
   in
-  let tid = create_pyramid ~filtered:false ~format:Gl.rg8 in
-  let nid =
-    create_pyramid ~filtered:true
-      ~format:(if xyz_normals then Gl.rgb10_a2 else Gl.rg8)
-  in
+  let tid = create_rg8_pyramid ~filtered:false in
+  let nid = create_rg8_pyramid ~filtered:true in
 
   (* normal.frag writes heights to attachment 0 and the encoded normal to
      attachment 1, so both pyramids are filled by the same passes as before. *)
@@ -3231,8 +3222,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               time_gpu ctx "compute_relief_hd" (fun () ->
                   compute_relief ~spacing_scale:g.layer.px_arcsec ~border:false
                     ~height_scale:g.height_scale ~height_offset:g.height_offset
-                    ~xyz_normals:true ctx g.layer.size g.layer.size lat
-                    triangle_geo tex normal_pid downsample_pid relief_uniforms
+                    ctx g.layer.size g.layer.size lat triangle_geo tex
+                    normal_pid downsample_pid relief_uniforms
                     downsample_uniforms)
             in
             (* Nothing reads the source grid on the GPU after the bake. *)
