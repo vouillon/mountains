@@ -2937,3 +2937,21 @@ the `min 1 (step/8)` bump mapping. The remaining texture-character contrast
 between rings is the data-resolution difference itself, spread over the band
 rather than a line; if it still reads as a defect on device, lower the 5 m
 ring's bump share before touching the band.
+
+### The race fix had the same hole one publish deeper (2026-08-13)
+
+After the rebase onto main the near field rendered flat: the inner ring's
+blend never ran (log signature: all tiles fetched, blends stop before the
+1 m ring, "eye ... on a 4.98 m grid"). Not a rebase regression — the refine
+loop replayed byte-identical, and the ring pipeline files match the
+pre-rebase tip exactly. Instrumenting refine showed the sequence: publish
+the settled rings, and while that publish runs its seconds of GPU work the
+last fetch settles; the publish branch then went back to the *wait* — whose
+pending filter finds nothing pending and exits. The 2026-08-07 fix closed
+this window for the first publish and left it open for every refine
+publish. Fixed in ac438b0: the publish branch re-enters [refine] (the
+settled check) instead of [wait]; terminates because [shown] grows
+strictly per publish. Verified twice headlessly: 4 blends, eye on the
+1.00 m grid, near-field relief back. What exposed it was WMS timing — the
+inner ring landing ~2 s behind the others, inside the publish window — so
+it would have struck any device with that fetch spacing, rebase or not.
