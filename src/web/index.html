@@ -1358,18 +1358,80 @@
           window.location.reload();
         };
 
+        // Reload only once the new worker is the registration's active one:
+        // that is when a navigation goes to it, and with the shell served from
+        // the cache a reload any earlier is answered by the worker still in
+        // charge -- the same build again, with the prompt now gone. Waiting is
+        // not a formality. The handover waits on this page's own requests:
+        // Chrome holds the activation off while the outgoing worker still has
+        // fetches in flight, and this app keeps a stream of tiles coming, tens
+        // at a time on the connections where any of this matters. Measured at
+        // ten seconds with the elevation host unreachable, twenty with sixty of
+        // its requests hanging on their timeouts; a slow network is slower.
+        // Under the network-first shell none of this showed, a reload having
+        // fetched the new code whoever served it.
+        let armed = false;
         reload.addEventListener('click', () => {
           reload.disabled = true;
           reload.textContent = 'Reloading…';
-          // The new worker takes control once it stops waiting, and that is the
-          // moment its shell is the one being served.
-          navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+          if (!armed) {
+            armed = true;
+            const reloadWhenActive = () => {
+              if (worker.state === 'activated') reloadOnce();
+            };
+            worker.addEventListener('statechange', reloadWhenActive);
+            navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+            reloadWhenActive();
+          }
           worker.postMessage('skipWaiting');
-          // Should it not answer -- an older worker without that handler, say --
-          // reload anyway rather than leave the button dead.
-          setTimeout(reloadOnce, 2000);
+          // Never a reload on a timer: that is precisely the one that lands back
+          // on the old build. If the handover is taking too long, hand the
+          // button back -- a second press costs nothing, and the update needs
+          // none of this at the next launch, every window being closed by then.
+          setTimeout(() => {
+            if (reloading) return;
+            reload.disabled = false;
+            reload.textContent = 'Reload';
+          }, 45000);
         });
         dismiss.addEventListener('click', () => bar.remove());
+      }
+
+      // Which build a worker serves: the digest its cache is named after, asked
+      // for over a port it answers on (see the message handler in
+      // service_worker.ml). null when it does not answer -- a worker from a
+      // build predating that handler, or one too busy installing.
+      function workerVersion(worker) {
+        return new Promise(resolve => {
+          if (!worker) return resolve(null);
+          const channel = new MessageChannel();
+          channel.port1.onmessage = (e) => resolve(e.data);
+          setTimeout(() => resolve(null), 2000);
+          try {
+            worker.postMessage('version', [channel.port2]);
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      }
+
+      // An update worth a word is one that changes the application. A new worker
+      // serving the same digest differs from the running one in its own script
+      // and nothing else, which the digest does not cover: reloading would land
+      // on the very same app, so it is left waiting for the windows to close
+      // instead of asking for a reload that shows nothing. Anything unanswered
+      // counts as different, which is what this did before asking.
+      async function offerIfDifferent(worker) {
+        if (!worker) return;
+        const [running, offered] = await Promise.all([
+          workerVersion(navigator.serviceWorker.controller),
+          workerVersion(worker),
+        ]);
+        if (running !== null && running === offered) {
+          console.log('New service worker, same application: no update offered');
+          return;
+        }
+        whenAppIsUp(() => offerUpdate(worker));
       }
 
       async function watchForUpdate() {
@@ -1378,7 +1440,7 @@
           const registration = await navigator.serviceWorker.ready;
           // One may be waiting already, installed during an earlier visit.
           if (registration.waiting && navigator.serviceWorker.controller) {
-            whenAppIsUp(() => offerUpdate(registration.waiting));
+            offerIfDifferent(registration.waiting);
           }
           registration.addEventListener('updatefound', () => {
             const installing = registration.installing;
@@ -1388,7 +1450,7 @@
               // rather than a first visit, which needs no telling.
               if (installing.state === 'installed' &&
                   navigator.serviceWorker.controller) {
-                whenAppIsUp(() => offerUpdate(registration.waiting || installing));
+                offerIfDifferent(registration.waiting || installing);
               }
             });
           });

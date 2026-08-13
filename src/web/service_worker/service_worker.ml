@@ -311,14 +311,38 @@ let () =
    and asks for this when it is accepted (see [watchForUpdate] in index.html).
    Not done on install, unprompted: activating swaps the worker under a running
    page, and [delete_old_caches] then takes away the shell it is still using, so
-   it must happen only when the page is about to reload into the new one. *)
+   it must happen only when the page is about to reload into the new one.
+
+   [version] answers on the port the page hands over. What triggers an update is
+   a byte-different worker script, and the script is not among the files
+   [Sw_version.version] digests: a deploy touching this file alone -- or a
+   toolchain that compiles it differently -- yields a new worker offering the
+   very same application, an update that visibly does nothing. The page asks
+   both workers and keeps quiet when the two agree (see [offerIfDifferent] in
+   index.html). Nothing is lost by the silence: this worker still takes over of
+   its own accord once every window has been closed. *)
 let () =
   ignore
     (Brr.Ev.listen Brr_io.Message.Ev.message
        (fun ev ->
-         let data = Brr_io.Message.Ev.data (Brr.Ev.as_type ev) in
-         if Jstr.equal (Jv.to_jstr data) (Jstr.v "skipWaiting") then
-           ignore Brr_webworkers.Service_worker.G.(skip_waiting ()))
+         let ev = Brr.Ev.as_type ev in
+         let data = Jv.to_jstr (Brr_io.Message.Ev.data ev) in
+         if Jstr.equal data (Jstr.v "skipWaiting") then
+           (* Not [ignore]: this resolves only when the activation it asks for
+              has happened, which is not at once and can fail, and a silent
+              failure here is a Reload button that does nothing. *)
+           Fut.await
+             Brr_webworkers.Service_worker.G.(skip_waiting ())
+             (function
+               | Ok () -> ()
+               | Error e ->
+                   Brr.Console.(
+                     error [ Jstr.v "skipWaiting failed:"; Jv.Error.message e ]))
+         else if Jstr.equal data (Jstr.v "version") then
+           List.iter
+             (fun port ->
+               Brr_io.Message.Port.post port (Jstr.v Sw_version.version))
+             (Brr_io.Message.Ev.ports ev))
        Brr.G.target)
 
 (* Navigation preload sends the document to the network in parallel with the
