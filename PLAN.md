@@ -2955,3 +2955,37 @@ strictly per publish. Verified twice headlessly: 4 blends, eye on the
 1.00 m grid, near-field relief back. What exposed it was WMS timing — the
 inner ring landing ~2 s behind the others, inside the publish window — so
 it would have struck any device with that fetch spacing, rebase or not.
+
+### The flat near field, second act: a mixed-build shell cache (2026-08-13)
+
+The refine fix was necessary but was not what the user was seeing. Their
+console showed the true signature: two blends reporting **5,851,864 m** and
+**18,371,518 m** height ranges (quantisation steps of 89-280 m -- the near
+field renders flat because every sample lands on a handful of levels), with
+the one OCaml-path blend sane in between. Megametre blend ranges mean the
+viewer and blend.wasm disagree on the parameter layout -- the same signature
+PLAN records for the warm-capture-profile trap, this time in a live browser.
+
+How a browser gets a mixed build: the service worker's install handler
+precached with plain requests, and `cache.addAll` fetches through the
+browser's HTTP cache. Under heuristic freshness (localhost's python server
+sends only Last-Modified; GitHub Pages sends max-age=600) the unchanging
+names -- blend.wasm above all -- can be served from the *previous* build,
+while the hashed `code-<hash>.wasm` is necessarily fresh. The new shell
+cache then permanently pairs the new viewer with the old blend.wasm. This
+exact trap was measured in the service worker session and fixed on main as
+a3a843f (precache requests carry `cache: "reload"`, and shell lookups are
+pinned to the build's own cache instead of searching every one) — but that
+landed *after* the hd rebase, so hd was serving the unprotected worker.
+Resolved by rebasing hd onto main again, picking up a3a843f and 2ed75ae.
+Recovery for an already-poisoned profile (keeps the v1 tile cache):
+
+    const ks = await caches.keys();
+    for (const k of ks) if (k.startsWith('mountains-')) await caches.delete(k);
+    await (await navigator.serviceWorker.getRegistration()).unregister();
+    location.reload();
+
+Also fixed while hunting (real, but not this): the refine loop re-entered
+its settled check through the `on_gpu_finished` await with no epoch test, so
+a location switch during that drain could receive the previous location's
+remaining rings.
