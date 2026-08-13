@@ -3602,8 +3602,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                  is pending no longer -- the same window the comment above
                  [refine] describes, one publish later. Terminates: [shown]
                  grows strictly on this path and is bounded by the ring
-                 count. *)
-              refine ()
+                 count. The await above is the one place this loop crosses a
+                 turn between two publishes, so the epoch is re-checked here:
+                 a switch that ran during the drain must not receive this
+                 location's remaining rings. *)
+              if !location_epoch <> epoch then Lwt.return_unit else refine ()
         end
         else wait ()
       and wait () =
