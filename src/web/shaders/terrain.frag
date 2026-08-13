@@ -301,6 +301,13 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   float mask_macro = smoothstep(175., 280., v_dist);        // 500m noise
   float mask_mid = smoothstep(25., 40., v_dist);
 
+  // The fine scale bows out on the steepest faces: they are the most
+  // expensive fragments (2-3 planes at every scale once past
+  // [triplanarSideGate]), and the 10 m noise contributes least to how a wall
+  // reads -- its character is macro and mid structure. Starts where the side
+  // gate ends, so the fine bump is never simultaneously triplanar.
+  fade_fine *= 1.0 - smoothstep(0.55, 0.7, 1.0 - geomNormal.z);
+
   // Compute projection basis once (before the gated fetches: no dFdx inside
   // non-uniform control flow)
   highp vec3 dPdx = dFdx(v_world_pos);
