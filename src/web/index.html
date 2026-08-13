@@ -1319,12 +1319,15 @@
       let updateOffered = false;
 
       // Held back until the loading screen has gone: an offer to reload makes no
-      // sense over a screen that is still loading.
+      // sense over a screen that is still loading. Shown anyway after three
+      // minutes of it, rather than dropped: the shell is served from the cache,
+      // so reloading a build that hangs on startup only brings the same one
+      // back, and this prompt is the way off it.
       function whenAppIsUp(action, attempt = 0) {
         const overlay = document.getElementById('startup-overlay');
-        if (!overlay || overlay.classList.contains('hidden')) {
+        if (!overlay || overlay.classList.contains('hidden') || attempt >= 900) {
           action();
-        } else if (attempt < 900) {
+        } else {
           setTimeout(() => whenAppIsUp(action, attempt + 1), 200);
         }
       }

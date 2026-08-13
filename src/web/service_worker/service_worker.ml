@@ -1,8 +1,14 @@
 open Fut.Result_syntax
 
 (* The application shell goes to a cache named after a digest of its contents:
-   a deploy changing any of them uses a fresh cache, so cache-first assets (the
-   worker, the Wasm modules) can no longer be served from a previous build.
+   a deploy changing any of them uses a fresh cache, so nothing can be served
+   from a previous build. Every file of the shell is served from that cache
+   first, the network only answering what it does not hold: on the bad
+   connections this app is used on, revalidating a few megabytes of code is the
+   slowest part of a start, and it buys nothing a deploy does not already give
+   -- a new build arrives as a new worker, which the page offers as an update
+   (see [watchForUpdate] in index.html).
+
    The tiles are immutable and expensive to fetch, so they live in a separate,
    persistent cache which survives deploys. Its name is also hard-coded in the
    main thread ([Dem_loader.prefetch], [Clc_loader.prefetch_tile],
@@ -55,6 +61,17 @@ let is_map_basemap url =
      || contains_sub url
           "LAYER=IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW"
      || contains_sub url "LAYER=ELEVATION.CONTOUR.LINE")
+
+(* The shell is what lives under the worker's own scope, tiles aside. Anything
+   else -- the elevation service above, and whatever else may be added -- is
+   left to the handlers that know it, rather than falling into the shell's
+   cache-first path, where a query-insensitive lookup would answer one request
+   with another's response. *)
+let scope =
+  Jstr.to_string
+    Brr_webworkers.Service_worker.(Registration.scope G.registration)
+
+let is_shell url = String.starts_with ~prefix:scope url
 
 (* [Cache.Storage.match'] searches every cache, so application caches from
    previous builds must be dropped, not just left unused. *)
@@ -123,9 +140,16 @@ let put_in_cache request response =
   let+ _ = store_in_cache request response in
   Ok ()
 
-let match_opts =
-  let o = Jv.obj [| ("ignoreSearch", Jv.true') |] in
-  Obj.magic o
+let match_opts = Brr_io.Fetch.Cache.query_opts ~ignore_search:true ()
+
+(* Shell lookups are pinned to this build's cache instead of searching every
+   one of them. A new worker fills its cache while installing, under a page this
+   one is still serving: a storage-wide match could answer that page with a file
+   from a build it never loaded, mixing the two. Pinned, each worker serves its
+   own build whole, until the page reloads into the new one. *)
+let shell_match_opts =
+  Brr_io.Fetch.Cache.query_opts ~ignore_search:true ~cache_name:app_cache_name
+    ()
 
 (* [put_in_cache] stores error responses too. With [serve_not_found], a cached
    404 is served rather than skipped: a WMTS elevation tile answers 404 when it
@@ -162,43 +186,6 @@ let use_cache_first ?(serve_not_found = false) ?query_opts request =
       let* response = Brr_io.Fetch.request request in
       let* () = put_in_cache request response in
       Fut.return (Ok response)
-
-(* [preloadResponse] only exists where navigation preload is implemented
-   (Chromium); elsewhere [Fut.of_promise] would raise on the undefined
-   property, aborting the whole fetch handler. *)
-let preload_response event =
-  if
-    Jv.is_none
-      (Jv.get
-         (Brr.Ev.to_jv (Brr_io.Fetch.Ev.as_extendable event))
-         "preloadResponse")
-  then Fut.return (Ok None)
-  else Brr_io.Fetch.Ev.preload_response event
-
-let use_cache_on_error event request =
-  let open Fut.Syntax in
-  let* response = preload_response event in
-  match response with
-  | Ok (Some response) when Brr_io.Fetch.Response.ok response ->
-      let open Fut.Result_syntax in
-      let* () = put_in_cache request response in
-      Fut.return (Ok response)
-  | Ok _ | Error _ -> (
-      let* response = Brr_io.Fetch.request request in
-      match response with
-      | Ok response when Brr_io.Fetch.Response.ok response ->
-          let open Fut.Result_syntax in
-          let* () = put_in_cache request response in
-          Fut.return (Ok response)
-      | Ok _ | Error _ -> (
-          let open Fut.Result_syntax in
-          let* response =
-            Brr_io.Fetch.Cache.Storage.match' ~query_opts:match_opts
-              (Brr_io.Fetch.caches ()) request
-          in
-          match response with
-          | Some response -> Fut.return (Ok response)
-          | None -> Fut.return (Ok (Brr_io.Fetch.Response.error ()))))
 
 (* Web Share Target ([share_target] in manifest.json): a share arrives as a
    [multipart/form-data] POST navigation to [share-target], and no document can
@@ -308,13 +295,11 @@ let () =
                 if is_map_basemap url then Brr_io.Fetch.request request
                 else if is_hd_dem url then
                   use_cache_first ~serve_not_found:true request
-                else if
-                  is_tile url
-                  || String.ends_with ~suffix:"worker.bc.js" url
-                  || String.ends_with ~suffix:"decompress_tile.wasm" url
-                  || String.ends_with ~suffix:"blend.wasm" url
-                then use_cache_first ~query_opts:match_opts request
-                else use_cache_on_error ev request
+                else if is_tile url then
+                  use_cache_first ~query_opts:match_opts request
+                else if is_shell url then
+                  use_cache_first ~query_opts:shell_match_opts request
+                else Brr_io.Fetch.request request
             in
             match response with
             | Ok _ -> Fut.return response
@@ -336,15 +321,22 @@ let () =
            ignore Brr_webworkers.Service_worker.G.(skip_waiting ()))
        Brr.G.target)
 
-(* Navigation preload is unimplemented in Firefox, where
-   [registration.navigationPreload] is undefined: enabling it must not throw
-   before [Clients.claim] runs. *)
-let enable_navigation_preload () =
+(* Navigation preload sends the document to the network in parallel with the
+   fetch handler, which was the fast path while documents were served
+   network-first. Served from the cache instead, that response is dropped
+   unread, so it is one request's worth of a scarce connection spent on nothing.
+   Turning it off has to be done, not merely left undone: the setting belongs to
+   the registration and outlives the worker that asked for it, so installs
+   carrying it from an earlier build would keep preloading for ever.
+
+   It is unimplemented in Firefox, where [registration.navigationPreload] is
+   undefined: this must not throw before [Clients.claim] runs. *)
+let disable_navigation_preload () =
   let open Brr_webworkers.Service_worker in
   let preload = Registration.navigation_preload G.registration in
   if Jv.is_none (Navigation_preload_manager.to_jv preload) then
     Fut.return (Ok ())
-  else Navigation_preload_manager.enable preload
+  else Navigation_preload_manager.disable preload
 
 let () =
   ignore
@@ -352,12 +344,28 @@ let () =
        (fun ev ->
          Brr.Ev.Extendable.wait_until (Brr.Ev.as_type ev)
            (let open Fut.Result_syntax in
-            let+ () = enable_navigation_preload ()
+            let+ () = disable_navigation_preload ()
             and+ () = Brr_webworkers.Service_worker.(Clients.claim G.clients)
             and+ () = delete_old_caches ()
             and+ () = prune_data_cache () in
             ()))
        Brr.G.target)
+
+(* Precaching goes to the network, not through the browser's own HTTP cache,
+   which is how a new worker can otherwise fill its cache with the build it is
+   replacing. A document served with any freshness at all -- GitHub Pages sends
+   [max-age=600] for HTML -- is reused from there rather than fetched, and
+   [Cache.add_all] does nothing to prevent it: measured here, a worker installed
+   seconds after a deploy precached the *previous* index.html into the cache
+   named after the new build. Network-first that lasted until the next
+   revalidation; cache-first it is what the build would serve for as long as it
+   lives, an update the user accepted and did not get. [Cache.reload] is the
+   fetch that ignores the HTTP cache in both directions. *)
+let precache_request url =
+  let init =
+    Brr_io.Fetch.Request.init ~cache:Brr_io.Fetch.Request.Cache.reload ()
+  in
+  Brr_io.Fetch.Request.v ~init (Jstr.v url)
 
 let () =
   ignore
@@ -367,8 +375,7 @@ let () =
            (let open Fut.Result_syntax in
             let* cache = open_cache app_cache_name in
             Brr_io.Fetch.Cache.add_all cache
-              (List.map
-                 (fun url -> Brr_io.Fetch.Request.v (Jstr.v url))
+              (List.map precache_request
                  ([
                     ".";
                     "viewer.bc.wasm.js";
@@ -386,8 +393,8 @@ let () =
 
 (*
 - Use cache first for the DEM (.dem, .tif) and land cover (.clc) tiles, and for
-  the worker and Wasm modules
-- Use cache on error for other files
+  the application shell
+- Pass anything else through to the network
 
 https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API/Using_Service_Workers
 https://googlechrome.github.io/samples/service-worker/custom-offline-page/

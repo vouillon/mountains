@@ -2,9 +2,9 @@
 
    Usage: gen_sw_version <wasm assets dir> <file>...
 
-   [version] is a digest of every asset the service worker precaches, so that
-   any deploy changing one of them yields a different cache name (and a
-   byte-different service_worker.bc.js, which is what triggers an update).
+   [version] is a digest of every asset a build serves, so that any deploy
+   changing one of them yields a different cache name (and a byte-different
+   service_worker.bc.js, which is what triggers an update).
    [wasm_assets] are the content-hashed Wasm modules loaded by
    viewer.bc.wasm.js; their names are only known at build time. *)
 

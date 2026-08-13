@@ -9,8 +9,14 @@
  (libraries mountains yojson brr lwt)
  (modes js))
 
-; Build identifier for the service worker cache: a digest of the precached
-; assets, plus the content-hashed names of the Wasm code modules.
+; Build identifier for the service worker cache: a digest of the assets a build
+; serves, plus the content-hashed names of the Wasm code modules.
+;
+; Not only the precached ones. Everything is served cache-first now, so an asset
+; fetched on demand and kept -- the manifest, the icons, the detail textures for
+; the formats other than the one precached -- is refetched only when the cache
+; name changes. Left out of the digest, a deploy touching nothing else would
+; leave every install already out there on the old copy for good.
 
 (executable
  (name gen_sw_version)
@@ -33,4 +39,9 @@
     %{dep:../decompress_tile.wasm}
     %{dep:../decode_clc.wasm}
     %{dep:../blend.wasm}
-    %{dep:../../../assets/details_bc7.ktx2}))))
+    %{dep:../manifest.json}
+    %{dep:../icon192.png}
+    %{dep:../icon512.png}
+    %{dep:../../../assets/details_bc7.ktx2}
+    %{dep:../../../assets/details_astc.ktx2}
+    %{dep:../../../assets/details_etc2.ktx2}))))
