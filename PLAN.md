@@ -2989,3 +2989,28 @@ Also fixed while hunting (real, but not this): the refine loop re-entered
 its settled check through the `on_gpu_finished` await with no epoch test, so
 a location switch during that drain could receive the previous location's
 remaining rings.
+
+### The bump share becomes a per-pixel footprint law (2026-08-14)
+
+Sub-metre detail was missing on near flat ground: one share per ring
+conflated the band the data owns (above its Nyquist -- attenuate, it buried
+the 1 m relief) with the band no grid can ever hold (below the pitch -- the
+bump was its only source, and 12.5% of it read as wax). What a derivative
+bump paints at a pixel has the wavelength of the pixel's own footprint, so
+the decision is per-pixel: s = footprint / pitch, using the *better-resolved*
+screen axis (min |dPdx|,|dPdy| -- at grazing view the long axis spans many
+samples while the transverse one is what shows detail) and the pitch
+stretched by 1/n_z on steep faces (the 2026-08-13 slope division, subsumed).
+Full bump below s = 0.25, floor 0.1 from s = 1 up. hd_bump[] became
+hd_step[] (the raw pitch in metres); the base path and empty slots share a
+60,000 m sentinel -- mediump-safe where an infinity is not, and the ratio is
+computed as fpMin * n_z / step so no intermediate overflows fp16. Border
+bands mix the pitch, the law is applied after: continuous.
+
+Verified headlessly at three views (all rings blended in-frame): near flat
+ground regains micro-relief and the far field is unchanged (footprint law
+yields exactly 1.0 there); the 2 km telephoto keeps the LIDAR drainage
+legible over a somewhat richer texture; the Font Sancte cliffs stay rough.
+The window (0.25..1 samples/px) and the 0.1 floor are the two knobs, and the
+crossover's reading -- continuous texture vs a detail band -- needs a real
+GPU, not SwiftShader.
