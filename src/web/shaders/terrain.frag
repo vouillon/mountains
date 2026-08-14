@@ -11,10 +11,11 @@ uniform highp sampler2D relief_normal;
 #define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
-// How much of the procedural bump each ring keeps (1.0 over the base data):
-// the bump stands in for relief the data cannot hold, so a fine ring, whose
-// normals carry the real thing, dials it down (see [Render_state]).
-uniform mediump float hd_bump[HD_SLOTS];
+// Each ring's sample pitch in metres (the coarser axis). The bump weighs
+// itself against it per pixel in [perturbNormal]: footprints far below the
+// pitch show scales no grid sample can express, footprints at the pitch and
+// above show exactly the band the data owns (see [Render_state]).
+uniform mediump float hd_step[HD_SLOTS];
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
@@ -297,7 +298,7 @@ highp vec3 triplanarHeightGrad(Triplanar t, highp vec3 pos, float scale,
 // Procedural normal perturbation based on detail noise. [tri] is the macro
 // material-blend sample from main, reused as finite-difference centers.
 vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
-                   vec4 detailWeights, float bumpScale) {
+                   vec4 detailWeights, float dataStep) {
   // Determine roughness
   const vec4 roughnessWeights =
       vec4(0.6 /* rock */, 0.9 /* grass */, 0.85 /* forest */, 0.2 /* ice */);
@@ -309,7 +310,7 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
     material_roughness = min(material_roughness, 0.3);
   }
 
-  float bumpStrength = 4.0 * material_roughness * bumpScale;
+  float bumpStrength = 4.0 * material_roughness;
 
   // Distance fades and masks for the three noise scales (skipping fetches
   // where a scale contributes nothing)
@@ -340,6 +341,22 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // at one mip-0 texel (gen_textures.sh bakes 1024x1024) so 8-bit
   // quantization noise is not amplified by a tiny divisor.
   highp float fp3 = max(length(dPdx), length(dPdy));
+
+  // What a derivative bump paints at a pixel has the wavelength of the
+  // pixel's own footprint, so whether it is detail the relief data cannot
+  // hold (keep it) or a duplicate of the band the data owns (it would bury
+  // the real thing) is a per-pixel ratio: data samples per pixel, along the
+  // *better-resolved* screen axis -- at grazing view the long axis stretches
+  // over many samples while the transverse one is what actually shows
+  // detail. The pitch is per metre of horizontal grid, so it stretches by
+  // 1/n_z on a steep face (multiplied through to keep every term small in
+  // mediump). Below a quarter-sample per pixel the bump is untouched; from
+  // one sample per pixel on it keeps a tenth, enough texture to read as
+  // material rather than relief.
+  highp float fpMin = min(length(dPdx), length(dPdy));
+  bumpStrength *=
+      1.0 -
+      0.9 * smoothstep(0.25, 1.0, fpMin * max(geomNormal.z, 0.125) / dataStep);
 
   // All three scales take a triplanar world-space gradient, gated by their
   // distance fades: steep faces get texture in proper proportion at every
@@ -517,16 +534,16 @@ void main() {
   mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
   mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
   mediump vec2 encodedN;
-  mediump float bump_scale;
+  mediump float data_step;
   if (f0 >= 1.0) {
     encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
-    bump_scale = hd_bump[0];
+    data_step = hd_step[0];
   } else if (f1 >= 1.0 && f0 <= 0.0) {
     encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
-    bump_scale = hd_bump[1];
+    data_step = hd_step[1];
   } else if (f2 >= 1.0 && f1 <= 0.0 && f0 <= 0.0) {
     encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
-    bump_scale = hd_bump[2];
+    data_step = hd_step[2];
   } else {
     // A ring's border band (rare: the bands are ~6% of each extent), or
     // outside every ring. Composite outside-in so each ring fades over the
@@ -534,21 +551,24 @@ void main() {
     // actually open, and the branches stay quad-coherent away from the
     // bands' own edges (the same acceptance as the selection above).
     encodedN = texture(relief_normal, reliefCoord).rg;
-    bump_scale = 1.0;
+    // The base gets the same sentinel [Render_state] uploads for empty
+    // slots: far above any footprint, i.e. the full bump, exactly as the
+    // base always had -- and mediump-safe, unlike an infinity.
+    data_step = 60000.0;
     if (f2 > 0.0) {
       encodedN =
           mix(encodedN, texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);
-      bump_scale = mix(bump_scale, hd_bump[2], f2);
+      data_step = mix(data_step, hd_step[2], f2);
     }
     if (f1 > 0.0) {
       encodedN =
           mix(encodedN, texture(hd_relief_normal[1], hdReliefCoord1).rg, f1);
-      bump_scale = mix(bump_scale, hd_bump[1], f1);
+      data_step = mix(data_step, hd_step[1], f1);
     }
     if (f0 > 0.0) {
       encodedN =
           mix(encodedN, texture(hd_relief_normal[0], hdReliefCoord0).rg, f0);
-      bump_scale = mix(bump_scale, hd_bump[0], f0);
+      data_step = mix(data_step, hd_step[0], f0);
     }
   }
   vec3 normal;
@@ -667,7 +687,7 @@ void main() {
 
   // Procedural normal perturbation (replaces rock_normal_map)
   final_normal =
-      perturbNormal(normal, tri, surface.roughness, finalWeights, bump_scale);
+      perturbNormal(normal, tri, surface.roughness, finalWeights, data_step);
 
   // Water Wave Logic
   if (waterMask > 0.01) {

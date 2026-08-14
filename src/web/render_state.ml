@@ -105,7 +105,7 @@ type terrain_uniforms = {
   hd_height_scale_n : Gl.uniform_location array;
   hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
-  hd_bump : Gl.uniform_location array;
+  hd_step : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   (* Lighting *)
@@ -273,7 +273,7 @@ let init_terrain_uniforms ctx pid =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
     hd_half_texel =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_half_texel[%d]" i));
-    hd_bump = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bump[%d]" i));
+    hd_step = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_step[%d]" i));
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_lightDir = u "u_lightDir";
@@ -443,14 +443,17 @@ type hd_params = {
 }
 (** Geometry of the near-field high-resolution relief (see [Hd_dem]). *)
 
-(* How much of the procedural bump a ring keeps. The bump stands in for relief
-   the data cannot hold: over the 30 m base it is all there is, while on a
-   metre grid it mostly buries the real detail it duplicates (PLAN.md,
-   2026-08-06). Proportional to the sample pitch, full strength from 8 m up;
-   the fragment shader multiplies it into its [bumpStrength]. *)
-let hd_bump_scale = function
-  | None -> 1.
-  | Some { hd_step_m; _ } -> Float.min 1. (hd_step_m /. 8.)
+(* The value the fragment shader weighs the procedural bump against: the
+   ring's sample pitch in metres. The bump stands in for relief the data
+   cannot hold, and whether it can is a per-pixel question -- a pixel whose
+   footprint is far below the pitch shows scales no grid sample can express
+   (the bump carries them), while a pixel spanning a sample or more shows
+   exactly the band the data owns (the bump would bury it: PLAN.md,
+   2026-08-06). The shader computes that ratio from its own footprint, with
+   the pitch stretched by 1/n_z on steep faces. Empty slots get the same
+   sentinel the base path uses: far above any footprint, read as "the data
+   holds nothing visible", i.e. the full bump. *)
+let hd_step_sentinel = 60000.
 
 (* The shader wants the same map normalised to [0, 1] over the ring, as a 2x2 and
    a translation: a ring on a projected grid has axes turned from north, so this
@@ -530,7 +533,8 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     Gl.uniform1f ctx u.hd_half_texel.(i) half_texel;
     Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
     Gl.uniform1f ctx u.hd_height_offset.(i) hoffset;
-    Gl.uniform1f ctx u.hd_bump.(i) (hd_bump_scale (slot i))
+    Gl.uniform1f ctx u.hd_step.(i)
+      (match slot i with Some p -> p.hd_step_m | None -> hd_step_sentinel)
   done;
   Gl.use_program ctx shadow_pid;
   for i = 0 to hd_slots - 1 do

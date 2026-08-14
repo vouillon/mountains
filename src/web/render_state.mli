@@ -66,7 +66,7 @@ type terrain_uniforms = {
   hd_height_scale_n : Gl.uniform_location array;
   hd_height_offset : Gl.uniform_location array;
   hd_half_texel : Gl.uniform_location array;
-  hd_bump : Gl.uniform_location array;
+  hd_step : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
