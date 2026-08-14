@@ -1842,13 +1842,28 @@ let draw_text ctx (uniforms : Render_state.text_uniforms) transform buffer view
 let scale = (*2. *. 27. /. 24.*) 3.2
 let text_height = 0.07
 
-(* Width of the GPX trace, as a fraction of the canvas height -- the same rule
-   the POI labels follow, and for the same reason. A width fixed in device
+(* Width of the GPX trace, as a fraction of the natural height (see
+   [natural_height] in the draw loop) -- the same rule the POI labels follow,
+   and for the same reason. A width fixed in device
    pixels is a width fixed in nothing a viewer can see: a phone packs two or
    three of them into the length a desktop spends on one, so the five pixels
    that draw a clear line on a monitor draw a hairline on a handset. Tuned to
    land back on those five over a 1080-pixel-high desktop canvas. *)
 let path_width = 0.0046
+
+(* Whether the screen is turned a quarter turn from the device's natural
+   orientation. [screen.orientation] needs iOS 16.4; older Safari only has the
+   legacy numeric [window.orientation]. Desktops, and Android under the
+   manifest's natural-orientation request, report 0. *)
+let screen_is_rotated () =
+  let angle =
+    let o = Jv.get (Jv.get Jv.global "screen") "orientation" in
+    if not (Jv.is_none o || Jv.is_null o) then Jv.to_float (Jv.get o "angle")
+    else
+      let a = Jv.get Jv.global "orientation" in
+      if Jv.is_none a || Jv.is_null a then 0. else Jv.to_float a
+  in
+  int_of_float (abs_float angle) mod 180 = 90
 
 (* Scratch matrix for the per-POI transforms (see [text_transform]). *)
 let poi_transform : Matrix.t = Array.make 16 0.
@@ -2051,6 +2066,19 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   let canvas_height = Brr_canvas.Canvas.h canvas in
   Gl.viewport ctx 0 0 canvas_width canvas_height;
   let aspect = float canvas_width /. float canvas_height in
+  (* The canvas dimension that is vertical when the device sits in its natural
+     orientation. Label and trace sizes are tuned as fractions of it: the
+     manifest requests the natural (portrait) orientation and Android honors
+     it, but iOS cannot lock, so a rotated iPhone keeps rendering with its
+     short dimension as the canvas height and fraction-of-height sizes come
+     out half. Sizing off the natural height keeps text and trace at their
+     portrait physical size through a rotation -- matching the terrain, whose
+     projection below fixes the field of view along the long axis and is thus
+     rotation-invariant -- while unrotated screens keep sizing off their
+     height as before. *)
+  let natural_height =
+    if screen_is_rotated () then canvas_width else canvas_height
+  in
   let transform =
     Matrix.(
       translate 0. 0. (-.height -. 2.)
@@ -2062,11 +2090,18 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     if aspect < 1. then (s /. aspect, s) else (s, s *. aspect)
   in
   let text_scale = scale *. !zoom in
-  (* POI labels keep a constant size relative to the smaller canvas dimension.
-     [x_scale] and [y_scale] are both derived from the larger one, so without
-     this correction the labels grow with the width of a landscape window: fine
-     on a phone, oversized on a desktop. *)
-  let text_height = text_height /. max 1. aspect in
+  (* POI labels keep a constant size relative to the natural height.
+     [x_scale] and [y_scale] are both derived from the larger canvas
+     dimension, so without a correction the labels grow with the width of a
+     landscape window: fine on a phone, oversized on a desktop. Multiplying by
+     the natural height over the larger dimension reduces to the old
+     fraction-of-height rule ([/. max 1. aspect]) on unrotated screens and to
+     no correction at all on a rotated phone, whose width is its natural
+     height. *)
+  let text_height =
+    text_height *. float natural_height
+    /. float (max canvas_width canvas_height)
+  in
   let proj = Matrix.project ~x_scale ~y_scale ~near_plane:1. in
   let points =
     (* Plane position and silhouette-anchored height are precomputed per
@@ -2255,7 +2290,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
       Gl.uniform2f ctx path_uniforms.Render_state.u_viewport
         (float canvas_width) (float canvas_height);
       Gl.uniform1f ctx path_uniforms.Render_state.u_linewidth
-        (path_width *. float canvas_height);
+        (path_width *. float natural_height);
       Gl.bind_vertex_array ctx (Some vao);
       Gl.draw_arrays ctx Gl.triangle_strip 0 (count * 4)
   | None -> ());
