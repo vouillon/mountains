@@ -270,6 +270,16 @@ let plan layer ~lat ~lon =
       let origin_y = lat_min +. (0.5 *. layer.px_arcsec) -. float alat in
       (origin_x, origin_y, reqs)
 
+(* What [fetch] would ask for, as one string. Blocks are anchored on a tile or on
+   a grid corner rather than on the location, so two nearby places usually plan
+   the very same requests; when they do, they are asking for the same piece of
+   ground, and a grid already blended for one of them serves the other unchanged
+   (see [reanchor]). Equal ids mean equal request lists by construction -- the id
+   *is* the request list -- so this cannot drift from [plan]. *)
+let block_id layer ~lat ~lon =
+  let _, _, reqs = plan layer ~lat ~lon in
+  String.concat "\n" (List.map (fun r -> r.url) reqs)
+
 type raw = {
   layer : layer;
   samples : (float, float32_elt, c_layout) Array1.t;
@@ -411,6 +421,19 @@ let get_height (t : t) row col =
   let low = t.grid.Dem_loader.data.{row, col * 2} in
   let high = t.grid.Dem_loader.data.{row, (col * 2) + 1} in
   (float_of_int ((high lsl 8) lor low) *. t.height_scale) +. t.height_offset
+
+(* The same grid, seen from another anchor arcsecond. The samples are absolute
+   ground -- a block of it, decided by [block_id] and not by where the observer
+   stands -- and only the origins are stated relative to the anchor, so a grid
+   blended for one location is exact for any other holding the same block. Both
+   anchors are in arcseconds, latitude first, as [Web_utils.arcsec_floor] gives
+   them. *)
+let reanchor (t : t) ~old_anchor:(old_lat, old_lon) ~anchor:(alat, alon) =
+  {
+    t with
+    origin_x = t.origin_x +. float (old_lon - alon);
+    origin_y = t.origin_y +. float (old_lat - alat);
+  }
 
 (* The surface a refinement is mixed into: any u16 grid with a known origin and
    spacing, so the layers can be chained (base -> L13 -> finer). The fields are

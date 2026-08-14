@@ -8,18 +8,17 @@ val compute_deltas : lat:float -> float * float * float
 (** [compute_deltas ~lat] returns [(deltax, deltay, avg_delta)] for the given
     latitude. *)
 
-val compute_sub_arcsec_offset : float -> float
-(** [compute_sub_arcsec_offset coord] returns the fractional part within the
-    current arc-second for a geographic coordinate. *)
-
 val meridian_convergence : lat:float -> float
 (** tan(latitude) / earth radius: the second-order coefficient between the
     observer-centred azimuthal frame and the lat/lon grid. *)
 
 val compute_center_offset :
-  lat:float -> lon:float -> x:int -> y:int -> float * float
-(** [compute_center_offset ~lat ~lon ~x ~y] computes the center offset in meters
-    from tile origin. Returns [(center_offset_x, center_offset_y)]. *)
+  lat:float -> eye_x:float -> eye_y:float -> float * float
+(** [compute_center_offset ~lat ~eye_x ~eye_y] is the eye's offset in metres
+    from the anchor arcsecond -- the sample at the centre of the base tile --
+    given its position in base-grid samples east and north of it. Every grid the
+    mesh reads is anchored there rather than on the observer, so this offset is
+    the only thing that moves when the eye does. *)
 
 (** {1 Radial Grid Parameters} *)
 
@@ -222,9 +221,8 @@ val upload_session_static :
   shadow_uniforms ->
   w:int ->
   lat:float ->
-  x:int ->
-  y:int ->
-  lon:float ->
+  eye_x:float ->
+  eye_y:float ->
   light_dir:Matrix.vector ->
   shadow_matrices:Matrix.t array ->
   shadow_splits:float array ->
@@ -279,9 +277,8 @@ val upload_path_session :
   path_uniforms ->
   w:int ->
   lat:float ->
-  x:int ->
-  y:int ->
-  lon:float ->
+  eye_x:float ->
+  eye_y:float ->
   unit
 
 val upload_path_hd_params :

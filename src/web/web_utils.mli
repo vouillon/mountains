@@ -15,8 +15,8 @@ val log2 : int -> int
 val arcsec_floor : float -> int
 (** [arcsec_floor coord] is the index of the arc-second cell containing the
     latitude or longitude [coord]. It rounds towards -infinity, unlike
-    [truncate]: all tile anchoring must use it so that it stays consistent with
-    [Render_state.compute_sub_arcsec_offset] for negative coordinates. *)
+    [truncate]: all tile anchoring must use it so that a position's offset from
+    its anchor stays inside the cell for negative coordinates. *)
 
 type buffer =
   | Buffer : (_, _, Bigarray.c_layout) Bigarray.Array1.t -> buffer

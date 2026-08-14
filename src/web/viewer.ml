@@ -1953,54 +1953,80 @@ let apply_manual_rotation q da_rad db_rad =
    replaced. The session-wide resources (programs, geometry, detail map,
    palette, shadow map) outlive every location and live in
    [graphics_resources]. *)
-type hd_relief = {
+type ring = {
+  grid : Hd_dem.t;
+      (** the blended heights, kept as well as baked: the eye height, the sight
+          lines and the POI anchors are all resolved against the surface that is
+          actually drawn *)
   hd_relief_texture : Gl.texture;
   hd_relief_normal_texture : Gl.texture;
 }
-(** The near-field high-resolution relief of a location (see [Hd_dem]), when the
-    service had data for it. *)
+(** One near-field high-resolution refinement of a location (see [Hd_dem]),
+    blended onto the surface beneath it and baked. *)
+
+(** What one refinement layer contributed, carrying the identity of the block it
+    was built from ([Hd_dem.block_id]). A block is a piece of absolute ground,
+    so a nearby location that plans the same block can take the ring as it
+    stands instead of fetching and blending it again; that identity, and not the
+    coordinates it was fetched at, is what says so. *)
+type slot =
+  | Pending  (** the fetch had not answered when this location was published *)
+  | Blank of string  (** the block, for which the service had nothing *)
+  | Blended of string * ring  (** the block, blended onto the surface beneath *)
+
+type base = {
+  anchor_lat : int;  (** arcseconds: the sample at the centre of [tile] *)
+  anchor_lon : int;
+  tile : Dem_loader.t;
+  poi : (Points.t * (float * float)) list;  (** in base-grid samples *)
+  relief_texture : Gl.texture;
+  relief_normal_texture : Gl.texture;
+  ao_texture : Gl.texture;
+  cover_map_texture : Gl.texture;
+}
+(** What a location bakes around its anchor arcsecond. Every one of these is a
+    function of that arcsecond alone -- the base grid, the cover map and the
+    ambient occlusion are all centred on it, never on the observer -- so it
+    outlives a move that stays near it (see [reuse_radius_m]). *)
 
 let show_labels = ref true
 
 type location = {
   height : float;
   points : (lazy_text * (float * float * float)) list;
-  relief_texture : Gl.texture;
-  relief_normal_texture : Gl.texture;
-  ao_texture : Gl.texture;
-  cover_map_texture : Gl.texture;
-  hd : hd_relief list;  (** innermost ring first *)
   gpx_path : (Gl.vertex_array_object * Gl.buffer * int) option;
+  base : base;  (** shared with the locations that stood on the same anchor *)
+  slots : slot list;  (** one per refinement layer, coarsest first *)
 }
 
 let session : location option ref = ref None
 
-(* The POI textures are created lazily by [draw_text], hence the option. *)
-let delete_location ctx
-    {
-      relief_texture;
-      relief_normal_texture;
-      ao_texture;
-      cover_map_texture;
-      points;
-      hd;
-      gpx_path;
-      _;
-    } =
+let delete_ring ctx { hd_relief_texture; hd_relief_normal_texture; _ } =
+  Gl.delete_texture ctx hd_relief_texture;
+  Gl.delete_texture ctx hd_relief_normal_texture
+
+let delete_slot ctx = function
+  | Blended (_, r) -> delete_ring ctx r
+  | Pending | Blank _ -> ()
+
+let delete_base ctx
+    { relief_texture; relief_normal_texture; ao_texture; cover_map_texture; _ }
+    =
+  Gl.delete_texture ctx relief_texture;
+  Gl.delete_texture ctx relief_normal_texture;
+  Gl.delete_texture ctx ao_texture;
+  Gl.delete_texture ctx cover_map_texture
+
+(* What one publish owns outright: the trace geometry and the labels [draw_text]
+   has materialised since. The base and the rings are shared with whatever comes
+   next and are retired separately. *)
+let delete_publish ctx { points; gpx_path; _ } =
   Option.iter
     (fun (vao, vbo, _) ->
       Gl.delete_vertex_array ctx vao;
       Gl.delete_buffer ctx vbo)
     gpx_path;
-  Gl.delete_texture ctx relief_texture;
-  Gl.delete_texture ctx relief_normal_texture;
-  Gl.delete_texture ctx ao_texture;
-  Gl.delete_texture ctx cover_map_texture;
-  List.iter
-    (fun { hd_relief_texture; hd_relief_normal_texture } ->
-      Gl.delete_texture ctx hd_relief_texture;
-      Gl.delete_texture ctx hd_relief_normal_texture)
-    hd;
+  (* The POI textures are created lazily by [draw_text], hence the option. *)
   List.iter
     (fun ({ texture; _ }, _) ->
       match texture with
@@ -3048,6 +3074,32 @@ let hd_settle_s = 0.75
    interpolated value at one point, keeps the eye above its own surroundings. *)
 let eye_clearance_m = 4.
 
+(* Coarsest first: each ring is blended onto its predecessor, so this is the
+   nesting order, and the order the slots of a location are listed in. *)
+let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
+
+(* How far the eye may stand from the arcsecond its surroundings were baked on
+   before they are baked again. Nothing in a bake depends on where one stands
+   inside the tile -- the base grid, the ambient occlusion, the cover map and
+   every refinement ring are anchored on that arcsecond, and the mesh reaches
+   them through [center_offset] alone -- so holding it across a short move is
+   exact rather than approximate, and a move that holds it costs a shadow map, a
+   run of the sight lines and nothing else.
+
+   What it does cost is peripheral, and both terms are why this is a couple of
+   hundred metres rather than a kilometre: the base tile reaches [w/2]
+   arcseconds (63 km) from the anchor rather than from the eye, so that much of
+   the rim is lost on one side; and the finest cover-map clipmap level, ~1 km
+   across, is centred there too, so ground beyond it reads its land cover one
+   level coarser. At 250 m of a 63 km horizon both are noise. *)
+let reuse_radius_m = 250.
+
+let near_anchor b ~lat ~lon =
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let dx = deltax *. ((lon *. 3600.) -. float b.anchor_lon)
+  and dy = deltay *. ((lat *. 3600.) -. float b.anchor_lat) in
+  (dx *. dx) +. (dy *. dy) <= reuse_radius_m *. reuse_radius_m
+
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
@@ -3084,29 +3136,95 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   } =
     graphics
   in
-  (* The DEM and the CLC tiles (for POIs) load in parallel. The near-field
-     high-resolution elevation starts with them but is deliberately not awaited
-     alongside them: it is the one source that can take [Hd_dem.timeout_s] to
-     answer, and awaiting it holds the whole location -- base tiles that may well
-     be in cache included -- behind that ceiling. *)
-  let hd_fetches =
-    List.map
-      (fun layer -> (layer, Hd_dem.fetch layer ~lat ~lon))
-      (* Coarsest first: [chain] blends each onto its predecessor, so the order
-         here is the nesting order. *)
-      [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
+  (* Where this load stands: on the previous location's anchor arcsecond if it is
+     near enough (see [reuse_radius_m]), on its own otherwise. Holding it is what
+     lets everything below be kept rather than baked again. *)
+  let previous = !session in
+  let reused_base =
+    match previous with
+    | Some { base; _ } when near_anchor base ~lat ~lon -> Some base
+    | Some _ | None -> None
   in
-  let* tile, (_, _, _, _, clc_tiles) =
-    Lwt.both
-      (Dem_loader.load ~size:w ~lat ~lon)
-      (Clc_loader.load_tiles ~lat ~lon ~size:w)
+  let anchor_lat, anchor_lon =
+    match reused_base with
+    | Some b -> (b.anchor_lat, b.anchor_lon)
+    | None -> (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
+  in
+  (* The anchor as a position, for everything that is fetched or baked around it
+     rather than around the observer. Mid-arcsecond, so that it floors back to
+     the arcsecond it names. *)
+  let alat = (float anchor_lat +. 0.5) /. 3600.
+  and alon = (float anchor_lon +. 0.5) /. 3600. in
+  (* The eye in base-grid samples east and north of the anchor: under one
+     arcsecond on a fresh load, up to [reuse_radius_m] when the anchor was
+     held. *)
+  let eye_x = (lon *. 3600.) -. float anchor_lon
+  and eye_y = (lat *. 3600.) -. float anchor_lat in
+  (* Rings the previous location blended for the very blocks this one needs. A
+     block is a piece of absolute ground, so such a ring is exact here, down to
+     the bake -- only its origins are restated against this anchor.
+
+     Kept as a prefix from the coarsest in: each ring is blended onto the one
+     outside it, and one whose neighbour is being rebuilt would mix two surfaces
+     that were faded into each other at different edges. A [Pending] slot ends
+     the prefix as well, never having had its data. A ring the service had
+     nothing for is kept like any other -- it is a fact about the block, not
+     about the moment -- so it is asked for again when the block changes, not
+     when the observer moves a few metres. *)
+  let reused_slots =
+    match previous with
+    | None -> []
+    | Some { base; slots; _ } ->
+        let old_anchor = (base.anchor_lat, base.anchor_lon)
+        and anchor = (anchor_lat, anchor_lon) in
+        let rec take layers slots =
+          match (layers, slots) with
+          | layer :: layers, slot :: slots -> (
+              let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
+              match slot with
+              | Blank b when b = block -> Blank b :: take layers slots
+              | Blended (b, r) when b = block ->
+                  Blended
+                    ( b,
+                      {
+                        r with
+                        grid = Hd_dem.reanchor r.grid ~old_anchor ~anchor;
+                      } )
+                  :: take layers slots
+              | Pending | Blank _ | Blended _ -> [])
+          | [], _ | _, [] -> []
+        in
+        take hd_layers slots
+  in
+  let kept_rings = List.length reused_slots in
+  (* The DEM and the CLC tiles (for POIs) load in parallel, and only if this load
+     is not standing on them already. The near-field elevation starts with them
+     but is deliberately not awaited alongside them: it is the one source that
+     can take [Hd_dem.timeout_s] to answer, and awaiting it holds the whole
+     location -- base tiles that may well be in cache included -- behind that
+     ceiling. *)
+  let hd_fetches =
+    List.filteri (fun i _ -> i >= kept_rings) hd_layers
+    |> List.map (fun layer -> (layer, Hd_dem.fetch layer ~lat:alat ~lon:alon))
+  in
+  let* fetched =
+    match reused_base with
+    | Some _ -> Lwt.return None
+    | None ->
+        let* tile, (_, _, _, _, clc_tiles) =
+          Lwt.both
+            (Dem_loader.load ~size:w ~lat:alat ~lon:alon)
+            (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:w)
+        in
+        Lwt.return (Some (tile, clc_tiles))
   in
   (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
      not free -- the eye is anchored on the surface that is drawn, so folding a
      refinement in afterwards lifts the camera by up to a few tens of metres on a
      summit -- so the cache hits and the fast rejections of being offline, which
      is nearly every load, are kept on a single publish. Only a fetch slow enough
-     that waiting for it is itself the problem gets published around. *)
+     that waiting for it is itself the problem gets published around. A load that
+     kept every ring waits for nothing here. *)
   let* () =
     Lwt.choose
       [
@@ -3117,72 +3235,171 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   in
   if !location_epoch <> epoch then Lwt.return false
   else begin
-    let x = w / 2 in
-    let y = h / 2 in
-    let poi = poi_positions ~w ~h ~lat ~lon ~tile clc_tiles in
-    (* Each ring is blended onto the surface beneath it -- the coarsest onto the
-       base tile, each finer one onto its predecessor -- so a ring equals the
-       surface below wherever its own data is missing or faded, and the renderer
-       can switch between them on a plain extent test. A ring whose fetch came
-       back empty simply drops out of the chain, and the next finer one blends
-       onto whatever is left.
-
-       Returns the rings innermost first, which is the order the shader tests
-       them in and the order [publish] assigns texture slots. *)
-    let chain raws =
-      let rings, _ =
-        List.fold_left
-          (fun (rings, source) raw ->
-            match Option.bind raw (Hd_dem.blend ~lat ~source) with
-            | None -> (rings, source)
-            | Some g -> (g :: rings, Hd_dem.as_source g))
-          ([], Hd_dem.base_source tile)
-          raws
-      in
-      rings
-    in
+    (* The eye in whole samples of the base grid, and the fraction over: the
+       tests below walk that grid, and [x]/[y] index it. *)
+    let x = (w / 2) + int_of_float (Float.floor eye_x) in
+    let y = (h / 2) + int_of_float (Float.floor eye_y) in
+    let off_x = eye_x -. Float.floor eye_x in
+    let off_y = eye_y -. Float.floor eye_y in
     (* [Hd_dem.fetch] never fails, so [Fail] is unreachable; it is folded into
-       "no data for this ring" rather than left to raise inside the refinement. *)
-    let settled p = match Lwt.state p with Lwt.Return r -> r | _ -> None in
-    let still_pending p =
-      match Lwt.state p with Lwt.Sleep -> true | _ -> false
+       "no data for this ring" rather than left to raise inside the refinement.
+
+       [arrived] is how many of the layers this load asked for have answered
+       with data: the refinement republishes when that count goes up, and blends
+       nothing again for a ring that came back empty. *)
+    let arrived () =
+      List.length
+        (List.filter
+           (fun (_, p) ->
+             match Lwt.state p with Lwt.Return (Some _) -> true | _ -> false)
+           hd_fetches)
     in
-    let settled_raws () = List.map (fun (_, p) -> settled p) hd_fetches in
-    let arrived raws = List.length (List.filter Option.is_some raws) in
-    let first_raws = settled_raws () in
-    let in_time = chain first_raws in
-    let refine_later = List.exists (fun (_, p) -> still_pending p) hd_fetches in
-    (* The previous location's textures are dead from here on: the bakes below
-       overwrite every unit they were bound to. Deleting first keeps the peak
-       footprint at one location's worth of DEM-sized textures. [session] is
-       cleared with them so that [publish] can tell a record it supersedes from
-       one already taken down; no [draw] observes the gap, everything from here
-       to the publish being synchronous. *)
-    Option.iter (delete_location ctx) !session;
+    (* Everything the previous location owned that this one is not standing on is
+       dead from here: the bakes below overwrite every unit those textures were
+       bound to. Deleting first keeps the peak footprint at one location's worth
+       of DEM-sized textures. [session] is cleared with them so that [publish]
+       can tell a record it supersedes from one already taken down; no [draw]
+       observes the gap, everything from here to the publish being synchronous.
+
+       Nothing has been able to touch [session] since [previous] was read: this
+       load bumped the epoch on entry, so every older load and refinement stands
+       down at its own epoch check rather than publishing. *)
+    (match previous with
+    | None -> ()
+    | Some prev ->
+        delete_publish ctx prev;
+        List.iteri
+          (fun i slot -> if i >= kept_rings then delete_slot ctx slot)
+          prev.slots;
+        if Option.is_none reused_base then delete_base ctx prev.base);
     session := None;
-    let relief_texture, relief_normal_texture =
-      let tile_texture = make_tile_texture ctx tile in
-      let pyramids =
-        time_gpu ctx "compute_relief" (fun () ->
-            compute_relief ctx w h lat triangle_geo tile_texture normal_pid
-              downsample_pid relief_uniforms downsample_uniforms)
-      in
-      (* Nothing reads the source grid on the GPU after the bake: it is not among
-         the textures [bind_terrain_textures] binds, and every consumer goes
-         through the pyramids. Freeing it here rather than with the location
-         keeps 32 MiB (RG8 4096^2) out of the per-location footprint, as the
-         high-resolution bake below already does with its own source. *)
-      Gl.delete_texture ctx tile_texture;
-      pyramids
-    in
     let index_count = Bigarray.Array1.dim indices in
 
-    let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+    (* Around the anchor, not around the eye: these are the spacings of the grids
+       that are baked, and holding an anchor must hold the bakes exactly. *)
+    let deltax, deltay, _ = Render_state.compute_deltas ~lat:alat in
 
-    let ao_texture =
-      time_gpu ctx "compute_ao" (fun () ->
-          compute_ao ctx w h deltay relief_texture nearest_sampler ao_bake_pid
-            ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+    let base =
+      match fetched with
+      (* Nothing was fetched exactly when the anchor was held, which is exactly
+         when there is a base to stand on. *)
+      | None -> Option.get reused_base
+      | Some (tile, clc_tiles) ->
+          let relief_texture, relief_normal_texture =
+            let tile_texture = make_tile_texture ctx tile in
+            let pyramids =
+              time_gpu ctx "compute_relief" (fun () ->
+                  compute_relief ctx w h alat triangle_geo tile_texture
+                    normal_pid downsample_pid relief_uniforms
+                    downsample_uniforms)
+            in
+            (* Nothing reads the source grid on the GPU after the bake: it is not
+               among the textures [bind_terrain_textures] binds, and every
+               consumer goes through the pyramids. Freeing it here rather than
+               with the location keeps 32 MiB (RG8 4096^2) out of the
+               per-location footprint, as the high-resolution bake below already
+               does with its own source. *)
+            Gl.delete_texture ctx tile_texture;
+            pyramids
+          in
+          let ao_texture =
+            time_gpu ctx "compute_ao" (fun () ->
+                compute_ao ctx w h deltay relief_texture nearest_sampler
+                  ao_bake_pid ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+          in
+          (* GPU rasterize CLC tiles to FBO *)
+          let cover_map_texture =
+            time_gpu ctx "rasterize_clc_tiles" (fun () ->
+                rasterize_clc_tiles ctx ~lat:alat ~lon:alon ~w ~clc_tiles
+                  ~clc_raster_pid ~water_raster_pid clc_raster_uniforms
+                  water_raster_uniforms)
+          in
+          {
+            anchor_lat;
+            anchor_lon;
+            tile;
+            poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles;
+            relief_texture;
+            relief_normal_texture;
+            ao_texture;
+            cover_map_texture;
+          }
+    in
+    let {
+      tile;
+      poi;
+      relief_texture;
+      relief_normal_texture;
+      ao_texture;
+      cover_map_texture;
+      _;
+    } =
+      base
+    in
+
+    (* A ring is blended onto the surface beneath it -- the coarsest onto the
+       base tile, each finer one onto its predecessor -- so it equals the surface
+       below wherever its own data is missing or faded, and the renderer can
+       switch between them on a plain extent test. A ring whose fetch came back
+       empty simply drops out, and the next finer one blends onto whatever is
+       left.
+
+       [keep] is the head of the layer list that needs neither: the rings this
+       load took from the previous location, and, on a refinement, the ones it
+       has already blended and baked itself. *)
+    let build ~keep =
+      let source =
+        List.fold_left
+          (fun source -> function
+            | Blended (_, r) -> Hd_dem.as_source r.grid
+            | Pending | Blank _ -> source)
+          (Hd_dem.base_source tile) keep
+      in
+      let slots, _ =
+        List.fold_left
+          (fun (slots, source) (layer, p) ->
+            let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
+            match Lwt.state p with
+            | Lwt.Sleep -> (Pending :: slots, source)
+            | Lwt.Fail _ | Lwt.Return None -> (Blank block :: slots, source)
+            | Lwt.Return (Some raw) -> (
+                match Hd_dem.blend ~lat:alat ~source raw with
+                | None -> (Blank block :: slots, source)
+                | Some g ->
+                    let tex = make_tile_texture ctx g.grid in
+                    let hd_relief_texture, hd_relief_normal_texture =
+                      time_gpu ctx "compute_relief_hd" (fun () ->
+                          compute_relief ~spacing_scale:g.layer.px_arcsec
+                            ~border:false ~height_scale:g.height_scale
+                            ~height_offset:g.height_offset ctx g.layer.size
+                            g.layer.size alat triangle_geo tex normal_pid
+                            downsample_pid relief_uniforms downsample_uniforms)
+                    in
+                    (* Nothing reads the source grid on the GPU after the
+                       bake. *)
+                    Gl.delete_texture ctx tex;
+                    ( Blended
+                        ( block,
+                          {
+                            grid = g;
+                            hd_relief_texture;
+                            hd_relief_normal_texture;
+                          } )
+                      :: slots,
+                      Hd_dem.as_source g )))
+          ([], source)
+          (* [hd_fetches] starts at the first layer this load asked for. *)
+          (List.filteri
+             (fun i _ -> i >= List.length keep - kept_rings)
+             hd_fetches)
+      in
+      keep @ List.rev slots
+    in
+    let in_time = build ~keep:reused_slots in
+    let refine_later =
+      List.exists
+        (function Pending -> true | Blank _ | Blended _ -> false)
+        in_time
     in
 
     let light_dir =
@@ -3203,24 +3420,25 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     in
     let splits_dist = [| 2000.; 8000.; 25000. |] in
 
-    (* GPU rasterize CLC tiles to FBO *)
-    let cover_map_texture =
-      time_gpu ctx "rasterize_clc_tiles" (fun () ->
-          rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
-            ~water_raster_pid clc_raster_uniforms water_raster_uniforms)
-    in
-
-    (* Everything downstream of the near-field grid, gathered so that the
-       location can go to screen without it and be republished once it lands. The
-       bakes above -- base relief pyramid, ambient occlusion, land-cover raster
-       -- do not depend on it and are deliberately not among them: a refinement
-       redoes only the finer relief pyramid, the shadow map that samples it, the
-       eye height, and the POI replicas that are anchored on both. *)
-    let publish ~hd_grids =
+    (* Everything that depends on where the eye stands, gathered so that the
+       location can go to screen without a ring and be republished once it lands
+       -- and so that a move short enough to keep its surroundings runs this and
+       nothing else. The bakes above -- base relief pyramid, ambient occlusion,
+       land-cover raster, and each ring's own pyramid -- are anchored, not
+       observed: what is left here is the eye height, the shadow map, the sight
+       lines and the POI replicas anchored on both. *)
+    let publish ~keep ~slots =
+      (* Innermost first, which is the order the shader tests the rings in and
+         the order [upload_hd_params] assigns texture slots. *)
+      let rings =
+        List.rev
+          (List.filter_map
+             (function Blended (_, r) -> Some r | Pending | Blank _ -> None)
+             slots)
+      in
+      let hd_grids = List.map (fun r -> r.grid) rings in
       (* Bilinear interpolation for height *)
       let height =
-        let off_x = Render_state.compute_sub_arcsec_offset lon in
-        let off_y = Render_state.compute_sub_arcsec_offset lat in
         let base_height =
           let get_h = Dem_loader.get_height tile in
           let h00 = get_h y x in
@@ -3237,8 +3455,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            it is looking out of. Read the eye height off the grid that is
            drawn. *)
         let from_ring (g : Hd_dem.t) =
-          let gx = (off_x -. g.origin_x) /. g.layer.px_arcsec in
-          let gy = (off_y -. g.origin_y) /. g.layer.px_arcsec in
+          let gx = (eye_x -. g.origin_x) /. g.layer.px_arcsec in
+          let gy = (eye_y -. g.origin_y) /. g.layer.px_arcsec in
           if
             gx >= 0.
             && gx <= float (g.layer.size - 2)
@@ -3291,36 +3509,18 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         | Some h -> h
         | None -> base_height
       in
-      (* A finer relief pyramid over each ring's square, innermost first. *)
-      let hd =
-        List.map
-          (fun (g : Hd_dem.t) ->
-            let tex = make_tile_texture ctx g.grid in
-            let hd_relief_texture, hd_relief_normal_texture =
-              time_gpu ctx "compute_relief_hd" (fun () ->
-                  compute_relief ~spacing_scale:g.layer.px_arcsec ~border:false
-                    ~height_scale:g.height_scale ~height_offset:g.height_offset
-                    ctx g.layer.size g.layer.size lat triangle_geo tex
-                    normal_pid downsample_pid relief_uniforms
-                    downsample_uniforms)
-            in
-            (* Nothing reads the source grid on the GPU after the bake. *)
-            Gl.delete_texture ctx tex;
-            { hd_relief_texture; hd_relief_normal_texture })
-          hd_grids
-      in
       (* Slots the rings do not fill get the 1x1 placeholder: their [hd_valid] is
          false, so nothing samples them, but a texture must still be bound or the
          driver may complain about an incomplete unit. *)
       let hd_slot_textures =
         Array.init Render_state.hd_slots (fun i ->
-            match List.nth_opt hd i with
+            match List.nth_opt rings i with
             | Some h -> (h.hd_relief_texture, h.hd_relief_normal_texture)
             | None -> (hd_placeholder, hd_placeholder))
       in
       let world_center =
         let center_offset_x, center_offset_y =
-          Render_state.compute_center_offset ~lat ~lon ~x ~y
+          Render_state.compute_center_offset ~lat:alat ~eye_x ~eye_y
         in
         Matrix.
           { x = center_offset_x; y = center_offset_y; z = height +. 2.; w = 1. }
@@ -3332,7 +3532,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
 
       (* Upload all location-static uniforms *)
       Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
-        terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat ~x ~y ~lon
+        terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat:alat ~eye_x ~eye_y
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~fog_color:fog_linear ~zenith_color:zenith_linear;
       let hd_params =
@@ -3351,7 +3551,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
         shadow_uniforms hd_params;
       Gl.use_program ctx path_pid;
-      Render_state.upload_path_session ctx path_uniforms ~w ~lat ~x ~y ~lon;
+      Render_state.upload_path_session ctx path_uniforms ~w ~lat:alat ~eye_x
+        ~eye_y;
       Render_state.upload_path_hd_params ctx path_uniforms hd_params;
 
       (* Render shadows into the session-wide shadow map (fixed 2048x2048x3) *)
@@ -3396,8 +3597,15 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               Visibility.step = 0.5 *. g.layer.px_arcsec;
               sample =
                 (fun bx by ->
-                  let hx = (bx -. float x -. g.origin_x) /. g.layer.px_arcsec in
-                  let hy = (by -. float y -. g.origin_y) /. g.layer.px_arcsec in
+                  (* [bx]/[by] index the base grid and the origins are stated
+                     from the anchor, which sits at its centre -- not at the
+                     eye, which is free to stand elsewhere in the tile. *)
+                  let hx =
+                    (bx -. float (w / 2) -. g.origin_x) /. g.layer.px_arcsec
+                  in
+                  let hy =
+                    (by -. float (h / 2) -. g.origin_y) /. g.layer.px_arcsec
+                  in
                   if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
                     Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
                   else None);
@@ -3418,8 +3626,6 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       let fine = refinements in
       let points =
         let t_vis = Brr.(Performance.now_ms G.performance) in
-        let off_x = Render_state.compute_sub_arcsec_offset lon in
-        let off_y = Render_state.compute_sub_arcsec_offset lat in
         let kept =
           List.filter
             (fun (_, (gx, gy)) ->
@@ -3443,9 +3649,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         kept
       in
       let points =
-        let off_x = Render_state.compute_sub_arcsec_offset lon in
-        let off_y = Render_state.compute_sub_arcsec_offset lat in
-        let conv = Render_state.meridian_convergence ~lat in
+        let conv = Render_state.meridian_convergence ~lat:alat in
         let inv_avg_delta = 2. /. (deltax +. deltay) in
         List.map
           (fun ({ Points.name; elevation; _ }, (x', y')) ->
@@ -3514,46 +3718,23 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       let gpx_path = build_gpx_path ctx ~lat ~lon ~radial_params in
       (* A refinement supersedes the first publish of this same location, and
-         that record shares every base texture with this one: [delete_location]
-         would take those down too. Only what it owns alone goes -- the POI
-         labels [draw_text] has materialised since, and its own near-field
-         relief, which is [None] on the path that is actually taken. *)
+         that record shares its surroundings and its settled rings with this
+         one: only what it owns alone goes -- the POI labels [draw_text] has
+         materialised since, the trace, and the rings this publish has just
+         blended again over a ring that landed late. *)
       Option.iter
         (fun (prev : location) ->
-          List.iter
-            (fun ({ texture; _ }, _) ->
-              match texture with
-              | Some (tid, _) -> Gl.delete_texture ctx tid
-              | None -> ())
-            prev.points;
-          List.iter
-            (fun { hd_relief_texture; hd_relief_normal_texture } ->
-              Gl.delete_texture ctx hd_relief_texture;
-              Gl.delete_texture ctx hd_relief_normal_texture)
-            prev.hd;
-          Option.iter
-            (fun (vao, vbo, _) ->
-              Gl.delete_vertex_array ctx vao;
-              Gl.delete_buffer ctx vbo)
-            prev.gpx_path)
+          delete_publish ctx prev;
+          List.iteri
+            (fun i slot -> if i >= List.length keep then delete_slot ctx slot)
+            prev.slots)
         !session;
       (* Publish the new location: from the epoch check that guards this call to
          here there is no await, so the swap is atomic as far as [draw] is
          concerned. *)
-      session :=
-        Some
-          {
-            height;
-            points;
-            relief_texture;
-            relief_normal_texture;
-            ao_texture;
-            cover_map_texture;
-            hd;
-            gpx_path;
-          }
+      session := Some { height; points; gpx_path; base; slots }
     in
-    publish ~hd_grids:in_time;
+    publish ~keep:reused_slots ~slots:in_time;
     if refine_later then begin
       (* Wait for the next ring to land, let a burst of them coalesce, publish
          what is in hand, and go round again. Waiting for *all* of them instead
@@ -3561,29 +3742,43 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          finished seconds ago off the screen until [Hd_dem]'s timeout expires --
          which is exactly what happens on a bad connection, where the coarsest
          ring is the one worth having. *)
-      let shown = ref (arrived first_raws) in
+      let shown = ref (arrived ()) in
       let rec refine () =
-        match List.filter (fun (_, p) -> still_pending p) hd_fetches with
+        match
+          List.filter
+            (fun (_, p) ->
+              match Lwt.state p with Lwt.Sleep -> true | _ -> false)
+            hd_fetches
+        with
         | [] -> Lwt.return_unit
         | pending ->
             let* _ = Lwt.nchoose_split (List.map snd pending) in
             let* () = sleep hd_settle_s in
             if !location_epoch <> epoch then Lwt.return_unit
-            else
-              let raws = settled_raws () in
-              if arrived raws <= !shown then refine ()
-              else begin
-                shown := arrived raws;
-                match chain raws with
-                | [] -> refine ()
-                | hd_grids ->
-                    (* [Hd_dem.blend] is synchronous, so the epoch test above
-                       still holds here: no [draw] has run since. *)
-                    publish ~hd_grids;
-                    let* () = Web_utils.on_gpu_finished ctx in
-                    force_redraw := true;
-                    refine ()
-              end
+            else if arrived () <= !shown then refine ()
+            else begin
+              shown := arrived ();
+              (* Everything up to the first ring that was still missing stands:
+                 its data and the surface beneath it are what they were. From
+                 there in, a ring that lands late becomes the surface the finer
+                 ones must be blended onto again. *)
+              let keep =
+                let rec settled = function
+                  | (Blank _ as slot) :: slots | (Blended _ as slot) :: slots ->
+                      slot :: settled slots
+                  | Pending :: _ | [] -> []
+                in
+                match !session with
+                | Some { slots; _ } -> settled slots
+                | None -> reused_slots
+              in
+              (* [Hd_dem.blend] is synchronous, so the epoch test above still
+                 holds here: no [draw] has run since. *)
+              publish ~keep ~slots:(build ~keep);
+              let* () = Web_utils.on_gpu_finished ctx in
+              force_redraw := true;
+              refine ()
+            end
       in
       Lwt.async refine
     end;

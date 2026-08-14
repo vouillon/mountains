@@ -2361,3 +2361,77 @@ azimuths and take, for each sector, the max over it and its neighbours -- which
 is O(N x 300) instead of O(rays x 300) and beats the current cost for N well
 below 4813. That is an approximation needing a safety margin, not a conservative
 bound, so it would have to be justified by measurement rather than by argument.
+
+## Short moves keep their surroundings — DONE (2026-08-14)
+
+**The observation.** Everything a location bakes is a function of its *anchor
+arcsecond*, not of where the observer stands: `Dem_loader.load` centres the base
+tile on `arcsec_floor lat/lon`, the cover map puts `(w/2, h/2)` there too
+(`rasterize_clc_tiles`), and every refinement block is anchored on a level-13
+tile or a 39.55" grid corner (`Hd_dem.anchor_tile`, `plan`) precisely so that
+nearby locations share URLs. A switch of a few hundred metres nevertheless
+re-fetched, re-blended and re-baked ~90 MB of textures to produce, texel for
+texel, what was already on the GPU.
+
+**The anchor need not follow the eye.** `radial_common.vert` is already
+anchor-relative: `norm_coord` centres the base pyramid on the anchor, `hd_bias`
+is "the normalized position of the anchor", and `center_offset` -- metres from
+the anchor to the eye -- is the only term that moves with the observer. So this
+took no shader change at all. On the CPU `compute_center_offset` took `~x` and
+`~y` and ignored them (the eye *was* the anchor by construction); it now takes
+the eye's offset in base-grid samples, and the two places that assumed eye =
+anchor -- the eye height read off a ring, and the refinement sampler handed to
+`Visibility.test_precise` -- were given `w/2` or that offset explicitly. Every
+fetch and bake is now passed the anchor position rather than the observer's.
+
+**What is kept.**
+
+- The whole baked base -- tile, relief pyramid and normals, ambient occlusion,
+  cover map, POI grid positions -- while the eye is within `reuse_radius_m`
+  (250 m) of the arcsecond it was baked on.
+- Each refinement ring, independently, while `Hd_dem.block_id` -- the list of
+  requests `plan` would issue, which *is* the block's identity -- is unchanged.
+  A kept ring is exact across an anchor change: its samples are absolute ground,
+  so only its two origins are restated (`Hd_dem.reanchor`). Kept as a prefix
+  from the coarsest in, a ring being blended onto the one outside it.
+
+A location is now `{ height; points; gpx_path; base; slots }`, `base` shared
+with every location that stood on the same anchor and `slots` one entry per
+refinement layer (`Pending | Blank of block | Blended of block * ring`). The
+two-phase publish falls out of the same list: a refinement rebuilds from the
+first slot that was still pending inward, instead of re-blending and re-baking
+all three rings.
+
+**Measured** (SwiftShader, frozen clock, `45.833,6.865,alpha=25,beta=82`, all
+three rings resident on both sides):
+
+| case | fetches | blends | pixels vs. a fresh load there |
+| --- | --- | --- | --- |
+| 145 m, anchor held, everything kept | 0 | 0 | RMSE 0.046 |
+| 300 m south, base rebaked, three rings reanchored | 0 | 0 | **RMSE 0** |
+| 667 m / 3.5 km, nothing kept | 3 | 3 | **RMSE 0** |
+
+The eye height and the surviving POI set match a full reload exactly in every
+case (`4638.01 -> 4639.89 m`, 725/4878 POIs on both sides of the 300 m switch).
+The 0.046 of the held-anchor case is entirely land cover: the cover-map clipmap
+stays centred on the anchor, so 145 m away its texel grid and its level
+boundaries sit elsewhere and material edges re-quantise by about a texel.
+Geometry, skyline and shading are untouched -- the difference image is black
+along every ridge.
+
+Against `main`, a *fresh* load is pixel-identical but for two POI labels at the
+63 km rim (RMSE 0.0016, 0.9% of pixels, all glyph edges): `poi_positions` now
+filters candidates around the anchor rather than around the eye, which is where
+the tile actually is.
+
+**Cost.** The base tile (33 MB) and the blended ring grids (12 MB) are now held
+for as long as the location is on screen, instead of being dropped once the
+bakes are done: those CPU-side heights are what the eye clearance, the sight
+lines and the POI silhouettes read, so no reuse can avoid keeping them. ~45 MB
+of JS heap on an Android-first target, against a switch that would otherwise
+refetch and rebake everything.
+
+**If the land-cover re-quantisation ever shows**, `reuse_radius_m` is the single
+knob. The alternative is to make the cover map eye-relative (one more uniform in
+`sampleCLCBilinear`) and re-rasterize it on every move, which re-adds a bake to
+the path this section exists to empty.

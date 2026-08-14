@@ -59,6 +59,12 @@ val fetch : layer -> lat:float -> lon:float -> raw option Lwt.t
     flight when the deadline expires -- are nodata, which {!blend} turns back
     into the coarser surface. *)
 
+val block_id : layer -> lat:float -> lon:float -> string
+(** Identity of the block [fetch] would ask for at [lat]/[lon]: two locations
+    share it exactly when the requests are the same, i.e. when they are asking
+    for the same ground. What lets a nearby location keep a ring instead of
+    fetching and blending it again (see {!reanchor}). *)
+
 type t = {
   layer : layer;  (** the layer this grid came from *)
   grid : Dem_loader.t;  (** blended heights, row 0 southernmost *)
@@ -77,6 +83,12 @@ type t = {
 val get_height : t -> int -> int -> float
 (** [get_height t row col] in metres, decoded with this grid's own quantisation.
 *)
+
+val reanchor : t -> old_anchor:int * int -> anchor:int * int -> t
+(** The same grid with its origins stated against another anchor arcsecond
+    (latitude, longitude, in arcseconds). The samples are absolute ground, so
+    this is exact for any location holding the same {!block_id}; it is not a
+    resampling and touches nothing but the two origins. *)
 
 val prefetch : layer -> lat:float -> lon:float -> unit Lwt.t
 (** Warm the persistent tile cache for offline use with a block twice the

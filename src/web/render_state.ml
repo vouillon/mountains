@@ -22,35 +22,24 @@ let compute_deltas ~lat =
   let avg_delta = (deltax +. deltay) *. 0.5 in
   (deltax, deltay, avg_delta)
 
-(** Compute sub-arcsecond offset for a coordinate. Returns the fractional part
-    within the current arc-second. *)
-let compute_sub_arcsec_offset coord = (coord *. 3600.) -. floor (coord *. 3600.)
-
 (* Meridian convergence at [lat]: tan(latitude) over the Earth radius, the
    coefficient of the second-order corrections between the observer-centred
    azimuthal frame and the lat/lon grid. Must match radial_common.vert and
    the inverse in viewer.ml. *)
 let meridian_convergence ~lat = tan (lat *. Float.pi /. 180.) /. 6_371_000.
 
-(** Compute center offset in meters from tile origin. [x] and [y] are
-    tile-relative indices, [lat] and [lon] are geographic coords. *)
-let compute_center_offset ~lat ~lon ~x:_ ~y:_ =
+(* Metres from the anchor arcsecond to the eye, [eye_x]/[eye_y] being the eye's
+   position in base-grid samples east and north of it.
+
+   The mesh is centred on the eye, but every grid it reads is anchored on the
+   arcsecond at the centre of the base tile: [radial_common.vert] derives
+   [norm_coord] and every [hd_bias] from a coordinate this offset alone shifts.
+   So the eye is not tied to the anchor -- the tile can stay put across a short
+   move (see [reuse_radius_m] in viewer.ml), which is the whole point of taking
+   the offset rather than the fractional part of a longitude. *)
+let compute_center_offset ~lat ~eye_x ~eye_y =
   let deltax, deltay, _ = compute_deltas ~lat in
-  let off_x = compute_sub_arcsec_offset lon in
-  let off_y = compute_sub_arcsec_offset lat in
-  let center_offset_x =
-    deltax
-    *.
-    (*float x +.*)
-    off_x
-  in
-  let center_offset_y =
-    deltay
-    *.
-    (*float y +.*)
-    off_y
-  in
-  (center_offset_x, center_offset_y)
+  (deltax *. eye_x, deltay *. eye_y)
 
 (* Number of nested near-field refinement rings the shaders declare (HD_SLOTS in
    radial_common.vert). Adding a ring is a change to this and to the layer list
@@ -509,12 +498,12 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     - Fog Color *)
 let upload_session_static ctx terrain_pid sky_pid shadow_pid
     (u : terrain_uniforms) (sky_u : sky_uniforms) (shadow_u : shadow_uniforms)
-    ~w ~lat ~x ~y ~lon ~light_dir ~shadow_matrices ~shadow_splits ~fog_color
+    ~w ~lat ~eye_x ~eye_y ~light_dir ~shadow_matrices ~shadow_splits ~fog_color
     ~zenith_color =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
   let max_lod = Web_utils.log2 w in
   let center_offset_x, center_offset_y =
-    compute_center_offset ~lat ~lon ~x ~y
+    compute_center_offset ~lat ~eye_x ~eye_y
   in
 
   (* Terrain shader uniforms *)
@@ -665,10 +654,10 @@ let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
   Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0
 (* [u_linewidth] follows the canvas, so it is uploaded per frame instead. *)
 
-let upload_path_session ctx (u : path_uniforms) ~w ~lat ~x ~y ~lon =
+let upload_path_session ctx (u : path_uniforms) ~w ~lat ~eye_x ~eye_y =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
   let center_offset_x, center_offset_y =
-    compute_center_offset ~lat ~lon ~x ~y
+    compute_center_offset ~lat ~eye_x ~eye_y
   in
   Gl.uniform1f ctx u.inv_w (1. /. float w);
   Gl.uniform1f ctx u.meridian_conv (meridian_convergence ~lat);
