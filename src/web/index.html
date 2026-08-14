@@ -247,6 +247,59 @@
     .fab-share.rot270 svg { transform: rotate(90deg); }
     .fab-gpx.active { background: rgba(224, 231, 255, 0.95); border-color: #6366f1; }
 
+    /* Follow the device (see [set_own_position] in viewer.ml). Stacked above
+       the row rather than added to its end: a fifth button at the same pitch
+       reaches 352px in from the edge, which a 360px phone has not got, and this
+       one is offered exactly when the phone is in hand outdoors. It keeps the
+       row's first place along the edge, so it stays over the same button
+       whichever way the screen is turned. */
+    .fab-recenter {
+      position: absolute;
+      bottom: calc(92px + env(safe-area-inset-bottom));
+      right: calc(24px + env(safe-area-inset-right));
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      z-index: 100;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.2s, background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .fab-recenter:active { transform: scale(0.9); }
+    .fab-recenter svg { width: 26px; height: 26px; stroke: #4f46e5; }
+
+    /* Standing still is the ordinary case, so the button spends most of its
+       time disabled: it keeps its place and stays legible instead of appearing
+       from nowhere the moment one walks off. */
+    .fab-recenter:disabled { opacity: 0.4; cursor: default; }
+    .fab-recenter:disabled:active { transform: none; }
+
+    .fab-recenter.rot90 {
+      bottom: auto;
+      top: calc(92px + env(safe-area-inset-top));
+    }
+    .fab-recenter.rot90 svg { transform: rotate(270deg); }
+
+    .fab-recenter.rot180 {
+      bottom: auto; right: auto;
+      top: calc(92px + env(safe-area-inset-top));
+      left: calc(24px + env(safe-area-inset-left));
+    }
+    .fab-recenter.rot180 svg { transform: rotate(180deg); }
+
+    .fab-recenter.rot270 {
+      right: auto;
+      left: calc(24px + env(safe-area-inset-left));
+    }
+    .fab-recenter.rot270 svg { transform: rotate(90deg); }
+
     .menu-overlay {
       position: fixed;
       top: 0;

@@ -2435,3 +2435,36 @@ refetch and rebake everything.
 knob. The alternative is to make the cover map eye-relative (one more uniform in
 `sampleCLCBilinear`) and re-rasterize it on every move, which re-adds a bake to
 the path this section exists to empty.
+
+## A button to follow the device — DONE (2026-08-14)
+
+A view is built for one position and stays at it, so walking away from it leaves
+the near field describing where one was. `switch_location` now takes
+`~own_position`, answered by every caller: the startup fix and "Use My Location"
+say true, a typed coordinate, the map, a featured place, `flyToCoords` and
+`popstate` say false -- a URL naming the spot one happens to be standing in is
+still not a view anchored on the device. While it is true, and only then, the
+device is watched (`Brr_io.Geolocation.watch`, high accuracy, paused on
+`visibilitychange`) and a fifth FAB is shown.
+
+Disabled until the device has actually gone somewhere: `recenter_min_move_m`
+(20 m) or the fix's own accuracy, whichever is larger, since consumer GNSS
+wanders about ten metres while standing still and a 40 m fix 25 m out is not
+evidence of anything. Once live it stays live until half that distance, so a fix
+wandering across the line does not blink the button at someone who has not
+moved. Tapping switches with `~push:false` and no camera change: walking is not
+navigating, and one is looking at the same thing from a few steps away. Which is
+also why the button is worth having now -- at 60 m the switch keeps its anchor
+and every ring, so it costs a shadow map and the sight lines.
+
+Stacked above the row (`bottom: 92px`) rather than added to its end: a fifth
+button at the row's 68 px pitch would start 352 px in from the edge, which a
+360 px phone has not got, and this is the one button that appears precisely when
+the phone is in hand outdoors.
+
+Verified headless with `Emulation.setGeolocationOverride` and
+`Browser.grantPermissions`: shown and disabled after a geolocated start, still
+disabled 12 m away, enabled at 60 m, and on tap the view moves there (the URL
+goes 45.833 -> 45.83354, replaced not pushed) and the button goes quiet again;
+hidden after switching to a typed place, and it stays hidden while the device
+moves; hidden at a URL position.

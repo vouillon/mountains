@@ -2588,14 +2588,26 @@ let set_orientation alpha beta =
   (current_orientation := Quaternion.(q_yaw * q_pitch));
   target_orientation := !current_orientation
 
+(* [own_position] says whether the position came from the device rather than
+   from a name, a URL or a tap on the map. It is not a detail of how the switch
+   is performed -- the load is the same either way -- but of what the view then
+   is: only a view standing where its user stands can go stale by their walking
+   away from it, which is what [set_own_position] below arms the follow button
+   for. Every caller has to answer it, which is why it is not optional. *)
 let switch_location :
     (push:bool ->
     camera:(float * float * float) option ->
+    own_position:bool ->
     lat:float ->
     lon:float ->
     unit)
     ref =
-  ref (fun ~push:_ ~camera:_ ~lat:_ ~lon:_ -> ())
+  ref (fun ~push:_ ~camera:_ ~own_position:_ ~lat:_ ~lon:_ -> ())
+
+(* Set by [create_location_ui], which owns the button and knows the tile size
+   the device fix has to fall inside; the renderer below only knows whether the
+   location it just published is the user's own. *)
+let set_own_position : (bool -> unit) ref = ref (fun _ -> ())
 
 (* Bumped by every [load_location]. Lwt cancellation is awkward, so instead a
    load that finds itself no longer at the current epoch when it comes back from
@@ -3922,7 +3934,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
      zoom and every session-wide GPU resource are deliberately kept, so that
      heading continuity across a switch is preserved. *)
   (switch_location :=
-     fun ~push ~camera ~lat ~lon ->
+     fun ~push ~camera ~own_position ~lat ~lon ->
        Lwt.async (fun () ->
            Lwt.catch
              (fun () ->
@@ -3931,6 +3943,11 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                if applied then begin
                  current_lat := lat;
                  current_lon := lon;
+                 (* Whether the view now stands where its user does, which
+                    decides the follow button and the watch behind it. Here
+                    rather than at the call sites: it must follow the position
+                    that actually reached the screen. *)
+                 !set_own_position own_position;
                  (* A camera preset (featured locations) is applied only once
                     its location owns the screen. *)
                  (match camera with
@@ -4195,9 +4212,13 @@ let setup_popstate_listener ~size =
        (fun _ev ->
          match get_url_position ~size with
          | Some (lat, lon, alpha, beta, z) ->
+             (* A place the URL names, even if the user happens to be standing
+                in it: what the follow button watches is the view being
+                *anchored* on the device, and going back through history is not
+                that. *)
              !switch_location ~push:false
                ~camera:(Some (alpha, beta, z))
-               ~lat ~lon
+               ~own_position:false ~lat ~lon
          | None -> ())
        (Brr.Window.as_target Brr.G.window))
 
@@ -4391,6 +4412,92 @@ let get_position ~size =
       | Some loc -> Ok (Geolocation, loc)
       | None -> Ok (Preset, get_preset_position ()))
 
+(* Following the device.
+
+   A view is built for one position and stays at it. Walk a couple of hundred
+   metres and the near field is describing where one was: on a ridge that is the
+   difference between the ground in front of the eye and the ground behind one's
+   shoulder. So while the view stands on a device fix -- and only then, a view of
+   somewhere else being nobody's own position -- the device is watched, and a
+   button offers to rebuild the view where its user now is.
+
+   Offering rather than following: a rebuild moves the whole scene, and having
+   that happen unbidden while reading a skyline is worse than the staleness it
+   cures. The button is there whenever the view is the user's own place, and
+   live only once the device has actually gone somewhere. *)
+
+(* How far the device must be from the view's position before the button lights
+   up. Consumer GNSS wanders by ten metres or so while its owner stands still,
+   and a view rebuilt ten metres away is the same view. The fix's own accuracy
+   is a second floor for the same reason: a 40 m fix 25 m out is not evidence of
+   having moved anywhere. *)
+let recenter_min_move_m = 20.
+let recenter_button : Brr.El.t option ref = ref None
+
+(* The fix the button would move to, and by its presence whether the button is
+   live at all. *)
+let recenter_target : (float * float) option ref = ref None
+let own_position = ref false
+let geo_watch : Brr_io.Geolocation.watch_id option ref = ref None
+
+let set_recenter_target target =
+  recenter_target := target;
+  Option.iter
+    (fun el ->
+      Brr.El.set_at (Jstr.v "disabled")
+        (if Option.is_none target then Some Jstr.empty else None)
+        el)
+    !recenter_button
+
+let stop_watching_position () =
+  Option.iter
+    (fun id ->
+      Brr_io.Geolocation.unwatch
+        (Brr_io.Geolocation.of_navigator Brr.G.navigator)
+        id;
+      geo_watch := None)
+    !geo_watch
+
+let start_watching_position ~size =
+  if Option.is_none !geo_watch then begin
+    let open Brr_io.Geolocation in
+    let watch_fix = function
+      | Error _ ->
+          (* A fix that cannot be had says nothing about having moved: whatever
+             the button was offering, it goes on offering. *)
+          ()
+      | Ok pos ->
+          let lat = Pos.latitude pos and lon = Pos.longitude pos in
+          let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+          let dx = deltax *. ((lon -. !current_lon) *. 3600.)
+          and dy = deltay *. ((lat -. !current_lat) *. 3600.) in
+          let moved = sqrt ((dx *. dx) +. (dy *. dy)) in
+          let threshold = Float.max recenter_min_move_m (Pos.accuracy pos) in
+          (* Hysteresis: once the offer stands, withdrawing it takes a walk back
+             to well inside the threshold, so a fix wandering across the line
+             does not blink the button at someone standing still. *)
+          let far =
+            if Option.is_some !recenter_target then moved > 0.5 *. threshold
+            else moved > threshold
+          in
+          set_recenter_target
+            (if far && in_range ~size ~lat ~lon then Some (lat, lon) else None)
+    in
+    geo_watch :=
+      Some
+        (watch
+           ~opts:
+             (opts ~high_accuracy:true ~maximum_age_ms:10_000 ~timeout_ms:60_000
+                ())
+           (of_navigator Brr.G.navigator)
+           watch_fix)
+  end
+
+let page_hidden () =
+  Jstr.equal
+    (Brr.Document.visibility_state Brr.G.document)
+    Brr.Document.Visibility_state.hidden
+
 (* [enter_sensor_mode] is passed in rather than called directly: it is defined
    further down, once the compass button it drives exists. *)
 let create_location_ui ~size ~enter_sensor_mode =
@@ -4415,13 +4522,60 @@ let create_location_ui ~size ~enter_sensor_mode =
     Brr.El.set_at (Jstr.v "title") (Some (Jstr.v "Toggle Labels")) el;
     el
   in
+  (* Hidden until a location arrives that the device chose, and disabled until
+     the device has left it: see the note above [recenter_min_move_m]. *)
+  let fab_recenter =
+    let el = Brr.El.button ~at:Brr.At.[ class' (Jstr.v "fab-recenter") ] [] in
+    Jv.set (Brr.El.to_jv el) "innerHTML"
+      (Jv.of_string
+         {|<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"></circle><line x1="12" y1="1" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="23"></line><line x1="1" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="23" y2="12"></line></svg>|});
+    let label = Jstr.v "Move the view to where you are now" in
+    Brr.El.set_at (Jstr.v "title") (Some label) el;
+    Brr.El.set_at (Jstr.v "aria-label") (Some label) el;
+    Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el;
+    el
+  in
+  recenter_button := Some fab_recenter;
+  set_recenter_target None;
+  ignore
+    (Brr.Ev.listen Brr.Ev.click
+       (fun _ ->
+         Option.iter
+           (fun (lat, lon) ->
+             (* No history entry, and the camera left alone: walking is not
+                navigating, and one is looking at the same thing from a few
+                steps away. *)
+             !switch_location ~push:false ~camera:None ~own_position:true ~lat
+               ~lon)
+           !recenter_target)
+       (Brr.El.as_target fab_recenter));
+  (* The watch is what the button costs, so it runs only while the view is the
+     user's own place, and not behind a locked screen: a GNSS receiver kept
+     awake for a button nobody can see is the one way this feature could matter
+     to a battery. *)
+  (set_own_position :=
+     fun own ->
+       own_position := own;
+       set_recenter_target None;
+       Brr.El.set_inline_style (Jstr.v "display")
+         (Jstr.v (if own then "flex" else "none"))
+         fab_recenter;
+       if own && not (page_hidden ()) then start_watching_position ~size
+       else stop_watching_position ());
+  ignore
+    (Brr.Ev.listen Brr.Ev.visibilitychange
+       (fun _ ->
+         if page_hidden () then stop_watching_position ()
+         else if !own_position then start_watching_position ~size)
+       (Brr.Document.as_target Brr.G.document));
   (* The GPX and share buttons live in index.html rather than being built here,
      but they sit in the same row and have to turn with it: without this they
      stayed put while the other two moved. This script is deferred, so they are
      in the document by now. *)
   let html_fab id = Brr.Document.find_el_by_id Brr.G.document (Jstr.v id) in
   fab_els :=
-    [ fab; fab_labels ] @ List.filter_map html_fab [ "fab-gpx"; "fab-share" ];
+    [ fab; fab_labels; fab_recenter ]
+    @ List.filter_map html_fab [ "fab-gpx"; "fab-share" ];
 
   let overlay = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu-overlay") ] [] in
   let menu = Brr.El.div ~at:Brr.At.[ class' (Jstr.v "menu") ] [] in
@@ -4439,7 +4593,7 @@ let create_location_ui ~size ~enter_sensor_mode =
         [ Brr.El.txt (Jstr.v "Select Location") ];
     ];
   Brr.El.append_children overlay [ menu ];
-  Brr.El.append_children body [ fab; fab_labels; overlay ];
+  Brr.El.append_children body [ fab; fab_labels; fab_recenter; overlay ];
 
   ignore
     (Brr.Ev.listen Brr.Ev.click
@@ -4525,7 +4679,7 @@ let create_location_ui ~size ~enter_sensor_mode =
         if in_range ~size ~lat ~lon then begin
           clear_input_error ();
           close_menu ();
-          !switch_location ~push:true ~camera:None ~lat ~lon
+          !switch_location ~push:true ~camera:None ~own_position:false ~lat ~lon
         end
         else show_input_error "Location out of range"
     | None -> show_input_error "Invalid coordinates"
@@ -4570,7 +4724,8 @@ let create_location_ui ~size ~enter_sensor_mode =
                (* Standing where the view is centred, the device's own heading is
                   the one the user means: point the phone and look. *)
                enter_sensor_mode ();
-               !switch_location ~push:true ~camera:None ~lat ~lon;
+               !switch_location ~push:true ~camera:None ~own_position:true ~lat
+                 ~lon;
                Fut.return ()
            | None ->
                show_input_error "Location out of range or unavailable";
@@ -4613,7 +4768,7 @@ let create_location_ui ~size ~enter_sensor_mode =
            mode survives the switch. The camera is left alone, the map saying
            nothing about which way to look. *)
         close_menu ();
-        !switch_location ~push:true ~camera:None ~lat ~lon)
+        !switch_location ~push:true ~camera:None ~own_position:false ~lat ~lon)
   in
   let map_btn =
     Brr.El.div
@@ -4655,7 +4810,7 @@ let create_location_ui ~size ~enter_sensor_mode =
                close_menu ();
                !switch_location ~push:true
                  ~camera:(Some (alpha, beta, z))
-                 ~lat ~lon)
+                 ~own_position:false ~lat ~lon)
              (Brr.El.as_target item));
         Brr.El.append_children location_list [ item ];
         item)
@@ -5501,7 +5656,7 @@ let main () =
          Option.iter (fun _ -> enter_manual_mode ()) bearing;
          !switch_location ~push:true
            ~camera:(Option.map (fun alpha -> (-.alpha, 90., !zoom)) bearing)
-           ~lat ~lon));
+           ~own_position:false ~lat ~lon));
   (* If URL parameters were provided but we fell back to another source (e.g. out of range),
      redirect to the resolved location. *)
   (match source with
@@ -5535,6 +5690,9 @@ let main () =
     let start = setup_events canvas in
     fun () ->
       start ();
+      (* The opening location does not go through [switch_location], so it says
+         for itself whether it is the user's own place. *)
+      !set_own_position (source = Geolocation);
       (* Warming the surroundings must not compete with the tiles of the view
          being displayed: only start once the first location is up. *)
       if source = Geolocation then begin
