@@ -266,35 +266,35 @@ let compute_azimuth q =
    [R = Rz alpha * Rx beta * Ry gamma], with alpha in [0,360),
    beta in [-180,180), gamma in [-90,90).
 
-   The spec's worked example ([compassHeading]) takes the heading of the
-   horizontal component of the vector orthogonal to the screen and pointing out
-   of its back, that is of [R * (0, 0, -1)], minus the third column of R:
+   iOS's [webkitCompassHeading] comes from Core Location, whose default
+   [headingOrientation] is portrait: the reference is the top of the device,
+   [R * (0, 1, 0)], not the screen normal used by the spec's worked example.
+   A device test settled this (2026-08-14): computing the implied heading from
+   the screen normal gave a view correct in portrait -- at gamma = 0 the two
+   references share an azimuth at every tilt -- but aimed exactly 90 degrees
+   to the side in landscape, the angle by which they then differ.
 
-     vx (east)  = -cos a sin g - sin a sin b cos g
-     vy (north) = -sin a sin g + cos a sin b cos g
+   The y axis is invariant under [Ry gamma], so
+   [R * (0, 1, 0) = (-sin a cos b, cos a cos b, sin b)] and the heading
+   [atan2 vx vy] (vx east, vy north, hence clockwise from north) is exactly
+   [-alpha] whenever [cos beta > 0], independent of gamma and thus of the
+   screen orientation.
 
-   and returns [atan2 vx vy], an azimuth clockwise from north because vx is the
-   east component. We assume iOS's [webkitCompassHeading] is the heading of that
-   same physical direction: only then does the difference between the two
-   headings isolate the offset between the two reference frames. (If a device
-   test ever contradicts this, the other plausible reference is the device top,
-   [R * (0, 1, 0)], whose degenerate zone is the upright pose instead of the flat
-   one.)
-
-   Degenerate zone: vx^2 + vy^2 = 1 - (cos beta cos gamma)^2, so the heading is
-   undefined exactly when the screen normal is vertical, i.e. the device lies
-   flat (beta = gamma = 0, or beta = +/-180 and gamma = 0). We reject the whole
-   neighbourhood where the horizontal component is shorter than 0.1 (about 5.7
-   degrees from flat) and the heading, though defined, amplifies sensor noise.
-   The app's primary pose (upright, beta near 90) is as far from that zone as a
-   pose can be. *)
-let implied_compass_heading ~alpha ~beta ~gamma =
-  let a = alpha *. pi /. 180.
-  and b = beta *. pi /. 180.
-  and g = gamma *. pi /. 180. in
-  let vx = (-.cos a *. sin g) -. (sin a *. sin b *. cos g)
-  and vy = (-.sin a *. sin g) +. (cos a *. sin b *. cos g) in
-  if (vx *. vx) +. (vy *. vy) < 0.01 then None else Some (atan2 vx vy)
+   Degenerate zone: the horizontal component has length |cos beta|, vanishing
+   when the device top is vertical -- near the app's primary upright pose,
+   which is also the W3C gimbal singularity where [alpha] itself is
+   ill-defined, so samples there would be doubly worthless. We reject
+   [cos beta < 0.1] (within about 5.7 degrees of vertical): the offset being
+   recovered is a constant, estimates from flatter poses -- raising the phone
+   sweeps through plenty -- carry over, and the caller holds the last one
+   meanwhile. The test is signed on purpose: past vertical the projection
+   model says both headings flip by 180 degrees together, but Apple's
+   behaviour there is unverified, so we sit those poses out rather than risk
+   polluting the filter. *)
+let implied_compass_heading ~alpha ~beta =
+  let a = alpha *. pi /. 180. and b = beta *. pi /. 180. in
+  let cb = cos b in
+  if cb < 0.1 then None else Some (atan2 (-.sin a *. cb) (cos a *. cb))
 
 (* GLSL Common *)
 
@@ -5103,12 +5103,14 @@ let setup_events canvas =
     then orientation_event_seen := true;
     (* iOS: [alpha] is relative to an arbitrary startup heading; the absolute
        heading is in [webkitCompassHeading], measured clockwise from north. The
-       two frames differ by a rotation about the world vertical, so rather than
-       substituting the heading for [alpha] -- which mixes two frames and only
-       happens to be right when the device is flat -- we build the quaternion
-       from the raw, self-consistent triplet (smooth through the beta = 90
-       singularity, where [alpha] and [gamma] are individually ill-defined) and
-       rotate the result by that frame offset. *)
+       two frames differ by a rotation about the world vertical. Substituting
+       the heading for [alpha] would be exact in any pose short of vertical
+       (see [implied_compass_heading]) but injects the compass's noise into
+       every frame and mixes two frames near the beta = 90 singularity, where
+       [alpha] and [gamma] are individually ill-defined -- the app's primary
+       pose. Instead we build the quaternion from the raw, self-consistent
+       triplet (smooth through the singularity) and rotate the result by a
+       filtered estimate of that frame offset. *)
     let compass = Jv.get evt "webkitCompassHeading" in
     let has_compass = not (Jv.is_none compass) in
     (* A plain [deviceorientation] event may carry only relative data, whose
@@ -5150,7 +5152,7 @@ let setup_events canvas =
                  if Jv.is_none a || Jv.is_null a then 0. else Jv.to_float a
                in
                if heading >= 0. && accuracy >= 0. && accuracy <= 30. then
-                 match implied_compass_heading ~alpha ~beta ~gamma with
+                 match implied_compass_heading ~alpha ~beta with
                  | None -> ()
                  | Some implied ->
                      let d = implied -. (heading *. pi /. 180.) in
@@ -5169,9 +5171,10 @@ let setup_events canvas =
                      end));
         (* The [alpha] to compose with, plus an optional world-Z rotation to
            apply afterwards. Before the first valid compass sample -- or if the
-           event carries no [alpha] at all -- fall back to the old substitution,
-           which is correct near the flat pose, i.e. precisely the pose in which
-           the offset cannot be estimated. *)
+           event carries no [alpha] at all -- fall back to substituting the
+           compass for [alpha]: [heading = -alpha] (mod 360) whenever
+           [cos beta > 0], so the substitution is exact in every pose short of
+           vertical, just noisier than the filtered offset. *)
         let alpha, correction =
           if not has_compass then (angle "alpha", None)
           else
