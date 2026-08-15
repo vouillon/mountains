@@ -903,7 +903,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
      drag released outside the window cannot leave a pointer stuck down. Only
      pointers that started on the viewport are ever tracked. Fingers take a
      separate route, on touch events; see the note further down. *)
-  let pointers : (int, float * float) Hashtbl.t = Hashtbl.create 4 in
+  let pointers : (float, float * float) Hashtbl.t = Hashtbl.create 4 in
   let pinch = ref None in
 
   let pointer_span () =
@@ -916,7 +916,16 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
      it: [pointerId] for a mouse or a pen, the touch identifier for a finger.
      The two event families below both come through here, and their identifier
      spaces cannot be confused because a gesture is driven by one or the other,
-     never by both at once. *)
+     never by both at once.
+
+     The key stays the float the DOM hands over, never an OCaml int: iOS fills
+     [Touch.identifier] with values far beyond the unboxed integer range, and
+     under wasm_of_ocaml the conversion then raises -- out of every handler, so
+     no press was ever recorded, no move ever applied, and the map simply did
+     not drag on any iPhone. Reproduced headlessly by dispatching touches with
+     identifier 2e9: each event threw an uncaught exception, and the wreckage
+     even wedged later well-numbered gestures. A float holds any identifier
+     exactly and hashes fine. *)
   let press ~id ~x ~y =
     (* Touching the map catches it, as grabbing a spinning thing does. This also
        clears the velocity, so a pinch -- whose moves never measure one --
@@ -986,6 +995,9 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
      pointer events remain the better path for a mouse or a pen, being the ones
      that keep coming when a drag leaves the window. *)
   let is_touch p = Jstr.equal (Ev.Pointer.type' p) (Jstr.v "touch") in
+  (* Read as a float for the same reason as the touch identifier above --
+     [Ev.Pointer.id] would squeeze it through an int. *)
+  let pointer_id ev = Jv.to_float (Jv.get (Ev.to_jv ev) "pointerId") in
 
   ignore
     (Ev.listen Ev.pointerdown
@@ -995,7 +1007,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
            let m = Ev.Pointer.as_mouse p in
            Ev.prevent_default ev;
            Ev.stop_propagation ev;
-           press ~id:(Ev.Pointer.id p) ~x:(Ev.Mouse.client_x m)
+           press ~id:(pointer_id ev) ~x:(Ev.Mouse.client_x m)
              ~y:(Ev.Mouse.client_y m)
          end)
        (El.as_target viewport));
@@ -1007,7 +1019,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
          if not (is_touch p) then begin
            let m = Ev.Pointer.as_mouse p in
            if
-             move ~id:(Ev.Pointer.id p) ~x:(Ev.Mouse.client_x m)
+             move ~id:(pointer_id ev) ~x:(Ev.Mouse.client_x m)
                ~y:(Ev.Mouse.client_y m)
            then Ev.stop_propagation ev
          end)
@@ -1015,7 +1027,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
 
   let pointer_release ev =
     let p = Ev.as_type ev in
-    if not (is_touch p) then release ~id:(Ev.Pointer.id p)
+    if not (is_touch p) then release ~id:(pointer_id ev)
   in
   ignore
     (Ev.listen Ev.pointerup pointer_release
@@ -1044,7 +1056,7 @@ let create ~regions ~in_range ~traces ~landmarks ~on_select =
     for i = 0 to n - 1 do
       let t = Jv.call ts "item" [| Jv.of_int i |] in
       f
-        ~id:(Jv.to_int (Jv.get t "identifier"))
+        ~id:(Jv.to_float (Jv.get t "identifier"))
         ~x:(Jv.to_float (Jv.get t "clientX"))
         ~y:(Jv.to_float (Jv.get t "clientY"))
     done
