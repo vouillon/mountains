@@ -3805,7 +3805,37 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          which is exactly what happens on a bad connection, where the coarsest
          ring is the one worth having. *)
       let shown = ref (arrived ()) in
+      (* Publish whatever has settled beyond [shown] before waiting for more.
+         Starting with the wait finds nothing pending once the last ring has
+         settled, and returns with that ring arrived but never published.
+         Nothing can settle under the first publish here -- it is synchronous
+         from [build] on -- but the loop must not depend on that. *)
       let rec refine () =
+        if arrived () > !shown then begin
+          shown := arrived ();
+          (* Everything up to the first ring that was still missing stands: its
+             data and the surface beneath it are what they were. From there in,
+             a ring that lands late becomes the surface the finer ones must be
+             blended onto again. *)
+          let keep =
+            let rec settled = function
+              | (Blank _ as slot) :: slots | (Blended _ as slot) :: slots ->
+                  slot :: settled slots
+              | Pending :: _ | [] -> []
+            in
+            match !session with
+            | Some { slots; _ } -> settled slots
+            | None -> reused_slots
+          in
+          (* [Hd_dem.blend] is synchronous, so the epoch test that guarded
+             entry still holds: no [draw] has run since. *)
+          publish ~keep ~slots:(build ~keep);
+          let* () = Web_utils.on_gpu_finished ctx in
+          force_redraw := true;
+          wait ()
+        end
+        else wait ()
+      and wait () =
         match
           List.filter
             (fun (_, p) ->
@@ -3816,31 +3846,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         | pending ->
             let* _ = Lwt.nchoose_split (List.map snd pending) in
             let* () = sleep hd_settle_s in
-            if !location_epoch <> epoch then Lwt.return_unit
-            else if arrived () <= !shown then refine ()
-            else begin
-              shown := arrived ();
-              (* Everything up to the first ring that was still missing stands:
-                 its data and the surface beneath it are what they were. From
-                 there in, a ring that lands late becomes the surface the finer
-                 ones must be blended onto again. *)
-              let keep =
-                let rec settled = function
-                  | (Blank _ as slot) :: slots | (Blended _ as slot) :: slots ->
-                      slot :: settled slots
-                  | Pending :: _ | [] -> []
-                in
-                match !session with
-                | Some { slots; _ } -> settled slots
-                | None -> reused_slots
-              in
-              (* [Hd_dem.blend] is synchronous, so the epoch test above still
-                 holds here: no [draw] has run since. *)
-              publish ~keep ~slots:(build ~keep);
-              let* () = Web_utils.on_gpu_finished ctx in
-              force_redraw := true;
-              refine ()
-            end
+            if !location_epoch <> epoch then Lwt.return_unit else refine ()
       in
       Lwt.async refine
     end;
