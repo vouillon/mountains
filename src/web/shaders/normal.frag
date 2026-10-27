@@ -1,7 +1,6 @@
 
 uniform vec2 size;
 uniform vec2 delta;
-uniform vec2 uv_scale;
 uniform sampler2D tile;
 // The grid's own quantisation. Each blended refinement spans only the height
 // range it holds, so this is not the base tile's 9500 m over 65536 steps; see
@@ -9,7 +8,6 @@ uniform sampler2D tile;
 // inherits the grid's scale.
 uniform highp float height_scale;  // metres per u16 step
 uniform highp float height_offset; // metres at u16 zero
-in vec2 uv;
 // Two render targets: heights (16-bit fixed point, little-endian) and the
 // encoded normal go to separate RG8 textures. Every consumer reads only one of
 // the two pairs (heights via texelFetch in the vertex shaders and the AO
@@ -18,26 +16,32 @@ in vec2 uv;
 layout(location = 0) out mediump vec2 height_out;
 layout(location = 1) out mediump vec2 normal_out;
 
-float get_z(vec2 offset) {
-  vec2 tileCoord = uv * (size - 1.0) + 0.5;
+// The source holds this level's [size] grid in its lower-left corner and the
+// target is drawn texel for texel, so each tap is an integer fetch clamped to
+// that grid -- not to the texture's own edge: past level 0 the source is the
+// full-size downsample scratch, whose texels beyond [size] still hold the
+// previous level (or nothing at level 1), and a +1 tap on the last column or
+// row used to read them.
+float get_z(ivec2 offset) {
+  ivec2 p = clamp(ivec2(gl_FragCoord.xy) + offset, ivec2(0), ivec2(size) - 1);
   // Decode from RG8: R=low byte, G=high byte (little-endian)
   // Samples are in [0, 1], need to multiply by 255 to get 0..255
-  vec2 rg = texture(tile, ((tileCoord + offset) / size) * uv_scale).rg * 255.0;
+  vec2 rg = texelFetch(tile, p, 0).rg * 255.0;
   float h_val = rg.g * 256.0 + rg.r;
   return h_val * height_scale + height_offset;
 }
 
 void main() {
   // Sobel filter
-  float tl = get_z(vec2(-1, -1));
-  float t = get_z(vec2(0, -1));
-  float tr = get_z(vec2(1, -1));
-  float l = get_z(vec2(-1, 0));
-  float c = get_z(vec2(0, 0));
-  float r = get_z(vec2(1, 0));
-  float bl = get_z(vec2(-1, 1));
-  float b = get_z(vec2(0, 1));
-  float br = get_z(vec2(1, 1));
+  float tl = get_z(ivec2(-1, -1));
+  float t = get_z(ivec2(0, -1));
+  float tr = get_z(ivec2(1, -1));
+  float l = get_z(ivec2(-1, 0));
+  float c = get_z(ivec2(0, 0));
+  float r = get_z(ivec2(1, 0));
+  float bl = get_z(ivec2(-1, 1));
+  float b = get_z(ivec2(0, 1));
+  float br = get_z(ivec2(1, 1));
 
   float dX = tr + 2.0 * r + br - (tl + 2.0 * l + bl);
   float dY = bl + 2.0 * b + br - (tl + 2.0 * t + tr);

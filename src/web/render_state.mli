@@ -117,7 +117,6 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
-  uv_scale : Gl.uniform_location;
   height_scale : Gl.uniform_location;
   height_offset : Gl.uniform_location;
 }

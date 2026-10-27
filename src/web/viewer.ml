@@ -1133,8 +1133,6 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true)
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
   let deltax = deltax *. spacing_scale and deltay = deltay *. spacing_scale in
   Gl.uniform2f ctx u.delta deltax deltay;
-  (* Level 0 samples full tile texture *)
-  Gl.uniform2f ctx u.uv_scale 1.0 1.0;
 
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
 
@@ -1206,12 +1204,8 @@ let compute_relief ?(spacing_scale = 1.0) ?(border = true)
       let scale = 2.0 ** float level in
       Gl.uniform2f ctx u.delta (deltax *. scale) (deltay *. scale);
 
-      (* Temp texture is full size (width), but we only wrote to top-left w*h *)
-      (* Scale UVs to sample only the valid region *)
-      let uv_scale_x = float w /. float width in
-      let uv_scale_y = float h /. float height in
-      Gl.uniform2f ctx u.uv_scale uv_scale_x uv_scale_y;
-
+      (* Temp texture is full size (width), but we only wrote to top-left w*h;
+         normal.frag clamps its taps to [size] for exactly that reason. *)
       Gl.viewport ctx 0 0 w h;
 
       (* Clear Mip Level to Zero *)

@@ -154,7 +154,6 @@ type sky_uniforms = {
 type relief_uniforms = {
   size : Gl.uniform_location;
   delta : Gl.uniform_location;
-  uv_scale : Gl.uniform_location;
   height_scale : Gl.uniform_location;
   height_offset : Gl.uniform_location;
 }
@@ -327,7 +326,6 @@ let init_relief_uniforms ctx pid =
   {
     size = u "size";
     delta = u "delta";
-    uv_scale = u "uv_scale";
     height_scale = u "height_scale";
     height_offset = u "height_offset";
   }
