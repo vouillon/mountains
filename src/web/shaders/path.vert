@@ -139,8 +139,13 @@ void main() {
   }
 
   float depthA = -viewA.z;
+  // Screen direction, in pixels: the perpendicular below is only one in pixel
+  // space if [dir] is measured there, and NDC is stretched by the viewport's
+  // aspect (a ribbon taken perpendicular in NDC came out up to 7% thin and
+  // sheared by 22 degrees on a portrait phone).
   vec2 dir = vec2((D.x * depthA + viewA.x * D.z) * proj[0][0],
-                  (D.y * depthA + viewA.y * D.z) * proj[1][1]);
+                  (D.y * depthA + viewA.y * D.z) * proj[1][1]) *
+             u_viewport;
 
   float len = length(dir);
   vec2 n = (len > 0.001) ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
