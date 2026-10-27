@@ -729,7 +729,11 @@ void main() {
   bool is_mirror = mirror > 0.0;
 
   // === Specular & Environment Reflection ===
-  vec3 halfVec = normalize(lightDir + view_dir_n);
+  // Highp, and guarded: looking straight at the sun past a ridge the two
+  // directions cancel, and at fp16 they do so exactly over a ~5e-4 rad patch,
+  // where normalize() would return NaN.
+  highp vec3 halfSum = lightDir + view_dir_n;
+  highp vec3 halfVec = halfSum * inversesqrt(max(dot(halfSum, halfSum), 1e-12));
 
   // GGX distribution with a hand-tuned strength in front of it, which is not a
   // reflectance and does hand a quarter of the light on sunlit rock and grass
@@ -746,7 +750,16 @@ void main() {
   float NdotH = max(0.0, dot(final_normal, halfVec));
   float NdotV = max(dot(final_normal, view_dir_n), 1e-3);
   float roughSq = material_roughness * material_roughness;
-  float denom = NdotH * NdotH * (roughSq - 1.0) + 1.0;
+  // NdotH^2 (roughSq - 1) + 1, rewritten as (1 - NdotH^2) + NdotH^2 roughSq
+  // with 1 - NdotH^2 taken as |N x H|^2: the direct form subtracts two numbers
+  // near 1, which at fp16 moves in steps of ~1e-3 -- the whole width of the
+  // glint's core on water (roughness 0.05-0.15), so it came out in a few hard
+  // rings. Squared in highp, where the core's ~1e-5 is not subnormal. The
+  // identity needs the unclamped N.H, so a half vector behind the surface
+  // keeps the clamped value's denominator of 1 (the two agree at N.H = 0).
+  vec3 NxH = cross(final_normal, halfVec);
+  float a = NdotH * material_roughness;
+  highp float denom = (NdotH > 0.0) ? dot(NxH, NxH) + a * a : 1.0;
   float D = roughSq / (3.14159 * denom * denom + 0.0001);
   float final_l = max(0.0, dot(final_normal, lightDir));
   float specular = D * final_l;
