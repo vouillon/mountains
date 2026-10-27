@@ -60,6 +60,8 @@ type terrain_uniforms = {
   hd_relief_normal : Gl.uniform_location array;
   hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
+  hd_quad_x : Gl.uniform_location array;
+  hd_quad_y : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
   hd_height_scale_n : Gl.uniform_location array;
@@ -100,6 +102,8 @@ type shadow_uniforms = {
   hd_relief : Gl.uniform_location array;
   hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
+  hd_quad_x : Gl.uniform_location array;
+  hd_quad_y : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
   hd_height_scale_n : Gl.uniform_location array;
@@ -187,7 +191,7 @@ val upload_texture_units_shadow : Gl.t -> shadow_uniforms -> unit
 
 type hd_params = {
   hd_size : int;  (** samples per side *)
-  hd_to_index : Affine.t;
+  hd_to_index : Warp.t;
       (** arcseconds from the anchor arcsecond to a fractional sample index.
           Off-diagonal for a ring on a projected grid, whose axes are turned
           from north by its CRS's grid convergence. *)
@@ -280,6 +284,8 @@ type path_uniforms = {
   hd_relief : Gl.uniform_location array;
   hd_mat : Gl.uniform_location array;
   hd_bias : Gl.uniform_location array;
+  hd_quad_x : Gl.uniform_location array;
+  hd_quad_y : Gl.uniform_location array;
   hd_lod_bias : Gl.uniform_location array;
   hd_max_lod : Gl.uniform_location array;
   hd_height_scale_n : Gl.uniform_location array;

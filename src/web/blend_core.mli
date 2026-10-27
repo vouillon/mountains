@@ -17,7 +17,7 @@ val nodata_limit : float
 
 type params = {
   size : int;  (** samples per side of the refinement *)
-  to_src : Affine.t;
+  to_src : Warp.t;
       (** a refinement sample index to a fractional source sample index *)
   src_size : int;  (** samples per side of the surface beneath *)
   src_height_scale : float;  (** metres per u16 step of the source *)
@@ -30,14 +30,15 @@ type params = {
 
     {!to_src} is one map rather than an origin and a spacing per axis because a
     refinement served in its own projected CRS sits on a grid whose axes are
-    turned from the source's -- see [Hd_dem.frame]. *)
+    turned from the source's, and curve against it -- see [Hd_dem.frame]. *)
 
 val axis_aligned : params -> bool
 (** Whether columns depend only on the column index and rows only on the row
     index, so a resampler may hoist one source row pair per source row and
-    precompute the column indices once. False only where a projected grid meets
-    a graticule-aligned one; [Blend_wasm] tests it to decide whether
-    [blend.wat], which assumes it, can be used at all. *)
+    precompute the column indices once: an affine map with no cross terms. False
+    only where a projected grid meets a graticule-aligned one; [Blend_wasm]
+    tests it to decide whether [blend.wat], which assumes it, can be used at
+    all. *)
 
 type geometry = {
   col_lo : int;

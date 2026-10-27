@@ -26,12 +26,13 @@ let smoothstep t =
    samples arrive north-up, which the resampling loop accounts for. *)
 type params = {
   size : int; (* samples per side of the refinement *)
-  to_src : Affine.t;
+  to_src : Warp.t;
       (* refinement sample index to fractional source sample index. One map
          rather than an origin and a spacing per axis, because a refinement
          served in its own projected CRS sits on a grid whose axes are turned
-         from the source's -- see [Hd_dem.frame]. The graticule-aligned case is
-         this with [b] and [d] zero, which is what [Blend_wasm] tests for. *)
+         from the source's, and curve against it -- see [Hd_dem.frame]. The
+         graticule-aligned case is this affine with [b] and [d] zero, which is
+         what [Blend_wasm] tests for. *)
   src_size : int; (* samples per side of the surface beneath *)
   src_height_scale : float; (* metres per u16 step of the source *)
   src_height_offset : float; (* metres at source u16 zero *)
@@ -43,7 +44,7 @@ type params = {
    bilinear pair [i], [i + 1] stays inside the grid on both axes. The two grids
    need not be power-of-two multiples of one another, or even share axes. *)
 let source_index p j u =
-  let c, r = Affine.apply p.to_src (float j) (float u) in
+  let c, r = Warp.apply p.to_src (float j) (float u) in
   let lim = float (p.src_size - 2) in
   (Float.max 0. (Float.min lim c), Float.max 0. (Float.min lim r))
 
@@ -52,7 +53,10 @@ let source_index p j u =
    indices once for the whole grid. Every blend but one is like this: the base
    and l13 are on the graticule, and two rings in the same projected CRS share
    axes with each other. *)
-let axis_aligned p = p.to_src.Affine.b = 0. && p.to_src.Affine.d = 0.
+let axis_aligned p =
+  Warp.is_affine p.to_src
+  && p.to_src.Warp.lin.Affine.b = 0.
+  && p.to_src.Warp.lin.Affine.d = 0.
 
 (* The rectangle of the source that a blend reads: the bilinear window, plus the
    one row and column beyond it that the range scan reaches. This is what has to
@@ -72,15 +76,39 @@ let geometry p =
   (* An affine map takes a rectangle to a parallelogram, whose extreme
      coordinates are attained at the corners; the clamp in [source_index] is
      monotone, so it cannot move an interior sample outside the corners' box
-     either. Four corners therefore bound the whole grid, turned or not. *)
+     either. Four corners therefore bound the whole grid, turned or not. A
+     curved map has no interior extremes either -- its linear part dominates
+     its gradient everywhere over a block -- but along an edge one can fall
+     between the corners, so the edges are sampled too and the box widened by
+     a sample, which outweighs the curvature between two edge samples many
+     times over. *)
   let e = p.size - 1 in
   let corners =
-    [
-      source_index p 0 0;
-      source_index p e 0;
-      source_index p 0 e;
-      source_index p e e;
-    ]
+    if Warp.is_affine p.to_src then
+      [
+        source_index p 0 0;
+        source_index p e 0;
+        source_index p 0 e;
+        source_index p e e;
+      ]
+    else
+      let n = 16 in
+      List.concat_map
+        (fun k ->
+          let t = k * e / n in
+          let lim = float (p.src_size - 2) in
+          let clamp v = Float.max 0. (Float.min lim v) in
+          let pad (c, r) =
+            [
+              (clamp (c -. 1.), clamp (r -. 1.));
+              (clamp (c +. 1.), clamp (r +. 1.));
+            ]
+          in
+          pad (source_index p t 0)
+          @ pad (source_index p t e)
+          @ pad (source_index p 0 t)
+          @ pad (source_index p e t))
+        (List.init (n + 1) Fun.id)
   in
   let extent f =
     ( List.fold_left (fun a c -> Float.min a (f c)) infinity corners,

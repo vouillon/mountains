@@ -59,9 +59,9 @@ type layer = {
          boundary lands where the two agree. *)
 }
 
-(* Where a refinement's samples sit, as an affine map both ways between
-   arcseconds from the anchor arcsecond and a fractional sample index. Rows count
-   from the south, as everywhere else.
+(* Where a refinement's samples sit, as a map both ways between arcseconds from
+   the anchor arcsecond and a fractional sample index. Rows count from the south,
+   as everywhere else.
 
    Both directions are stored because both are wanted and neither is cheap to
    keep in step by hand: the mesh, the shadow pass, POI anchoring, visibility and
@@ -71,12 +71,29 @@ type layer = {
    drifting.
 
    For a graticule-aligned grid this is exactly the [(offset - origin) /
-   px_arcsec] it replaces, with the off-diagonal terms zero. For a grid served in
-   its own projected CRS they are not zero: its axes are turned from north by
-   that CRS's grid convergence -- 2.44 degrees at 6.36 E, 0.55 at La Reunion. *)
+   px_arcsec] it replaces: affine, with the off-diagonal terms zero. For a grid
+   served in its own projected CRS no affine map is exact. Its axes are turned
+   from north by that CRS's grid convergence -- 2.44 degrees at 6.36 E, 0.55 at
+   La Reunion -- and over a block of kilometres the map also curves: a second of
+   longitude shortens with latitude and the convergence changes with longitude.
+   The best affine fit misplaces the corners of the 5 km ring by 1.1 m, so such
+   a frame is a {!Warp} fitted to the projection itself, good to a fraction of a
+   millimetre (see [plan]). *)
+type grid = {
+  epsg : string; (* the projected CRS *)
+  gx0 : float; (* projected coordinates of the centre of sample (0, 0) *)
+  gy0 : float;
+  metres : float; (* projected metres per sample, both axes *)
+}
+
 type frame = {
-  to_index : Affine.t;
-  of_index : Affine.t;
+  to_index : Warp.t;
+  of_index : Warp.t;
+  grid : grid option;
+      (* the projected grid the samples lie on, for a block served in one: two
+         such blocks in the same CRS map onto each other exactly by an affine
+         map in projected metres, which [blend] uses instead of going out
+         through one fitted frame and back in through the other *)
   arcsec_step : float;
       (* sample pitch in arcseconds: sets the mip level the mesh reads and how
          finely a sight line is walked, both of which are measured against the
@@ -86,7 +103,9 @@ type frame = {
          for a projected grid: its axes are turned by the CRS's grid
          convergence, which the relief bake has to undo or the ring's normals
          come out rotated against the surface around it. Orthogonal to [axis_y]
-         on the ground, these projections being conformal. *)
+         on the ground, these projections being conformal. Taken at the centre
+         of the block, where a curved frame's axes are the average of its
+         own. *)
   axis_y : float * float;
   step_x_m : float; (* their lengths: metres on the ground per step *)
   step_y_m : float;
@@ -94,19 +113,19 @@ type frame = {
 
 (* Ground metres per step along each axis, from the frame itself rather than
    passed in beside it, so a projected grid's scale factor -- its projected metre
-   is not quite a ground metre -- is accounted for without anything special. *)
-let frame_of_index of_index ~arcsec_step ~lat =
+   is not quite a ground metre -- is accounted for without anything special. The
+   pitch in arcseconds is the area per sample, which picks no axis. *)
+let make_frame ~to_index ~of_index ~grid ~size ~lat =
   let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-  let axis u v =
-    let x, y = Affine.apply of_index u v
-    and ox, oy = Affine.apply of_index 0. 0. in
-    ((x -. ox) *. deltax, (y -. oy) *. deltay)
-  in
-  let ((ax, ay) as axis_x) = axis 1. 0. and ((bx, by) as axis_y) = axis 0. 1. in
+  let c = 0.5 *. float (size - 1) in
+  let ui, uj, vi, vj = Warp.jacobian of_index c c in
+  let ((ax, ay) as axis_x) = (ui *. deltax, vi *. deltay)
+  and ((bx, by) as axis_y) = (uj *. deltax, vj *. deltay) in
   {
-    to_index = Affine.inverse of_index;
+    to_index;
     of_index;
-    arcsec_step;
+    grid;
+    arcsec_step = sqrt (Float.abs ((ui *. vj) -. (uj *. vi)));
     axis_x;
     axis_y;
     step_x_m = Float.hypot ax ay;
@@ -114,10 +133,13 @@ let frame_of_index of_index ~arcsec_step ~lat =
   }
 
 (* A graticule-aligned block: one scale for both axes, in arcseconds. *)
-let geographic_frame ~px_arcsec ~origin_x ~origin_y ~lat =
-  frame_of_index
-    (Affine.diagonal ~sx:px_arcsec ~sy:px_arcsec ~tx:origin_x ~ty:origin_y)
-    ~arcsec_step:px_arcsec ~lat
+let geographic_frame ~px_arcsec ~origin_x ~origin_y ~size ~lat =
+  let of_index =
+    Affine.diagonal ~sx:px_arcsec ~sy:px_arcsec ~tx:origin_x ~ty:origin_y
+  in
+  make_frame ~of_index:(Warp.of_affine of_index)
+    ~to_index:(Warp.of_affine (Affine.inverse of_index))
+    ~grid:None ~size ~lat
 
 let wmts_layer ~matrix_level ~block_tiles ~fade_metres =
   (* Level L has 2^(L+1) tiles across 360 degrees: level 0 is two tiles wide. *)
@@ -285,7 +307,9 @@ let plan layer ~lat ~lon =
               (List.init block_tiles Fun.id))
           (List.init block_tiles Fun.id)
       in
-      Some (geographic_frame ~px_arcsec ~origin_x ~origin_y ~lat, reqs)
+      Some
+        ( geographic_frame ~px_arcsec ~origin_x ~origin_y ~size:layer.size ~lat,
+          reqs )
   | Wms_projected { stem; metres; split } -> (
       match Projection.of_location ~lat ~lon with
       | None -> None
@@ -308,11 +332,14 @@ let plan layer ~lat ~lon =
           let corner v = Float.round (v /. align) *. align in
           let x0 = corner xa -. (span /. 2.)
           and y0 = corner ya -. (span /. 2.) in
-          (* Arcseconds from the anchor to projected metres from the anchor, from
-             the local derivative of the projection: conformal, so over a couple
-             of kilometres this is a rotation and a scale to within centimetres
-             (0.008 degrees of turn and a part in a million of scale across the
-             block). *)
+          (* The frame is fitted to the projection itself: a 9 x 9 lattice of
+             offsets over the block, each projected exactly, fits a [Warp] each
+             way. Only where the lattice goes is taken from the local derivative
+             at the anchor -- a rotation and a scale, which places the corners to
+             within a couple of metres, plenty for choosing where to sample but
+             not for the frame: measured, the quadratic fit is good to 0.27 mm
+             over the 5 m ring and 0.02 mm over the 1 m one, where the best
+             affine map is out by 1.1 m and 0.18 m at the corners. *)
           let j11, j12, j21, j22 =
             Projection.jacobian crs ~lat:anchor_lat ~lon:anchor_lon
           in
@@ -326,12 +353,38 @@ let plan layer ~lat ~lon =
               f = 0.;
             }
           in
-          let of_index =
+          let gx0 = x0 +. (0.5 *. metres) and gy0 = y0 +. (0.5 *. metres) in
+          let estimate =
             Affine.compose
               (Affine.inverse per_arcsec)
-              (Affine.diagonal ~sx:metres ~sy:metres
-                 ~tx:(x0 -. xa +. (0.5 *. metres))
-                 ~ty:(y0 -. ya +. (0.5 *. metres)))
+              (Affine.diagonal ~sx:metres ~sy:metres ~tx:(gx0 -. xa)
+                 ~ty:(gy0 -. ya))
+          in
+          let samples =
+            let last = float (layer.size - 1) in
+            let lattice =
+              List.init 9 (fun k -> (float k /. 8. *. 1.1) -. 0.05)
+            in
+            Array.of_list
+              (List.concat_map
+                 (fun s ->
+                   List.map
+                     (fun t ->
+                       let u, v =
+                         Affine.apply estimate (s *. last) (t *. last)
+                       in
+                       let x, y =
+                         Projection.forward crs
+                           ~lat:(anchor_lat +. (v /. 3600.))
+                           ~lon:(anchor_lon +. (u /. 3600.))
+                       in
+                       (u, v, (x -. gx0) /. metres, (y -. gy0) /. metres))
+                     lattice)
+                 lattice)
+          in
+          let to_index = Warp.fit samples in
+          let of_index =
+            Warp.fit (Array.map (fun (u, v, i, j) -> (i, j, u, v)) samples)
           in
           let px = layer.size / split in
           let piece = span /. float split in
@@ -356,13 +409,10 @@ let plan layer ~lat ~lon =
                   (List.init split Fun.id))
               (List.init split Fun.id)
           in
-          (* One sample covers [metres] square in projected metres; the pitch in
-             arcseconds is what the mip selection and the ray walk want, and the
-             area per sample gives it without picking an axis. *)
           Some
-            ( frame_of_index of_index
-                ~arcsec_step:(sqrt (Float.abs (Affine.det of_index)))
-                ~lat,
+            ( make_frame ~to_index ~of_index
+                ~grid:(Some { epsg = Projection.epsg crs; gx0; gy0; metres })
+                ~size:layer.size ~lat,
               reqs ))
 
 (* What [fetch] would ask for, as one string. Blocks are anchored on a tile or on
@@ -527,19 +577,17 @@ let get_height (t : t) row col =
    anchors are in arcseconds, latitude first, as [Web_utils.arcsec_floor] gives
    them. *)
 let reanchor (t : t) ~old_anchor:(old_lat, old_lon) ~anchor:(alat, alon) =
-  (* A point [p] arcseconds from the new anchor is [p + d] from the old one. The
-     linear part -- the grid's axes, and for a projected block the rotation and
-     scale taken at the old anchor -- describes the same samples either way. *)
+  (* A point [p] arcseconds from the new anchor is [p + d] from the old one, and
+     both translations are exact: a projected block's frame is fitted to the
+     projection itself, so stated from either anchor it is the same map. *)
   let dx = float (alon - old_lon) and dy = float (alat - old_lat) in
-  let shift = Affine.diagonal ~sx:1. ~sy:1. ~tx:dx ~ty:dy
-  and unshift = Affine.diagonal ~sx:1. ~sy:1. ~tx:(-.dx) ~ty:(-.dy) in
   {
     t with
     frame =
       {
         t.frame with
-        to_index = Affine.compose t.frame.to_index shift;
-        of_index = Affine.compose unshift t.frame.of_index;
+        to_index = Warp.translate_input t.frame.to_index ~du:dx ~dv:dy;
+        of_index = Warp.translate_output t.frame.of_index ~dx:(-.dx) ~dy:(-.dy);
       };
   }
 
@@ -552,9 +600,10 @@ let reanchor (t : t) ~old_anchor:(old_lat, old_lon) ~anchor:(alat, alon) =
    Rows count from the south on both sides, matching [Dem_loader]. *)
 type source = {
   src_grid : Dem_loader.t;
-  src_to_index : Affine.t;
+  src_to_index : Warp.t;
       (* arcseconds from the anchor to a fractional sample index of this grid,
-         the same map a [frame] carries; a source needs no more than that *)
+         the same map a [frame] carries *)
+  src_proj : grid option; (* and the projected grid it lies on, if any *)
   src_height_scale : float; (* metres per u16 step *)
   src_height_offset : float; (* metres at u16 zero *)
 }
@@ -566,7 +615,10 @@ let base_source (grid : Dem_loader.t) =
   let o = -.float (grid.Dem_loader.size / 2) in
   {
     src_grid = grid;
-    src_to_index = Affine.inverse (Affine.diagonal ~sx:1.0 ~sy:1.0 ~tx:o ~ty:o);
+    src_to_index =
+      Warp.of_affine
+        (Affine.inverse (Affine.diagonal ~sx:1.0 ~sy:1.0 ~tx:o ~ty:o));
+    src_proj = None;
     src_height_scale = base_height_scale;
     src_height_offset = base_height_offset;
   }
@@ -576,6 +628,7 @@ let as_source (t : t) =
   {
     src_grid = t.grid;
     src_to_index = t.frame.to_index;
+    src_proj = t.frame.grid;
     src_height_scale = t.height_scale;
     src_height_offset = t.height_offset;
   }
@@ -604,19 +657,23 @@ let source_window (source : source) (g : Blend_core.geometry) =
   done;
   win
 
-(* Two rings in one projected CRS do share axes, but the composition below cannot
-   quite say so: it goes out through one frame and back in through the other, and
-   a projection composed with a numerical inverse of itself leaves off-diagonal
-   terms of order 1e-17 instead of zero. Snapped here, where the rounding is
-   introduced, so that [Blend_core.axis_aligned] stays an exact test rather than a
-   tolerance shared by two implementations -- and so the fast path is not lost to
-   noise. The term dropped displaces a sample by under 1e-6 of one, against the
-   ~20 samples a genuine 2.44-degree turn displaces. *)
-let snap_axes (m : Affine.t) ~size =
-  let negligible v = Float.abs v *. float size < 1e-6 in
-  if negligible m.Affine.b && negligible m.Affine.d then
-    { m with Affine.b = 0.; d = 0. }
-  else m
+(* Refinement index to source index. Two grids in one projected CRS share axes,
+   and in projected metres the map between them is exactly a scale and an
+   offset, so it is built there rather than out through one fitted frame and
+   back in through the other -- which would only approximate it, and lose
+   [Blend_core.axis_aligned] to the residue. Otherwise out to arcseconds through
+   the refinement's own frame and back in through the source's: exact for two
+   graticule grids, both affine; curved where a projected ring meets the
+   graticule surface beneath it, the one blend that goes through
+   [Blend_core]'s general path. *)
+let refinement_to_source (source : source) (raw : raw) =
+  match (raw.frame.grid, source.src_proj) with
+  | Some r, Some s when r.epsg = s.epsg ->
+      Warp.of_affine
+        (Affine.diagonal ~sx:(r.metres /. s.metres) ~sy:(r.metres /. s.metres)
+           ~tx:((r.gx0 -. s.gx0) /. s.metres)
+           ~ty:((r.gy0 -. s.gy0) /. s.metres))
+  | _ -> Warp.compose source.src_to_index raw.frame.of_index
 
 let blend ~lat:_ ~(source : source) (raw : raw) =
   let { size; fade_metres; _ } = raw.layer in
@@ -624,12 +681,7 @@ let blend ~lat:_ ~(source : source) (raw : raw) =
   let p =
     {
       Blend_core.size;
-      (* Refinement index to source index: out to arcseconds through the
-         refinement's own frame, back in through the source's. Both being
-         affine, so is the composition, whether or not the two grids share
-         axes. *)
-      to_src =
-        snap_axes (Affine.compose source.src_to_index raw.frame.of_index) ~size;
+      to_src = refinement_to_source source raw;
       src_size = source.src_grid.Dem_loader.size;
       src_height_scale = source.src_height_scale;
       src_height_offset = source.src_height_offset;

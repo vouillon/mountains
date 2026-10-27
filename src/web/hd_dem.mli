@@ -60,10 +60,18 @@ val block_id : layer -> lat:float -> lon:float -> string
     for the same ground. What lets a nearby location keep a ring instead of
     fetching and blending it again (see {!reanchor}). *)
 
+type grid = {
+  epsg : string;  (** the projected CRS *)
+  gx0 : float;  (** projected coordinates of the centre of sample (0, 0) *)
+  gy0 : float;
+  metres : float;  (** projected metres per sample, both axes *)
+}
+
 type frame = {
-  to_index : Affine.t;
+  to_index : Warp.t;
       (** arcseconds from the anchor arcsecond to a fractional (column, row) *)
-  of_index : Affine.t;  (** and back *)
+  of_index : Warp.t;  (** and back *)
+  grid : grid option;  (** the projected grid, for a block served in one *)
   arcsec_step : float;
       (** sample pitch in arcseconds: the mip level the mesh reads and how
           finely a sight line is walked are both measured against the
@@ -73,7 +81,8 @@ type frame = {
           east for a projected grid, whose axes are turned by the CRS's grid
           convergence; orthogonal to {!axis_y} on the ground all the same, these
           projections being conformal. The relief bake needs it to express the
-          normal it computes in the grid's axes in east/north instead. *)
+          normal it computes in the grid's axes in east/north instead. Taken at
+          the centre of the block. *)
   axis_y : float * float;
   step_x_m : float;  (** their lengths: metres on the ground per step *)
   step_y_m : float;
@@ -82,11 +91,14 @@ type frame = {
     else.
 
     For a graticule-aligned block this is exactly the
-    [(offset - origin) / px_arcsec] that consumers used to compute themselves.
-    For a block served in its own projected CRS the off-diagonal terms are not
-    zero, because its axes are turned from north by that CRS's grid convergence
-    -- 2.44 degrees at 6.36 E. Reading the frame rather than an origin and a
-    spacing is what lets both kinds share one path. *)
+    [(offset - origin) / px_arcsec] that consumers used to compute themselves,
+    and affine. For a block served in its own projected CRS it is not: the axes
+    are turned from north by that CRS's grid convergence -- 2.44 degrees at 6.36
+    E -- and over kilometres the map also curves, so the frame is a {!Warp}
+    fitted to the projection, good to a fraction of a millimetre where the best
+    affine map misplaces a 5 km block's corners by a metre. Reading the frame
+    rather than an origin and a spacing is what lets both kinds share one path.
+*)
 
 type t = {
   layer : layer;  (** the layer this grid came from *)

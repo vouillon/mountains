@@ -3532,7 +3532,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            it is looking out of. Read the eye height off the grid that is
            drawn. *)
         let from_ring (g : Hd_dem.t) =
-          let gx, gy = Affine.apply g.frame.to_index eye_x eye_y in
+          let gx, gy = Warp.apply g.frame.to_index eye_x eye_y in
           if
             gx >= 0.
             && gx <= float (g.layer.size - 2)
@@ -3678,7 +3678,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                      from the anchor, which sits at its centre -- not at the
                      eye, which is free to stand elsewhere in the tile. *)
                   let hx, hy =
-                    Affine.apply g.frame.to_index
+                    Warp.apply g.frame.to_index
                       (bx -. float (w / 2))
                       (by -. float (h / 2))
                   in
@@ -3754,7 +3754,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               let r = sqrt r2 in
               let from_ring (g : Hd_dem.t) =
                 let hd_x, hd_y =
-                  Affine.apply g.frame.to_index
+                  Warp.apply g.frame.to_index
                     (x' -. float (w / 2))
                     (y' -. float (w / 2))
                 in

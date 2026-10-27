@@ -118,10 +118,10 @@ let run (p : Blend_core.params) ~samples ~win =
                Jv.of_int g.row_lo;
                Jv.of_int g.n_cols;
                Jv.of_int g.n_rows;
-               Jv.of_float p.to_src.Affine.a;
-               Jv.of_float p.to_src.Affine.c;
-               Jv.of_float p.to_src.Affine.e;
-               Jv.of_float p.to_src.Affine.f;
+               Jv.of_float p.to_src.Warp.lin.Affine.a;
+               Jv.of_float p.to_src.Warp.lin.Affine.c;
+               Jv.of_float p.to_src.Warp.lin.Affine.e;
+               Jv.of_float p.to_src.Warp.lin.Affine.f;
                Jv.of_float p.src_height_scale;
                Jv.of_float p.src_height_offset;
                Jv.of_float p.fade_x;
