@@ -107,6 +107,7 @@ type terrain_uniforms = {
   (* Shadows *)
   shadow_matrices : Gl.uniform_location;
   shadow_splits : Gl.uniform_location;
+  shadow_cascades : Gl.uniform_location;
   shadow_map : Gl.uniform_location;
 }
 (** Cached uniform locations for the terrain shader. *)
@@ -270,6 +271,7 @@ let init_terrain_uniforms ctx pid =
     u_zenithColor = u "u_zenithColor";
     shadow_matrices = u "shadow_matrices";
     shadow_splits = u "shadow_splits";
+    shadow_cascades = u "shadow_cascades";
     shadow_map = u "shadow_map";
   }
 
@@ -496,8 +498,8 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     - Fog Color *)
 let upload_session_static ctx terrain_pid sky_pid shadow_pid
     (u : terrain_uniforms) (sky_u : sky_uniforms) (shadow_u : shadow_uniforms)
-    ~w ~lat ~eye_x ~eye_y ~light_dir ~shadow_matrices ~shadow_splits ~fog_color
-    ~zenith_color =
+    ~w ~lat ~eye_x ~eye_y ~light_dir ~shadow_matrices ~shadow_splits
+    ~shadow_cascades ~fog_color ~zenith_color =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
   let max_lod = Web_utils.log2 w in
   let center_offset_x, center_offset_y =
@@ -542,6 +544,10 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
     Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout shadow_splits
   in
   Gl.uniform1fv ctx u.shadow_splits (Brr.Tarray.of_bigarray1 splits_ba);
+  let cascades_ba =
+    Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout shadow_cascades
+  in
+  Gl.uniform2fv ctx u.shadow_cascades (Brr.Tarray.of_bigarray1 cascades_ba);
 
   (* Shadow shader uniforms *)
   Gl.use_program ctx shadow_pid;

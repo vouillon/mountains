@@ -75,6 +75,7 @@ type terrain_uniforms = {
   u_zenithColor : Gl.uniform_location;
   shadow_matrices : Gl.uniform_location;
   shadow_splits : Gl.uniform_location;
+  shadow_cascades : Gl.uniform_location;
   shadow_map : Gl.uniform_location;
 }
 (** Cached uniform locations for the terrain shader. *)
@@ -225,6 +226,7 @@ val upload_session_static :
   light_dir:Matrix.vector ->
   shadow_matrices:Matrix.t array ->
   shadow_splits:float array ->
+  shadow_cascades:float array ->
   fog_color:float * float * float ->
   zenith_color:float * float * float ->
   unit

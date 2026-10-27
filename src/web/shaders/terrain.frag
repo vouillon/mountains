@@ -22,6 +22,9 @@ uniform mediump sampler2D u_paletteTex;     // 128x1 RGBA palette
 uniform int u_numLevels;                    // Number of clipmap levels
 uniform highp mat4 shadow_matrices[3];      // Must be highp for projection
 uniform mediump float shadow_splits[3];
+// Per cascade: world metres per shadow texel, and the depth range its [0,1]
+// spans, both from the ortho box [calculate_shadow_matrices] builds.
+uniform highp vec2 shadow_cascades[3];
 uniform vec3 u_lightDir; // Pre-normalized on CPU
 uniform highp float center_height;
 
@@ -777,9 +780,9 @@ void main() {
       cascade = 1;
 
     float slopeScale = 1.0 - cosTheta;
-    // One shadow texel in world units per cascade (ortho width / 2048).
-    float texelSz = (cascade == 0) ? 3.0 : ((cascade == 1) ? 12.0 : 37.0);
-    float normalOffset = texelSz * slopeScale;
+    // One shadow texel in world units for this cascade (ortho width / 2048).
+    highp float texelWorld = shadow_cascades[cascade].x;
+    float normalOffset = texelWorld * slopeScale;
     // World coordinates, and everything derived from them down to the depth
     // comparison, must stay highp: at fp16 [offset_pos] alone is quantised to
     // 2 m at 3 km and 16 m at 20 km, and [proj_coords.z] to 10/23/73 m of
@@ -799,10 +802,7 @@ void main() {
     // direction. Too little and the texel rows band such slopes (acne); a
     // large constant (the previous 30/72/225 m) detaches every shadow from
     // its caster instead.
-    highp float texelWorld =
-        (cascade == 0) ? 2.93 : ((cascade == 1) ? 11.7 : 36.6);
-    highp float depthSpan =
-        (cascade == 0) ? 20000.0 : ((cascade == 1) ? 48000.0 : 150000.0);
+    highp float depthSpan = shadow_cascades[cascade].y;
     highp float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
                                         max(cosTheta, 0.1));
     highp float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;

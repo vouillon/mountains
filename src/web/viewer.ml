@@ -661,22 +661,40 @@ let create_shadow_fbo ctx shadow_map =
   Gl.bind_framebuffer ctx Gl.framebuffer None;
   fbo
 
+(* Side of the square shadow map, in texels *)
+let shadow_map_size = 2048
+
+(* Half-width of cascade [i]'s ortho box, and its depth range on either side of
+   the centre. Shared by [calculate_shadow_matrices] and
+   [shadow_cascade_extents], so terrain.frag's biases follow the boxes. *)
+let shadow_cascade_box i =
+  (* Shadow map radius: 1.5x the split distance for margin *)
+  (* Larger cascades for coarse 20-30m grid cells *)
+  let split_radius =
+    if i = 0 then 2000.0 else if i = 1 then 8000.0 else 25000.0
+  in
+  let shadow_radius = split_radius *. 1.5 in
+  (* Ortho Proj: scale depth range with shadow radius *)
+  let depth_range = Float.max 10000. (shadow_radius *. 2.) in
+  (shadow_radius, depth_range)
+
+(* terrain.frag's [shadow_cascades]: per cascade, world metres per shadow texel
+   and the full depth span its [0,1] covers. *)
+let shadow_cascade_extents () =
+  Array.init 6 (fun j ->
+      let shadow_radius, depth_range = shadow_cascade_box (j / 2) in
+      if j mod 2 = 0 then 2. *. shadow_radius /. float shadow_map_size
+      else 2. *. depth_range)
+
 let calculate_shadow_matrices ~light_dir ~world_center =
   let matrices = Array.make 3 (Array.make 16 0.) in
 
   (* Simple Cascades based on Splits *)
   for i = 0 to 2 do
-    (* Shadow map radius: 1.5x the split distance for margin *)
-    (* Larger cascades for coarse 20-30m grid cells *)
-    let split_radius =
-      if i = 0 then 2000.0 else if i = 1 then 8000.0 else 25000.0
-    in
-    let shadow_radius = split_radius *. 1.5 in
+    let shadow_radius, depth_range = shadow_cascade_box i in
 
     let center = world_center in
 
-    (* Ortho Proj: scale depth range with shadow radius *)
-    let depth_range = Float.max 10000. (shadow_radius *. 2.) in
     let p =
       Matrix.ortho ~left:(-.shadow_radius) ~right:shadow_radius
         ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:(-.depth_range)
@@ -770,7 +788,7 @@ let init_graphics ctx =
   let ao_blur_pid = Web_utils.create_program ctx ao_blur_program in
   let terrain_pid = Web_utils.create_program ctx terrain_program in
 
-  let shadow_map = create_shadow_map ctx 2048 2048 3 in
+  let shadow_map = create_shadow_map ctx shadow_map_size shadow_map_size 3 in
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
   let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
 
@@ -1601,7 +1619,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
 
   (* Setup FBO and viewport *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some shadow_fbo);
-  Gl.viewport ctx 0 0 2048 2048;
+  Gl.viewport ctx 0 0 shadow_map_size shadow_map_size;
   Gl.use_program ctx shadow_pid;
 
   (* Bind Relief Texture *)
@@ -3577,6 +3595,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
         terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat:alat ~eye_x ~eye_y
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
+        ~shadow_cascades:(shadow_cascade_extents ())
         ~fog_color:fog_linear ~zenith_color:zenith_linear;
       let hd_params =
         List.map
