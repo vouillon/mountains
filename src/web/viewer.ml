@@ -246,7 +246,7 @@ let input_mode = ref Sensor
 let zoom = ref 1.0
 let min_zoom = 0.5
 let max_zoom = 3.0
-let clamp_zoom z = max min_zoom (min max_zoom z)
+let clamp_zoom z = Float.max min_zoom (Float.min max_zoom z)
 
 (* Math Helpers *)
 
@@ -676,7 +676,7 @@ let calculate_shadow_matrices ~light_dir ~world_center =
     let center = world_center in
 
     (* Ortho Proj: scale depth range with shadow radius *)
-    let depth_range = max 10000. (shadow_radius *. 2.) in
+    let depth_range = Float.max 10000. (shadow_radius *. 2.) in
     let p =
       Matrix.ortho ~left:(-.shadow_radius) ~right:shadow_radius
         ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:(-.depth_range)
@@ -1664,7 +1664,7 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
         if layer = 0 then 2000.0 else if layer = 1 then 8000.0 else 25000.0
       in
       let shadow_radius = split_radius *. 1.5 in
-      let depth_range = max 10000. (shadow_radius *. 2.) in
+      let depth_range = Float.max 10000. (shadow_radius *. 2.) in
       let reach = (shadow_radius *. sqrt 2.) +. depth_range in
       let gk = radial_params.Render_state.grid_k in
       let gs = radial_params.Render_state.grid_scale in
@@ -1927,14 +1927,14 @@ let apply_manual_rotation q da_rad db_rad =
   let fwd =
     Quaternion.transform_vector q_yawed { x = 0.; y = 0.; z = -1.; w = 0. }
   in
-  let fwd_z = max (-1.) (min 1. fwd.z) in
+  let fwd_z = Float.max (-1.) (Float.min 1. fwd.z) in
   let theta = acos (-.fwd_z) in
 
   (* 3. Calculate target pitch and Clamp *)
   let target_theta = theta +. db_rad in
   let min_pitch = 60. *. Float.pi /. 180. in
   let max_pitch = 120. *. Float.pi /. 180. in
-  let clamped_theta = max min_pitch (min max_pitch target_theta) in
+  let clamped_theta = Float.max min_pitch (Float.min max_pitch target_theta) in
 
   (* 4. Apply effective pitch delta around Horizon Right Axis *)
   let effective_db = clamped_theta -. theta in
@@ -2477,7 +2477,7 @@ let event_loop ~generation ctx draw =
     let min_tau = 0.02 in
     let max_tau = 0.15 in
     let t = (log !zoom -. log min_zoom) /. (log max_zoom -. log min_zoom) in
-    let t = max 0. (min 1. t) in
+    let t = Float.max 0. (Float.min 1. t) in
     let t = t *. t in
     min_tau +. (t *. (max_tau -. min_tau))
   in
@@ -2867,7 +2867,7 @@ let split_gpx_segment ~(radial_params : Render_state.radial_params)
   let rec walk t acc steps =
     if t >= 1. -. epsilon || steps = 4096 then List.rev (finish :: acc)
     else
-      let px, py, _ = point (min 1. (t +. epsilon)) in
+      let px, py, _ = point (Float.min 1. (t +. epsilon)) in
       let a, b, c = triangle_at (px, py) in
       let crossing edge_start edge_end =
         let ex, ey =
@@ -2895,9 +2895,9 @@ let split_gpx_segment ~(radial_params : Render_state.radial_params)
       if next = 1. then List.rev (finish :: acc)
       else
         let nudge =
-          min
-            (0.01 /. max 0.01 segment_length)
-            (min ((next -. t) *. 0.25) ((1. -. next) *. 0.25))
+          Float.min
+            (0.01 /. Float.max 0.01 segment_length)
+            (Float.min ((next -. t) *. 0.25) ((1. -. next) *. 0.25))
         in
         let before = next -. nudge and after = next +. nudge in
         walk after (point after :: point before :: acc) (steps + 1)
@@ -5378,7 +5378,7 @@ let setup_events canvas =
              let h = Brr.El.inner_h canvas in
              let w = Brr.El.inner_w canvas in
              let speed =
-               2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
+               2.0 /. (Float.max w h *. scale *. !zoom) *. 180. /. Float.pi
              in
              let gamma = -. !locked_inclination in
              let c = cos gamma in
@@ -5488,7 +5488,7 @@ let setup_events canvas =
                let h = Brr.El.inner_h canvas in
                let w = Brr.El.inner_w canvas in
                let speed =
-                 2.0 /. (max w h *. scale *. !zoom) *. 180. /. Float.pi
+                 2.0 /. (Float.max w h *. scale *. !zoom) *. 180. /. Float.pi
                in
                let gamma = -. !locked_inclination in
                let c = cos gamma in

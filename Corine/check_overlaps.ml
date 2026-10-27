@@ -163,10 +163,10 @@ let read_cache filename =
 (* --- 3. Feature Extraction --- *)
 let get_tri_bbox t =
   {
-    t_min_x = min t.p1.x (min t.p2.x t.p3.x);
-    t_max_x = max t.p1.x (max t.p2.x t.p3.x);
-    t_min_y = min t.p1.y (min t.p2.y t.p3.y);
-    t_max_y = max t.p1.y (max t.p2.y t.p3.y);
+    t_min_x = Float.min t.p1.x (Float.min t.p2.x t.p3.x);
+    t_max_x = Float.max t.p1.x (Float.max t.p2.x t.p3.x);
+    t_min_y = Float.min t.p1.y (Float.min t.p2.y t.p3.y);
+    t_max_y = Float.max t.p1.y (Float.max t.p2.y t.p3.y);
   }
 
 let extract_features v_count data =

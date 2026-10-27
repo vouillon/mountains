@@ -54,7 +54,7 @@ let () =
         let ny = tile.{y - 1, x} -. tile.{y + 1, x} in
         let nz = 2. *. 30. in
         let u =
-          max 0.
+          Float.max 0.
             (-.(nx +. ny -. nz)
             /. sqrt 3.
             /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)))
@@ -87,7 +87,7 @@ let () =
         let ny = tile.{y - 1, x} -. tile.{y + 1, x} in
         let nz = 2. *. 30. in
         let u =
-          max 0.
+          Float.max 0.
             (-.(nx +. ny -. nz)
             /. sqrt 3.
             /. sqrt ((nx *. nx) +. (ny *. ny) +. (nz *. nz)))

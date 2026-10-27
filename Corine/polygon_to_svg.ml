@@ -55,7 +55,7 @@ let generate_svg filename output_file use_normalized =
 
   let width = !max_x -. !min_x in
   let height = !max_y -. !min_y in
-  let margin = max width height *. 0.05 in
+  let margin = Float.max width height *. 0.05 in
 
   let view_min_x = !min_x -. margin in
   let view_min_y = !min_y -. margin in

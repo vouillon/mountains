@@ -32,7 +32,7 @@ module Geometry = struct
       let cy = (!min_y +. !max_y) *. 0.5 in
       let width = !max_x -. !min_x in
       let height = !max_y -. !min_y in
-      let scale = 2.0 /. max width height in
+      let scale = 2.0 /. Float.max width height in
       (* Safe divide if width/height=0? max handles it unless both 0 *)
       let scale = if scale = infinity then 1.0 else scale in
 

@@ -22,10 +22,10 @@ let empty_bbox =
 
 let combine_bbox b p =
   {
-    min_x = min b.min_x p.x;
-    min_y = min b.min_y p.y;
-    max_x = max b.max_x p.x;
-    max_y = max b.max_y p.y;
+    min_x = Float.min b.min_x p.x;
+    min_y = Float.min b.min_y p.y;
+    max_x = Float.max b.max_x p.x;
+    max_y = Float.max b.max_y p.y;
   }
 
 let get_bbox geom =

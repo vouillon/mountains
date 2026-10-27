@@ -987,12 +987,12 @@ let event_loop win angle inclination draw =
         draw ~aspect:(float w /. float h) ~angle ~inclination win;
         loop angle inclination
     | `Key_down when key_scancode e = `Up ->
-        let inclination = min 120. (inclination +. 3.) in
+        let inclination = Float.min 120. (inclination +. 3.) in
         let w, h = Sdl.get_window_size win in
         draw ~aspect:(float w /. float h) ~angle ~inclination win;
         loop angle inclination
     | `Key_down when key_scancode e = `Down ->
-        let inclination = max 60. (inclination -. 3.) in
+        let inclination = Float.max 60. (inclination -. 3.) in
         let w, h = Sdl.get_window_size win in
         draw ~aspect:(float w /. float h) ~angle ~inclination win;
         loop angle inclination

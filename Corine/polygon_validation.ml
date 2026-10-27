@@ -48,10 +48,10 @@ let on_segment verts ia ib ip =
   let bx, by = (get_x verts ib, get_y verts ib) in
   let px, py = (get_x verts ip, get_y verts ip) in
   abs_float (cross_product verts ia ib ip) < epsilon
-  && px >= min ax bx -. epsilon
-  && px <= max ax bx +. epsilon
-  && py >= min ay by -. epsilon
-  && py <= max ay by +. epsilon
+  && px >= Float.min ax bx -. epsilon
+  && px <= Float.max ax bx +. epsilon
+  && py >= Float.min ay by -. epsilon
+  && py <= Float.max ay by +. epsilon
 
 let segments_intersect verts p1 p2 a b =
   let cp1 = cross_product verts p1 p2 a in

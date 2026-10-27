@@ -98,7 +98,7 @@ let transform_point p bbox width height =
 
   let scale_x = float_of_int width /. range_x in
   let scale_y = float_of_int height /. range_y in
-  let scale = min scale_x scale_y *. 0.95 in
+  let scale = Float.min scale_x scale_y *. 0.95 in
 
   let map_pixel_width = range_x *. scale in
   let map_pixel_height = range_y *. scale in

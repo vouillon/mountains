@@ -438,16 +438,16 @@ let process_tile db_path output_dir tile_name =
   in
 
   let min_laea_x =
-    List.fold_left (fun acc (x, _) -> min acc x) infinity laea_pts
+    List.fold_left (fun acc (x, _) -> Float.min acc x) infinity laea_pts
   in
   let max_laea_x =
-    List.fold_left (fun acc (x, _) -> max acc x) neg_infinity laea_pts
+    List.fold_left (fun acc (x, _) -> Float.max acc x) neg_infinity laea_pts
   in
   let min_laea_y =
-    List.fold_left (fun acc (_, y) -> min acc y) infinity laea_pts
+    List.fold_left (fun acc (_, y) -> Float.min acc y) infinity laea_pts
   in
   let max_laea_y =
-    List.fold_left (fun acc (_, y) -> max acc y) neg_infinity laea_pts
+    List.fold_left (fun acc (_, y) -> Float.max acc y) neg_infinity laea_pts
   in
 
   Printf.printf "LAEA Query Bounds: X[%.0f - %.0f] Y[%.0f - %.0f]\n%!"
