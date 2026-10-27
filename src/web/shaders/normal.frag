@@ -54,7 +54,9 @@ void main() {
   // Encode Normal (xy components to [0,1])
   vec2 encN = n.xy * 0.5 + 0.5;
 
-  float h_val = (c - height_offset) / height_scale;
+  // Rounded: the decode/re-encode round trip can land a hair under an integer,
+  // and a value just below k * 256 would otherwise split as (k - 1, 255).
+  float h_val = floor((c - height_offset) / height_scale + 0.5);
   float h_high = floor(h_val / 256.0) / 255.0;
   float h_low = mod(h_val, 256.0) / 255.0;
 

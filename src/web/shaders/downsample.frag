@@ -13,8 +13,10 @@ out vec2 frag_color;
 
 float decode(vec2 c) { return c.r + c.g * 256.0; }
 
+// Rounds to the nearest u16 step here, so both bytes are exact and the store
+// does not depend on how the hardware converts to UNORM.
 vec2 encode(float v) {
-  v *= 255.;
+  v = floor(v * 255. + 0.5);
   float h_high = floor(v / 256.0) / 255.0;
   float h_low = mod(v, 256.0) / 255.0;
   return vec2(h_low, h_high);
@@ -55,7 +57,7 @@ void main() {
 
   float sum_exp = w00 + w10 + w01 + w11;
   float avg_exp = sum_exp / 4.;
-  float h_avg = max_h + (log(avg_exp) / k / h_scale) + 0.5 / 255.;
+  float h_avg = max_h + (log(avg_exp) / k / h_scale);
 
   frag_color = encode(h_avg);
 }

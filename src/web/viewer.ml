@@ -2764,8 +2764,8 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
    grid is not aligned with the base one -- seen from [r] metres away:
    replicates the vertex shader's LOD selection and corner-convention bilinear
    fetch over the soft-max height pyramid that [compute_relief] bakes
-   (downsample.frag, per-level sharpness k = 0.1 * 0.5^(level-1), +0.5/255
-   encode bias). Distant mip levels cannot reach a sharp summit's
+   (downsample.frag, sharpness [downsample_k], stored rounded to the nearest
+   u16 step, which this leaves out). Distant mip levels cannot reach a sharp summit's
    full-resolution height, so a POI anchored there would float above the
    rendered silhouette. [inv_avg_delta] is per texel of [tile], so passing the
    finer grid's value is what shifts the LOD selection with it. *)
@@ -2795,7 +2795,7 @@ let rendered_height ~get_height ~(radial_params : Render_state.radial_params)
         let m = Float.max (Float.max h00 h10) (Float.max h01 h11) in
         let w h = exp (k *. (h -. m)) in
         let avg = (w h00 +. w h10 +. w h01 +. w h11) /. 4. in
-        m +. (log avg /. k) +. (0.5 /. 255. *. (9500. /. 257.))
+        m +. (log avg /. k)
     in
     let inv = 1. /. (2. ** float lod) in
     let plx = gx *. inv and ply = gy *. inv in
