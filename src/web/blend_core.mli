@@ -17,20 +17,27 @@ val nodata_limit : float
 
 type params = {
   size : int;  (** samples per side of the refinement *)
-  px_arcsec : float;  (** its sample spacing *)
-  raw_origin_x : float;  (** arcseconds from the anchor to its column 0 *)
-  raw_origin_y : float;  (** ... and to its southernmost row *)
+  to_src : Affine.t;
+      (** a refinement sample index to a fractional source sample index *)
   src_size : int;  (** samples per side of the surface beneath *)
-  src_origin_x : float;
-  src_origin_y : float;
-  src_px_arcsec : float;
   src_height_scale : float;  (** metres per u16 step of the source *)
   src_height_offset : float;  (** metres at source u16 zero *)
   fade_x : float;  (** fade width, in refinement samples, per axis *)
   fade_y : float;
 }
 (** Rows count from the south on both grids, matching {!Dem_loader}; the
-    refinement's own samples are north-up, which {!run} accounts for. *)
+    refinement's own samples are north-up, which {!run} accounts for.
+
+    {!to_src} is one map rather than an origin and a spacing per axis because a
+    refinement served in its own projected CRS sits on a grid whose axes are
+    turned from the source's -- see [Hd_dem.frame]. *)
+
+val axis_aligned : params -> bool
+(** Whether columns depend only on the column index and rows only on the row
+    index, so a resampler may hoist one source row pair per source row and
+    precompute the column indices once. False only where a projected grid meets
+    a graticule-aligned one; [Blend_wasm] tests it to decide whether
+    [blend.wat], which assumes it, can be used at all. *)
 
 type geometry = {
   col_lo : int;

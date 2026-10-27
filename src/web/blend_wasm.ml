@@ -76,7 +76,12 @@ let start () =
 let align8 x = (x + 7) land lnot 7
 
 let run (p : Blend_core.params) ~samples ~win =
-  match !exports with
+  (* The wat hoists one source row pair per source row and precomputes the
+     column indices once, both of which assume the two grids share axes. A ring
+     on a projected grid over the graticule-aligned surface beneath it does not,
+     and takes the OCaml path -- 1024^2, which measured ~65 ms there before it
+     was ported, against a fetch of several seconds. *)
+  match if Blend_core.axis_aligned p then !exports else None with
   | None -> Blend_core.run p ~samples ~win
   | Some exports ->
       let g = Blend_core.geometry p in
@@ -113,12 +118,10 @@ let run (p : Blend_core.params) ~samples ~win =
                Jv.of_int g.row_lo;
                Jv.of_int g.n_cols;
                Jv.of_int g.n_rows;
-               Jv.of_float p.px_arcsec;
-               Jv.of_float p.src_px_arcsec;
-               Jv.of_float p.raw_origin_x;
-               Jv.of_float p.raw_origin_y;
-               Jv.of_float p.src_origin_x;
-               Jv.of_float p.src_origin_y;
+               Jv.of_float p.to_src.Affine.a;
+               Jv.of_float p.to_src.Affine.c;
+               Jv.of_float p.to_src.Affine.e;
+               Jv.of_float p.to_src.Affine.f;
                Jv.of_float p.src_height_scale;
                Jv.of_float p.src_height_offset;
                Jv.of_float p.fade_x;
