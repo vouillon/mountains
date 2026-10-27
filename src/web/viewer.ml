@@ -971,7 +971,8 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
   Gl.uniform1i ctx bake_u.relief 0;
   (* Keep generating noise/radius based on FULL width for consistent world scale *)
   Gl.uniform1i ctx bake_u.width width;
-  Gl.uniform1f ctx bake_u.scale scale;
+  let scale_x, scale_y = scale in
+  Gl.uniform2f ctx bake_u.scale scale_x scale_y;
 
   Gl.active_texture ctx Gl.texture0;
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
@@ -3345,8 +3346,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           in
           let ao_texture =
             time_gpu ctx "compute_ao" (fun () ->
-                compute_ao ctx w h deltay relief_texture nearest_sampler
-                  ao_bake_pid ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+                compute_ao ctx w h (deltax, deltay) relief_texture
+                  nearest_sampler ao_bake_pid ao_blur_pid ao_bake_uniforms
+                  ao_blur_uniforms)
           in
           (* GPU rasterize CLC tiles to FBO *)
           let cover_map_texture =

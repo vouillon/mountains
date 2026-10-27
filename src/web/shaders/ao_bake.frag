@@ -1,6 +1,9 @@
 uniform highp sampler2D relief;
 uniform int width;
-uniform mediump float scale;
+// Metres per texel, east and north: an arcsecond grid's texels are not square
+// (0.71 to 1 at 45 N), and taking one axis for both misjudged every east- and
+// west-facing horizon by that ratio.
+uniform highp vec2 scale;
 in vec2 uv;
 out mediump float occlusion;
 
@@ -14,7 +17,6 @@ void main() {
   const mediump float STEPS = 10.0;
 
   mediump float R_uv = 50.0 / float(width);
-  float R_world = 50.0 * scale;
 
   float h_center = decode_height(texture(relief, uv).rg);
 
@@ -24,6 +26,8 @@ void main() {
   for (mediump float d = 0.0; d < DIRECTIONS; d++) {
     mediump float angle = (d + noise) * (2.0 * PI / DIRECTIONS);
     mediump vec2 dir = vec2(cos(angle), sin(angle));
+    // Metres covered by the full radius along this direction
+    float R_world = 50.0 * length(dir * scale);
 
     mediump float max_tan = -100.0;
 
