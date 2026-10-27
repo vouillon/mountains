@@ -620,17 +620,52 @@ let make_hd_placeholder ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-(* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
-let make_palette_texture ctx =
+(* Create CLC palette texture (128x1 RGBA, 2 pixels per material). The upload
+   stands on its own so the recovery below can refresh a texture whose handle
+   survived but whose data did not. *)
+let upload_palette ctx tid =
   let data = Clc_palette.generate_palette () in
-  let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 128 1 0 Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
-  Gl.bind_texture ctx Gl.texture_2d None;
+  Gl.bind_texture ctx Gl.texture_2d None
+
+let make_palette_texture ctx =
+  let tid = Gl.create_texture ctx in
+  upload_palette ctx tid;
   tid
+
+(* Whether the palette still holds its data. iOS reclaims GPU memory from a
+   backgrounded page without necessarily losing the context: every handle
+   comes back valid, some contents are gone, and no event says so. A texture
+   in that state samples as (0,0,0,1) -- and the palette's alpha channel is
+   [waterFactor], so its loss alone turns the whole terrain into water
+   mirroring the sky. It is also the one texture nothing re-uploads after the
+   session starts (everything else is rebaked by location loads), which makes
+   it both the lasting symptom and the right probe for the purge itself: one
+   texel read back and compared against the bytes it was created from. *)
+let palette_intact ctx tid =
+  let fbo = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    tid 0;
+  let ok =
+    Gl.check_framebuffer_status ctx Gl.framebuffer = Gl.framebuffer_complete
+    &&
+    let px = Bigarray.(Array1.create int8_unsigned c_layout 4) in
+    Gl.read_pixels ctx 0 0 1 1 Gl.rgba Gl.unsigned_byte
+      (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 px));
+    let expected = Clc_palette.generate_palette () in
+    px.{0} = expected.{0}
+    && px.{1} = expected.{1}
+    && px.{2} = expected.{2}
+    && px.{3} = expected.{3}
+  in
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.delete_framebuffer ctx fbo;
+  ok
 
 let create_shadow_map ctx width height layers =
   let tid = Gl.create_texture ctx in
@@ -2016,6 +2051,13 @@ type location = {
 
 let session : location option ref = ref None
 
+(* When set, the next location load reuses nothing from the previous one:
+   raised by the purge recovery (see [palette_intact]), whose textures have
+   valid handles but suspect contents, so every bake must stand on fresh
+   uploads. The load still deletes what it declines to reuse, exactly as if
+   the eye had moved beyond [reuse_radius_m]. *)
+let force_full_bake = ref false
+
 let delete_ring ctx { hd_relief_texture; hd_relief_normal_texture; _ } =
   Gl.delete_texture ctx hd_relief_texture;
   Gl.delete_texture ctx hd_relief_normal_texture
@@ -3150,6 +3192,10 @@ let near_anchor b ~lat ~lon =
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
+  (* Consumed at entry: exactly one load declines the reuses below, whether or
+     not it runs to publication. *)
+  let full_bake = !force_full_bake in
+  force_full_bake := false;
   let {
     terrain_geo;
     indices;
@@ -3189,7 +3235,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let previous = !session in
   let reused_base =
     match previous with
-    | Some { base; _ } when near_anchor base ~lat ~lon -> Some base
+    | Some { base; _ } when (not full_bake) && near_anchor base ~lat ~lon ->
+        Some base
     | Some _ | None -> None
   in
   let anchor_lat, anchor_lon =
@@ -3220,6 +3267,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      when the observer moves a few metres. *)
   let reused_slots =
     match previous with
+    | _ when full_bake -> []
     | None -> []
     | Some { base; slots; _ } ->
         let old_anchor = (base.anchor_lat, base.anchor_lon)
@@ -3959,6 +4007,49 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                       (Printexc.to_string e));
                  Lwt.return_unit)))
        (Brr.El.as_target canvas));
+  (* The quieter way iOS takes the textures: reclaimed while the page was in
+     the background, with the context intact and no event delivered -- see
+     [palette_intact] for how that state looks and why the palette is the
+     probe. Checked whenever the page returns; recovery re-uploads the two
+     session-lifetime textures in place and rebakes the location from scratch,
+     since the purge does not say what else it took. A loss the browser does
+     announce takes the [webglcontextlost] path above instead, which this
+     defers to. *)
+  let recover_from_purge () =
+    upload_palette ctx !gpu.palette_texture;
+    load_compressed_detail_map ctx !gpu.detail_map;
+    force_full_bake := true;
+    let* () = show_startup_overlay "Restoring Terrain..." true in
+    let* _applied = load ~lat:!current_lat ~lon:!current_lon in
+    hide_startup_overlay ();
+    Lwt.return_unit
+  in
+  ignore
+    (Brr.Ev.listen Brr.Ev.visibilitychange
+       (fun _ ->
+         if
+           Jstr.equal
+             (Brr.Document.visibility_state Brr.G.document)
+             Brr.Document.Visibility_state.visible
+           && (not !context_lost)
+           && (not (Gl.is_context_lost ctx))
+           && Option.is_some !session
+           && not (palette_intact ctx !gpu.palette_texture)
+         then begin
+           Brr.Console.(
+             log [ Jstr.v "Texture contents purged while hidden: rebaking" ]);
+           Lwt.async (fun () ->
+               Lwt.catch recover_from_purge (fun e ->
+                   (match e with
+                   | Jv.Error e -> Brr.Console.error [ e ]
+                   | _ -> ());
+                   hide_startup_overlay ();
+                   display_temporary_message
+                     (Printf.sprintf "Could not restore the display: %s"
+                        (Printexc.to_string e));
+                   Lwt.return_unit))
+         end)
+       (Brr.Document.as_target Brr.G.document));
   let* applied = load ~lat ~lon in
   start ();
   (* Not if a restore superseded this load: it raised the overlay and will take
