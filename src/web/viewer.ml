@@ -3832,7 +3832,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           publish ~keep ~slots:(build ~keep);
           let* () = Web_utils.on_gpu_finished ctx in
           force_redraw := true;
-          wait ()
+          (* Back through the settled check, not the wait: this publish spanned
+             seconds of GPU work, and a ring that settled under it is pending no
+             longer -- the window the comment above [refine] describes, one
+             publish later. Terminates: [shown] grows strictly on this path and
+             is bounded by the ring count. *)
+          refine ()
         end
         else wait ()
       and wait () =
