@@ -202,6 +202,17 @@ Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
                           float sideGate) {
   Triplanar t;
   t.blend = abs(normal);
+  // Biplanar past the gate: the weakest plane's weight goes to exactly zero
+  // and its fetches are skipped. It is the plane the surface is most oblique
+  // to, so it carried the least and the most stretched texture -- on a wall
+  // facing one axis the other side plane, on a wall facing a diagonal the
+  // top-down one -- and a wall pixel drops from three planes per scale to
+  // two (20 detail fetches to 13 facing Mont Aiguille). Continuous: a plane
+  // leaves as its weight reaches the minimum, so no seam where the choice
+  // changes. Two noises average less than three, so walls read a little
+  // crisper. Below the gate the blend is untouched.
+  float weakest = min(min(t.blend.x, t.blend.y), t.blend.z);
+  t.blend = mix(t.blend, max(t.blend - weakest, 0.0), sideGate);
   t.blend /= (t.blend.x + t.blend.y + t.blend.z + 0.0001);
 
   // Sample each projection plane. The side projections are faded by their
@@ -209,7 +220,9 @@ Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
   // the neutral 0.5. What the material blend loses under the gate is a
   // statistically identical share of the same noise, sampled less obliquely.
   float bias = 1.;
-  t.d_xy = texture(u_detailMap, worldPos.xy * scale, bias);
+  t.d_xy = vec4(0.5);
+  if (t.blend.z > 0.0)
+    t.d_xy = texture(u_detailMap, worldPos.xy * scale, bias);
   t.d_xz = vec4(0.5);
   t.fade_y = smoothstep(0.003, 0.01, t.blend.y) * sideGate;
   if (t.fade_y > 0.0)
@@ -261,16 +274,18 @@ vec2 planeHeightGrad(highp vec2 pos, float scale, vec4 weights, float h0,
 // under [triplanarSideGate] the gradient collapses to the plain XY gradient
 // (weight one, the pre-triplanar behavior) instead of a blend.z-weakened
 // one. Sub-gate terrain: 3 taps per scale, what the XY-only version cost; a
-// wall opens 2-3 planes (6-9 taps) within the same distance gates, which
-// used to skip walls entirely.
+// wall opens two planes (6 taps; three only inside the gate's own ramp)
+// within the same distance gates, which used to skip walls entirely.
 highp vec3 triplanarHeightGrad(Triplanar t, highp vec3 pos, float scale,
                                vec4 weights, highp float eps) {
   float w_y = t.blend.y * t.fade_y;
   float w_x = t.blend.x * t.fade_x;
   highp vec3 g = vec3(0.);
-  g.xy =
-      (1.0 - w_x - w_y) * planeHeightGrad(pos.xy, scale, weights,
-                                          computeHeight(t.d_xy, weights), eps);
+  // Skipped with its fetch when [sampleTriplanar] dropped the XY plane.
+  if (t.blend.z > 0.0)
+    g.xy = (1.0 - w_x - w_y) * planeHeightGrad(pos.xy, scale, weights,
+                                               computeHeight(t.d_xy, weights),
+                                               eps);
   if (w_y > 0.0)
     g.xz += w_y * planeHeightGrad(pos.xz, scale, weights,
                                   computeHeight(t.d_xz, weights), eps);
@@ -305,10 +320,12 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   float mask_mid = smoothstep(25., 40., v_dist);
 
   // The fine scale bows out on the steepest faces: they are the most
-  // expensive fragments (2-3 planes at every scale once past
+  // expensive fragments (two planes at every scale once past
   // [triplanarSideGate]), and the 10 m noise contributes least to how a wall
   // reads -- its character is macro and mid structure. Starts where the side
-  // gate ends, so the fine bump is never simultaneously triplanar.
+  // gate ends, so from where the gate opens (50 degrees) until it is gone (73)
+  // the fine bump is triplanar like the others: it reads better there than
+  // an XY-only one.
   fade_fine *= 1.0 - smoothstep(0.55, 0.7, 1.0 - geomNormal.z);
 
   // Compute projection basis once (before the gated fetches: no dFdx inside
@@ -327,14 +344,14 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // quantization noise is not amplified by a tiny divisor.
   highp float fp3 = max(length(dPdx), length(dPdy));
 
-  // All three scales take a triplanar world-space gradient, gated by their
-  // distance fades: steep faces get texture in proper proportion at every
-  // scale (an XY-only gradient smears down the fall line there, and a slope
-  // fade instead of it stripped cliffs down to the bare relief normals --
-  // both tried and rejected). The macro centers are [tri]'s, already paid
-  // for by the material blend; mid and fine fetch their own. Below
-  // [triplanarSideGate] all of it collapses to the XY plane: 3 taps per
-  // scale, what the XY-only version cost.
+  // All three scales take a triplanar (past the gate, biplanar) world-space
+  // gradient, gated by their distance fades: steep faces get texture in
+  // proper proportion at every scale (an XY-only gradient smears down the
+  // fall line there, and a slope fade instead of it stripped cliffs down to
+  // the bare relief normals -- both tried and rejected). The macro centers
+  // are [tri]'s, already paid for by the material blend; mid and fine fetch
+  // their own. Below [triplanarSideGate] all of it collapses to the XY plane:
+  // 3 taps per scale, what the XY-only version cost.
   float sideGate = triplanarSideGate(geomNormal);
   highp vec3 grad1 = vec3(0.);
   if (mask_macro > 0.0)
