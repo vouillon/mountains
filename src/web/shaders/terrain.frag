@@ -554,7 +554,10 @@ void main() {
   mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
   mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
   mediump vec2 encodedN;
-  mediump float data_step;
+  // Highp: it is mixed down from the 60000 sentinel, and at fp16 (ulp 32 there)
+  // a mix that should land on a ring's metre-scale pitch lands tens of metres
+  // off it -- or on zero.
+  highp float data_step;
   if (f0 >= 1.0) {
     encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
     data_step = hd_step[0];
@@ -569,21 +572,33 @@ void main() {
     // outside every ring. Composite outside-in so each ring fades over the
     // one beneath it; the fetch count is bounded by the fades that are
     // actually open, and the branches stay quad-coherent away from the
-    // bands' own edges (the same acceptance as the selection above).
-    encodedN = texture(relief_normal, reliefCoord).rg;
-    // The base gets the same sentinel [Render_state] uploads for empty
-    // slots: far above any footprint, i.e. the full bump, exactly as the
-    // base always had -- and mediump-safe, unlike an infinity.
-    data_step = 60000.0;
-    if (f2 > 0.0) {
-      encodedN =
-          mix(encodedN, texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);
-      data_step = mix(data_step, hd_step[2], f2);
-    }
-    if (f1 > 0.0) {
-      encodedN =
-          mix(encodedN, texture(hd_relief_normal[1], hdReliefCoord1).rg, f1);
-      data_step = mix(data_step, hd_step[1], f1);
+    // bands' own edges (the same acceptance as the selection above). The
+    // composite starts at the innermost ring that is fully open here:
+    // everything beneath it would only be mixed away at weight one.
+    if (f1 >= 1.0) {
+      encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
+      data_step = hd_step[1];
+    } else {
+      if (f2 >= 1.0) {
+        encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
+        data_step = hd_step[2];
+      } else {
+        encodedN = texture(relief_normal, reliefCoord).rg;
+        // The base gets the same sentinel [Render_state] uploads for empty
+        // slots: far above any footprint, i.e. the full bump, exactly as the
+        // base always had -- and mediump-safe, unlike an infinity.
+        data_step = 60000.0;
+        if (f2 > 0.0) {
+          encodedN = mix(encodedN,
+                         texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);
+          data_step = mix(data_step, hd_step[2], f2);
+        }
+      }
+      if (f1 > 0.0) {
+        encodedN =
+            mix(encodedN, texture(hd_relief_normal[1], hdReliefCoord1).rg, f1);
+        data_step = mix(data_step, hd_step[1], f1);
+      }
     }
     if (f0 > 0.0) {
       encodedN =
