@@ -221,6 +221,17 @@ val upload_grad_rot :
     for a graticule-aligned grid, a rotation by the grid convergence for one in
     a projected CRS. *)
 
+val upload_hd_mat :
+  Gl.t ->
+  Gl.uniform_location ->
+  Gl.uniform_location ->
+  Gl.uniform_location ->
+  Gl.uniform_location ->
+  Warp.t ->
+  unit
+(** Upload a {!Warp.t} as a [mat2], a [vec2] translation and the two [vec3]s of
+    quadratic terms, as the shaders' ring transforms take it. *)
+
 val upload_hd_params :
   Gl.t ->
   Gl.program ->

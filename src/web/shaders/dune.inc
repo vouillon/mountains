@@ -275,6 +275,42 @@
   (diff text.vert text.vert.fmt)))
 
 (rule
+ (target tree.frag.fmt)
+ (deps tree.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff tree.frag tree.frag.fmt)))
+
+(rule
+ (target tree.vert.fmt)
+ (deps tree.vert)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff tree.vert tree.vert.fmt)))
+
+(rule
+ (target tree_find.vert.fmt)
+ (deps tree_find.vert)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff tree_find.vert tree_find.vert.fmt)))
+
+(rule
  (target triangle.frag.fmt)
  (deps triangle.frag)
  (action

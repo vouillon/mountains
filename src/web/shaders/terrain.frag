@@ -415,7 +415,7 @@ void canopyGeometry() {
                      : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
   highp vec2 e = min(c, 1.0 - c);
   float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  float near = smoothstep(80.0, 200.0, v_dist);
+  float near = smoothstep(300.0, 450.0, v_dist);
   float lod = log2(max(grid_k * (v_dist + grid_scale) / 2.0, 1.0)) + 2.0;
   vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
   float h = s.r * (255.0 / 5.0);
