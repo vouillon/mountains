@@ -37,6 +37,9 @@ uniform highp float u_invW; // 1 / the base grid's size
 // where it has one, decides the species.
 uniform bool u_treeCoverOn;
 uniform highp vec4 u_treeCoverArc; // origin, then 1 / extent
+// Metres above which the trees turn to conifers, over 500 m, whatever the
+// land cover's class says (terrain.frag's, Viewer.apply_tree_cover).
+uniform highp float u_coniferLine;
 
 out vec4 f_pos;   // metres from the eye east and north, ground, height
 out vec4 f_shape; // crown radius, 1 for a conifer, two draws in [0, 1]
@@ -174,9 +177,12 @@ void main() {
   vec3 cover = coverAt(arc);
   if (cover.y > 0.5 || cover.z > 0.5)
     return;
+  highp float ground = groundAt(idx / float(textureSize(u_ground, 0).x));
   // Conifer stands within the class's share, as terrain.frag's [coniferAmt]
-  // (its world position is metres from the anchor, as [arc * u_delta]).
-  float share = cover.x;
+  // (its world position is metres from the anchor, as [arc * u_delta]); all
+  // conifers up high.
+  float share = mix(cover.x, 1.0,
+                    smoothstep(u_coniferLine, u_coniferLine + 500.0, ground));
   bool conifer = share >= 0.98 ||
                  (share > 0.02 &&
                   share > valueNoise(arc * u_delta / 60.0 + vec2(53.0, 7.0)));
@@ -194,7 +200,6 @@ void main() {
   }
 
   highp vec2 base = arc * u_delta - u_centerOffset;
-  highp float ground = groundAt(idx / float(textureSize(u_ground, 0).x));
   // Thinning out over the treeline, as terrain.frag.
   if (smoothstep(2500.0, 2800.0, ground) > float((hs >> 12u) & 0xffu) / 255.0)
     return;

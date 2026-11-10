@@ -4147,12 +4147,27 @@ let apply_tree_cover ctx ~terrain_pid =
     | None -> Gl.uniform1i ctx (u on_name) 0
   in
   let map0, arc0 = rects 0 and map1, _ = rects 1 in
+  (* Where trees outside the land cover's forests turn to conifers (larch,
+     arolla and mountain pine, spruce): in the mountains of Europe; not in La
+     Reunion, whose upland forests are broadleaved. *)
+  let conifer_line =
+    match !tree_cover_frame with
+    | Some (anchor_lat, _, _) when anchor_lat < 0 -> 1e5
+    | _ -> 1400.
+  in
+  let set_line pid =
+    Gl.uniform1f ctx
+      (Gl.get_uniform_location ctx pid (Jstr.v "u_coniferLine"))
+      conifer_line
+  in
   Gl.use_program ctx terrain_pid;
   set terrain_pid "u_treeCoverOn" "u_treeCoverMap" map0;
   set terrain_pid "u_treeCoverFarOn" "u_treeCoverFarMap" map1;
+  set_line terrain_pid;
   let t = get_trees_gl ctx in
   Gl.use_program ctx t.find_pid;
-  set t.find_pid "u_treeCoverOn" "u_treeCoverArc" arc0
+  set t.find_pid "u_treeCoverOn" "u_treeCoverArc" arc0;
+  set_line t.find_pid
 
 (* Start fetching the tree cover's blocks for a load at [lat]/[lon], unless
    they are held or on their way already. *)

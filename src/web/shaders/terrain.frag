@@ -53,6 +53,10 @@ uniform highp vec4 u_treeCoverMap;
 // likewise.
 uniform bool u_treeCoverFarOn;
 uniform highp vec4 u_treeCoverFarMap;
+// Metres above which the trees turn to conifers, over 500 m, whatever the
+// land cover's class says: in the Alps scattered trees up high are larch,
+// arolla and mountain pine, spruce (Viewer.apply_tree_cover).
+uniform highp float u_coniferLine;
 const float BUMP_ENC = 4.0;
 // Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
@@ -935,6 +939,9 @@ void main() {
     // 44.58, 6.85 it reads 0-9% on 70% of the LIDAR's trees over 3 m), so
     // where it has no trees but the land cover says forest, that is sparse
     // forest, half trees, rather than meadow.
+    surface.conifer = mix(surface.conifer, 1.0,
+                          smoothstep(u_coniferLine, u_coniferLine + 500.0,
+                                     v_world_pos.z + center_height));
     float coverTrust = 0.0;
     float clcForest = 0.5 * smoothstep(0.35, 0.6, surface.detailWeights.b);
     for (int level = 0; level < 2; level++) {
