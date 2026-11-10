@@ -28,6 +28,11 @@ out highp vec3 v_world;
 out vec3 v_fromEye; // the eye to this point, metres
 flat out float v_tint;
 flat out float v_bark;
+// For the foliage pattern (tree.frag): the point from the tree's foot,
+// metres; the tree's seed; its height and crown radius.
+out highp vec3 v_local;
+flat out highp float v_seed;
+flat out vec2 v_size;
 
 const int SIDES = 7;
 const float TAU = 6.2831853;
@@ -57,6 +62,9 @@ void collapse() {
   v_fromEye = vec3(0.0, 0.0, 1.0);
   v_tint = 1.0;
   v_bark = 0.0;
+  v_local = vec3(0.0);
+  v_seed = 0.0;
+  v_size = vec2(1.0);
 }
 
 // Conifer: tier [tier] of three overlapping cones, each one narrower and
@@ -195,6 +203,9 @@ void main() {
     v_tint = (0.75 + 0.4 * a_shape.w) * (0.8 + 0.4 * rand(seed, 7, tri));
   }
   v_normal = n;
+  v_local = p - vec3(a_pos.xy, ground);
+  v_seed = float(seed);
+  v_size = vec2(h, r);
 
   // Earth curvature, as the mesh (radial_common.vert).
   p.z -= dot(p.xy, p.xy) * 6.8306e-8;
