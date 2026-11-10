@@ -10,7 +10,8 @@
 // Layers: 2 * scale + side, scale 0/1/2 = macro/mid/fine (500/71/10 m
 // periods), side 0 = the horizontal (XY) projection, 1 = the vertical ones,
 // whose v axis is world z: their rock pattern is stretched along it, so on a
-// wall the ribs and gullies run down the fall line.
+// wall the ribs and gullies run down the fall line. Layer 6 is different: the
+// forest crowns, height and gradient (see [crownField]).
 //
 // Every pattern is a lattice of integer frequency per tile, so it tiles. A is
 // ridged (rock), B smooth (soil, vegetation, ice; none at the macro scale);
@@ -146,9 +147,71 @@ vec2 fbm(vec2 p, float f0, int octaves, uint seed, float sharp, float stretch) {
   return g;
 }
 
+// One population of crowns: [n] x [n] cells per tile, each holding a crown
+// with probability [keep], its site anywhere in the cell, its radius in
+// [rmin, rmax] cells (at most 1, so a 3 x 3 neighbourhood finds it), a
+// slightly pointed profile 1 - (d / r)^1.3, and a height that grows with the
+// radius, jittered. Folds the crowns into the running upper envelope [best]
+// and its gradient [g] (per tile unit), scaled by [hs].
+void crownPop(vec2 p, int n, uint seed, float keep, float rmin, float rmax,
+              float hs, inout float best, inout vec2 g) {
+  vec2 x = p * float(n);
+  ivec2 c = ivec2(floor(x));
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++) {
+      ivec2 cell = c + ivec2(dx, dy);
+      ivec2 w = cell - n * ivec2(floorDiv(cell.x, n), floorDiv(cell.y, n));
+      uint h = hash(uvec2(w) + uvec2(seed * 7919u, seed * 104729u));
+      uint h2 = hash(uvec2(h, seed));
+      if (float(h2 >> 16u) / 65535.0 > keep)
+        continue;
+      vec2 site =
+          vec2(cell) + vec2(float(h & 0xffffu), float(h >> 16u)) / 65535.0;
+      float u = float(h2 & 0xffu) / 255.0;
+      float r = mix(rmin, rmax, u);
+      float k =
+          hs * (r / rmax) * (0.75 + 0.5 * float((h2 >> 8u) & 0xffu) / 255.0);
+      vec2 dv = x - site;
+      float d = length(dv);
+      if (d < r) {
+        float hh = k * (1.0 - pow(d / r, 1.3));
+        if (hh > best) {
+          best = hh;
+          g = d > 1e-5 ? -k * 1.3 * pow(d / r, 0.3) / r * dv / d * float(n)
+                       : vec2(0.0);
+        }
+      }
+    }
+}
+
+// Forest crowns (layer 6): the upper envelope of two populations -- big trees
+// in 14 cells across, 15% of the cells empty, and small ones in 27, a quarter
+// of them empty, filling in between -- so they neither line up in rows nor
+// come in one size. Gaps sit at zero. Returns (height in [0, 1], gradient
+// per tile unit).
+vec3 crownField(vec2 p, uint seed) {
+  float best = 0.0;
+  vec2 g = vec2(0.0);
+  crownPop(p, 14, seed, 0.85, 0.5, 1.0, 0.85, best, g);
+  crownPop(p, 27, seed + 1u, 0.75, 0.6, 1.0, 0.6, best, g);
+  return vec3(best, g);
+}
+
+// Encoding range of the crown gradient, per tile unit (CROWN_GMAX in
+// terrain.frag).
+const float CROWN_GMAX = 64.0;
+
 void main() {
   // Texel centres: [uv] runs 0..1 across the viewport.
   vec2 p = uv;
+  if (u_layer == 6) {
+    // At the terrain shader's 131 m tile: big crowns up to ~9 m across, small
+    // ones ~3-5 m.
+    vec3 c = crownField(p, 900u);
+    color = vec4(clamp(c.x, 0.0, 1.0),
+                 clamp(c.yz / (2.0 * CROWN_GMAX) + 0.5, 0.0, 1.0), 1.0);
+    return;
+  }
   int scale = u_layer / 2;
   bool side = (u_layer % 2) == 1;
   // Each scale keeps only the top octaves of its tile, so the three tile the

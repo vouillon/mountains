@@ -24,6 +24,14 @@ uniform mediump sampler2D
 // over +-BUMP_ENC (must match [bump_enc] in viewer.ml).
 uniform mediump sampler2DArray u_bumpGrad;
 const float BUMP_ENC = 4.0;
+// Forest crowns, layer 6 of u_bumpGrad (bump_gen.frag's [crownField]): tile
+// size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
+// range per tile unit
+// (CROWN_GMAX there), and the crowns' height against their width, which
+// sets how steep their sides are.
+const float CROWN_TILE = 131.0;
+const float CROWN_GMAX = 64.0;
+const float CROWN_RELIEF = 3.0;
 // The mid and fine tiles (70.7 m, 10.24 m) are deliberately incommensurate
 // with the macro one (500 m): at 1/7 and 1/50 of it every layer realigned
 // every 500 m and the whole bump repeated on that grid. (The top plane also
@@ -301,6 +309,32 @@ const vec4 BUMP_AMP_B[3] =
 // draw.
 float bandShare(float lmin, float lmax, float step) {
   return clamp(log2(3.0 * step / lmin) / log2(lmax / lmin), 0.0, 1.0);
+}
+
+// Value noise in [0, 1] over unit cells, hashed from the cell itself: no tile,
+// so nothing repeats. The integer arithmetic needs 32 bits (highp: mediump
+// ints are 16-bit on Mali).
+highp uint cellHash(highp ivec2 c) {
+  highp uvec2 v = uvec2(c) * 1664525u + 1013904223u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  v.x += v.y * 1664525u;
+  v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  return v.x ^ v.y;
+}
+
+float valueNoise(highp vec2 p) {
+  highp vec2 i = floor(p);
+  highp vec2 f = p - i;
+  highp ivec2 c = ivec2(i);
+  float a = float(cellHash(c) & 0xffffu) / 65535.0;
+  float b = float(cellHash(c + ivec2(1, 0)) & 0xffffu) / 65535.0;
+  float d = float(cellHash(c + ivec2(0, 1)) & 0xffffu) / 65535.0;
+  float e = float(cellHash(c + ivec2(1, 1)) & 0xffffu) / 65535.0;
+  vec2 u = vec2(f * f * (3.0 - 2.0 * f));
+  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
 }
 
 // 1 while a band whose longest wavelength is [lmax] still has content at a
@@ -711,6 +745,75 @@ void main() {
   vec4 finalWeights =
       (weightSum > 0.001) ? (heightWeights / weightSum) : surface.detailWeights;
 
+  // Forest crowns at their true size (~7 m): one fetch, on forest only, once
+  // a crown spans a few pixels (smaller, filtered crowns flattened the canopy
+  // to a lawn, and the canopy photo reads better there). Their height sets the
+  // canopy colour and occlusion -- lit tops, dark gaps, in place of the
+  // canopy photo's, which at the 500 m macro tile drew 70 m "crowns" -- and
+  // their gradient shades each crown, lit on its sun side.
+  float crownFade = 0.0;
+  float crownH = 0.0;
+  highp vec2 crownGrad = vec2(0.0);
+  {
+    highp vec3 ddx = dFdx(v_world_pos);
+    highp vec3 ddy = dFdy(v_world_pos);
+    highp float fpC = max(0.25 * max(length(ddx), length(ddy)),
+                          min(length(ddx), length(ddy)));
+    if (finalWeights.b > 0.01)
+      crownFade = lodFade(4.0, fpC);
+    if (crownFade > 0.0) {
+      // No LOD bias (the bump's +1 blurred crowns of a few pixels into soft
+      // blobs). Two copies of the tile, turned and offset differently, one per
+      // zone of a non-repeating value noise (~250 m): random clusters of big
+      // trees and gaps within the one 131 m tile repeated recognisably over
+      // a wide forest. Crowns cannot be averaged, so each zone takes one
+      // copy, and both are read only across the narrow transitions.
+      float pick = smoothstep(
+          0.42, 0.58, valueNoise(v_world_pos.xy / 250.0 + vec2(17.0, 31.0)));
+      highp vec2 rc = vec2(0.921, 0.389); // turned 23 degrees
+      vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
+      if (pick < 1.0)
+        cs = texture(
+            u_bumpGrad,
+            vec3(mat2(rc.x, rc.y, -rc.y, rc.x) * v_world_pos.xy / CROWN_TILE,
+                 6.0),
+            0.);
+      if (pick > 0.0) {
+        const vec2 rc2 = vec2(-0.276, 0.961); // turned 106 degrees
+        vec4 cs2 = texture(u_bumpGrad,
+                           vec3(mat2(rc2.x, rc2.y, -rc2.y, rc2.x) *
+                                        v_world_pos.xy / CROWN_TILE +
+                                    vec2(0.37, 0.61),
+                                6.0),
+                           0.);
+        // Bring the second copy's gradient into the first copy's frame, so
+        // the single turn-back below serves both.
+        highp vec2 g2 = mat2(rc2.x, -rc2.y, rc2.y, rc2.x) * (cs2.gb - 0.5);
+        cs2.gb = mat2(rc.x, rc.y, -rc.y, rc.x) * g2 + 0.5;
+        cs = mix(cs, cs2, pick);
+      }
+      // Density varies over ~150 m by a non-repeating value noise: crowns
+      // lowered by [thin] and rescaled, so the small and low ones drop out
+      // first, leaving clearings in some stands and a closed canopy in others.
+      // (Driven by the forest's 500 m colour noise, it repeated with that
+      // tile, as large light and dark patches over a big forest.)
+      float thin =
+          0.12 * smoothstep(0.55, 0.15, valueNoise(v_world_pos.xy / 150.0));
+      crownH = max(cs.r - thin, 0.0) / (1.0 - thin);
+      crownGrad = (cs.r > thin ? 1.0 / (1.0 - thin) : 0.0) *
+                  (mat2(rc.x, -rc.y, rc.y, rc.x) *
+                   ((cs.gb - 0.5) * (2.0 * CROWN_GMAX / CROWN_TILE)));
+    }
+  }
+
+  // The canopy's tone: dark in the gaps, lit across a crown rather than only
+  // at its top -- by height alone, only crown centres were bright, and at zoom
+  // a forest read as scattered blobs on black. Averages ~0.42 over a closed
+  // canopy, as the canopy photo does where crowns fade out: brighter, the
+  // forest turned to a lawn up close and darkened with distance.
+  float crownTone =
+      0.05 + 0.55 * smoothstep(0.0, 0.12, crownH) * (0.6 + 0.4 * crownH);
+
   // -----------------------------------------------------------------------
   // STEP B: BIO-VARIATION (Color & Texture)
   // -----------------------------------------------------------------------
@@ -758,7 +861,7 @@ void main() {
 
   // --- FOREST (Blue Channel) ---
   if (finalWeights.b > 0.001) {
-    float forestNoise = texNoise.b;
+    float forestNoise = mix(texNoise.b, crownTone, crownFade);
 
     // Volume: Deep Shadow (Low) vs Sunlit Canopy (High)
     vec3 deepShadow = baseAlbedo * vec3(0.2, 0.25, 0.3); // Very dark/cool
@@ -785,6 +888,16 @@ void main() {
   // Procedural normal perturbation (replaces rock_normal_map)
   final_normal =
       perturbNormal(normal, tri, surface.roughness, finalWeights, data_step);
+  // Crowns stand vertical whatever the slope under them: each tilts the
+  // ground's normal about the vertical axis -- a horizontal offset -- rather
+  // than within the slope's tangent plane. As a bump on the slope every crown
+  // leaned with it and the pattern followed the slope; replacing the normal
+  // outright lost the slope's own light and shade, which real forest keeps.
+  if (crownFade > 0.0) {
+    float onCrown = smoothstep(0.02, 0.2, crownH) * crownFade * finalWeights.b;
+    final_normal = normalize(final_normal +
+                             vec3(-crownGrad * (CROWN_RELIEF * onCrown), 0.0));
+  }
 
   // Water Wave Logic
   if (waterMask > 0.01) {
@@ -1023,7 +1136,7 @@ void main() {
   // Noise-based Micro-AO: Darken crevasses/gaps (low noise values)
   // 1. Compute per-material AO factors (Low noise = Darker)
   float rockAO = smoothstep(0.0, 0.6, texNoise.r);
-  float forestAO = smoothstep(0.0, 0.5, texNoise.b);
+  float forestAO = smoothstep(0.0, 0.5, mix(texNoise.b, crownTone, crownFade));
   float iceAO = smoothstep(0.0, 0.6, texNoise.a);
 
   // 2. Combine based on weights (Grass/Green channel gets 1.0 = no darkening)
