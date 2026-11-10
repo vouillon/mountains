@@ -76,6 +76,7 @@ struct Surface {
   vec4 detailWeights; // RGBA = Rock, Grass, Forest, Ice
   float waterFactor;
   float conifer; // share of conifers in the tree cover
+  float built;   // artificial surfaces (buildings read as canopy there)
 };
 
 // Lookup surface properties from palette by material ID
@@ -85,7 +86,9 @@ Surface getSurfaceFromID(uint id) {
   ivec2 coord = ivec2(int(id) * 3, 0);
   vec4 pixelA = texelFetch(u_paletteTex, coord, 0);
   vec4 pixelB = texelFetch(u_paletteTex, coord + ivec2(1, 0), 0);
-  s.conifer = texelFetch(u_paletteTex, coord + ivec2(2, 0), 0).r;
+  vec4 pixelC = texelFetch(u_paletteTex, coord + ivec2(2, 0), 0);
+  s.conifer = pixelC.r;
+  s.built = pixelC.g;
 
   // Palette is pre-baked with linear values (gamma decoded on CPU)
   s.albedo = pixelA.rgb;
@@ -180,6 +183,8 @@ Surface sampleCLCBilinear(highp vec2 uv) {
 
   result.conifer = mix(mix(s00.conifer, s10.conifer, frac.x),
                        mix(s01.conifer, s11.conifer, frac.x), frac.y);
+  result.built = mix(mix(s00.built, s10.built, frac.x),
+                     mix(s01.built, s11.built, frac.x), frac.y);
 
   return result;
 }
@@ -375,18 +380,27 @@ vec4 crownSample(float layer, float pick, highp vec2 rc) {
   return cs;
 }
 
-// Canopy height in metres at this fragment, -1 where unknown (no canopy for
-// the block on screen, outside it, or no data there).
-float canopyHeight() {
+// What the canopy says at this fragment: (tree share, confidence, height in
+// m). The share is 0 below 1.5 m of canopy and 1 above 4 m. The confidence is
+// 0 without a canopy for the block on screen, outside it or where the
+// service had no data, fades out over the block's last ~60 m so the hand-over
+// to land cover is not a seam, and drops above 40 m: heights like that are
+// mostly cliffs, where surface and ground models disagree (La Reunion reads
+// 200 m), rather than trees. The fetch happens in uniform control flow.
+vec3 canopyTrees() {
   if (u_canopySlot < 0)
-    return -1.0;
+    return vec3(0.0);
   highp vec2 c = u_canopySlot == 0
                      ? hdReliefCoord0
                      : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
-  if (any(lessThan(c, vec2(0.0))) || any(greaterThan(c, vec2(1.0))))
-    return -1.0;
-  float v = texture(u_canopy, c).r;
-  return v > 0.995 ? -1.0 : v * (255.0 / 5.0);
+  float v = texture(u_canopy, clamp(c, 0.0, 1.0)).r;
+  highp vec2 e = min(c, 1.0 - c);
+  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
+  if (v > 0.995)
+    return vec3(0.0);
+  float h = v * (255.0 / 5.0);
+  return vec3(smoothstep(1.5, 4.0, h), edge * (1.0 - smoothstep(40.0, 48.0, h)),
+              h);
 }
 
 // 1 while a band whose longest wavelength is [lmax] still has content at a
@@ -768,6 +782,46 @@ void main() {
 
   // === CLC-Based Material ===
   Surface surface = sampleCLCBilinear(reliefCoord);
+
+  // === Canopy (LIDAR HD) ===
+  // Inside the 1 m ring's block, the canopy height says where the trees are:
+  // their real edges, clearings, corridors and lone trees, in place of land
+  // cover drawn to 25 ha. Where it disagrees with the class, the detail
+  // weights move to forest or to the class's non-forest mix, and the albedo to
+  // forest green (by the conifer share) or to meadow green. Not on water, nor
+  // on built-up classes, whose buildings the canopy model reads as trees.
+  {
+    vec3 ct = canopyTrees();
+    float trust = ct.y * (1.0 - surface.built) *
+                  (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
+    if (trust > 0.0) {
+      vec4 w = surface.detailWeights;
+      float isForest = smoothstep(0.35, 0.6, w.b);
+      vec4 ground = vec4(w.r, w.g, 0.0, w.a);
+      float gs = dot(ground, vec4(1.0));
+      ground = gs > 0.05 ? ground / gs : vec4(0.1, 0.9, 0.0, 0.0);
+      // Treeless ground on a steep slope is mostly rock and scree, not
+      // meadow: from ~32 to ~49 degrees, below where the steepness rule of
+      // [applySlopeModification] takes over.
+      float bare = smoothstep(0.15, 0.35, slope);
+      ground = mix(ground, vec4(1.0, 0.0, 0.0, 0.0), bare);
+      surface.detailWeights = mix(
+          w, mix(ground, vec4(0.0, 0.0, 1.0, 0.0), ct.x) * dot(w, vec4(1.0)),
+          trust);
+      // Linear palette albedos of broadleaved (311) and coniferous (312)
+      // forest; for open ground, natural grassland (321) muted towards
+      // moorland (322) -- grassland alone made clearings lime green, brighter
+      // than the meadows around -- and bare rock (as [applySlopeModification])
+      // where it is steep.
+      vec3 forestAlbedo = mix(vec3(0.0170, 0.1009, 0.0127),
+                              vec3(0.0127, 0.0676, 0.0170), surface.conifer);
+      vec3 groundAlbedo =
+          mix(vec3(0.116, 0.205, 0.048), vec3(0.21, 0.19, 0.17), bare);
+      vec3 target = mix(groundAlbedo, forestAlbedo, ct.x);
+      surface.albedo =
+          mix(surface.albedo, target, trust * abs(ct.x - isForest));
+    }
+  }
 
   applySlopeModification(surface, slope);
 

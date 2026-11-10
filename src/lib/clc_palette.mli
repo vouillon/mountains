@@ -32,4 +32,4 @@ val generate_palette :
     material:
     - Pixel A: Albedo RGB + Roughness Alpha
     - Pixel B: Detail Weights RGB + Water Factor Alpha
-    - Pixel C: Conifer share in Red *)
+    - Pixel C: Conifer share in Red, built-up (artificial surfaces) in Green *)

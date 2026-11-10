@@ -527,7 +527,11 @@ let generate_palette () =
     Array1.set data (base + 7) (int_of_float (m.water_factor *. 255.));
     (* Pixel C: Conifer share *)
     Array1.set data (base + 8)
-      (int_of_float ((conifer_share m.code *. 255.) +. 0.5))
+      (int_of_float ((conifer_share m.code *. 255.) +. 0.5));
+    (* Pixel C green: built-up (CORINE 1xx, artificial surfaces), where a
+       canopy height model reads buildings as trees. *)
+    Array1.set data (base + 9)
+      (if m.code >= 100 && m.code < 200 then 255 else 0)
   done;
   data
 
