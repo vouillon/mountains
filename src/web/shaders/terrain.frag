@@ -278,9 +278,11 @@ mediump float ringFade(bool valid, highp vec2 c) {
 // side planes: rock takes it as is. Negated it is the opposite, rounded domes
 // parted by sharp creases: a canopy for forest, a groove network for ice
 // (crevasses) at the macro and mid scales. B is smooth noise -- grass, and ice
-// at the fine scale -- except at the macro scale, where it is the rock's long
-// structure, a network of cracks, ledges and couloirs from 125 m to 31 m, and
-// grass takes nothing: distant meadows read best flat. Calibrated so each
+// at the fine scale; the macro scale has none, and grass takes nothing there:
+// distant meadows read best flat. Nothing longer than 31 m either: a
+// 125-31 m band (Voronoi grooves, then strata along the contours) read as
+// drawn on, where a photo of the same view shows only the couloirs and ribs
+// the relief data already holds. Calibrated so each
 // land-cover class keeps the texture strength the photo-texture bump gave it:
 // the gradient energy over the band each scale covers (total RMS would count
 // long tilts, which shade as blotches rather than texture), except the
@@ -290,7 +292,7 @@ const vec4 BUMP_AMP_A[3] =
     vec4[3](vec4(174.2, 0.0, -103.9, -114.8), vec4(290.5, 0.0, -259.7, -116.1),
             vec4(290.5, 0.0, -259.7, 0.0));
 const vec4 BUMP_AMP_B[3] =
-    vec4[3](vec4(217.9, 0.0, 0.0, 0.0), vec4(0.0, 44.2, 0.0, 0.0),
+    vec4[3](vec4(0.0, 0.0, 0.0, 0.0), vec4(0.0, 44.2, 0.0, 0.0),
             vec4(0.0, 44.2, 0.0, 117.8));
 
 // The share of a bump band [lmin, lmax] (wavelengths, m) that the relief data
@@ -413,16 +415,16 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
 
   // Each band is weighed by the share of its octaves the relief data cannot
   // hold (see [bandShare]), so the texture does not bury the relief: in the
-  // 2.4 m rings the 125-31 m grooves are off and the 31-4 m band keeps under
-  // a third, on the 30 m base nearly all of it stays. A function of where
+  // 2.4 m rings the 31-4 m band keeps under a third, on the 30 m base all of
+  // it stays. A function of where
   // the pixel is, not of its size -- the footprint law this replaces (data
   // samples per pixel) made the texture change with the zoom. The base's
   // sentinel step stands for its real 30 m here, and as the step is per
   // metre of horizontal grid, along a steep face the posts sit 1/n_z further
   // apart and the data holds less.
   float ds = min(dataStep, 30.0) / max(geomNormal.z, 0.25);
-  vec4 band = vec4(bandShare(31.0, 125.0, ds), bandShare(4.0, 31.0, ds),
-                   bandShare(0.55, 9.0, ds), bandShare(0.08, 1.25, ds));
+  vec3 band = vec3(bandShare(4.0, 31.0, ds), bandShare(0.55, 9.0, ds),
+                   bandShare(0.08, 1.25, ds));
 
   // One fetch per open projection plane per scale (past [triplanarSideGate]
   // two planes, below it the XY plane alone).
@@ -430,8 +432,8 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   highp vec3 grad2 = vec3(0.);
   highp vec3 grad3 = vec3(0.);
   if (mask_macro > 0.0) {
-    vec2 amp = vec2(dot(bw, BUMP_AMP_A[0]), dot(bw, BUMP_AMP_B[0])) * band.yx *
-               vec2(lodFade(31.0, fpL), lodFade(125.0, fpL));
+    vec2 amp = vec2(dot(bw, BUMP_AMP_A[0]), dot(bw, BUMP_AMP_B[0])) * band.x *
+               lodFade(31.0, fpL);
     // Forest: two copies of the layer, alternating over zones 700 m to 1.1 km
     // across (a mask of incommensurate sinusoids): flat forest showed the
     // 500 m tile repeating, with nothing in the relief to break it up.
@@ -447,12 +449,12 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   if (fade_mid > 0.0)
     grad2 =
         bumpGrad(tri, v_world_pos, BUMP_SCALE_MID, 1,
-                 vec2(dot(bw, BUMP_AMP_A[1]), dot(bw, BUMP_AMP_B[1])) * band.z,
+                 vec2(dot(bw, BUMP_AMP_A[1]), dot(bw, BUMP_AMP_B[1])) * band.y,
                  vec2(0.866, 0.5), 0.0);
   if (fade_fine > 0.0)
     grad3 =
         bumpGrad(tri, v_world_pos, BUMP_SCALE_FINE, 2,
-                 vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B[2])) * band.w,
+                 vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B[2])) * band.z,
                  vec2(0.454, 0.891), 0.0);
 
   // Per-scale: scalar height derivatives along the screen axes via the chain

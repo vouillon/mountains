@@ -13,12 +13,11 @@
 // wall the ribs and gullies run down the fall line.
 //
 // Every pattern is a lattice of integer frequency per tile, so it tiles. A is
-// ridged (rock), B smooth (soil, vegetation, ice) except at the macro scale
-// (see there); together the three scales cover 31 m down to 8 cm without
-// gaps. (Forest crowns come from
-// the canopy photo in the colour, not from here: a crown pattern in the bump
-// has no energy between its 7 m size and the next band, which shaded as dark
-// domes on everything that used it.)
+// ridged (rock), B smooth (soil, vegetation, ice; none at the macro scale);
+// together the three scales cover 31 m down to 8 cm without gaps. (Forest
+// crowns come from the canopy photo in the colour, not from here: a crown
+// pattern in the bump has no energy between its 7 m size and the next band,
+// which shaded as dark domes on everything that used it.)
 
 // The hash and the lattice arithmetic need 32-bit integers: a fragment
 // shader's ints default to mediump, 16 bits on Mali, which turned the baked
@@ -147,63 +146,6 @@ vec2 fbm(vec2 p, float f0, int octaves, uint seed, float sharp, float stretch) {
   return g;
 }
 
-// A network of narrow grooves along the edges of a jittered Voronoi tiling:
-// cracks, ledges and couloirs, angular and long where noise contours wander.
-// [n] cells per tile along u, n / [stretch] along v (elongated down the fall
-// line on the side layers); three sizes, n, 2n, 4n, each carrying the same
-// gradient. The groove is -(1 - e / w)^3 within [w] (in cells) of an edge, e
-// the distance to the bisector of the two nearest sites. Returns the gradient
-// per tile unit.
-vec2 grooves(vec2 p, int n, float stretch, uint seed) {
-  vec2 g = vec2(0.0);
-  float amp = 1.0;
-  for (int o = 0; o < 3; o++) {
-    ivec2 period = ivec2(n, max(1, int(float(n) / stretch)));
-    // Warped by a cell-frequency noise, so the edges wander instead of
-    // running dead straight across several cells. J = dx/dp carries the
-    // gradient back from the warped domain.
-    vec3 wx = noised(p, ivec2(period.x, 0), ivec2(0, period.y), seed + 71u);
-    vec3 wy = noised(p, ivec2(period.x, 0), ivec2(0, period.y), seed + 72u);
-    const float warp = 0.3;
-    vec2 x = p * vec2(period) + warp * vec2(wx.x, wy.x);
-    mat2 jt = mat2(float(period.x) + warp * wx.y, warp * wx.z, warp * wy.y,
-                   float(period.y) + warp * wy.z);
-    ivec2 c = ivec2(floor(x));
-    float d1 = 1e9, d2 = 1e9;
-    vec2 s1 = vec2(0.0), s2 = vec2(0.0);
-    for (int dy = -1; dy <= 1; dy++)
-      for (int dx = -1; dx <= 1; dx++) {
-        ivec2 cell = c + ivec2(dx, dy);
-        ivec2 w = ((cell % period) + period) % period;
-        uint h = hash(uvec2(w) + uvec2((seed + uint(o)) * 7919u, 104729u));
-        vec2 site = vec2(cell) + 0.15 +
-                    0.7 * vec2(float(h & 0xffffu), float(h >> 16u)) / 65535.0;
-        float d = dot(x - site, x - site);
-        if (d < d1) {
-          d2 = d1;
-          s2 = s1;
-          d1 = d;
-          s1 = site;
-        } else if (d < d2) {
-          d2 = d;
-          s2 = site;
-        }
-      }
-    vec2 u = normalize(s2 - s1);
-    float e = dot(0.5 * (s1 + s2) - x, u);
-    const float width = 0.06;
-    if (e < width) {
-      float r = 1.0 - e / width;
-      // h = -r^3, de/dx = -u
-      vec2 gx = 3.0 * r * r / width * u;
-      g += amp * (jt * gx);
-    }
-    n *= 2;
-    amp *= 0.5;
-  }
-  return g;
-}
-
 void main() {
   // Texel centres: [uv] runs 0..1 across the viewport.
   vec2 p = uv;
@@ -221,15 +163,10 @@ void main() {
   if (scale == 0) {
     // Macro, 500 m tile. A: 31 m to 4 m, uniform (calm and broken patches
     // baked in made the tile recognisable, and forest showed it repeating; a
-    // sinusoid mask in the terrain shader looked worse and repeated too). B:
-    // the rock's long structure, 125 m to 31 m, a network of narrow grooves
-    // (cracks, ledges, couloirs) -- beyond the
-    // high-resolution rings the relief data is 30 m, and a rock slope's
-    // structure between there and ~100 m is the bump's to draw (with A alone
-    // distant rock read as uniform gravel). Only rock uses B here: forest and
-    // ice would turn blotchy, and distant meadows read best flat.
+    // sinusoid mask in the terrain shader looked worse and repeated too). No
+    // B: nothing uses it at this scale.
     a = fbm(p, 16.0, 4, seed, 2.0, stretch);
-    b = grooves(p, 4, stretch, seed + 50u);
+    b = vec2(0.0);
   } else if (scale == 1) {
     // Mid, 71 m tile, 9 m to 0.55 m: fractured rock; soft ground.
     a = fbm(p, 8.0, 5, seed, 2.0, stretch);
