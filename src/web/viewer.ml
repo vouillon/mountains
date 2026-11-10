@@ -3350,8 +3350,13 @@ let canopy_texture ctx raw =
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 size size;
+  let levels = 1 + truncate (Float.log2 (float size)) in
+  Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 size size;
   Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
+  (* Mipmapped: the mesh reads the level matching its vertex spacing (see
+     radial_common.vert's [canopyLift]). *)
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
   (* Read [heights] on unit 15 while baking into [tid]. *)
   Gl.bind_texture ctx Gl.texture_2d (Some heights);
   let pid = Web_utils.create_program ctx canopy_prep_program in
@@ -3385,13 +3390,14 @@ let canopy_texture ctx raw =
   Gl.delete_program ctx pid;
   Gl.delete_texture ctx heights;
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.active_texture ctx Gl.texture0;
   tid
 
-(* Bind the canopy (or [placeholder]) on unit 15 and tell the terrain program
-   which ring slot to read it through. *)
-let apply_canopy ctx terrain_pid (u : Render_state.terrain_uniforms)
-    ~placeholder =
+(* Bind the canopy (or [placeholder]) on unit 15 and tell [pids] -- the
+   terrain, shadow and path programs, which all read it -- which ring slot to
+   read it through. *)
+let apply_canopy ctx pids ~placeholder =
   let tex, slot =
     match (!canopy_ring, !canopy_state) with
     | Some (b, slot), Some (b', g, tex) when b = b' && g = !context_generation
@@ -3402,8 +3408,14 @@ let apply_canopy ctx terrain_pid (u : Render_state.terrain_uniforms)
   Gl.active_texture ctx Gl.texture15;
   Gl.bind_texture ctx Gl.texture_2d (Some tex);
   Gl.active_texture ctx Gl.texture0;
-  Gl.use_program ctx terrain_pid;
-  Gl.uniform1i ctx u.u_canopySlot slot
+  List.iter
+    (fun pid ->
+      Gl.use_program ctx pid;
+      Gl.uniform1i ctx (Gl.get_uniform_location ctx pid (Jstr.v "u_canopy")) 15;
+      Gl.uniform1i ctx
+        (Gl.get_uniform_location ctx pid (Jstr.v "u_canopySlot"))
+        slot)
+    pids
 
 (* Start fetching the canopy for the 1 m ring a load at [lat]/[lon] will have,
    unless it is held or on its way already. *)
@@ -3436,24 +3448,30 @@ let start_canopy ~lat ~lon =
   end
 
 (* Called on every publish with the 1 m ring now on screen, if any: uploads a
-   fetched canopy for that block, and shows whatever is current. *)
-let update_canopy ctx terrain_pid u ~placeholder ring =
+   fetched canopy for that block, and shows whatever is current. A canopy
+   landing after the publish raises the mesh under shadows drawn without it:
+   [on_late] redraws them. *)
+let update_canopy ctx pids ~placeholder ~on_late ring =
   canopy_ring := ring;
-  let ready () =
-    (match (!canopy_ring, !canopy_raw) with
-    | Some (b, _), Some (b', g, raw) when b = b' && g = !context_generation ->
-        (match !canopy_state with
-        | Some (_, g, old) when g = !context_generation ->
-            Gl.delete_texture ctx old
-        | _ -> ());
-        canopy_state := Some (b, g, canopy_texture ctx raw);
-        canopy_raw := None;
-        force_redraw := true
-    | _ -> ());
-    apply_canopy ctx terrain_pid u ~placeholder
+  let ready ~late =
+    let uploaded =
+      match (!canopy_ring, !canopy_raw) with
+      | Some (b, _), Some (b', g, raw) when b = b' && g = !context_generation ->
+          (match !canopy_state with
+          | Some (_, g, old) when g = !context_generation ->
+              Gl.delete_texture ctx old
+          | _ -> ());
+          canopy_state := Some (b, g, canopy_texture ctx raw);
+          canopy_raw := None;
+          force_redraw := true;
+          true
+      | _ -> false
+    in
+    apply_canopy ctx pids ~placeholder;
+    if uploaded && late then on_late ()
   in
-  canopy_ready := ready;
-  ready ()
+  (canopy_ready := fun () -> ready ~late:true);
+  ready ~late:false
 
 (* How far the eye may stand from the arcsecond its surroundings were baked on
    before they are baked again. Nothing in a bake depends on where one stands
@@ -3943,8 +3961,17 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        let slot =
          List.find_index (fun r -> r.grid.Hd_dem.layer == Hd_dem.lidar_2m) rings
        in
-       update_canopy ctx terrain_pid terrain_uniforms
+       update_canopy ctx
+         [ terrain_pid; shadow_pid; path_pid ]
          ~placeholder:hd_placeholder
+         ~on_late:(fun () ->
+           time_gpu ctx "draw_shadows" (fun () ->
+               draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
+                 ~matrices:shadow_matrices ~terrain_geo ~index_count
+                 ~radial_params ~relief_texture ~hd_slot_textures ctx);
+           bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
+             ~ao_texture ~detail_map ~shadow_map ~cover_map_texture
+             ~palette_texture ~hd_slot_textures)
          (match (ring_1m, slot) with
          | Some b, Some i -> Some (b, i)
          | _ -> None));

@@ -145,6 +145,56 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
                             BASE_OFFSET);
 }
 
+// The LIDAR HD canopy over the 1 m ring's block (see terrain.frag and
+// Viewer.canopy_texture): R is the height, 0.2 m per step, 255 for nodata.
+// Shared by the terrain, shadow and path programs, so the forest the mesh
+// stands up, the forest that casts shadows and the forest a GPX trace is
+// draped over are one surface. Precisions explicit: terrain.frag declares the
+// same uniforms, and they must match across stages.
+uniform mediump sampler2D u_canopy;
+uniform mediump int u_canopySlot;
+
+// The canopy mip level the mesh reads at [grid_spacing] m between rings: two
+// levels coarser than the spacing (~8 m averages near the eye), so the mesh
+// carries a stand's shape and its crowns stay in the shading -- at the
+// spacing itself every crown became a spike. terrain.frag shades with the
+// slope of this same level, so the formula is shared.
+float canopyLod(highp float grid_spacing) {
+  return log2(max(grid_spacing / 2.0, 1.0)) + 2.0;
+}
+
+// Only stands are stood up: averaged at [canopyLod], a lone tree became a
+// grassy mound three times its width with a green crown on top (the colour
+// reads the canopy at full resolution). The averaged crown tone measures the
+// cover -- about 0.5 in a closed canopy, 0.1-0.2 around a lone tree -- so
+// lone trees and small groups stay flat, drawn by their crown shading alone.
+// terrain.frag weighs the slope it shades with by the same factor.
+float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
+
+// Metres to raise the mesh by for the canopy, at ring coordinate [c] (the
+// 1 m ring's normalised coordinate) for a vertex [r] m from the eye with
+// [grid_spacing] m between rings, read at [canopyLod], so far vertices take
+// the canopy averaged into a smooth blanket rather than aliasing crowns. 0
+// within ~100 m of the eye (one stands under the trees, not in them), over the
+// block's last ~60 m, under 1.5 m of canopy, where there is no data, and above
+// 40 m (cliffs, where surface and ground models disagree).
+highp float canopyLift(highp vec2 c, highp float r, highp float grid_spacing) {
+  if (u_canopySlot < 0)
+    return 0.0;
+  highp vec2 e = min(c, 1.0 - c);
+  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
+  float near = smoothstep(80.0, 200.0, r);
+  if (edge <= 0.0 || near <= 0.0)
+    return 0.0;
+  float lod = canopyLod(grid_spacing);
+  vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
+  if (s.r > 0.995)
+    return 0.0;
+  float h = s.r * (255.0 / 5.0);
+  return h * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *
+         canopyCover(s.a) * edge * near;
+}
+
 // Compute radial grid vertex position and sample terrain height
 RadialVertex computeRadialVertex() {
   const float PI = 3.14159265359;
@@ -183,6 +233,10 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[1] = hdCoord(1, coord);
   v.hd_coord[2] = hdCoord(2, coord);
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
+  v.height += canopyLift(
+      u_canopySlot == 0 ? v.hd_coord[0]
+                        : (u_canopySlot == 1 ? v.hd_coord[1] : v.hd_coord[2]),
+      r, grid_spacing);
 
   // Earth curvature with standard atmospheric refraction folded in
   // (effective radius R / (1 - 0.13) ~ 7320 km). The grid is centred on the

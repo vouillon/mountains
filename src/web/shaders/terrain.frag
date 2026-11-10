@@ -28,8 +28,10 @@ uniform mediump sampler2DArray u_bumpGrad;
 // north, and a crown tone (see Viewer.canopy_texture). Read through ring slot
 // [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
 // block on screen.
+// Declared in radial_common.vert too (u_canopy, u_canopySlot), with the same
+// precisions.
 uniform mediump sampler2D u_canopy;
-uniform int u_canopySlot;
+uniform mediump int u_canopySlot;
 const float BUMP_ENC = 4.0;
 // Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
@@ -393,6 +395,36 @@ vec4 crownSample(float layer, float pick, highp vec2 rc) {
 // its confidence times its tree share, set by the canopy block in main.
 vec4 g_canopy = vec4(0.0);
 float g_canopyReal = 0.0;
+// The slope of the canopy the mesh stands up (radial_common.vert's
+// [canopyLift] and [canopyLod]), and how far it is stood up here.
+vec2 g_liftSlope = vec2(0.0);
+float g_liftWeight = 0.0;
+
+// Radial grid spacing, as in radial_common.vert (same uniforms).
+uniform highp float grid_k;
+uniform highp float grid_scale;
+
+// Read the canopy at the level the mesh did, and the share of it the mesh
+// was raised by -- the same factors as [canopyLift] (its [canopyCover]
+// included), with the distance to the eye for the ring radius.
+void canopyGeometry() {
+  if (u_canopySlot < 0)
+    return;
+  highp vec2 c = u_canopySlot == 0
+                     ? hdReliefCoord0
+                     : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
+  highp vec2 e = min(c, 1.0 - c);
+  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
+  float near = smoothstep(80.0, 200.0, v_dist);
+  float lod = log2(max(grid_k * (v_dist + grid_scale) / 2.0, 1.0)) + 2.0;
+  vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
+  float h = s.r * (255.0 / 5.0);
+  g_liftSlope = (s.gb * 255.0 - 128.0) / 32.0;
+  g_liftWeight = s.r > 0.995 ? 0.0
+                             : smoothstep(1.0, 3.0, h) *
+                                   (1.0 - smoothstep(40.0, 48.0, h)) *
+                                   smoothstep(0.2, 0.4, s.a) * edge * near;
+}
 
 vec3 canopyTrees() {
   if (u_canopySlot < 0)
@@ -800,6 +832,7 @@ void main() {
   // on built-up classes, whose buildings the canopy model reads as trees.
   {
     vec3 ct = canopyTrees();
+    canopyGeometry();
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
     g_canopyReal = trust * ct.x;
@@ -925,16 +958,18 @@ void main() {
                      ((cs.gb - 0.5) * (2.0 * CROWN_GMAX / CROWN_TILE)));
       }
       // Where the LIDAR canopy has trees, the crowns are the real ones: its
-      // tone (tops lit, flanks and gaps dark) and its own slope, softened to
-      // half -- a 2 m grid only approximates a crown's surface, and at full
-      // slope its facets showed. Divided by CROWN_RELIEF, which the tilt
-      // below applies to both.
+      // tone (tops lit, flanks and gaps dark) and their slope beyond what the
+      // raised mesh already shades (see [canopyGeometry]), softened to half --
+      // a 2 m grid only approximates a crown's surface, and at full slope its
+      // facets showed. Divided by CROWN_RELIEF, which the tilt below applies
+      // to both.
       if (g_canopyReal > 0.0) {
         crownH = mix(crownH, g_canopy.a, g_canopyReal);
-        crownGrad =
-            mix(crownGrad,
-                (g_canopy.gb * 255.0 - 128.0) / 32.0 * (0.5 / CROWN_RELIEF),
-                g_canopyReal);
+        crownGrad = mix(crownGrad,
+                        ((g_canopy.gb * 255.0 - 128.0) / 32.0 -
+                         g_liftSlope * g_liftWeight) *
+                            (0.5 / CROWN_RELIEF),
+                        g_canopyReal);
       }
     }
   }
@@ -1031,6 +1066,13 @@ void main() {
   // than within the slope's tangent plane. As a bump on the slope every crown
   // leaned with it and the pattern followed the slope; replacing the normal
   // outright lost the slope's own light and shade, which real forest keeps.
+  // The raised canopy's own slope (the surface is ground plus canopy, so the
+  // gradients add): forest edges and the sides of stands shade as walls, not
+  // as the ground beneath them. The crown tilt below then adds only the
+  // detail beyond this smoothed slope.
+  if (g_liftWeight > 0.0)
+    final_normal =
+        normalize(final_normal + vec3(-g_liftSlope * g_liftWeight, 0.0));
   if (crownFade > 0.0) {
     float onCrown = smoothstep(0.02, 0.2, crownH) * crownFade * finalWeights.b;
     final_normal = normalize(final_normal +
