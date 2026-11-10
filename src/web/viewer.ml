@@ -6110,23 +6110,30 @@ let update_fab_orientation angle =
 
 (* iOS 13+ does not deliver any orientation event until permission is granted
    via [DeviceOrientationEvent.requestPermission ()], which must be called from
-   a user gesture. The method is absent on other browsers (Android/desktop),
-   where orientation events flow without any prompt. *)
+   a user gesture. Chrome has the method too (since 121), but grants it
+   without a prompt or a gesture; it is absent on other browsers, where
+   orientation events flow without any prompt. *)
 let needs_orientation_permission () =
   let doe = Jv.get Jv.global "DeviceOrientationEvent" in
   (not (Jv.is_none doe))
   && Jstr.equal (Jv.typeof (Jv.get doe "requestPermission")) (Jstr.v "function")
 
-(* Requests permission; resolves to [true] when granted. Must be called
-   synchronously from within a user-gesture handler. *)
+(* Requests permission. On iOS, Safari answers at once with a decision it
+   already holds, [`Granted] or [`Denied] (the latter until it is relaunched or
+   the site's data is cleared: asking again does not prompt); otherwise it
+   prompts, but only when called synchronously from within a user-gesture
+   handler, and fails outside one ([`Undecided]). *)
 let request_orientation_permission () =
   let doe = Jv.get Jv.global "DeviceOrientationEvent" in
-  let p = Jv.call doe "requestPermission" [||] in
   Lwt.catch
     (fun () ->
+      let p = Jv.call doe "requestPermission" [||] in
       let* res = to_lwt (Fut.of_promise ~ok:Jv.to_jstr p) in
-      Lwt.return (Jstr.equal res (Jstr.v "granted")))
-    (fun _ -> Lwt.return false)
+      Lwt.return
+        (if Jstr.equal res (Jstr.v "granted") then `Granted
+         else if Jstr.equal res (Jstr.v "denied") then `Denied
+         else `Undecided))
+    (fun _ -> Lwt.return `Undecided)
 
 let compass_button = ref None
 let orientation_permission_granted = ref false
@@ -6163,9 +6170,9 @@ let show_compass_button () =
     (Brr.Ev.listen Brr.Ev.click
        (fun _ ->
          Lwt.async (fun () ->
-             let* granted = request_orientation_permission () in
+             let* answer = request_orientation_permission () in
              remove_compass_button ();
-             if granted then orientation_permission_granted := true
+             if answer = `Granted then orientation_permission_granted := true
              else begin
                input_mode := Manual;
                display_temporary_message
@@ -6191,10 +6198,25 @@ let maybe_show_compass_button () =
   else if missing && not !orientation_probe_pending then begin
     orientation_probe_pending := true;
     Lwt.async (fun () ->
-        let* () = sleep orientation_probe_delay in
+        (* Asked outside a gesture, the browser tells a decision it already
+           holds without prompting: Chrome, which has [requestPermission] too,
+           grants it; iOS answers with the user's earlier choice. A refusal
+           is final (a tap would not prompt again): no button, drag instead. *)
+        let* answer = request_orientation_permission () in
+        let* () =
+          if answer = `Undecided then sleep orientation_probe_delay
+          else Lwt.return ()
+        in
         orientation_probe_pending := false;
-        if !orientation_event_seen then orientation_permission_granted := true
-        else if !input_mode = Sensor then show_compass_button ();
+        if answer = `Granted || !orientation_event_seen then
+          orientation_permission_granted := true
+        else if !input_mode = Sensor then
+          if answer = `Denied then begin
+            input_mode := Manual;
+            display_temporary_message
+              "Motion access refused \u{2014} drag to look around"
+          end
+          else show_compass_button ();
         Lwt.return ())
   end
 
