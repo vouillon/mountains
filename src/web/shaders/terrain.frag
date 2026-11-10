@@ -62,6 +62,9 @@ uniform highp vec2 shadow_cascades[3];
 // it holds any.
 uniform highp mat4 u_treeShadowMatrix;
 uniform bool u_treeShadowOn;
+// Whether tree.vert stands trees over the canopy block (Viewer.draw_trees),
+// out to ~900 m (Viewer.tree_radius): under them, the ground is forest floor.
+uniform bool u_treesOn;
 uniform vec3 u_lightDir; // Pre-normalized on CPU
 uniform highp float center_height;
 
@@ -419,7 +422,7 @@ void canopyGeometry() {
                      : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
   highp vec2 e = min(c, 1.0 - c);
   float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  float near = smoothstep(300.0, 450.0, v_dist);
+  float near = smoothstep(840.0, 960.0, v_dist);
   float lod = log2(max(grid_k * (v_dist + grid_scale) / 2.0, 1.0)) + 2.0;
   vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
   float h = s.r * (255.0 / 5.0);
@@ -839,6 +842,12 @@ void main() {
     canopyGeometry();
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
+    // Where tree.vert stands the trees, this is the ground under them: no
+    // canopy, crowns or forest bump of its own, but forest floor -- the open
+    // ground's detail, and needle litter and moss for colour.
+    float stood = u_treesOn ? 1.0 - smoothstep(800.0, 950.0, v_dist) : 0.0;
+    float floorShare = ct.x * stood;
+    ct.x *= 1.0 - stood;
     g_canopyReal = trust * ct.x;
     if (trust > 0.0) {
       vec4 w = surface.detailWeights;
@@ -866,6 +875,8 @@ void main() {
       vec3 target = mix(groundAlbedo, forestAlbedo, ct.x);
       surface.albedo =
           mix(surface.albedo, target, trust * abs(ct.x - isForest));
+      surface.albedo =
+          mix(surface.albedo, vec3(0.038, 0.055, 0.018), trust * floorShare);
     }
   }
 

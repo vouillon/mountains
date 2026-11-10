@@ -175,7 +175,8 @@ float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 // 1 m ring's normalised coordinate) for a vertex [r] m from the eye with
 // [grid_spacing] m between rings, read at [canopyLod], so far vertices take
 // the canopy averaged into a smooth blanket rather than aliasing crowns. 0
-// within ~300 m of the eye, where tree.vert stands trees instead, over the
+// within ~900 m of the eye, where tree.vert stands trees instead (thinning
+// out over the last 120 m of Viewer.tree_radius), over the
 // block's last ~60 m, under 1.5 m of canopy, where there is no data, and above
 // 40 m (cliffs, where surface and ground models disagree).
 highp float canopyLift(highp vec2 c, highp float r, highp float grid_spacing) {
@@ -183,7 +184,7 @@ highp float canopyLift(highp vec2 c, highp float r, highp float grid_spacing) {
     return 0.0;
   highp vec2 e = min(c, 1.0 - c);
   float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  float near = smoothstep(300.0, 450.0, r);
+  float near = smoothstep(840.0, 960.0, r);
   if (edge <= 0.0 || near <= 0.0)
     return 0.0;
   float lod = canopyLod(grid_spacing);

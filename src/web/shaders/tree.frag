@@ -14,12 +14,14 @@ uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 uniform highp float u_eyeHeight;
 uniform bool u_broadleaf;
+uniform bool u_far; // beyond Viewer.tree_far: cheaper shadows
 uniform highp sampler2DArrayShadow shadow_map;
 uniform highp mat4 u_shadowMatrix; // the first cascade's
 // That cascade's world metres per shadow texel and the depth its [0,1] spans
 // (terrain.frag's [shadow_cascades]).
 uniform highp vec2 u_shadowCascade;
 uniform highp mat4 u_treeShadowMatrix; // layer 3's, 4 km deep
+uniform mediump sampler3D u_noise;     // Viewer.make_tree_noise
 
 in vec3 v_normal;
 in highp float v_dist;
@@ -36,7 +38,8 @@ flat in vec2 v_size;
 out mediump vec4 color;
 
 // 5-tap PCF of shadow layer [layer] at [p] seen through [m], [bias] metres
-// over a depth span of [span]; lit outside the layer.
+// over a depth span of [span]; lit outside the layer. One tap far out, where
+// a tree is a few pixels.
 float shadowAt(int layer, highp mat4 m, highp vec3 p, highp float bias,
                highp float span) {
   highp vec4 s = m * vec4(p, 1.0);
@@ -48,6 +51,8 @@ float shadowAt(int layer, highp mat4 m, highp vec3 p, highp float bias,
   highp float t = 0.000488;
   float l = float(layer);
   float v = texture(shadow_map, vec4(c.xy, l, compare));
+  if (u_far)
+    return v;
   v += texture(shadow_map, vec4(c.xy + vec2(t, 0.0), l, compare));
   v += texture(shadow_map, vec4(c.xy - vec2(t, 0.0), l, compare));
   v += texture(shadow_map, vec4(c.xy + vec2(0.0, t), l, compare));
@@ -89,40 +94,15 @@ float rnd3(highp ivec3 c) {
   return float(hash3(c + ivec3(int(v_seed))) & 0xffffu) / 65535.0;
 }
 
-float valueNoise3(highp vec3 p) {
-  highp vec3 i = floor(p);
-  vec3 f = vec3(p - i);
-  highp ivec3 c = ivec3(i);
-  vec3 u = f * f * (3.0 - 2.0 * f);
-  return mix(
-      mix(mix(rnd3(c), rnd3(c + ivec3(1, 0, 0)), u.x),
-          mix(rnd3(c + ivec3(0, 1, 0)), rnd3(c + ivec3(1, 1, 0)), u.x), u.y),
-      mix(mix(rnd3(c + ivec3(0, 0, 1)), rnd3(c + ivec3(1, 0, 1)), u.x),
-          mix(rnd3(c + ivec3(0, 1, 1)), rnd3(c + ivec3(1, 1, 1)), u.x), u.y),
-      u.z);
-}
-
-// Leaf clumps: the nearest of one jittered point per unit cell among the 8
-// cells around [p] (jitter kept to the cell's middle, so 8 are enough);
-// distance in x, the direction from that point to [p] in yzw.
-vec4 clumps(highp vec3 p) {
-  highp vec3 b = floor(p - 0.5);
-  float best = 10.0;
-  vec3 dir = vec3(0.0, 0.0, 1.0);
-  for (int k = 0; k < 8; k++) {
-    highp vec3 c = b + vec3(float(k & 1), float((k >> 1) & 1), float(k >> 2));
-    highp ivec3 ic = ivec3(c);
-    highp vec3 q = c + 0.25 +
-                   0.5 * vec3(rnd3(ic), rnd3(ic + ivec3(17, 0, 0)),
-                              rnd3(ic + ivec3(0, 29, 0)));
-    vec3 d = vec3(p - q);
-    float l = dot(d, d);
-    if (l < best) {
-      best = l;
-      dir = d;
-    }
-  }
-  return vec4(sqrt(best), normalize(dir));
+// Four independent noises in [0, 1] at [p] (metres) over cells of [cell]
+// metres: the tiling 32^3 white noise of Viewer.make_tree_noise, filtered by
+// the hardware into value noise, each tree reading it at its own offset; its
+// mipmaps fade it to 0.5 as the cells shrink below the pixel footprint [fp].
+// One fetch where hashing a value noise took eight.
+vec4 noiseAt(highp vec3 p, float cell, highp float fp) {
+  highp vec3 c = p / (cell * 32.0) +
+                 fract(vec3(v_seed * 0.0173, v_seed * 0.0291, v_seed * 0.0437));
+  return textureLod(u_noise, c, log2(max(fp / cell, 0.001)));
 }
 
 // The foliage's tone (scaling the albedo) at this point, tilting [n] to
@@ -132,19 +112,13 @@ float foliage(inout vec3 n, highp float fp) {
   float fine = 1.0 - smoothstep(0.06, 0.15, fp);
   float tone = 1.0;
   if (fine > 0.0) {
-    // Two octaves of tone, and a tilt of the normal over ~0.5 m: each clump
-    // of needles or leaves catches the light its own way.
+    // Two octaves of tone, and a tilt of the normal: each clump of needles
+    // or leaves catches the light its own way.
+    vec4 a = noiseAt(v_local, 0.25, fp);
     float finer = 1.0 - smoothstep(0.025, 0.06, fp);
-    tone =
-        mix(1.0,
-            (0.6 + 0.8 * valueNoise3(v_local * 4.0)) *
-                mix(1.0, 0.75 + 0.5 * valueNoise3(v_local * 9.0 + 5.0), finer),
-            fine);
-    highp vec3 q = v_local * 2.0;
-    vec3 tilt = vec3(valueNoise3(q + 41.0), valueNoise3(q + 53.0),
-                     valueNoise3(q + 67.0)) -
-                0.5;
-    n = normalize(n + tilt * (1.2 * fine));
+    float b = finer > 0.0 ? noiseAt(v_local + 3.7, 0.11, fp).r : 0.5;
+    tone = mix(1.0, (0.55 + 0.9 * a.r) * (0.7 + 0.6 * b), fine);
+    n = normalize(n + (a.gba - 0.5) * (2.0 * fine));
   }
   if (!u_broadleaf) {
     // Branch whorls: drooping layers, lit on top, dark in the gap beneath
@@ -161,24 +135,23 @@ float foliage(inout vec3 n, highp float fp) {
       // Whorls neither level nor evenly spaced: a noise over ~0.7 m
       // shifts them by up to half a period.
       float f = fract(float(v_local.z / period) + phase + 0.5 * rho / period +
-                      0.5 * valueNoise3(v_local * 1.4 + 31.0));
+                      0.6 * noiseAt(v_local + 31.0, 0.7, fp).r);
       float layer = smoothstep(0.0, 0.35, f);
       tone *= mix(1.0, mix(0.55, 1.08, layer), fade);
       // Top faces of the branches face up, their undersides down.
       n = normalize(n + vec3(0.0, 0.0, (layer - 0.45) * 0.9 * fade));
     }
   } else {
-    // Leaf clumps of ~1.6 m: soft domes, darker between, their sizes and
-    // depths varied by a noise over ~3 m.
+    // Leaf clumps of ~1.6 m: soft blobs of a noise, darker between, their
+    // depth varied, each bulging its own way.
     float size = 1.6;
     float fade = 1.0 - smoothstep(0.15, 0.35, fp / size);
     if (fade > 0.0) {
-      highp vec3 q = v_local / size;
-      vec4 c = clumps(q + 0.35 * (valueNoise3(q * 0.5 + 7.0) - 0.5));
-      float depth = 0.5 + 0.5 * valueNoise3(q * 0.5 + 19.0);
-      float dome = 1.0 - smoothstep(0.1, 0.85, c.x);
+      vec4 c = noiseAt(v_local + 7.0, 0.5 * size, fp);
+      float dome = smoothstep(0.3, 0.7, c.r);
+      float depth = 0.4 + 0.6 * c.g;
       tone *= mix(1.0, mix(1.0 - 0.4 * depth, 1.06, dome), fade);
-      n = normalize(n + c.yzw * (0.45 * depth * fade));
+      n = normalize(n + (c.gba - 0.5) * (0.9 * depth * fade));
     }
   }
   return tone;
@@ -200,7 +173,10 @@ void main() {
   float within = mix(0.35, 1.0, v_up);
   float lit_side = max(dot(n, u_lightDir), 0.0);
   float relief = reliefShadow(n);
-  float sun = lit_side > 0.0 && relief > 0.0 ? relief * treeShadow(n) : 0.0;
+  // Far trees are not in layer 3 (they cast into the first cascade).
+  float sun = lit_side > 0.0 && relief > 0.0
+                  ? relief * (u_far ? 1.0 : treeShadow(n))
+                  : 0.0;
   vec3 sunColor = vec3(1.0, 0.95, 0.9);
   vec3 direct = sunColor * lit_side * sun * mix(0.6, 1.0, v_up);
   // Against the sun, the edges of a crown glow: light through the foliage,
