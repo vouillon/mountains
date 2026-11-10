@@ -96,8 +96,11 @@ vec3 noised(vec2 p, ivec2 m1, ivec2 m2, uint seed) {
 }
 
 // fBm from frequency [f0] (cycles per tile) over [octaves] octaves, the
-// frequency doubling and the amplitude halving, so each octave carries the
-// same gradient. Octave o turns by its own angle; [stretch] > 1 divides the
+// frequency doubling and the amplitude falling by 0.75, so each finer octave
+// carries 1.5x the gradient of the one before. The photo textures this
+// replaced rose 1.6-2.2x per octave; at an equal gradient per octave a
+// scale's coarsest octaves drew large shaded blobs wherever the footprint
+// left only them. Octave o turns by its own angle; [stretch] > 1 divides the
 // frequency along v (world z on the side layers) by it, elongating the
 // features down the fall line. [sharp] > 0 makes it ridged: (1 - |n|)^sharp,
 // sharp crests whose width narrows as [sharp] grows. Returns the gradient per
@@ -139,7 +142,7 @@ vec2 fbm(vec2 p, float f0, int octaves, uint seed, float sharp, float stretch) {
     }
     g += amp * d;
     f *= 2.0;
-    amp *= 0.5;
+    amp *= 0.75;
   }
   return g;
 }

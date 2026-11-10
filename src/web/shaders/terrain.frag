@@ -397,15 +397,10 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // anisotropic (4x) filter selects a mip for.
   highp float fpL = max(0.25 * max(length(dPdx), length(dPdy)),
                         min(length(dPdx), length(dPdy)));
-  // The fine scale also bows out on the steepest faces: they are the most
-  // expensive fragments (two planes at every scale once past
-  // [triplanarSideGate]), and the 10 m noise contributes least to how a wall
-  // reads -- its character is macro and mid structure. Starts where the side
-  // gate ends, so from where the gate opens (50 degrees) until it is gone (73)
-  // the fine bump is triplanar like the others: it reads better there than
-  // an XY-only one.
-  float fade_fine =
-      (1.0 - smoothstep(0.55, 0.7, 1.0 - geomNormal.z)) * lodFade(1.25, fpL);
+  // The fine scale used to bow out on the steepest faces to save fetches
+  // (three per plane then, one now); that left a close wall with nothing
+  // under the mid scale's 0.55 m, which read blurry at 50 m.
+  float fade_fine = lodFade(1.25, fpL);
   float fade_mid = lodFade(9.0, fpL);
 
   // The land-cover classes blend their detail weights (a meadow is 0.1
