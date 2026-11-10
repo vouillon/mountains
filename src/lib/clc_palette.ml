@@ -487,11 +487,21 @@ let code_to_index =
 let get_index code =
   match Hashtbl.find_opt code_to_index code with Some i -> i | None -> 0
 
-(* Generate 128x1 RGBA palette texture (2 pixels per material)
+(* Generate the palette texture (3 pixels per material)
    Pixel A (even): Albedo RGB + Roughness A
    Pixel B (odd): Detail Weights RGB + Water Factor A *)
+(* Share of conifers in a class's tree cover, for the shape of its crowns
+   (cones or domes) and their tone. CORINE separates broadleaved (311),
+   coniferous (312) and mixed (313) forest; elsewhere trees are scattered or
+   transitional, and taken as mixed. *)
+let conifer_share code =
+  match code with 311 -> 0.0 | 312 -> 1.0 | 313 -> 0.5 | _ -> 0.5
+
+(* Palette texture width: three texels per material. *)
+let palette_width = 256
+
 let generate_palette () =
-  let data = Array1.create int8_unsigned c_layout (128 * 4) in
+  let data = Array1.create int8_unsigned c_layout (palette_width * 4) in
   Array1.fill data 0;
   let n_materials = Array.length materials in
   (* sRGB to linear using gamma 2.2, consistent with terrain fragment shader
@@ -502,8 +512,8 @@ let generate_palette () =
   in
   for idx = 0 to n_materials - 1 do
     let m = materials.(idx) in
-    let base = idx * 2 * 4 in
-    (* 2 pixels per material, 4 bytes each *)
+    let base = idx * 3 * 4 in
+    (* 3 pixels per material, 4 bytes each *)
     let r, g, b = m.albedo in
     (* Pixel A: Albedo (gamma decoded to linear) + Roughness *)
     Array1.set data (base + 0) (srgb_to_linear r);
@@ -514,7 +524,10 @@ let generate_palette () =
     Array1.set data (base + 4) (int_of_float (m.detail_rock *. 255.));
     Array1.set data (base + 5) (int_of_float (m.detail_grass *. 255.));
     Array1.set data (base + 6) (int_of_float (m.detail_forest *. 255.));
-    Array1.set data (base + 7) (int_of_float (m.water_factor *. 255.))
+    Array1.set data (base + 7) (int_of_float (m.water_factor *. 255.));
+    (* Pixel C: Conifer share *)
+    Array1.set data (base + 8)
+      (int_of_float ((conifer_share m.code *. 255.) +. 0.5))
   done;
   data
 

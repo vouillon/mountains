@@ -627,12 +627,13 @@ let make_hd_placeholder ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
-(* Create CLC palette texture (128x1 RGBA, 2 pixels per material) *)
+(* Create CLC palette texture (256x1 RGBA, 3 pixels per material) *)
 let make_palette_texture ctx =
   let data = Clc_palette.generate_palette () in
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 128 1 0 Gl.rgba Gl.unsigned_byte
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rgba8 Clc_palette.palette_width 1 0
+    Gl.rgba Gl.unsigned_byte
     (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
     0;
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
@@ -965,8 +966,8 @@ let set_drawing_buffer_color_space canvas =
 
 (* The terrain bump's gradient patterns (shaders/bump_gen.frag): 3 scales x
    (horizontal, vertical projection) layers of 512^2 RGBA8, each texel the
-   gradients of two tileable patterns, and a seventh layer of forest crowns
-   (height and gradient). Baked on the GPU at startup -- a few
+   gradients of two tileable patterns, and two layers of forest crowns,
+   broadleaf and conifer (height and gradient). Baked on the GPU at startup -- a few
    milliseconds, nothing to download -- with the mip chain box-filtered from
    it, and bound to texture unit 14 for the whole session (nothing else uses
    that unit); a context restore bakes them again through [make_gpu_state].
@@ -976,7 +977,7 @@ let set_drawing_buffer_color_space canvas =
    [bump_enc] is the encoding range in RMS units, matching [BUMP_ENC] in
    terrain.frag. *)
 let bump_size = 512
-let bump_layers = 7
+let bump_layers = 8
 let bump_enc = 4.0
 
 let bump_norm =
@@ -987,7 +988,8 @@ let bump_norm =
     (0.02363, 0.02101);
     (0.01876, 0.02106);
     (0.02374, 0.02106);
-    (* Layer 6, the forest crowns, encodes its own range. *)
+    (* Layers 6 and 7, the forest crowns, encode their own range. *)
+    (1.0, 1.0);
     (1.0, 1.0);
   |]
 

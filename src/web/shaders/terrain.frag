@@ -30,7 +30,7 @@ const float BUMP_ENC = 4.0;
 // (CROWN_GMAX there), and the crowns' height against their width, which
 // sets how steep their sides are.
 const float CROWN_TILE = 131.0;
-const float CROWN_GMAX = 64.0;
+const float CROWN_GMAX = 128.0;
 const float CROWN_RELIEF = 3.0;
 // The mid and fine tiles (70.7 m, 10.24 m) are deliberately incommensurate
 // with the macro one (500 m): at 1/7 and 1/50 of it every layer realigned
@@ -42,7 +42,7 @@ uniform highp sampler2DArrayShadow shadow_map; // Hardware shadow comparison
 
 // CLC Material System Uniforms
 uniform mediump usampler2DArray u_coverMap; // CLC ID clipmap (layers)
-uniform mediump sampler2D u_paletteTex;     // 128x1 RGBA palette
+uniform mediump sampler2D u_paletteTex;     // 256x1 RGBA palette
 uniform int u_numLevels;                    // Number of clipmap levels
 uniform highp mat4 shadow_matrices[3];      // Must be highp for projection
 uniform mediump float shadow_splits[3];
@@ -69,15 +69,17 @@ struct Surface {
   float roughness;
   vec4 detailWeights; // RGBA = Rock, Grass, Forest, Ice
   float waterFactor;
+  float conifer; // share of conifers in the tree cover
 };
 
 // Lookup surface properties from palette by material ID
 Surface getSurfaceFromID(uint id) {
   Surface s;
   // Use texelFetch for direct integer addressing (no filtering overhead)
-  ivec2 coord = ivec2(int(id) * 2, 0);
+  ivec2 coord = ivec2(int(id) * 3, 0);
   vec4 pixelA = texelFetch(u_paletteTex, coord, 0);
   vec4 pixelB = texelFetch(u_paletteTex, coord + ivec2(1, 0), 0);
+  s.conifer = texelFetch(u_paletteTex, coord + ivec2(2, 0), 0).r;
 
   // Palette is pre-baked with linear values (gamma decoded on CPU)
   s.albedo = pixelA.rgb;
@@ -169,6 +171,9 @@ Surface sampleCLCBilinear(highp vec2 uv) {
   float wf0 = mix(s00.waterFactor, s10.waterFactor, frac.x);
   float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
   result.waterFactor = mix(wf0, wf1, frac.y);
+
+  result.conifer = mix(mix(s00.conifer, s10.conifer, frac.x),
+                       mix(s01.conifer, s11.conifer, frac.x), frac.y);
 
   return result;
 }
@@ -335,6 +340,33 @@ float valueNoise(highp vec2 p) {
   float e = float(cellHash(c + ivec2(1, 1)) & 0xffffu) / 65535.0;
   vec2 u = vec2(f * f * (3.0 - 2.0 * f));
   return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+
+// One species' crown layer of u_bumpGrad ([layer], 6 broadleaf, 7 conifer):
+// two copies of the tile, turned and offset differently, blended by [pick]
+// (0 or 1 away from narrow transitions). The gradient comes back in the frame
+// of the first copy, turned by [rc]; the caller turns it back to the world.
+vec4 crownSample(float layer, float pick, highp vec2 rc) {
+  vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
+  if (pick < 1.0)
+    cs = texture(
+        u_bumpGrad,
+        vec3(mat2(rc.x, rc.y, -rc.y, rc.x) * v_world_pos.xy / CROWN_TILE,
+             layer),
+        0.);
+  if (pick > 0.0) {
+    const vec2 rc2 = vec2(-0.276, 0.961); // turned 106 degrees
+    vec4 cs2 = texture(
+        u_bumpGrad,
+        vec3(mat2(rc2.x, rc2.y, -rc2.y, rc2.x) * v_world_pos.xy / CROWN_TILE +
+                 vec2(0.37, 0.61),
+             layer),
+        0.);
+    highp vec2 g2 = mat2(rc2.x, -rc2.y, rc2.y, rc2.x) * (cs2.gb - 0.5);
+    cs2.gb = mat2(rc.x, rc.y, -rc.y, rc.x) * g2 + 0.5;
+    cs = mix(cs, cs2, pick);
+  }
+  return cs;
 }
 
 // 1 while a band whose longest wavelength is [lmax] still has content at a
@@ -752,6 +784,8 @@ void main() {
   // canopy photo's, which at the 500 m macro tile drew 70 m "crowns" -- and
   // their gradient shades each crown, lit on its sun side.
   float crownFade = 0.0;
+  float coniferAmt = 0.0;
+  float coniferTone = 0.0;
   float crownH = 0.0;
   highp vec2 crownGrad = vec2(0.0);
   {
@@ -759,39 +793,41 @@ void main() {
     highp vec3 ddy = dFdy(v_world_pos);
     highp float fpC = max(0.25 * max(length(ddx), length(ddy)),
                           min(length(ddx), length(ddy)));
-    if (finalWeights.b > 0.01)
-      crownFade = lodFade(4.0, fpC);
+    // Conifer stands within the class's share, by a non-repeating value
+    // noise over ~60 m: mixed forest comes out as stands of each, not as
+    // every tree half of each. [coniferAmt] is 1 where conifers grow.
+    if (finalWeights.b > 0.01) {
+      coniferAmt =
+          surface.conifer <= 0.02
+              ? 0.0
+              : (surface.conifer >= 0.98
+                     ? 1.0
+                     : smoothstep(-0.06, 0.06,
+                                  surface.conifer -
+                                      valueNoise(v_world_pos.xy / 60.0 +
+                                                 vec2(53.0, 7.0))));
+      // Conifer crowns are smaller: they show from a closer range.
+      crownFade = lodFade(mix(4.0, 2.2, coniferAmt), fpC);
+      // Stands show as tone patches until they are a few pixels across;
+      // beyond, the class's average share (no shimmer from a 60 m noise).
+      coniferTone = mix(surface.conifer, coniferAmt, lodFade(60.0, fpC));
+    }
     if (crownFade > 0.0) {
       // No LOD bias (the bump's +1 blurred crowns of a few pixels into soft
-      // blobs). Two copies of the tile, turned and offset differently, one per
-      // zone of a non-repeating value noise (~250 m): random clusters of big
-      // trees and gaps within the one 131 m tile repeated recognisably over
-      // a wide forest. Crowns cannot be averaged, so each zone takes one
-      // copy, and both are read only across the narrow transitions.
+      // blobs). Two copies of each species' tile, turned and offset
+      // differently, one per zone of a non-repeating value noise (~250 m):
+      // random clusters of big trees and gaps within one 131 m tile repeated
+      // recognisably over a wide forest. Crowns cannot be averaged, so each
+      // zone and each stand takes one sample, and two or more are read only
+      // across the narrow transitions.
       float pick = smoothstep(
           0.42, 0.58, valueNoise(v_world_pos.xy / 250.0 + vec2(17.0, 31.0)));
       highp vec2 rc = vec2(0.921, 0.389); // turned 23 degrees
       vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
-      if (pick < 1.0)
-        cs = texture(
-            u_bumpGrad,
-            vec3(mat2(rc.x, rc.y, -rc.y, rc.x) * v_world_pos.xy / CROWN_TILE,
-                 6.0),
-            0.);
-      if (pick > 0.0) {
-        const vec2 rc2 = vec2(-0.276, 0.961); // turned 106 degrees
-        vec4 cs2 = texture(u_bumpGrad,
-                           vec3(mat2(rc2.x, rc2.y, -rc2.y, rc2.x) *
-                                        v_world_pos.xy / CROWN_TILE +
-                                    vec2(0.37, 0.61),
-                                6.0),
-                           0.);
-        // Bring the second copy's gradient into the first copy's frame, so
-        // the single turn-back below serves both.
-        highp vec2 g2 = mat2(rc2.x, -rc2.y, rc2.y, rc2.x) * (cs2.gb - 0.5);
-        cs2.gb = mat2(rc.x, rc.y, -rc.y, rc.x) * g2 + 0.5;
-        cs = mix(cs, cs2, pick);
-      }
+      if (coniferAmt < 1.0)
+        cs = crownSample(6.0, pick, rc);
+      if (coniferAmt > 0.0)
+        cs = mix(cs, crownSample(7.0, pick, rc), coniferAmt);
       // Density varies over ~150 m by a non-repeating value noise: crowns
       // lowered by [thin] and rescaled, so the small and low ones drop out
       // first, leaving clearings in some stands and a closed canopy in others.
@@ -864,8 +900,13 @@ void main() {
     float forestNoise = mix(texNoise.b, crownTone, crownFade);
 
     // Volume: Deep Shadow (Low) vs Sunlit Canopy (High)
-    vec3 deepShadow = baseAlbedo * vec3(0.2, 0.25, 0.3); // Very dark/cool
-    vec3 sunlitTop = baseAlbedo * vec3(1.2, 1.25, 1.0);
+    // Conifers are darker and cooler than broadleaf trees: needles absorb
+    // more, and their canopy holds more shadow.
+    vec3 species =
+        mix(vec3(1.1, 1.12, 0.92), vec3(0.78, 0.85, 0.95), coniferTone);
+    vec3 deepShadow =
+        baseAlbedo * species * vec3(0.2, 0.25, 0.3); // Very dark/cool
+    vec3 sunlitTop = baseAlbedo * species * vec3(1.2, 1.25, 1.0);
 
     vec3 forestCol = mix(deepShadow, sunlitTop, forestNoise);
     accumulatedColor += forestCol * finalWeights.b;

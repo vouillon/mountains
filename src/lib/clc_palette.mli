@@ -20,8 +20,16 @@ val n_materials : int
 val get_index : int -> int
 (** Get palette index from CLC code. Returns 0 for unknown codes. *)
 
+val conifer_share : int -> float
+(** Share of conifers in a CLC class's tree cover, 0-1. *)
+
+val palette_width : int
+(** Width of the palette texture, in texels. *)
+
 val generate_palette :
   unit -> (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-(** Generate 128x1 RGBA palette texture data. Uses 2 pixels per material:
+(** Generate [palette_width]x1 RGBA palette texture data. Uses 3 pixels per
+    material:
     - Pixel A: Albedo RGB + Roughness Alpha
-    - Pixel B: Detail Weights RGB + Water Factor Alpha *)
+    - Pixel B: Detail Weights RGB + Water Factor Alpha
+    - Pixel C: Conifer share in Red *)
