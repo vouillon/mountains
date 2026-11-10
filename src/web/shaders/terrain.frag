@@ -27,11 +27,15 @@ uniform mediump sampler2DArray u_bumpGrad;
 // (0.2 m per step, 255 where the service had no data), its slope east and
 // north, and a crown tone (see Viewer.canopy_texture). Read through ring slot
 // [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
-// block on screen.
-// Declared in radial_common.vert too (u_canopy, u_canopySlot), with the same
-// precisions.
+// block on screen. The far canopy (Hd_dem.canopy_far, 5 m over the 5 m
+// ring's block) likewise through [u_canopyFarSlot]; both share [u_canopy]
+// (Viewer.canopy_atlas), the near one in its left half. [u_treesStand]: whether
+// tree.vert stands trees over the near canopy.
+// Declared in radial_common.vert too, with the same precisions.
 uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
+uniform mediump int u_canopyFarSlot;
+uniform bool u_treesStand;
 const float BUMP_ENC = 4.0;
 // Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
@@ -62,9 +66,6 @@ uniform highp vec2 shadow_cascades[3];
 // it holds any.
 uniform highp mat4 u_treeShadowMatrix;
 uniform bool u_treeShadowOn;
-// Whether tree.vert stands trees over the canopy block (Viewer.draw_trees),
-// out to ~900 m (Viewer.tree_radius): under them, the ground is forest floor.
-uniform bool u_treesOn;
 uniform vec3 u_lightDir; // Pre-normalized on CPU
 uniform highp float center_height;
 
@@ -411,42 +412,83 @@ float g_liftWeight = 0.0;
 uniform highp float grid_k;
 uniform highp float grid_scale;
 
-// Read the canopy at the level the mesh did, and the share of it the mesh
-// was raised by -- the same factors as [canopyLift] (its [canopyCover]
-// included), with the distance to the eye for the ring radius.
-void canopyGeometry() {
-  if (u_canopySlot < 0)
-    return;
-  highp vec2 c = u_canopySlot == 0
-                     ? hdReliefCoord0
-                     : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
+// As in radial_common.vert.
+highp vec2 canopyNearUV(highp vec2 c) {
+  return vec2(0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+}
+highp vec2 canopyFarUV(highp vec2 c) {
+  return vec2(0.5 + 0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+}
+float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
-  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  float near = smoothstep(840.0, 960.0, v_dist);
-  float lod = log2(max(grid_k * (v_dist + grid_scale) / 2.0, 1.0)) + 2.0;
-  vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
-  float h = s.r * (255.0 / 5.0);
-  g_liftSlope = (s.gb * 255.0 - 128.0) / 32.0;
-  g_liftWeight = s.r > 0.995 ? 0.0
-                             : smoothstep(1.0, 3.0, h) *
-                                   (1.0 - smoothstep(40.0, 48.0, h)) *
-                                   smoothstep(0.2, 0.4, s.a) * edge * near;
+  return smoothstep(0.0, 0.03, min(e.x, e.y));
+}
+float treesStood(highp float r, float nearEdge) {
+  return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
+}
+highp vec2 slotCoord(int slot) {
+  return slot == 0 ? hdReliefCoord0
+                   : (slot == 1 ? hdReliefCoord1 : hdReliefCoord2);
 }
 
+// Read the canopies at the level the mesh did, and the share of each the
+// mesh was raised by -- the same factors as [canopyLift] (its [canopyCover]
+// included), with the distance to the eye for the ring radius.
+void canopyGeometry() {
+  float nearEdge =
+      u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
+  float farEdge =
+      u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
+  float rest = 1.0 - treesStood(v_dist, nearEdge);
+  highp float spacing = grid_k * (v_dist + grid_scale);
+  vec2 slope = vec2(0.0);
+  float weight = 0.0;
+  for (int k = 0; k < 2; k++) {
+    float w = k == 0 ? nearEdge : (1.0 - nearEdge) * farEdge;
+    if (w <= 0.0 || rest <= 0.0)
+      continue;
+    float step = k == 0 ? 2.0 : 5.0;
+    highp vec2 uv = k == 0 ? canopyNearUV(slotCoord(u_canopySlot))
+                           : canopyFarUV(slotCoord(u_canopyFarSlot));
+    vec4 s = textureLod(u_canopy, uv, log2(max(spacing / step, 1.0)) + 2.0);
+    float h = s.r * (255.0 / 5.0);
+    float c = s.r > 0.995 ? 0.0
+                          : w * smoothstep(1.0, 3.0, h) *
+                                (1.0 - smoothstep(40.0, 48.0, h)) *
+                                smoothstep(0.2, 0.4, s.a);
+    slope += c * (s.gb * 255.0 - 128.0) / 32.0;
+    weight += c;
+  }
+  g_liftSlope = weight > 0.0 ? slope / weight : vec2(0.0);
+  g_liftWeight = weight * rest;
+}
+
+// The share of this fragment's canopy reading taken from the near canopy:
+// only it resolves crowns.
+float g_canopyNear = 0.0;
+
 vec3 canopyTrees() {
-  if (u_canopySlot < 0)
+  float nearEdge =
+      u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
+  float farEdge =
+      u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
+  // Fetched whatever the edges: uniform control flow for the near read,
+  // whose implicit level the crown shading relies on.
+  g_canopy = texture(u_canopy, canopyNearUV(slotCoord(max(u_canopySlot, 0))));
+  if (nearEdge + farEdge <= 0.0)
     return vec3(0.0);
-  highp vec2 c = u_canopySlot == 0
-                     ? hdReliefCoord0
-                     : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
-  g_canopy = texture(u_canopy, clamp(c, 0.0, 1.0));
-  float v = g_canopy.r;
-  highp vec2 e = min(c, 1.0 - c);
-  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  if (v > 0.995)
+  vec4 f =
+      farEdge > 0.0 && nearEdge < 1.0
+          ? textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)), 0.0)
+          : vec4(1.0);
+  float wn = g_canopy.r > 0.995 ? 0.0 : nearEdge;
+  float wf = f.r > 0.995 ? 0.0 : (1.0 - wn) * farEdge;
+  float wsum = wn + wf;
+  if (wsum <= 0.0)
     return vec3(0.0);
-  float h = v * (255.0 / 5.0);
-  return vec3(smoothstep(1.5, 4.0, h), edge * (1.0 - smoothstep(40.0, 48.0, h)),
+  float h = (wn * g_canopy.r + wf * f.r) * (255.0 / 5.0) / wsum;
+  g_canopyNear = wn / wsum;
+  return vec3(smoothstep(1.5, 4.0, h), wsum * (1.0 - smoothstep(40.0, 48.0, h)),
               h);
 }
 
@@ -845,10 +887,11 @@ void main() {
     // Where tree.vert stands the trees, this is the ground under them: no
     // canopy, crowns or forest bump of its own, but forest floor -- the open
     // ground's detail, and needle litter and moss for colour.
-    float stood = u_treesOn ? 1.0 - smoothstep(800.0, 950.0, v_dist) : 0.0;
+    float stood = treesStood(
+        v_dist, u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0);
     float floorShare = ct.x * stood;
     ct.x *= 1.0 - stood;
-    g_canopyReal = trust * ct.x;
+    g_canopyReal = trust * ct.x * g_canopyNear;
     if (trust > 0.0) {
       vec4 w = surface.detailWeights;
       float isForest = smoothstep(0.35, 0.6, w.b);

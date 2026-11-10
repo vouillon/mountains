@@ -108,7 +108,8 @@ void main() {
   ivec2 cell =
       ivec2(gl_VertexID % u_grid, gl_VertexID / u_grid) - ivec2(u_grid / 2);
   ivec2 t0 = ivec2(floor(u_eyeTexel * 0.5)) * 2 + cell * 2;
-  int csize = textureSize(u_canopy, 0).x;
+  // The near canopy is the left half of the atlas (Viewer.canopy_atlas).
+  int csize = textureSize(u_canopy, 0).y;
   if (any(lessThan(t0, ivec2(2))) || any(greaterThan(t0, ivec2(csize - 4))))
     return;
   // Beyond the radius, or within 40 m of the eye: a tree beside a viewer
@@ -149,6 +150,11 @@ void main() {
   float j1 = float((hs >> 8u) & 0xffu) / 255.0;
   float j2 = float((hs >> 16u) & 0xffu) / 255.0;
   float j3 = float((hs >> 24u) & 0xffu) / 255.0;
+  // Thinning out over the block's last 3% (~60 m), where the far canopy's
+  // raised mesh takes over (radial_common.vert's [canopyEdge]).
+  vec2 e = min(vec2(tt) + 0.5, float(csize) - 0.5 - vec2(tt)) / float(csize);
+  if (smoothstep(0.0, 0.03, min(e.x, e.y)) < float((hs >> 4u) & 0xffu) / 255.0)
+    return;
 
   // Canopy texel -> 1 m ring index (texel j's centre is index 2 j + 0.5),
   // with up to half a metre of jitter, -> arcseconds -> metres from the eye.

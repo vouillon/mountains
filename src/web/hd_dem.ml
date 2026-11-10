@@ -221,6 +221,14 @@ let canopy =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:2.0 ~split:2 ~size:1024 ~fade_metres:0.
 
+(* The same canopy at 5 m over the 5 m ring's block (5120 m, reaching at least
+   1920 m every way), read through that ring's coordinate: where forest stands
+   beyond [canopy]'s block, in place of land cover drawn to 25 ha. Too coarse
+   for crowns. *)
+let canopy_far =
+  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
+    ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:0.
+
 (* The spacing actually requested for a projected ring. Over La Reunion the
    service resamples from overviews at powers of two (1, 2, 4 m...), and at a
    ratio of 1.25 to one of them -- 5 m from 4, 2.5 from 2 -- its output beats

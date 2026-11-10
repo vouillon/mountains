@@ -153,14 +153,43 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
 // same uniforms, and they must match across stages.
 uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
+// The far canopy (Hd_dem.canopy_far, 5 m over the 5 m ring's block), read
+// through slot [u_canopyFarSlot], -1 when there is none. Both are in
+// [u_canopy] (Viewer.canopy_atlas): the near one in its left half, the far
+// one in its right.
+uniform mediump int u_canopyFarSlot;
+// Whether tree.vert stands trees over the near canopy (Viewer.apply_canopy).
+uniform bool u_treesStand;
 
-// The canopy mip level the mesh reads at [grid_spacing] m between rings: two
-// levels coarser than the spacing (~8 m averages near the eye), so the mesh
-// carries a stand's shape and its crowns stay in the shading -- at the
-// spacing itself every crown became a spike. terrain.frag shades with the
-// slope of this same level, so the formula is shared.
-float canopyLod(highp float grid_spacing) {
-  return log2(max(grid_spacing / 2.0, 1.0)) + 2.0;
+highp vec2 canopyNearUV(highp vec2 c) {
+  return vec2(0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+}
+highp vec2 canopyFarUV(highp vec2 c) {
+  return vec2(0.5 + 0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+}
+
+// How far a canopy is trusted at its block coordinate [c]: not over the
+// block's last 3% (~60 m near, ~150 m far), which also keeps the two halves
+// of the atlas from bleeding into each other's reads.
+float canopyEdge(highp vec2 c) {
+  highp vec2 e = min(c, 1.0 - c);
+  return smoothstep(0.0, 0.03, min(e.x, e.y));
+}
+
+// The share of the ground [r] m from the eye under tree.vert's trees: within
+// ~900 m (thinning out over the last 120 m of Viewer.tree_radius) and inside
+// the near block, whose edge [nearEdge] tree_find.vert thins them over too.
+float treesStood(highp float r, float nearEdge) {
+  return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
+}
+
+// The canopy mip level the mesh reads at [grid_spacing] m between rings, for
+// a canopy of [step] m: two levels coarser than the spacing (~8 m averages
+// near the eye), so the mesh carries a stand's shape and its crowns stay in
+// the shading -- at the spacing itself every crown became a spike.
+// terrain.frag shades with the slope of this same level.
+float canopyLod(highp float grid_spacing, float step) {
+  return log2(max(grid_spacing / step, 1.0)) + 2.0;
 }
 
 // Only stands are stood up: averaged at [canopyLod], a lone tree became a
@@ -171,29 +200,43 @@ float canopyLod(highp float grid_spacing) {
 // terrain.frag weighs the slope it shades with by the same factor.
 float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 
-// Metres to raise the mesh by for the canopy, at ring coordinate [c] (the
-// 1 m ring's normalised coordinate) for a vertex [r] m from the eye with
-// [grid_spacing] m between rings, read at [canopyLod], so far vertices take
-// the canopy averaged into a smooth blanket rather than aliasing crowns. 0
-// within ~900 m of the eye, where tree.vert stands trees instead (thinning
-// out over the last 120 m of Viewer.tree_radius), over the
-// block's last ~60 m, under 1.5 m of canopy, where there is no data, and above
-// 40 m (cliffs, where surface and ground models disagree).
-highp float canopyLift(highp vec2 c, highp float r, highp float grid_spacing) {
-  if (u_canopySlot < 0)
-    return 0.0;
-  highp vec2 e = min(c, 1.0 - c);
-  float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
-  float near = smoothstep(840.0, 960.0, r);
-  if (edge <= 0.0 || near <= 0.0)
-    return 0.0;
-  float lod = canopyLod(grid_spacing);
-  vec4 s = textureLod(u_canopy, clamp(c, 0.0, 1.0), lod);
+// The lift from one canopy's sample at atlas [uv], level [lod]: 0 under
+// 1.5 m of canopy, without data, and above 40 m (cliffs, where surface and
+// ground models disagree).
+highp float liftAt(highp vec2 uv, float lod) {
+  vec4 s = textureLod(u_canopy, uv, lod);
   if (s.r > 0.995)
     return 0.0;
   float h = s.r * (255.0 / 5.0);
   return h * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *
-         canopyCover(s.a) * edge * near;
+         canopyCover(s.a);
+}
+
+// Metres to raise the mesh by for the canopy, at the near and far rings'
+// normalised coordinates [cn], [cf], for a vertex [r] m from the eye with
+// [grid_spacing] m between rings: the near canopy inside its block, the far
+// one beyond, read at [canopyLod] so far vertices take the canopy averaged
+// into a smooth blanket rather than aliasing crowns. 0 where tree.vert stands
+// trees instead.
+highp float canopyLift(highp vec2 cn, highp vec2 cf, highp float r,
+                       highp float grid_spacing) {
+  float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
+  float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
+  float rest = 1.0 - treesStood(r, nearEdge);
+  if (rest <= 0.0)
+    return 0.0;
+  highp float lift = 0.0;
+  if (nearEdge > 0.0)
+    lift += nearEdge * liftAt(canopyNearUV(cn), canopyLod(grid_spacing, 2.0));
+  if (nearEdge < 1.0 && farEdge > 0.0)
+    lift += (1.0 - nearEdge) * farEdge *
+            liftAt(canopyFarUV(cf), canopyLod(grid_spacing, 5.0));
+  return lift * rest;
+}
+
+// A ring slot's normalised coordinate.
+highp vec2 slotCoord(highp vec2 c0, highp vec2 c1, highp vec2 c2, int slot) {
+  return slot == 0 ? c0 : (slot == 1 ? c1 : c2);
 }
 
 // Compute radial grid vertex position and sample terrain height
@@ -235,8 +278,8 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[2] = hdCoord(2, coord);
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
   v.height += canopyLift(
-      u_canopySlot == 0 ? v.hd_coord[0]
-                        : (u_canopySlot == 1 ? v.hd_coord[1] : v.hd_coord[2]),
+      slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),
+      slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopyFarSlot),
       r, grid_spacing);
 
   // Earth curvature with standard atmospheric refraction folded in

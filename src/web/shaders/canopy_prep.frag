@@ -9,6 +9,7 @@
 
 uniform highp sampler2D u_heights; // R32F, rows north-up as served
 uniform int u_size;
+uniform int u_offset; // the target's first column (Viewer.canopy_atlas)
 uniform float u_step; // metres per sample
 
 out vec4 color;
@@ -29,7 +30,7 @@ float N(ivec2 p, float v) {
 }
 
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) - ivec2(u_offset, 0);
   float v = H(p);
   if (v < 0.0) {
     color = vec4(1.0, 128.0 / 255.0, 128.0 / 255.0, 0.0);

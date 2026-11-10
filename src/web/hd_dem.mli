@@ -47,6 +47,10 @@ val canopy : layer
     read through that ring's normalised coordinate. 2 x 2 GetMaps of 512^2, 4.0
     MB. Not a refinement: never blended, only fetched. *)
 
+val canopy_far : layer
+(** The same at 5 m over {!lidar_5m}'s 5120 m block, read through that ring's
+    coordinate. 4.0 MB. *)
+
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the
     tiles that could not be fetched left at nodata. Carries the {!layer} it was
