@@ -1039,6 +1039,24 @@ void main() {
 
   vec3 sun_color = vec3(1.0, 0.95, 0.9);
   vec3 direct = sun_color * final_l * shadow_val * DIRECT_LIGHT;
+
+  // A canopy is not a Lambertian surface: it is crowns standing proud of the
+  // ground, each with a lit and a shaded side and a shadow behind it. With
+  // the sun behind the viewer the lit sides face the eye and the shadows hide
+  // behind the crowns (a hotspot right at the antisolar point); looking into
+  // the sun, mostly shaded sides show, with rims glowing where light comes
+  // through the edges. Lambert has none of this, which is much of why forest
+  // read as a flat carpet. [cosg] is the cosine of the phase angle (1 with
+  // the sun straight behind the viewer); the factor is 1 side-on, so forest
+  // keeps its overall brightness and only its direction changes.
+  if (finalWeights.b > 0.01) {
+    highp float cosg = dot(view_dir_n, lightDir);
+    float phase =
+        clamp(1.0 + 0.6 * float(cosg), 0.25, 2.0) +
+        0.4 * exp((float(cosg) - 1.0) / 0.015) +
+        0.8 * pow(max(-float(cosg), 0.0), 6.0) * pow(1.0 - NdotV, 3.0);
+    direct *= mix(1.0, phase, finalWeights.b);
+  }
   // Baked AO measures sky visibility: it attenuates the ambient term and the
   // sky reflection, not the direct sun, which the shadow map already handles
   // (multiplying the whole color darkened sunlit couloirs twice).
