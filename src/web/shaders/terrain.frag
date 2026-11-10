@@ -412,6 +412,13 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // mixed class (or the rock that steep slopes add) blends.
   vec4 bw = detailWeights * detailWeights * detailWeights;
   bw /= max(dot(bw, vec4(1.0)), 1e-6);
+  // Rock's fine and mid amplitudes are several times grass's, so even a third
+  // of rock (sparse-vegetation slopes, plus what steepness adds) owned their
+  // bump, and its creases read as combed hair there. Rock takes its share
+  // only where it is the majority: outcrops, where the height blend lifts it,
+  // and cliffs.
+  bw.r *= smoothstep(0.4, 0.6, bw.r);
+  bw /= max(dot(bw, vec4(1.0)), 1e-6);
 
   // Each band is weighed by the share of its octaves the relief data cannot
   // hold (see [bandShare]), so the texture does not bury the relief: in the
