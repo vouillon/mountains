@@ -758,6 +758,18 @@ type graphics_resources = {
   path_uniforms : Render_state.path_uniforms;
 }
 
+(* The terrain is fragment-bound on phones, and their densest screens are past
+   what the eye resolves: rendering a Pixel 8a (devicePixelRatio 2.625) at 0.75
+   took a near-field frame from ~25 ms to the 60 Hz floor with no visible
+   difference on the device. So the drawing buffer is capped at 2 device pixels
+   per CSS pixel and the browser upscales the rest; screens at or below 2 are
+   untouched. Label and trace sizes are fractions of the canvas height and
+   input is in CSS pixels, so nothing else follows the buffer size. *)
+let max_pixel_ratio = 2.
+
+let render_scale () =
+  Float.min 1. (max_pixel_ratio /. Brr.Window.device_pixel_ratio Brr.G.window)
+
 let resize_canvas ?device_width ?device_height canvas =
   let canvas_width, canvas_height =
     match (device_width, device_height) with
@@ -767,6 +779,13 @@ let resize_canvas ?device_width ?device_height canvas =
         let dpr = Brr.Window.device_pixel_ratio Brr.G.window in
         ( truncate (Brr.El.inner_w canvas *. dpr),
           truncate (Brr.El.inner_h canvas *. dpr) )
+  in
+  let canvas_width, canvas_height =
+    let r = render_scale () in
+    if r >= 1. then (canvas_width, canvas_height)
+    else
+      ( max 1 (truncate (float canvas_width *. r)),
+        max 1 (truncate (float canvas_height *. r)) )
   in
   let canvas = Brr_canvas.Canvas.of_el canvas in
   if Brr_canvas.Canvas.w canvas <> canvas_width then
