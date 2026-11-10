@@ -41,10 +41,20 @@ val lidar_2m : layer
     Absent, like {!lidar_5m}, wherever {!Projection} has no CRS for the
     location: {!fetch} answers [None] and the blend falls back to {!l13}. *)
 
+val canopy : layer
+(** LIDAR HD canopy height (surface minus ground, buildings included) at 2 m,
+    1024 samples: the same 2048 m block as {!lidar_2m} at any location, so it is
+    read through that ring's normalised coordinate. 2 x 2 GetMaps of 512^2, 4.0
+    MB. Not a refinement: never blended, only fetched. *)
+
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the
     tiles that could not be fetched left at nodata. Carries the {!layer} it was
     fetched for, so {!blend} cannot be handed a mismatched one. *)
+
+val raw_samples :
+  raw -> (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t
+(** The samples, [size] x [size], row 0 northernmost; nodata below -1000. *)
 
 val fetch : layer -> lat:float -> lon:float -> raw option Lwt.t
 (** Fetch [layer]'s block around [lat]/[lon]. Never fails: [None] (not a single

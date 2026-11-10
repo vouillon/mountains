@@ -23,8 +23,14 @@ uniform mediump sampler2D
 // gradients of two patterns A (rg) and B (ba) per texel, in RMS units encoded
 // over +-BUMP_ENC (must match [bump_enc] in viewer.ml).
 uniform mediump sampler2DArray u_bumpGrad;
+// LIDAR HD canopy height over the 1 m ring's block (Hd_dem.canopy): R8, 0.2 m
+// per step, 255 where the service had no data. Read through ring slot
+// [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
+// block on screen.
+uniform mediump sampler2D u_canopy;
+uniform int u_canopySlot;
 const float BUMP_ENC = 4.0;
-// Forest crowns, layer 6 of u_bumpGrad (bump_gen.frag's [crownField]): tile
+// Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
 // range per tile unit
 // (CROWN_GMAX there), and the crowns' height against their width, which
@@ -367,6 +373,20 @@ vec4 crownSample(float layer, float pick, highp vec2 rc) {
     cs = mix(cs, cs2, pick);
   }
   return cs;
+}
+
+// Canopy height in metres at this fragment, -1 where unknown (no canopy for
+// the block on screen, outside it, or no data there).
+float canopyHeight() {
+  if (u_canopySlot < 0)
+    return -1.0;
+  highp vec2 c = u_canopySlot == 0
+                     ? hdReliefCoord0
+                     : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
+  if (any(lessThan(c, vec2(0.0))) || any(greaterThan(c, vec2(1.0))))
+    return -1.0;
+  float v = texture(u_canopy, c).r;
+  return v > 0.995 ? -1.0 : v * (255.0 / 5.0);
 }
 
 // 1 while a band whose longest wavelength is [lmax] still has content at a

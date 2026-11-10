@@ -71,6 +71,8 @@ type terrain_uniforms = {
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_bumpGrad : Gl.uniform_location;
+  u_canopy : Gl.uniform_location;
+  u_canopySlot : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;

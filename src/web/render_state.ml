@@ -100,6 +100,8 @@ type terrain_uniforms = {
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_bumpGrad : Gl.uniform_location;
+  u_canopy : Gl.uniform_location;
+  u_canopySlot : Gl.uniform_location;
   (* Lighting *)
   u_lightDir : Gl.uniform_location;
   (* CLC *)
@@ -275,6 +277,8 @@ let init_terrain_uniforms ctx pid =
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_bumpGrad = u "u_bumpGrad";
+    u_canopy = u "u_canopy";
+    u_canopySlot = u "u_canopySlot";
     u_lightDir = u "u_lightDir";
     u_coverMap = u "u_coverMap";
     u_paletteTex = u "u_paletteTex";
@@ -428,7 +432,9 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.hd_relief.(2) 12;
   Gl.uniform1i ctx u.hd_relief_normal.(2) 13;
   (* Bound once for the session by [Viewer.make_bump_gradients]. *)
-  Gl.uniform1i ctx u.u_bumpGrad 14
+  Gl.uniform1i ctx u.u_bumpGrad 14;
+  (* Bound by [Viewer.update_canopy], with a placeholder while absent. *)
+  Gl.uniform1i ctx u.u_canopy 15
 
 (** Upload static texture unit bindings for shadow shader. *)
 let upload_texture_units_shadow ctx (u : shadow_uniforms) =

@@ -3303,6 +3303,119 @@ let eye_clearance_m = 4.
    nesting order, and the order the slots of a location are listed in. *)
 let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
 
+(* The canopy height (Hd_dem.canopy) over the 1 m ring's block, as an R8
+   texture on unit 15: 0.2 m per step up to 50.8 m, 255 for nodata. It is
+   fetched alongside the rings but never holds a publish up, and is shown
+   only while the 1 m ring on screen is the block it was fetched for -- it
+   has no frame of its own and is read through that ring's coordinate.
+
+   The fetch starts with the rings' ([start_canopy]), keyed on the block the
+   1 m ring will have, so it runs in parallel with them; it is uploaded once
+   both it and that ring are there ([update_canopy] on publish, or the
+   fetch's own arrival, whichever comes second).
+
+   [canopy_ring] is the 1 m ring last published (its block id and its slot),
+   [canopy_state] the texture and the block and context generation it was
+   made for, [canopy_raw] a fetched block not uploaded yet, [canopy_fetching]
+   the block a fetch is in flight for, [canopy_ready] what to run when a
+   fetch lands (set by each publish, which holds the GL handles). *)
+let canopy_ring : (string * int) option ref = ref None
+let canopy_state : (string * int * Gl.texture) option ref = ref None
+let canopy_raw : (string * int * Hd_dem.raw) option ref = ref None
+let canopy_fetching : (string * int) option ref = ref None
+let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
+
+let canopy_texture ctx raw =
+  let size = Hd_dem.canopy.size in
+  let src = Hd_dem.raw_samples raw in
+  let data = Bigarray.(Array1.create int8_unsigned c_layout (size * size)) in
+  for row = 0 to size - 1 do
+    (* Rows count from the south in the texture, from the north in [src]. *)
+    let s0 = (size - 1 - row) * size and d0 = row * size in
+    for col = 0 to size - 1 do
+      let h = src.{s0 + col} in
+      data.{d0 + col} <-
+        (if h < -1000. then 255
+         else Int.max 0 (Int.min 254 (Float.to_int ((h *. 5.) +. 0.5))))
+    done
+  done;
+  let tid = Gl.create_texture ctx in
+  Gl.active_texture ctx Gl.texture15;
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8 size size 0 Gl.red Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+    0;
+  Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
+  Gl.active_texture ctx Gl.texture0;
+  tid
+
+(* Bind the canopy (or [placeholder]) on unit 15 and tell the terrain program
+   which ring slot to read it through. *)
+let apply_canopy ctx terrain_pid (u : Render_state.terrain_uniforms)
+    ~placeholder =
+  let tex, slot =
+    match (!canopy_ring, !canopy_state) with
+    | Some (b, slot), Some (b', g, tex) when b = b' && g = !context_generation
+      ->
+        (tex, slot)
+    | _ -> (placeholder, -1)
+  in
+  Gl.active_texture ctx Gl.texture15;
+  Gl.bind_texture ctx Gl.texture_2d (Some tex);
+  Gl.active_texture ctx Gl.texture0;
+  Gl.use_program ctx terrain_pid;
+  Gl.uniform1i ctx u.u_canopySlot slot
+
+(* Start fetching the canopy for the 1 m ring a load at [lat]/[lon] will have,
+   unless it is held or on its way already. *)
+let start_canopy ~lat ~lon =
+  let block = Hd_dem.block_id Hd_dem.lidar_2m ~lat ~lon in
+  let generation = !context_generation in
+  let held =
+    (match !canopy_state with
+      | Some (b, g, _) -> b = block && g = generation
+      | None -> false)
+    || (match !canopy_raw with
+      | Some (b, g, _) -> b = block && g = generation
+      | None -> false)
+    || !canopy_fetching = Some (block, generation)
+  in
+  if block <> "" && not held then begin
+    canopy_fetching := Some (block, generation);
+    Lwt.async (fun () ->
+        let* raw = Hd_dem.fetch Hd_dem.canopy ~lat ~lon in
+        if !context_generation = generation then begin
+          if !canopy_fetching = Some (block, generation) then
+            canopy_fetching := None;
+          match raw with
+          | Some raw ->
+              canopy_raw := Some (block, generation, raw);
+              !canopy_ready ()
+          | None -> ()
+        end;
+        Lwt.return_unit)
+  end
+
+(* Called on every publish with the 1 m ring now on screen, if any: uploads a
+   fetched canopy for that block, and shows whatever is current. *)
+let update_canopy ctx terrain_pid u ~placeholder ring =
+  canopy_ring := ring;
+  let ready () =
+    (match (!canopy_ring, !canopy_raw) with
+    | Some (b, _), Some (b', g, raw) when b = b' && g = !context_generation ->
+        (match !canopy_state with
+        | Some (_, g, old) when g = !context_generation ->
+            Gl.delete_texture ctx old
+        | _ -> ());
+        canopy_state := Some (b, g, canopy_texture ctx raw);
+        canopy_raw := None;
+        force_redraw := true
+    | _ -> ());
+    apply_canopy ctx terrain_pid u ~placeholder
+  in
+  canopy_ready := ready;
+  ready ()
+
 (* How far the eye may stand from the arcsecond its surroundings were baked on
    before they are baked again. Nothing in a bake depends on where one stands
    inside the tile -- the base grid, the ambient occlusion, the cover map and
@@ -3428,6 +3541,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      can take [Hd_dem.timeout_s] to answer, and awaiting it holds the whole
      location -- base tiles that may well be in cache included -- behind that
      ceiling. *)
+  start_canopy ~lat:alat ~lon:alon;
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
     |> List.map (fun layer -> (layer, Hd_dem.fetch layer ~lat:alat ~lon:alon))
@@ -3777,6 +3891,24 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       Render_state.upload_hd_params ctx terrain_pid shadow_pid terrain_uniforms
         shadow_uniforms hd_params;
+      (* The canopy follows the 1 m ring: its block, and the slot it landed in
+         (innermost first, as above). *)
+      (let ring_1m =
+         List.find_map
+           (function
+             | Blended (b, r) when r.grid.Hd_dem.layer == Hd_dem.lidar_2m ->
+                 Some b
+             | Pending | Blank _ | Blended _ -> None)
+           slots
+       in
+       let slot =
+         List.find_index (fun r -> r.grid.Hd_dem.layer == Hd_dem.lidar_2m) rings
+       in
+       update_canopy ctx terrain_pid terrain_uniforms
+         ~placeholder:hd_placeholder
+         (match (ring_1m, slot) with
+         | Some b, Some i -> Some (b, i)
+         | _ -> None));
       Gl.use_program ctx path_pid;
       Render_state.upload_path_session ctx path_uniforms ~w ~lat:alat ~eye_x
         ~eye_y;

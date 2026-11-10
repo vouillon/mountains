@@ -212,6 +212,15 @@ let lidar_2m =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:1.0 ~split:2 ~size:2048 ~fade_metres:300.
 
+(* LIDAR HD canopy height (MNH: surface minus ground, so buildings too), over
+   the 1 m ring's own footprint: the same 2048 m span and the same alignment
+   rule in [plan] put it on exactly that ring's block, so the renderer reads it
+   through the ring's normalised coordinate with no frame of its own. At 2 m
+   rather than 1: 4 MB on the wire instead of 16, still finer than a crown. *)
+let canopy =
+  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
+    ~metres:2.0 ~split:2 ~size:1024 ~fade_metres:0.
+
 (* The spacing actually requested for a projected ring. Over La Reunion the
    service resamples from overviews at powers of two (1, 2, 4 m...), and at a
    ratio of 1.25 to one of them -- 5 m from 4, 2.5 from 2 -- its output beats
@@ -451,6 +460,8 @@ type raw = {
   frame : frame;
   missing : int;
 }
+
+let raw_samples (r : raw) = r.samples
 
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its
