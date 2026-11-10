@@ -1070,9 +1070,27 @@ void main() {
   // gradients add): forest edges and the sides of stands shade as walls, not
   // as the ground beneath them. The crown tilt below then adds only the
   // detail beyond this smoothed slope.
-  if (g_liftWeight > 0.0)
+  if (g_liftWeight > 0.0) {
     final_normal =
         normalize(final_normal + vec3(-g_liftSlope * g_liftWeight, 0.0));
+    // The flank of a stand seen from the side: shade under the crowns, broken
+    // by the gaps between trunks -- not the top-down crown pattern, smeared
+    // down the wall, which made groves read as moss-covered mounds. Bands
+    // along the flank's horizontal direction (constant in height, so
+    // vertical on screen), ~2.5 m and ~1 m, non-repeating; gone by 3 km,
+    // where they would alias.
+    highp vec2 sl = g_liftSlope * g_liftWeight;
+    float wall = smoothstep(0.4, 1.2, length(sl)) *
+                 (1.0 - smoothstep(1500.0, 3000.0, v_dist));
+    if (wall > 0.0) {
+      highp vec2 along = normalize(vec2(-sl.y, sl.x));
+      highp float t = dot(v_world_pos.xy, along);
+      float gaps = 0.65 * valueNoise(vec2(t / 2.5, 7.3)) +
+                   0.35 * valueNoise(vec2(t / 1.0, 19.1));
+      terrain_color *=
+          mix(1.0, 0.75 * (0.45 + 0.55 * smoothstep(0.3, 0.7, gaps)), wall);
+    }
+  }
   if (crownFade > 0.0) {
     float onCrown = smoothstep(0.02, 0.2, crownH) * crownFade * finalWeights.b;
     final_normal = normalize(final_normal +
