@@ -51,6 +51,10 @@ val canopy_far : layer
 (** The same at 5 m over {!lidar_5m}'s 5120 m block, read through that ring's
     coordinate. 4.0 MB. *)
 
+val canopy_mid : layer
+(** The same at 20 m over a 20 km block of its own: read through its
+    {!raw_frame}. 4.0 MB. *)
+
 type raw
 (** Raw elevations as returned by the service, in metres, north-up, with the
     tiles that could not be fetched left at nodata. Carries the {!layer} it was
@@ -115,6 +119,10 @@ type frame = {
     affine map misplaces a 5 km block's corners by a metre. Reading the frame
     rather than an origin and a spacing is what lets both kinds share one path.
 *)
+
+val raw_frame : raw -> frame
+(** Where a fetched block's samples sit, from the anchor arcsecond of the
+    location it was fetched for. *)
 
 type t = {
   layer : layer;  (** the layer this grid came from *)

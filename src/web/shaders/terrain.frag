@@ -29,19 +29,30 @@ uniform mediump sampler2DArray u_bumpGrad;
 // [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
 // block on screen. The far canopy (Hd_dem.canopy_far, 5 m over the 5 m
 // ring's block) likewise through [u_canopyFarSlot]; both share [u_canopy]
-// (Viewer.canopy_atlas), the near one in its first third. [u_treesStand]:
+// (Viewer.canopy_atlas), the near one in its first slot. [u_treesStand]:
 // whether tree.vert stands trees over the near canopy.
 // Declared in radial_common.vert too, with the same precisions.
 uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
 uniform mediump int u_canopyFarSlot;
 uniform bool u_treesStand;
+// The 20 m canopy (Hd_dem.canopy_mid, ~20 km), if [u_canopyMidOn]: slot 4 of
+// the atlas, through a map of its own from the base grid's coordinate.
+uniform bool u_canopyMidOn;
+uniform highp mat2 u_canopyMidMat;
+uniform highp vec2 u_canopyMidBias;
+uniform highp vec3 u_canopyMidQx;
+uniform highp vec3 u_canopyMidQy;
 // The EEA tree cover (Tree_cover, ~20 m over ~20 km), the atlas's third
 // region (see tree_cover_prep.frag): R density, G conifer share, B data. Read
 // at [reliefCoord * u_treeCoverMap.xy + u_treeCoverMap.zw], if
 // [u_treeCoverOn].
 uniform bool u_treeCoverOn;
 uniform highp vec4 u_treeCoverMap;
+// Beyond it, its coarser level (~80 m over ~80 km), the fourth region,
+// likewise.
+uniform bool u_treeCoverFarOn;
+uniform highp vec4 u_treeCoverFarMap;
 const float BUMP_ENC = 4.0;
 // Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
@@ -419,14 +430,26 @@ uniform highp float grid_k;
 uniform highp float grid_scale;
 
 // As in radial_common.vert.
-highp vec2 canopyNearUV(highp vec2 c) {
-  return vec2(clamp(c.x, 0.0, 1.0) / 3.0, clamp(c.y, 0.0, 1.0));
+// Slot [slot] of the atlas (Viewer.canopy_atlas: three columns, two rows):
+// 0 the near canopy, 1 the far one, 2 and 3 the EEA tree cover's two levels,
+// 4 the 20 m canopy.
+highp vec2 atlasUV(highp vec2 c, int slot) {
+  return (vec2(float(slot % 3), float(slot / 3)) + clamp(c, 0.0, 1.0)) /
+         vec2(3.0, 2.0);
 }
-highp vec2 canopyFarUV(highp vec2 c) {
-  return vec2((1.0 + clamp(c.x, 0.0, 1.0)) / 3.0, clamp(c.y, 0.0, 1.0));
+highp vec2 canopyNearUV(highp vec2 c) { return atlasUV(c, 0); }
+highp vec2 canopyFarUV(highp vec2 c) { return atlasUV(c, 1); }
+// The tree cover's level [level] (0 the finer).
+highp vec2 canopyCoverUV(highp vec2 c, int level) {
+  return atlasUV(c, 2 + level);
 }
-highp vec2 canopyCoverUV(highp vec2 c) {
-  return vec2((2.0 + clamp(c.x, 0.0, 1.0)) / 3.0, clamp(c.y, 0.0, 1.0));
+// The 20 m canopy's normalised coordinate, from the base grid's
+// (u_canopyMid*: Viewer.apply_canopy).
+highp vec2 canopyMidCoord() {
+  highp vec2 c = reliefCoord;
+  highp vec3 q = vec3(c.x * c.x, c.x * c.y, c.y * c.y);
+  return u_canopyMidMat * c + u_canopyMidBias +
+         vec2(dot(u_canopyMidQx, q), dot(u_canopyMidQy, q));
 }
 float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
@@ -481,10 +504,14 @@ vec3 canopyTrees() {
       u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
   float farEdge =
       u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
+  highp vec2 cm = canopyMidCoord();
+  float midEdge = u_canopyMidOn ? canopyEdge(cm) : 0.0;
   // Fetched whatever the edges: uniform control flow for the near read,
-  // whose implicit level the crown shading relies on.
+  // whose implicit level the crown shading relies on, and for the 20 m one,
+  // filtered with distance.
   g_canopy = texture(u_canopy, canopyNearUV(slotCoord(max(u_canopySlot, 0))));
-  if (nearEdge + farEdge <= 0.0)
+  vec4 m = u_canopyMidOn ? texture(u_canopy, atlasUV(cm, 4)) : vec4(1.0);
+  if (nearEdge + farEdge + midEdge <= 0.0)
     return vec3(0.0);
   vec4 f =
       farEdge > 0.0 && nearEdge < 1.0
@@ -492,13 +519,21 @@ vec3 canopyTrees() {
           : vec4(1.0);
   float wn = g_canopy.r > 0.995 ? 0.0 : nearEdge;
   float wf = f.r > 0.995 ? 0.0 : (1.0 - wn) * farEdge;
-  float wsum = wn + wf;
+  float wm = m.r > 0.995 ? 0.0 : (1.0 - wn - wf) * midEdge;
+  float wsum = wn + wf + wm;
   if (wsum <= 0.0)
     return vec3(0.0);
-  float h = (wn * g_canopy.r + wf * f.r) * (255.0 / 5.0) / wsum;
+  float hn = g_canopy.r * (255.0 / 5.0);
+  float hf = f.r * (255.0 / 5.0);
+  float hm = m.r * (255.0 / 5.0);
+  // The 20 m canopy is a mean over each sample: a sparse forest reads as a
+  // metre or two.
+  float share = (wn * smoothstep(1.5, 4.0, hn) + wf * smoothstep(1.5, 4.0, hf) +
+                 wm * smoothstep(0.5, 3.0, hm)) /
+                wsum;
+  float h = (wn * hn + wf * hf + wm * hm) / wsum;
   g_canopyNear = wn / wsum;
-  return vec3(smoothstep(1.5, 4.0, h), wsum * (1.0 - smoothstep(40.0, 48.0, h)),
-              h);
+  return vec3(share, wsum * (1.0 - smoothstep(40.0, 48.0, h)), h);
 }
 
 // 1 while a band whose longest wavelength is [lmax] still has content at a
@@ -895,17 +930,29 @@ void main() {
     // over ~30-60%. Its leaf type (10 m) says conifer or broadleaf wherever it
     // has trees, inside the canopies too: finer than the land cover's classes,
     // and what tree_find.vert picks the trees' species by.
-    if (u_treeCoverOn) {
-      highp vec2 cu = reliefCoord * u_treeCoverMap.xy + u_treeCoverMap.zw;
-      vec4 tc = texture(u_canopy, canopyCoverUV(cu));
-      float e = canopyEdge(cu) * tc.b;
+    // The finer level first, then the coarser one for what is left. The
+    // cover misses sparse high forest (open mountain pine and larch: at
+    // 44.58, 6.85 it reads 0-9% on 70% of the LIDAR's trees over 3 m), so
+    // where it has no trees but the land cover says forest, that is sparse
+    // forest, half trees, rather than meadow.
+    float coverTrust = 0.0;
+    float clcForest = 0.5 * smoothstep(0.35, 0.6, surface.detailWeights.b);
+    for (int level = 0; level < 2; level++) {
+      if (level == 0 ? !u_treeCoverOn : !u_treeCoverFarOn)
+        continue;
+      highp vec4 m = level == 0 ? u_treeCoverMap : u_treeCoverFarMap;
+      highp vec2 cu = reliefCoord * m.xy + m.zw;
+      vec4 tc = texture(u_canopy, canopyCoverUV(cu, level));
+      float e = canopyEdge(cu) * tc.b * (1.0 - coverTrust);
       if (e > 0.0) {
         float density = tc.r / tc.b;
         float total = ct.y + (1.0 - ct.y) * e;
-        ct.x = mix(smoothstep(0.3, 0.6, density), ct.x, ct.y / total);
+        ct.x = mix(max(smoothstep(0.3, 0.6, density), clcForest), ct.x,
+                   ct.y / total);
         ct.y = total;
         surface.conifer = mix(surface.conifer, clamp(tc.g, 0.0, 1.0),
                               e * smoothstep(0.1, 0.4, density));
+        coverTrust += e;
       }
     }
     float trust = ct.y * (1.0 - surface.built) *

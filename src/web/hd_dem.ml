@@ -229,6 +229,16 @@ let canopy_far =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:0.
 
+(* And at 20 m over 20 km, with a frame of its own (no ring shares its
+   block): where forest stands out to ~10 km. The service serves the coarser
+   grid close to a box mean of the finer one (0.66 m from the mean of the 2 m
+   samples, 1.4 m from any one of them, measured 2026-11-10), so a sparse
+   forest still reads as a low mean height -- what the EEA's tree cover
+   misses. *)
+let canopy_mid =
+  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
+    ~metres:20.0 ~split:2 ~size:1024 ~fade_metres:0.
+
 (* The spacing actually requested for a projected ring. Over La Reunion the
    service resamples from overviews at powers of two (1, 2, 4 m...), and at a
    ratio of 1.25 to one of them -- 5 m from 4, 2.5 from 2 -- its output beats
@@ -470,6 +480,7 @@ type raw = {
 }
 
 let raw_samples (r : raw) = r.samples
+let raw_frame (r : raw) = r.frame
 
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its

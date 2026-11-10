@@ -9,12 +9,12 @@
 // leaf type (1 broadleaved, 2 coniferous) in the right.
 uniform highp sampler2D u_input;
 uniform int u_size;
-uniform int u_offset; // the target's first column
+uniform ivec2 u_offset; // the target slot's first texel (Viewer.canopy_atlas)
 
 out vec4 color;
 
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy) - ivec2(u_offset, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy) - u_offset;
   ivec2 q = ivec2(p.x, u_size - 1 - p.y);
   float d = floor(texelFetch(u_input, q, 0).r * 255.0 + 0.5);
   float l = floor(texelFetch(u_input, q + ivec2(u_size, 0), 0).r * 255.0 + 0.5);

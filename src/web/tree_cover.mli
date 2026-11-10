@@ -1,5 +1,6 @@
 (** Tree cover density and dominant leaf type over Europe (EEA Copernicus
-    high-resolution layers, 2018), one block around a location. *)
+    high-resolution layers, 2018), in blocks around a location: level 0 at ~20 m
+    over ~20 km, level 1 at ~80 m over ~80 km. *)
 
 val size : int
 (** Samples per side of a block. *)
@@ -23,9 +24,15 @@ type t = {
           empty tile. *)
 }
 
-val block_id : lat:float -> lon:float -> string
-(** Identity of the block {!fetch} would ask for at [lat]/[lon]. *)
+val block_id : level:int -> lat:float -> lon:float -> string
+(** Identity of the block of [level] {!fetch} would ask for at [lat]/[lon]. *)
 
-val fetch : ?timeout_s:float -> lat:float -> lon:float -> unit -> t option Lwt.t
-(** Fetch the block around [lat]/[lon]. Never fails: [None] when it could not be
-    had within [timeout_s] (60 by default). *)
+val fetch :
+  ?timeout_s:float ->
+  level:int ->
+  lat:float ->
+  lon:float ->
+  unit ->
+  t option Lwt.t
+(** Fetch the block of [level] around [lat]/[lon]. Never fails: [None] when it
+    could not be had within [timeout_s] (60 by default). *)

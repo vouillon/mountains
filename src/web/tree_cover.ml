@@ -4,10 +4,11 @@
    beyond ~2.5 km, and everywhere outside France -- they say where forest
    stands and of which kind, in place of land cover drawn to 25 ha.
 
-   One block of [size] samples square around the location, ~20 m each, asked
-   for in WGS84 so that the renderer maps the base grid's coordinate onto it
-   linearly; snapped to a [snap_deg] grid so that nearby locations ask for the
-   same one (the service lets browsers cache it for 12 hours). The service
+   Blocks of [size] samples square around the location, asked for in WGS84 so
+   that the renderer maps the base grid's coordinate onto them linearly: at
+   level 0 ~20 m each (~20 km across), at level 1 ~80 m (~80 km), for the
+   distance; snapped to a grid ([snap_deg]) so that nearby locations ask for
+   the same ones (the service lets browsers cache them for 12 hours). The service
    resamples from its own grids (Web Mercator, ETRS89-LAEA). It answers raw
    values only as TIFF -- PNG comes out through its colour rendering -- here
    8-bit, uncompressed, in tiles, which [parse] locates; the renderer uploads
@@ -17,11 +18,11 @@ let ( let* ) = Lwt.bind
 let ( and* ) = Lwt.both
 let size = 1024
 let tile = 128
-let snap_deg = 0.05
+let snap_deg level = if level = 0 then 0.05 else 0.2
 
-(* Degrees per sample north-south: ~20 m. East-west, the same metres at the
-   block's latitude. *)
-let lat_step = 0.00018
+(* Degrees per sample north-south: ~20 m at level 0, ~80 m at level 1.
+   East-west, the same metres at the block's latitude. *)
+let lat_step level = if level = 0 then 0.00018 else 0.00072
 
 type t = {
   west : float;
@@ -34,16 +35,17 @@ type t = {
   leaf_type_tiles : int array;
 }
 
-let bounds ~lat ~lon =
-  let clat = Float.round (lat /. snap_deg) *. snap_deg
-  and clon = Float.round (lon /. snap_deg) *. snap_deg in
-  let half_lat = lat_step *. float size /. 2. in
+let bounds ~level ~lat ~lon =
+  let snap = snap_deg level in
+  let clat = Float.round (lat /. snap) *. snap
+  and clon = Float.round (lon /. snap) *. snap in
+  let half_lat = lat_step level *. float size /. 2. in
   let half_lon = half_lat /. Float.cos (clat *. Float.pi /. 180.) in
   (clon -. half_lon, clat -. half_lat, clon +. half_lon, clat +. half_lat)
 
-let block_id ~lat ~lon =
-  let w, s, _, _ = bounds ~lat ~lon in
-  Printf.sprintf "%.4f,%.4f" w s
+let block_id ~level ~lat ~lon =
+  let w, s, _, _ = bounds ~level ~lat ~lon in
+  Printf.sprintf "%d:%.4f,%.4f" level w s
 
 let request_url ~service ~interpolation (w, s, e, n) =
   Printf.sprintf
@@ -127,8 +129,8 @@ let fetch_layer ~service ~interpolation box =
   | Ok _ | Error _ -> Lwt.return None
 
 (* Never fails: [None] when either layer could not be had, in [timeout_s]. *)
-let fetch ?(timeout_s = 60.) ~lat ~lon () =
-  let ((west, south, east, north) as box) = bounds ~lat ~lon in
+let fetch ?(timeout_s = 60.) ~level ~lat ~lon () =
+  let ((west, south, east, north) as box) = bounds ~level ~lat ~lon in
   let both =
     let* d =
       fetch_layer ~service:"HRL_TreeCoverDensity_2018"

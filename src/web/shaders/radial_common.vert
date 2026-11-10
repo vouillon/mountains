@@ -155,18 +155,21 @@ uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
 // The far canopy (Hd_dem.canopy_far, 5 m over the 5 m ring's block), read
 // through slot [u_canopyFarSlot], -1 when there is none. Both are in
-// [u_canopy] (Viewer.canopy_atlas): the near one in its first third, the far
-// one in its second (the third is the EEA tree cover, terrain.frag's).
+// [u_canopy] (Viewer.canopy_atlas), with the EEA tree cover and the 20 m
+// canopy that terrain.frag reads.
 uniform mediump int u_canopyFarSlot;
 // Whether tree.vert stands trees over the near canopy (Viewer.apply_canopy).
 uniform bool u_treesStand;
 
-highp vec2 canopyNearUV(highp vec2 c) {
-  return vec2(clamp(c.x, 0.0, 1.0) / 3.0, clamp(c.y, 0.0, 1.0));
+// Slot [slot] of the atlas (Viewer.canopy_atlas: three columns, two rows):
+// 0 the near canopy, 1 the far one, 2 and 3 the EEA tree cover's two levels,
+// 4 the 20 m canopy.
+highp vec2 atlasUV(highp vec2 c, int slot) {
+  return (vec2(float(slot % 3), float(slot / 3)) + clamp(c, 0.0, 1.0)) /
+         vec2(3.0, 2.0);
 }
-highp vec2 canopyFarUV(highp vec2 c) {
-  return vec2((1.0 + clamp(c.x, 0.0, 1.0)) / 3.0, clamp(c.y, 0.0, 1.0));
-}
+highp vec2 canopyNearUV(highp vec2 c) { return atlasUV(c, 0); }
+highp vec2 canopyFarUV(highp vec2 c) { return atlasUV(c, 1); }
 
 // How far a canopy is trusted at its block coordinate [c]: not over the
 // block's last 3% (~60 m near, ~150 m far), which also keeps the two halves

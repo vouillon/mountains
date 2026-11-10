@@ -113,8 +113,9 @@ void main() {
   ivec2 cell =
       ivec2(gl_VertexID % u_grid, gl_VertexID / u_grid) - ivec2(u_grid / 2);
   ivec2 t0 = ivec2(floor(u_eyeTexel * 0.5)) * 2 + cell * 2;
-  // The near canopy is the first third of the atlas (Viewer.canopy_atlas).
-  int csize = textureSize(u_canopy, 0).y;
+  // The near canopy is the atlas's first slot, of three columns and two rows
+  // (Viewer.canopy_atlas).
+  int csize = textureSize(u_canopy, 0).y / 2;
   if (any(lessThan(t0, ivec2(2))) || any(greaterThan(t0, ivec2(csize - 4))))
     return;
   // Beyond the radius, or within 40 m of the eye: a tree beside a viewer

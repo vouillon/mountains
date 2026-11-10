@@ -2246,19 +2246,35 @@ let delete_publish ctx { points; gpx_path; _ } =
    it and that ring are there ([update_canopy] on publish, or the fetch's own
    arrival, whichever comes second).
 
+   Kind 2 is the 20 m canopy (Hd_dem.canopy_mid), with a block and frame of
+   its own: its "ring" is just its block, slot -1, and [canopy_mid_frame] the
+   frame of the block it holds, with the anchor that frame is stated from.
+
    Per kind: [canopy_ring] the ring last published (its block id and its
-   slot), [canopy_state] the block and context generation its half of the
-   atlas holds, [canopy_raw] a fetched block not uploaded yet,
-   [canopy_fetching] the block a fetch is in flight for. [canopy_atlas] is the
-   texture and the context generation it was made in, [canopy_ready] what to
-   run when a fetch lands (set by each publish, which holds the GL handles). *)
-let canopy_layers = [| Hd_dem.canopy; Hd_dem.canopy_far |]
-let canopy_ring_layers = [| Hd_dem.lidar_2m; Hd_dem.lidar_5m |]
-let canopy_steps = [| 2.; 5. |]
-let canopy_ring : (string * int) option array = [| None; None |]
-let canopy_state : (string * int) option array = [| None; None |]
-let canopy_raw : (string * int * Hd_dem.raw) option array = [| None; None |]
-let canopy_fetching : (string * int) option array = [| None; None |]
+   slot), [canopy_state] the block and context generation its region of the
+   atlas holds, [canopy_raw] a fetched block not uploaded yet (and the anchor
+   it was fetched from), [canopy_fetching] the block a fetch is in flight for.
+   [canopy_atlas] is the texture and the context generation it was made in,
+   [canopy_ready] what to run when a fetch lands (set by each publish, which
+   holds the GL handles). *)
+let canopy_kinds = 3
+let canopy_layers = [| Hd_dem.canopy; Hd_dem.canopy_far; Hd_dem.canopy_mid |]
+
+let canopy_ring_layers =
+  [| Hd_dem.lidar_2m; Hd_dem.lidar_5m; Hd_dem.canopy_mid |]
+
+let canopy_steps = [| 2.; 5.; 20. |]
+
+(* Each kind's slot of the atlas (see [atlasUV] in the shaders). *)
+let canopy_slots = [| 0; 1; 4 |]
+let canopy_ring : (string * int) option array = Array.make canopy_kinds None
+let canopy_state : (string * int) option array = Array.make canopy_kinds None
+
+let canopy_raw : (string * int * Hd_dem.raw * (int * int)) option array =
+  Array.make canopy_kinds None
+
+let canopy_fetching : (string * int) option array = Array.make canopy_kinds None
+let canopy_mid_frame : (Hd_dem.frame * (int * int)) option ref = ref None
 let canopy_atlas : (int * Gl.texture) option ref = ref None
 let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
 
@@ -3787,27 +3803,30 @@ let eye_clearance_m = 4.
 let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
 
 (* The canopy atlas: [Hd_dem.canopy], [Hd_dem.canopy_far] and the EEA tree
-   cover ([Tree_cover]) side by side, each 1024 samples square, RGBA8 (see
+   cover's two levels ([Tree_cover]) side by side, each 1024 samples square, RGBA8 (see
    canopy_prep.frag, tree_cover_prep.frag) and mipmapped: the mesh reads the
    level matching its vertex spacing (see radial_common.vert's [canopyLift]).
    Made once per context. *)
 let canopy_size = Hd_dem.canopy.size
 
-(* The EEA tree cover, the atlas's third region, for the block of the location
-   on screen ([tree_cover_wanted], with that location's anchor and base grid
-   size in [tree_cover_frame]), fetched and uploaded as the canopies are:
-   [tree_cover_state] the block, context generation and bounds the region
-   holds, [tree_cover_raw] a fetched block not uploaded yet,
-   [tree_cover_fetching] the block a fetch is in flight for. *)
-let tree_cover_wanted : string option ref = ref None
+(* The EEA tree cover, the atlas's third and fourth regions (its two levels),
+   for the blocks of the location on screen ([tree_cover_wanted], with that
+   location's anchor and base grid size in [tree_cover_frame]), fetched and
+   uploaded as the canopies are. Per level: [tree_cover_state] the block,
+   context generation and bounds the region holds, [tree_cover_raw] a fetched
+   block not uploaded yet, [tree_cover_fetching] the block a fetch is in
+   flight for. *)
+let tree_cover_wanted : string option array = [| None; None |]
 let tree_cover_frame : (int * int * int) option ref = ref None
 
 let tree_cover_state :
-    (string * int * (float * float * float * float)) option ref =
-  ref None
+    (string * int * (float * float * float * float)) option array =
+  [| None; None |]
 
-let tree_cover_raw : (string * int * Tree_cover.t) option ref = ref None
-let tree_cover_fetching : (string * int) option ref = ref None
+let tree_cover_raw : (string * int * Tree_cover.t) option array =
+  [| None; None |]
+
+let tree_cover_fetching : (string * int) option array = [| None; None |]
 let tree_cover_ready : (unit -> unit) ref = ref (fun () -> ())
 
 let get_canopy_atlas ctx =
@@ -3819,15 +3838,15 @@ let get_canopy_atlas ctx =
       Gl.bind_texture ctx Gl.texture_2d (Some tid);
       let levels = 1 + truncate (Float.log2 (float (3 * canopy_size))) in
       Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 (3 * canopy_size)
-        canopy_size;
+        (2 * canopy_size);
       Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
       Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
         Gl.linear_mipmap_linear;
       Gl.active_texture ctx Gl.texture0;
       canopy_atlas := Some (!context_generation, tid);
-      canopy_state.(0) <- None;
-      canopy_state.(1) <- None;
-      tree_cover_state := None;
+      Array.fill canopy_state 0 canopy_kinds None;
+      tree_cover_state.(0) <- None;
+      tree_cover_state.(1) <- None;
       tid
 
 (* Bake canopy [kind]'s raw heights into its half of the atlas: they go up as
@@ -3853,7 +3872,8 @@ let canopy_texture ctx kind raw =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_heights") 15;
   Gl.uniform1i ctx (u "u_size") size;
-  Gl.uniform1i ctx (u "u_offset") (kind * size);
+  let slot = canopy_slots.(kind) in
+  Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
   Gl.uniform1f ctx (u "u_step") canopy_steps.(kind);
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
@@ -3867,7 +3887,7 @@ let canopy_texture ctx kind raw =
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.blend;
   Gl.disable ctx Gl.cull_face';
-  Gl.viewport ctx (kind * size) 0 size size;
+  Gl.viewport ctx (slot mod 3 * size) (slot / 3 * size) size size;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
   if depth then Gl.enable ctx Gl.depth_test;
   if blend then Gl.enable ctx Gl.blend;
@@ -3906,6 +3926,42 @@ let apply_canopy ctx pids ~placeholder =
     (Some (Option.value atlas ~default:placeholder));
   Gl.active_texture ctx Gl.texture0;
   let stand = Lazy.force trees_enabled && near >= 0 in
+  (* The 20 m canopy's map from the base grid's normalised coordinate [c] (see
+     radial_common.vert: arcseconds from the anchor are [w (c - 1/2) - 1/2])
+     to its own, through its frame restated from the location's anchor. *)
+  let mid =
+    match
+      ( canopy_ring.(2),
+        canopy_state.(2),
+        atlas,
+        !canopy_mid_frame,
+        !tree_cover_frame )
+    with
+    | ( Some (b, _),
+        Some (b', g),
+        Some _,
+        Some (frame, (fetch_lat, fetch_lon)),
+        Some (anchor_lat, anchor_lon, w) )
+      when b = b' && g = !context_generation ->
+        let w = float w and size = float canopy_layers.(2).Hd_dem.size in
+        let to_index =
+          Warp.translate_input frame.Hd_dem.to_index
+            ~du:(float (anchor_lon - fetch_lon))
+            ~dv:(float (anchor_lat - fetch_lat))
+        in
+        let of_coord =
+          Warp.of_affine
+            (Affine.diagonal ~sx:w ~sy:w
+               ~tx:((-0.5 *. w) -. 0.5)
+               ~ty:((-0.5 *. w) -. 0.5))
+        and to_uv =
+          Warp.of_affine
+            (Affine.diagonal ~sx:(1. /. size) ~sy:(1. /. size) ~tx:(0.5 /. size)
+               ~ty:(0.5 /. size))
+        in
+        Some (Warp.compose to_uv (Warp.compose to_index of_coord))
+    | _ -> None
+  in
   List.iter
     (fun pid ->
       Gl.use_program ctx pid;
@@ -3913,13 +3969,19 @@ let apply_canopy ctx pids ~placeholder =
       Gl.uniform1i ctx (u "u_canopy") 15;
       Gl.uniform1i ctx (u "u_canopySlot") near;
       Gl.uniform1i ctx (u "u_canopyFarSlot") far;
-      Gl.uniform1i ctx (u "u_treesStand") (if stand then 1 else 0))
+      Gl.uniform1i ctx (u "u_treesStand") (if stand then 1 else 0);
+      Gl.uniform1i ctx (u "u_canopyMidOn") (if mid = None then 0 else 1);
+      Option.iter
+        (fun m ->
+          Render_state.upload_hd_mat ctx (u "u_canopyMidMat")
+            (u "u_canopyMidBias") (u "u_canopyMidQx") (u "u_canopyMidQy") m)
+        mid)
     pids
 
 (* Start fetching the canopies for the rings a load at [lat]/[lon] will have,
    unless they are held or on their way already. *)
 let start_canopy ~lat ~lon =
-  for kind = 0 to 1 do
+  for kind = 0 to canopy_kinds - 1 do
     let block = Hd_dem.block_id canopy_ring_layers.(kind) ~lat ~lon in
     let generation = !context_generation in
     let held =
@@ -3927,7 +3989,7 @@ let start_canopy ~lat ~lon =
         | Some (b, g) -> b = block && g = generation
         | None -> false)
       || (match canopy_raw.(kind) with
-        | Some (b, g, _) -> b = block && g = generation
+        | Some (b, g, _, _) -> b = block && g = generation
         | None -> false)
       || canopy_fetching.(kind) = Some (block, generation)
     in
@@ -3946,7 +4008,13 @@ let start_canopy ~lat ~lon =
               canopy_fetching.(kind) <- None;
             match raw with
             | Some raw ->
-                canopy_raw.(kind) <- Some (block, generation, raw);
+                canopy_raw.(kind) <-
+                  Some
+                    ( block,
+                      generation,
+                      raw,
+                      (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
+                    );
                 !canopy_ready ()
             | None -> ()
           end;
@@ -3954,19 +4022,22 @@ let start_canopy ~lat ~lon =
     end
   done
 
-(* Called on every publish with the near and far canopies' rings now on
-   screen, if any: uploads a fetched canopy for its ring's block, and shows
+(* Called on every publish with the canopies' rings now on screen, if any (for
+   kind 2, its block): uploads a fetched canopy for its ring's block, and shows
    whatever is current. A canopy landing after the publish raises the mesh
    under shadows drawn without it: [on_late] redraws them. *)
 let update_canopy ctx pids ~placeholder ~on_late rings =
-  Array.blit rings 0 canopy_ring 0 2;
+  Array.blit rings 0 canopy_ring 0 canopy_kinds;
   let ready ~late =
     let uploaded = ref false in
-    for kind = 0 to 1 do
+    for kind = 0 to canopy_kinds - 1 do
       match (canopy_ring.(kind), canopy_raw.(kind)) with
-      | Some (b, _), Some (b', g, raw) when b = b' && g = !context_generation ->
+      | Some (b, _), Some (b', g, raw, anchor)
+        when b = b' && g = !context_generation ->
           canopy_texture ctx kind raw;
           canopy_state.(kind) <- Some (b, g);
+          if kind = 2 then
+            canopy_mid_frame := Some (Hd_dem.raw_frame raw, anchor);
           canopy_raw.(kind) <- None;
           force_redraw := true;
           uploaded := true
@@ -3978,11 +4049,11 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
   (canopy_ready := fun () -> ready ~late:true);
   ready ~late:false
 
-(* Bake a fetched tree cover into the atlas's third region: both responses'
-   tiles go up straight from them, side by side in one R8 texture (one unit
-   for the bake), and shaders/tree_cover_prep.frag turns them into density,
-   conifer share and a data flag. *)
-let tree_cover_texture ctx (c : Tree_cover.t) =
+(* Bake a fetched tree cover block of [level] into its region of the atlas:
+   both responses' tiles go up straight from them, side by side in one R8
+   texture (one unit for the bake), and shaders/tree_cover_prep.frag turns
+   them into density, conifer share and a data flag. *)
+let tree_cover_texture ctx level (c : Tree_cover.t) =
   let size = Tree_cover.size and tile = Tree_cover.tile in
   assert (size = canopy_size);
   let atlas = get_canopy_atlas ctx in
@@ -4009,7 +4080,8 @@ let tree_cover_texture ctx (c : Tree_cover.t) =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_input") 15;
   Gl.uniform1i ctx (u "u_size") size;
-  Gl.uniform1i ctx (u "u_offset") (2 * size);
+  let slot = 2 + level in
+  Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
@@ -4020,7 +4092,7 @@ let tree_cover_texture ctx (c : Tree_cover.t) =
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.blend;
   Gl.disable ctx Gl.cull_face';
-  Gl.viewport ctx (2 * size) 0 size size;
+  Gl.viewport ctx (slot mod 3 * size) (slot / 3 * size) size size;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
   if depth then Gl.enable ctx Gl.depth_test;
   if blend then Gl.enable ctx Gl.blend;
@@ -4036,32 +4108,20 @@ let tree_cover_texture ctx (c : Tree_cover.t) =
   Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.active_texture ctx Gl.texture0
 
-(* Tell the terrain program and the tree search where the tree cover is, if
-   the atlas holds the one for the location on screen: from the base grid's
-   normalised coordinate (see radial_common.vert: arcseconds from the anchor
-   are [w (c - 1/2) - 1/2]) for the one, from arcseconds from the anchor for
-   the other. *)
+(* Tell the terrain program (both levels) and the tree search (the finer)
+   where the tree cover is, for each level whose region holds the block for
+   the location on screen: from the base grid's normalised coordinate (see
+   radial_common.vert: arcseconds from the anchor are [w (c - 1/2) - 1/2]) for
+   the one, from arcseconds from the anchor for the other. *)
 let apply_tree_cover ctx ~terrain_pid =
-  let cover =
-    match (!tree_cover_wanted, !tree_cover_state, !tree_cover_frame) with
-    | Some b, Some (b', g, bounds), Some frame
+  let rects level =
+    match
+      (tree_cover_wanted.(level), tree_cover_state.(level), !tree_cover_frame)
+    with
+    | ( Some b,
+        Some (b', g, (west, south, east, north)),
+        Some (anchor_lat, anchor_lon, w) )
       when b = b' && g = !context_generation ->
-        Some (bounds, frame)
-    | _ -> None
-  in
-  let t = get_trees_gl ctx in
-  let set pid on_name rect_name rect =
-    Gl.use_program ctx pid;
-    let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
-    match rect with
-    | Some (a, b, c, d) ->
-        Gl.uniform1i ctx (u on_name) 1;
-        Gl.uniform4f ctx (u rect_name) a b c d
-    | None -> Gl.uniform1i ctx (u on_name) 0
-  in
-  let map, arc =
-    match cover with
-    | Some ((west, south, east, north), (anchor_lat, anchor_lon, w)) ->
         let ex = (east -. west) *. 3600. and ey = (north -. south) *. 3600. in
         let w = float w in
         let x0 = (west *. 3600.) -. float anchor_lon
@@ -4072,62 +4132,85 @@ let apply_tree_cover ctx ~terrain_pid =
               ((-0.5 *. w) -. 0.5 -. x0) /. ex,
               ((-0.5 *. w) -. 0.5 -. y0) /. ey ),
           Some (x0, y0, 1. /. ex, 1. /. ey) )
-    | None -> (None, None)
+    | _ -> (None, None)
   in
-  set terrain_pid "u_treeCoverOn" "u_treeCoverMap" map;
-  set t.find_pid "u_treeCoverOn" "u_treeCoverArc" arc
+  let set pid on_name rect_name rect =
+    let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+    match rect with
+    | Some (a, b, c, d) ->
+        Gl.uniform1i ctx (u on_name) 1;
+        Gl.uniform4f ctx (u rect_name) a b c d
+    | None -> Gl.uniform1i ctx (u on_name) 0
+  in
+  let map0, arc0 = rects 0 and map1, _ = rects 1 in
+  Gl.use_program ctx terrain_pid;
+  set terrain_pid "u_treeCoverOn" "u_treeCoverMap" map0;
+  set terrain_pid "u_treeCoverFarOn" "u_treeCoverFarMap" map1;
+  let t = get_trees_gl ctx in
+  Gl.use_program ctx t.find_pid;
+  set t.find_pid "u_treeCoverOn" "u_treeCoverArc" arc0
 
-(* Start fetching the tree cover for a load at [lat]/[lon], unless it is held
-   or on its way already. *)
+(* Start fetching the tree cover's blocks for a load at [lat]/[lon], unless
+   they are held or on their way already. *)
 let start_tree_cover ~lat ~lon =
-  let block = Tree_cover.block_id ~lat ~lon in
-  let generation = !context_generation in
-  let held =
-    (match !tree_cover_state with
-      | Some (b, g, _) -> b = block && g = generation
-      | None -> false)
-    || (match !tree_cover_raw with
-      | Some (b, g, _) -> b = block && g = generation
-      | None -> false)
-    || !tree_cover_fetching = Some (block, generation)
-  in
-  if not held then begin
-    tree_cover_fetching := Some (block, generation);
-    Lwt.async (fun () ->
-        let* c = Tree_cover.fetch ~lat ~lon () in
-        if !context_generation = generation then begin
-          if !tree_cover_fetching = Some (block, generation) then
-            tree_cover_fetching := None;
-          match c with
-          | Some c ->
-              tree_cover_raw := Some (block, generation, c);
-              !tree_cover_ready ()
-          | None -> ()
-        end;
-        Lwt.return_unit)
-  end
+  for level = 0 to 1 do
+    let block = Tree_cover.block_id ~level ~lat ~lon in
+    let generation = !context_generation in
+    let held =
+      (match tree_cover_state.(level) with
+        | Some (b, g, _) -> b = block && g = generation
+        | None -> false)
+      || (match tree_cover_raw.(level) with
+        | Some (b, g, _) -> b = block && g = generation
+        | None -> false)
+      || tree_cover_fetching.(level) = Some (block, generation)
+    in
+    if not held then begin
+      tree_cover_fetching.(level) <- Some (block, generation);
+      Lwt.async (fun () ->
+          let* c = Tree_cover.fetch ~level ~lat ~lon () in
+          if !context_generation = generation then begin
+            if tree_cover_fetching.(level) = Some (block, generation) then
+              tree_cover_fetching.(level) <- None;
+            match c with
+            | Some c ->
+                tree_cover_raw.(level) <- Some (block, generation, c);
+                !tree_cover_ready ()
+            | None -> ()
+          end;
+          Lwt.return_unit)
+    end
+  done
 
-(* Called on every publish with the tree cover block of the location on
-   screen and its frame (anchor, base grid size): uploads a fetched cover for
-   it, and shows whatever is current. Landing late, it changes the trees'
-   species: [on_late] redraws the shadows, which searches for them again. *)
-let update_tree_cover ctx ~terrain_pid ~on_late ~block ~frame =
-  tree_cover_wanted := Some block;
+(* Called on every publish with the location on screen's tree cover blocks
+   ([lat]/[lon]) and frame (anchor, base grid size): uploads fetched blocks
+   for it, and shows whatever is current. The finer block landing late changes
+   the trees' species: [on_late] redraws the shadows, which searches for them
+   again. *)
+let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
+  for level = 0 to 1 do
+    tree_cover_wanted.(level) <- Some (Tree_cover.block_id ~level ~lat ~lon)
+  done;
   tree_cover_frame := Some frame;
   let ready ~late =
-    let uploaded =
-      match !tree_cover_raw with
-      | Some (b, g, c) when b = block && g = !context_generation ->
-          tree_cover_texture ctx c;
-          tree_cover_state := Some (b, g, (c.west, c.south, c.east, c.north));
-          tree_cover_raw := None;
-          trees_found := None;
-          force_redraw := true;
-          true
-      | _ -> false
-    in
+    let fine = ref false in
+    for level = 0 to 1 do
+      match tree_cover_raw.(level) with
+      | Some (b, g, c)
+        when Some b = tree_cover_wanted.(level) && g = !context_generation ->
+          tree_cover_texture ctx level c;
+          tree_cover_state.(level) <-
+            Some (b, g, (c.west, c.south, c.east, c.north));
+          tree_cover_raw.(level) <- None;
+          if level = 0 then begin
+            trees_found := None;
+            fine := true
+          end;
+          force_redraw := true
+      | _ -> ()
+    done;
     apply_tree_cover ctx ~terrain_pid;
-    if uploaded && late then on_late ()
+    if !fine && late then on_late ()
   in
   (tree_cover_ready := fun () -> ready ~late:true);
   ready ~late:false
@@ -4646,12 +4729,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            ~ao_texture ~detail_map ~shadow_map ~cover_map_texture
            ~palette_texture ~hd_slot_textures
        in
+       tree_cover_frame := Some (anchor_lat, anchor_lon, w);
        update_canopy ctx
          [ terrain_pid; shadow_pid; path_pid ]
          ~placeholder:hd_placeholder ~on_late
-         [| near_ring; ring_of Hd_dem.lidar_5m |];
-       update_tree_cover ctx ~terrain_pid ~on_late
-         ~block:(Tree_cover.block_id ~lat:alat ~lon:alon)
+         [|
+           near_ring;
+           ring_of Hd_dem.lidar_5m;
+           Some (Hd_dem.block_id Hd_dem.canopy_mid ~lat:alat ~lon:alon, -1);
+         |];
+       update_tree_cover ctx ~terrain_pid ~on_late ~lat:alat ~lon:alon
          ~frame:(anchor_lat, anchor_lon, w);
        match near_ring with
        | Some (block, i) ->
