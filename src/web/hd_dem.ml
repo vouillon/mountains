@@ -466,11 +466,14 @@ let raw_samples (r : raw) = r.samples
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its
    region at nodata, which the blend turns back into the base. *)
+exception Outside_coverage
+
 let fetch_one req =
   let open Brr_io.Fetch in
   let* res = to_lwt (url (Jstr.v req.url)) in
   match res with
   | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
+  | Ok resp when Response.status resp = 404 -> Lwt.fail Outside_coverage
   | Ok resp when not (Response.ok resp) ->
       Lwt.fail (Failure (Printf.sprintf "HTTP %d" (Response.status resp)))
   | Ok resp -> (
@@ -488,7 +491,7 @@ let fetch_one req =
 
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
-let fetch layer ~lat ~lon : raw option Lwt.t =
+let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
   let size = layer.size in
   match plan layer ~lat ~lon with
   | None -> Lwt.return None
@@ -531,7 +534,18 @@ let fetch layer ~lat ~lon : raw option Lwt.t =
                   incr arrived
                 end;
                 Lwt.return ())
-              (fun _ -> Lwt.return ()))
+              (fun e ->
+                (* Otherwise a failed tile only shows as a hole in the data.
+                   Not the 404 of a tile outside coverage, which is expected. *)
+                (match e with
+                | Outside_coverage -> ()
+                | e ->
+                    Format.eprintf "High-resolution tile failed: %s (%s)@."
+                      (match e with
+                      | Failure m -> m
+                      | e -> Printexc.to_string e)
+                      req.url);
+                Lwt.return ()))
           reqs
       in
       let publish () =

@@ -3790,7 +3790,10 @@ let start_canopy ~lat ~lon =
   if block <> "" && not held then begin
     canopy_fetching := Some (block, generation);
     Lwt.async (fun () ->
-        let* raw = Hd_dem.fetch Hd_dem.canopy ~lat ~lon in
+        (* Not the rings' 25 s: the canopy holds no publish up, and IGN often
+           takes longer than that to serve a quarter of a block nobody asked
+           for recently -- which then stayed bare for the whole visit. *)
+        let* raw = Hd_dem.fetch ~timeout_s:120. Hd_dem.canopy ~lat ~lon in
         if !context_generation = generation then begin
           if !canopy_fetching = Some (block, generation) then
             canopy_fetching := None;

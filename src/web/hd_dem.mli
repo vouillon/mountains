@@ -56,13 +56,15 @@ val raw_samples :
   raw -> (float, Bigarray.float32_elt, Bigarray.c_layout) Bigarray.Array1.t
 (** The samples, [size] x [size], row 0 northernmost; nodata below -1000. *)
 
-val fetch : layer -> lat:float -> lon:float -> raw option Lwt.t
+val fetch :
+  ?timeout_s:float -> layer -> lat:float -> lon:float -> raw option Lwt.t
 (** Fetch [layer]'s block around [lat]/[lon]. Never fails: [None] (not a single
     tile obtained, whether the requests failed or the deadline expired first)
     means the caller must carry on without this layer. Individual tiles that
     fail -- including the 404 of a tile outside coverage, and those still in
     flight when the deadline expires -- are nodata, which {!blend} turns back
-    into the coarser surface. *)
+    into the coarser surface. The deadline is [timeout_s] seconds, 25 by
+    default. *)
 
 val block_id : layer -> lat:float -> lon:float -> string
 (** Identity of the block [fetch] would ask for at [lat]/[lon]: two locations
