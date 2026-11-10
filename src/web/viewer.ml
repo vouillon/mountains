@@ -2558,8 +2558,58 @@ let current_view_uri () =
     (Brr.Window.location Brr.G.window)
     (Brr.Uri.Params.of_jstr search)
 
+(* [?fps] in the URL: redraw every frame and show the mean frame time over the
+   last 60 drawn frames in a corner, and in the console -- for timing a
+   rendering change on a phone, without a debugger attached. The figure is
+   floored at the display's refresh interval. The parameter survives the
+   view's own URL updates, but stays out of shared links. *)
+let show_fps =
+  lazy
+    (Brr.Uri.Params.mem (Jstr.v "fps")
+       (Brr.Uri.query_params (Brr.Window.location Brr.G.window)))
+
+let frame_time_readout =
+  let el = ref None and n = ref 0 and t0 = ref 0. in
+  fun () ->
+    incr n;
+    if !n = 1 then t0 := now_ms ()
+    else if !n = 61 then begin
+      let msg = Printf.sprintf "%.1f ms/frame" ((now_ms () -. !t0) /. 60.) in
+      let el =
+        match !el with
+        | Some e -> e
+        | None ->
+            let e =
+              Brr.El.div
+                ~at:
+                  [
+                    Brr.At.style
+                      (Jstr.v
+                         "position:fixed;top:calc(4px + \
+                          env(safe-area-inset-top));left:calc(4px + \
+                          env(safe-area-inset-left));z-index:1000;padding:2px \
+                          6px;background:#000a;color:#fff;font:14px monospace");
+                  ]
+                []
+            in
+            Brr.El.append_children (Brr.Document.body Brr.G.document) [ e ];
+            el := Some e;
+            e
+      in
+      Brr.Console.log [ Jstr.v msg ];
+      Brr.El.set_children el [ Brr.El.txt (Jstr.v msg) ];
+      n := 0
+    end
+
 let update_url_params ?(push = false) () =
   let uri = current_view_uri () in
+  let uri =
+    if Lazy.force show_fps then
+      Brr.Uri.with_query_params uri
+        (Brr.Uri.Params.of_jstr
+           (Jstr.append (Brr.Uri.query uri) (Jstr.v "&fps")))
+    else uri
+  in
   let history = Jv.get Jv.global "history" in
   let action = if push then "pushState" else "replaceState" in
   ignore
@@ -2689,14 +2739,16 @@ let event_loop ~generation ctx draw =
     let angle_diff = Quaternion.angle_between orientation prev_orientation in
     let zoom_diff = abs_float (z -. prev_zoom) in
     let should_draw =
-      angle_diff > angle_threshold || zoom_diff > 0.00001 || !force_redraw
+      angle_diff > angle_threshold
+      || zoom_diff > 0.00001 || !force_redraw || Lazy.force show_fps
     in
 
     (* Drawing into a lost context is a sequence of silent no-ops, and the
        timer queries [draw] posts would pile up unanswered. *)
     if should_draw && not !context_lost then (
       force_redraw := false;
-      draw ~orientation ctx);
+      draw ~orientation ctx;
+      if Lazy.force show_fps then frame_time_readout ());
 
     (* URL Update Logic: Check for stability (using current orientation vs previous frame) *)
     (* Note: We use the actual current orientation for stability check, even if we didn't draw *)
