@@ -23,8 +23,9 @@ uniform mediump sampler2D
 // gradients of two patterns A (rg) and B (ba) per texel, in RMS units encoded
 // over +-BUMP_ENC (must match [bump_enc] in viewer.ml).
 uniform mediump sampler2DArray u_bumpGrad;
-// LIDAR HD canopy height over the 1 m ring's block (Hd_dem.canopy): R8, 0.2 m
-// per step, 255 where the service had no data. Read through ring slot
+// LIDAR HD canopy over the 1 m ring's block (Hd_dem.canopy), RGBA8: height
+// (0.2 m per step, 255 where the service had no data), its slope east and
+// north, and a crown tone (see Viewer.canopy_texture). Read through ring slot
 // [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
 // block on screen.
 uniform mediump sampler2D u_canopy;
@@ -387,13 +388,20 @@ vec4 crownSample(float layer, float pick, highp vec2 rc) {
 // to land cover is not a seam, and drops above 40 m: heights like that are
 // mostly cliffs, where surface and ground models disagree (La Reunion reads
 // 200 m), rather than trees. The fetch happens in uniform control flow.
+// The canopy sample [canopyTrees] read (see [Viewer.canopy_texture] for the
+// channels), and how far the real canopy replaces the procedural crowns here:
+// its confidence times its tree share, set by the canopy block in main.
+vec4 g_canopy = vec4(0.0);
+float g_canopyReal = 0.0;
+
 vec3 canopyTrees() {
   if (u_canopySlot < 0)
     return vec3(0.0);
   highp vec2 c = u_canopySlot == 0
                      ? hdReliefCoord0
                      : (u_canopySlot == 1 ? hdReliefCoord1 : hdReliefCoord2);
-  float v = texture(u_canopy, clamp(c, 0.0, 1.0)).r;
+  g_canopy = texture(u_canopy, clamp(c, 0.0, 1.0));
+  float v = g_canopy.r;
   highp vec2 e = min(c, 1.0 - c);
   float edge = smoothstep(0.0, 0.03, min(e.x, e.y));
   if (v > 0.995)
@@ -794,6 +802,7 @@ void main() {
     vec3 ct = canopyTrees();
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
+    g_canopyReal = trust * ct.x;
     if (trust > 0.0) {
       vec4 w = surface.detailWeights;
       float isForest = smoothstep(0.35, 0.6, w.b);
@@ -894,25 +903,39 @@ void main() {
       // recognisably over a wide forest. Crowns cannot be averaged, so each
       // zone and each stand takes one sample, and two or more are read only
       // across the narrow transitions.
-      float pick = smoothstep(
-          0.42, 0.58, valueNoise(v_world_pos.xy / 250.0 + vec2(17.0, 31.0)));
-      highp vec2 rc = vec2(0.921, 0.389); // turned 23 degrees
-      vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
-      if (coniferAmt < 1.0)
-        cs = crownSample(6.0, pick, rc);
-      if (coniferAmt > 0.0)
-        cs = mix(cs, crownSample(7.0, pick, rc), coniferAmt);
-      // Density varies over ~150 m by a non-repeating value noise: crowns
-      // lowered by [thin] and rescaled, so the small and low ones drop out
-      // first, leaving clearings in some stands and a closed canopy in others.
-      // (Driven by the forest's 500 m colour noise, it repeated with that
-      // tile, as large light and dark patches over a big forest.)
-      float thin =
-          0.12 * smoothstep(0.55, 0.15, valueNoise(v_world_pos.xy / 150.0));
-      crownH = max(cs.r - thin, 0.0) / (1.0 - thin);
-      crownGrad = (cs.r > thin ? 1.0 / (1.0 - thin) : 0.0) *
-                  (mat2(rc.x, -rc.y, rc.y, rc.x) *
-                   ((cs.gb - 0.5) * (2.0 * CROWN_GMAX / CROWN_TILE)));
+      if (g_canopyReal < 1.0) {
+        float pick = smoothstep(
+            0.42, 0.58, valueNoise(v_world_pos.xy / 250.0 + vec2(17.0, 31.0)));
+        highp vec2 rc = vec2(0.921, 0.389); // turned 23 degrees
+        vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
+        if (coniferAmt < 1.0)
+          cs = crownSample(6.0, pick, rc);
+        if (coniferAmt > 0.0)
+          cs = mix(cs, crownSample(7.0, pick, rc), coniferAmt);
+        // Density varies over ~150 m by a non-repeating value noise: crowns
+        // lowered by [thin] and rescaled, so the small and low ones drop out
+        // first, leaving clearings in some stands and a closed canopy in
+        // others. (Driven by the forest's 500 m colour noise, it repeated with
+        // that tile, as large light and dark patches over a big forest.)
+        float thin =
+            0.12 * smoothstep(0.55, 0.15, valueNoise(v_world_pos.xy / 150.0));
+        crownH = max(cs.r - thin, 0.0) / (1.0 - thin);
+        crownGrad = (cs.r > thin ? 1.0 / (1.0 - thin) : 0.0) *
+                    (mat2(rc.x, -rc.y, rc.y, rc.x) *
+                     ((cs.gb - 0.5) * (2.0 * CROWN_GMAX / CROWN_TILE)));
+      }
+      // Where the LIDAR canopy has trees, the crowns are the real ones: its
+      // tone (tops lit, flanks and gaps dark) and its own slope, softened to
+      // half -- a 2 m grid only approximates a crown's surface, and at full
+      // slope its facets showed. Divided by CROWN_RELIEF, which the tilt
+      // below applies to both.
+      if (g_canopyReal > 0.0) {
+        crownH = mix(crownH, g_canopy.a, g_canopyReal);
+        crownGrad =
+            mix(crownGrad,
+                (g_canopy.gb * 255.0 - 128.0) / 32.0 * (0.5 / CROWN_RELIEF),
+                g_canopyReal);
+      }
     }
   }
 

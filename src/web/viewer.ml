@@ -396,6 +396,14 @@ let normal_program =
     attributes = [];
   }
 
+let canopy_prep_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader =
+      common_fragment_header ^ [%blob "shaders/canopy_prep.frag"];
+    attributes = [];
+  }
+
 let bump_gen_program =
   {
     vertex_shader = quad_vertex_shader;
@@ -3303,8 +3311,8 @@ let eye_clearance_m = 4.
    nesting order, and the order the slots of a location are listed in. *)
 let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
 
-(* The canopy height (Hd_dem.canopy) over the 1 m ring's block, as an R8
-   texture on unit 15: 0.2 m per step up to 50.8 m, 255 for nodata. It is
+(* The canopy height (Hd_dem.canopy) over the 1 m ring's block, as a texture
+   on unit 15 (see [canopy_texture]). It is
    fetched alongside the rings but never holds a publish up, and is shown
    only while the 1 m ring on screen is the block it was fetched for -- it
    has no frame of its own and is read through that ring's coordinate.
@@ -3325,27 +3333,58 @@ let canopy_raw : (string * int * Hd_dem.raw) option ref = ref None
 let canopy_fetching : (string * int) option ref = ref None
 let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
 
+(* The canopy texture: the raw heights go up as they arrived (an R32F
+   texture, no CPU pass over them -- element access to a Bigarray is slow
+   under wasm_of_ocaml, and a precompute here took ~400 ms on the main
+   thread), and shaders/canopy_prep.frag bakes them into the RGBA8 texture
+   the terrain shader reads: height, slope and crown tone per 2 m sample. *)
 let canopy_texture ctx raw =
   let size = Hd_dem.canopy.size in
   let src = Hd_dem.raw_samples raw in
-  let data = Bigarray.(Array1.create int8_unsigned c_layout (size * size)) in
-  for row = 0 to size - 1 do
-    (* Rows count from the south in the texture, from the north in [src]. *)
-    let s0 = (size - 1 - row) * size and d0 = row * size in
-    for col = 0 to size - 1 do
-      let h = src.{s0 + col} in
-      data.{d0 + col} <-
-        (if h < -1000. then 255
-         else Int.max 0 (Int.min 254 (Float.to_int ((h *. 5.) +. 0.5))))
-    done
-  done;
-  let tid = Gl.create_texture ctx in
+  let heights = Gl.create_texture ctx in
   Gl.active_texture ctx Gl.texture15;
-  Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r8 size size 0 Gl.red Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 data))
+  Gl.bind_texture ctx Gl.texture_2d (Some heights);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f size size 0 Gl.red Gl.float
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 src))
     0;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 size size;
   Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
+  (* Read [heights] on unit 15 while baking into [tid]. *)
+  Gl.bind_texture ctx Gl.texture_2d (Some heights);
+  let pid = Web_utils.create_program ctx canopy_prep_program in
+  Gl.use_program ctx pid;
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  Gl.uniform1i ctx (u "u_heights") 15;
+  Gl.uniform1i ctx (u "u_size") size;
+  Gl.uniform1f ctx (u "u_step") 2.;
+  let fbo = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    tid 0;
+  (* This may run between frames, whatever state the frame loop left: save
+     and restore what the full-screen pass must not have on. *)
+  let depth = Gl.is_enabled ctx Gl.depth_test
+  and blend = Gl.is_enabled ctx Gl.blend
+  and cull = Gl.is_enabled ctx Gl.cull_face' in
+  Gl.disable ctx Gl.depth_test;
+  Gl.disable ctx Gl.blend;
+  Gl.disable ctx Gl.cull_face';
+  Gl.viewport ctx 0 0 size size;
+  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  if depth then Gl.enable ctx Gl.depth_test;
+  if blend then Gl.enable ctx Gl.blend;
+  if cull then Gl.enable ctx Gl.cull_face';
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.viewport ctx 0 0
+    (Gl.drawing_buffer_width ctx)
+    (Gl.drawing_buffer_height ctx);
+  Gl.delete_framebuffer ctx fbo;
+  Gl.delete_program ctx pid;
+  Gl.delete_texture ctx heights;
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
   Gl.active_texture ctx Gl.texture0;
   tid
 

@@ -35,6 +35,18 @@
   (diff bump_gen.frag bump_gen.frag.fmt)))
 
 (rule
+ (target canopy_prep.frag.fmt)
+ (deps canopy_prep.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff canopy_prep.frag canopy_prep.frag.fmt)))
+
+(rule
  (target clc_raster.frag.fmt)
  (deps clc_raster.frag)
  (action
