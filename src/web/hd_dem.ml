@@ -212,6 +212,21 @@ let lidar_2m =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:1.0 ~split:2 ~size:2048 ~fade_metres:300.
 
+(* The spacing actually requested for a projected ring. Over La Reunion the
+   service resamples from overviews at powers of two (1, 2, 4 m...), and at a
+   ratio of 1.25 to one of them -- 5 m from 4, 2.5 from 2 -- its output beats
+   into a grid with a 4-pixel period: 20 m at 5 m, a waffle of lumps over every
+   slope. IGN's 1 m data, and a box mean of it to 5 m, carry none of it; 4 m
+   and 2 m output carry none either (measured 2026-11-10 near -20.993, 55.390,
+   second differences correlated at lag 4: 0.18-0.25 at 5 m, 0.01 at 4 m).
+   Lambert-93 at 5 m is clean, so only RGR92 / UTM 40S rounds down to a power
+   of two -- 4 m for the middle ring, which then spans 4096 m instead of 5120,
+   still reaching 1536 m in every direction. *)
+let served_metres crs metres =
+  if Projection.epsg crs = "EPSG:2975" then
+    Float.pow 2. (Float.floor (Float.log2 metres +. 1e-9))
+  else metres
+
 (* Ceiling on the whole set of tile requests. The location cannot be published
    before this resolves, so it is also the worst-case load-time penalty;
    expiring is not an error, the block is published with whatever has arrived by
@@ -314,6 +329,7 @@ let plan layer ~lat ~lon =
       match Projection.of_location ~lat ~lon with
       | None -> None
       | Some crs ->
+          let metres = served_metres crs metres in
           let alat = Web_utils.arcsec_floor lat
           and alon = Web_utils.arcsec_floor lon in
           let anchor_lat = float alat /. 3600.
