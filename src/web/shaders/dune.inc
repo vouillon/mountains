@@ -23,6 +23,18 @@
   (diff ao_blur.frag ao_blur.frag.fmt)))
 
 (rule
+ (target bump_gen.frag.fmt)
+ (deps bump_gen.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff bump_gen.frag bump_gen.frag.fmt)))
+
+(rule
  (target clc_raster.frag.fmt)
  (deps clc_raster.frag)
  (action

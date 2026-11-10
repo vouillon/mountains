@@ -70,6 +70,7 @@ type terrain_uniforms = {
   hd_step : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
+  u_bumpGrad : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;

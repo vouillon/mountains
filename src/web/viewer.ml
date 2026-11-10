@@ -396,6 +396,13 @@ let normal_program =
     attributes = [];
   }
 
+let bump_gen_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader = common_fragment_header ^ [%blob "shaders/bump_gen.frag"];
+    attributes = [];
+  }
+
 (* Graphics Resources & Setup *)
 
 module Gl = Brr_canvas.Gl
@@ -956,11 +963,78 @@ let set_drawing_buffer_color_space canvas =
     "drawingBufferColorSpace"
     (Jv.of_jstr (Jstr.v "display-p3"))
 
+(* The terrain bump's gradient patterns (shaders/bump_gen.frag): 3 scales x
+   (horizontal, vertical projection) layers of 512^2 RGBA8, each texel the
+   gradients of two tileable patterns. Baked on the GPU at startup -- a few
+   milliseconds, nothing to download -- with the mip chain box-filtered from
+   it, and bound to texture unit 14 for the whole session (nothing else uses
+   that unit); a context restore bakes them again through [make_gpu_state].
+
+   [bump_norm] brings each pattern's gradient RMS at mip 0 to one (measured on
+   the baked chain; the terrain shader's amplitudes are in those units), and
+   [bump_enc] is the encoding range in RMS units, matching [BUMP_ENC] in
+   terrain.frag. *)
+let bump_size = 512
+let bump_layers = 6
+let bump_enc = 4.0
+
+let bump_norm =
+  [|
+    (0.02737, 0.0177);
+    (0.03413, 0.02095);
+    (0.04593, 0.06336);
+    (0.05813, 0.06336);
+    (0.04524, 0.0623);
+    (0.05731, 0.0623);
+  |]
+
+let make_bump_gradients ctx =
+  let levels = 1 + truncate (Float.log2 (float bump_size)) in
+  let tex = Gl.create_texture ctx in
+  Gl.active_texture ctx Gl.texture14;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some tex);
+  Gl.tex_storage3d ctx Gl.texture_2d_array levels Gl.rgba8 bump_size bump_size
+    bump_layers;
+  let pid = Web_utils.create_program ctx bump_gen_program in
+  Gl.use_program ctx pid;
+  let fbo = Gl.create_framebuffer ctx in
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+  Gl.viewport ctx 0 0 bump_size bump_size;
+  Gl.disable ctx Gl.depth_test;
+  Gl.disable ctx Gl.blend;
+  Gl.disable ctx Gl.cull_face';
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  let u_layer = u "u_layer" and u_norm = u "u_norm" and u_enc = u "u_enc" in
+  Gl.uniform1f ctx u_enc bump_enc;
+  for layer = 0 to bump_layers - 1 do
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0 tex 0
+      layer;
+    Gl.uniform1i ctx u_layer layer;
+    let na, nb = bump_norm.(layer) in
+    Gl.uniform2f ctx u_norm na nb;
+    Gl.draw_arrays ctx Gl.triangle_strip 0 4
+  done;
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.delete_framebuffer ctx fbo;
+  Gl.delete_program ctx pid;
+  Gl.generate_mipmap ctx Gl.texture_2d_array;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter
+    Gl.linear_mipmap_linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_mag_filter Gl.linear;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_s Gl.repeat;
+  Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_wrap_t Gl.repeat;
+  (* Same anisotropy as the detail map, for the same reason. *)
+  if !max_anisotropy > 1.0 then
+    Gl.tex_parameterf ctx Gl.texture_2d_array 0x84FE
+      (Float.min 4.0 !max_anisotropy);
+  Gl.active_texture ctx Gl.texture0
+
 (* The extensions are context state too, so they are re-fetched here rather
    than once at startup. *)
 let make_gpu_state ctx =
   init_anisotropic_filtering ctx;
   let detail_map = make_detail_map ctx in
+  make_bump_gradients ctx;
   let graphics = init_graphics ctx in
   let palette_texture = make_palette_texture ctx in
   { detail_map; graphics; palette_texture }

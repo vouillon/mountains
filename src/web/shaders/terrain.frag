@@ -19,6 +19,17 @@ uniform mediump float hd_step[HD_SLOTS];
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
+// Baked bump gradients (bump_gen.frag): layer 2 * scale + side, the
+// gradients of two patterns A (rg) and B (ba) per texel, in RMS units encoded
+// over +-BUMP_ENC (must match [bump_enc] in viewer.ml).
+uniform mediump sampler2DArray u_bumpGrad;
+const float BUMP_ENC = 4.0;
+// The mid and fine tiles (70.7 m, 10.24 m) are deliberately incommensurate
+// with the macro one (500 m): at 1/7 and 1/50 of it every layer realigned
+// every 500 m and the whole bump repeated on that grid. (The top plane also
+// turns by 30 and 63 degrees at these scales, see [bumpGrad].)
+const float BUMP_SCALE_MID = 0.0141421;
+const float BUMP_SCALE_FINE = 0.0976563;
 uniform highp sampler2DArrayShadow shadow_map; // Hardware shadow comparison
 
 // CLC Material System Uniforms
@@ -183,9 +194,9 @@ void applySlopeModification(inout Surface s, float slope) {
 }
 
 // Triplanar sample of the packed RGBA detail map, kept per-plane: the raw
-// samples, the orientation blend and the side-projection fades survive so
-// that perturbNormal can reuse the fetches as finite-difference centers.
-// Everything else consumes the blend via [triplanarCombine].
+// samples, the orientation blend and the side-projection fades survive, the
+// blend and fades serving the bump ([bumpGrad]) at every scale. The samples
+// are consumed via [triplanarCombine].
 struct Triplanar {
   vec4 d_xy, d_xz, d_yz; // raw plane samples (0.5 where a plane is faded out)
   vec3 blend;
@@ -261,60 +272,94 @@ mediump float ringFade(bool valid, highp vec2 c) {
   return smoothstep(0.0, 0.02, d);
 }
 
-float computeHeight(vec4 noise, vec4 weights) {
-  const vec4 heightWeight =
-      vec4(3. /* rock */, 0.3 /* grass */, 5. /* forest */, 3. /* ice */);
-  return dot((noise - 0.5) * heightWeight, weights);
+// Per scale (macro, mid, fine), each material's amplitude of pattern A and of
+// pattern B, materials in (rock, grass, forest, ice) order. A is ridged noise
+// -- sharp crests over rounded hollows -- stretched down the fall line on the
+// side planes: rock takes it as is. Negated it is the opposite, rounded domes
+// parted by sharp creases: a canopy for forest, a groove network for ice
+// (crevasses) at the macro and mid scales. B is smooth noise -- grass, and ice
+// at the fine scale -- except at the macro scale, where it is the rock's long
+// structure, a network of cracks, ledges and couloirs from 125 m to 31 m, and
+// grass takes nothing: distant meadows read best flat. Calibrated so each
+// land-cover class keeps the texture strength the photo-texture bump gave it:
+// the gradient energy over the band each scale covers (total RMS would count
+// long tilts, which shade as blotches rather than texture), except the
+// rock's macro A, at 0.6 of that (distant rock read too dark and pitted), and
+// the forest's, at 0.4 (at 1, distant forest read as a 30 m maze).
+const vec4 BUMP_AMP_A[3] =
+    vec4[3](vec4(174.2, 0.0, -103.9, -114.8), vec4(290.5, 0.0, -259.7, -116.1),
+            vec4(290.5, 0.0, -259.7, 0.0));
+const vec4 BUMP_AMP_B[3] =
+    vec4[3](vec4(217.9, 0.0, 0.0, 0.0), vec4(0.0, 44.2, 0.0, 0.0),
+            vec4(0.0, 44.2, 0.0, 117.8));
+
+// The share of a bump band [lmin, lmax] (wavelengths, m) that the relief data
+// cannot hold, counted in octaves: data with post spacing [step] resolves
+// wavelengths down to about three posts, everything shorter is the bump's to
+// draw.
+float bandShare(float lmin, float lmax, float step) {
+  return clamp(log2(3.0 * step / lmin) / log2(lmax / lmin), 0.0, 1.0);
 }
 
-// Forward-difference gradient of the detail height in one projection plane,
-// around an already-fetched (and already height-converted) center sample:
-// continuous and per-pixel where dFdx/dFdy of a sample is constant across
-// each 2x2 quad (visibly blocky up close). Holding [weights] fixed across
-// the taps also keeps material-boundary weight gradients from reading as
-// bumps. [eps] is in world meters; the constant offset leaves the
-// implicit-LOD derivatives unchanged, so the taps hit the center's mip.
-vec2 planeHeightGrad(highp vec2 pos, float scale, vec4 weights, float h0,
-                     highp float eps) {
-  float hu = computeHeight(
-      texture(u_detailMap, (pos + vec2(eps, 0.)) * scale, 1.), weights);
-  float hv = computeHeight(
-      texture(u_detailMap, (pos + vec2(0., eps)) * scale, 1.), weights);
-  return vec2(hu - h0, hv - h0) / eps;
+// 1 while a band whose longest wavelength is [lmax] still has content at a
+// pixel footprint [fp] (both in m), 0 once it is filtered away.
+float lodFade(float lmax, highp float fp) {
+  return 1.0 - smoothstep(lmax / 8.0, lmax / 3.0, fp);
 }
 
-// Triplanar world-space gradient of the detail height at [scale]: the
-// per-plane forward differences, lifted onto each projection plane's axes
-// and combined with [t]'s orientation blend and fades held fixed. [t]'s raw
-// samples are the finite-difference centers -- for the macro scale they are
-// already paid for by the material blend; the mid/fine scales fetch their
-// own. The XY weight is the side planes' complement rather than blend.z, so
-// under [triplanarSideGate] the gradient collapses to the plain XY gradient
-// (weight one, the pre-triplanar behavior) instead of a blend.z-weakened
-// one. Sub-gate terrain: 3 taps per scale, what the XY-only version cost; a
-// wall opens two planes (6 taps; three only inside the gate's own ramp)
-// within the same distance gates, which used to skip walls entirely.
-highp vec3 triplanarHeightGrad(Triplanar t, highp vec3 pos, float scale,
-                               vec4 weights, highp float eps) {
+// World-space gradient of one scale's bump: one fetch per open projection
+// plane, the plane blend and fades being [t]'s (they depend on the normal
+// only, so every scale shares them). [amp] is the amplitude of A and B.
+highp vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
+                    vec2 rot, float mix2) {
   float w_y = t.blend.y * t.fade_y;
   float w_x = t.blend.x * t.fade_x;
+  float top = float(2 * s);
+  float side = top + 1.0;
   highp vec3 g = vec3(0.);
-  // Skipped with its fetch when [sampleTriplanar] dropped the XY plane.
-  if (t.blend.z > 0.0)
-    g.xy = (1.0 - w_x - w_y) * planeHeightGrad(pos.xy, scale, weights,
-                                               computeHeight(t.d_xy, weights),
-                                               eps);
-  if (w_y > 0.0)
-    g.xz += w_y * planeHeightGrad(pos.xz, scale, weights,
-                                  computeHeight(t.d_xz, weights), eps);
-  if (w_x > 0.0)
-    g.yz += w_x * planeHeightGrad(pos.yz, scale, weights,
-                                  computeHeight(t.d_yz, weights), eps);
-  return g;
+  // The top plane turns by a different angle per scale (rot = cos, sin), so
+  // the scales do not share axes; the gradient is turned back below.
+  highp vec2 rxy = mat2(rot.x, rot.y, -rot.y, rot.x) * pos.xy;
+  if (t.blend.z > 0.0) {
+    highp vec3 c = vec3(rxy * scale, top);
+    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
+    d *= 2.0 * BUMP_ENC;
+    highp vec2 gt =
+        mat2(rot.x, -rot.y, rot.y, rot.x) * (amp.x * d.xy + amp.y * d.zw);
+    // [mix2] > 0: blend in a second copy of the layer, turned 63 degrees and
+    // offset half a tile, which breaks the tile's repetition where nothing
+    // else does (flat forest). The blend keeps the gradient variance, so the
+    // mixing zones do not wash out.
+    if (mix2 > 0.0) {
+      const vec2 rot2 = vec2(0.454, 0.891);
+      highp vec2 r2 = mat2(rot2.x, rot2.y, -rot2.y, rot2.x) * pos.xy;
+      vec4 d2 = texture(u_bumpGrad, vec3(r2 * scale + 0.5, top), 1.) - 0.5;
+      d2 *= 2.0 * BUMP_ENC;
+      highp vec2 gt2 = mat2(rot2.x, -rot2.y, rot2.y, rot2.x) *
+                       (amp.x * d2.xy + amp.y * d2.zw);
+      gt = (gt * (1.0 - mix2) + gt2 * mix2) *
+           inversesqrt((1.0 - mix2) * (1.0 - mix2) + mix2 * mix2);
+    }
+    g.xy = (1.0 - w_x - w_y) * gt;
+  }
+  if (w_y > 0.0) {
+    highp vec3 c = vec3(pos.xz * scale, side);
+    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
+    d *= 2.0 * BUMP_ENC;
+    g.xz += w_y * (amp.x * d.xy + amp.y * d.zw);
+  }
+  if (w_x > 0.0) {
+    highp vec3 c = vec3(pos.yz * scale, side);
+    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
+    d *= 2.0 * BUMP_ENC;
+    g.yz += w_x * (amp.x * d.xy + amp.y * d.zw);
+  }
+  return g * scale;
 }
 
-// Procedural normal perturbation based on detail noise. [tri] is the macro
-// material-blend sample from main, reused as finite-difference centers.
+// Procedural normal perturbation: the baked bump gradients (see [bumpGrad])
+// at three scales. [tri] is the macro material-blend sample from main; its
+// plane blend and fades serve every scale.
 vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
                    vec4 detailWeights, float dataStep) {
   // Determine roughness
@@ -330,21 +375,10 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
 
   float bumpStrength = 4.0 * material_roughness;
 
-  // Distance fades and masks for the three noise scales (skipping fetches
-  // where a scale contributes nothing)
-  float fade_fine = 1.0 - smoothstep(1000., 2000., v_dist); // 10m noise
-  float fade_mid = 1.0 - smoothstep(4000., 8000., v_dist);  // 70m noise
-  float mask_macro = smoothstep(175., 280., v_dist);        // 500m noise
+  // Near-field masks: the macro scale only beyond ~200 m, the mid scale
+  // beyond ~30 m.
+  float mask_macro = smoothstep(175., 280., v_dist); // 500m noise
   float mask_mid = smoothstep(25., 40., v_dist);
-
-  // The fine scale bows out on the steepest faces: they are the most
-  // expensive fragments (two planes at every scale once past
-  // [triplanarSideGate]), and the 10 m noise contributes least to how a wall
-  // reads -- its character is macro and mid structure. Starts where the side
-  // gate ends, so from where the gate opens (50 degrees) until it is gone (73)
-  // the fine bump is triplanar like the others: it reads better there than
-  // an XY-only one.
-  fade_fine *= 1.0 - smoothstep(0.55, 0.7, 1.0 - geomNormal.z);
 
   // Compute projection basis once (before the gated fetches: no dFdx inside
   // non-uniform control flow)
@@ -356,51 +390,75 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   float signDet = (det > 0.0) ? 1.0 : -1.0;
   highp float invDet = signDet / (abs(det) + 1e-12);
 
-  // Finite-difference step: the 3D pixel footprint, so the gradients have
-  // the same frequency response as the dFdx they replace, floored per scale
-  // at one mip-0 texel (gen_textures.sh bakes 1024x1024) so 8-bit
-  // quantization noise is not amplified by a tiny divisor.
-  highp float fp3 = max(length(dPdx), length(dPdy));
+  // Each band bows out once the pixel footprint passes its longest
+  // wavelength: past that its mips hold only box-filter residue, which drew
+  // metre-sized blocks, and its fetches are wasted. This follows the zoom
+  // only as far as filtering itself does. The footprint is the one the
+  // anisotropic (4x) filter selects a mip for.
+  highp float fpL = max(0.25 * max(length(dPdx), length(dPdy)),
+                        min(length(dPdx), length(dPdy)));
+  // The fine scale also bows out on the steepest faces: they are the most
+  // expensive fragments (two planes at every scale once past
+  // [triplanarSideGate]), and the 10 m noise contributes least to how a wall
+  // reads -- its character is macro and mid structure. Starts where the side
+  // gate ends, so from where the gate opens (50 degrees) until it is gone (73)
+  // the fine bump is triplanar like the others: it reads better there than
+  // an XY-only one.
+  float fade_fine =
+      (1.0 - smoothstep(0.55, 0.7, 1.0 - geomNormal.z)) * lodFade(1.25, fpL);
+  float fade_mid = lodFade(9.0, fpL);
 
-  // What a derivative bump paints at a pixel has the wavelength of the
-  // pixel's own footprint, so whether it is detail the relief data cannot
-  // hold (keep it) or a duplicate of the band the data owns (it would bury
-  // the real thing) is a per-pixel ratio: data samples per pixel, along the
-  // *better-resolved* screen axis -- at grazing view the long axis stretches
-  // over many samples while the transverse one is what actually shows
-  // detail. The pitch is per metre of horizontal grid, so it stretches by
-  // 1/n_z on a steep face (multiplied through to keep every term small in
-  // mediump). Below a quarter-sample per pixel the bump is untouched; from
-  // one sample per pixel on it keeps a tenth, enough texture to read as
-  // material rather than relief.
-  highp float fpMin = min(length(dPdx), length(dPdy));
-  bumpStrength *=
-      1.0 -
-      0.9 * smoothstep(0.25, 1.0, fpMin * max(geomNormal.z, 0.125) / dataStep);
+  // The land-cover classes blend their detail weights (a meadow is 0.1
+  // rock, 0.85 grass, 0.05 forest), which is right for colour but would put
+  // rock fractures and tree crowns on every meadow: the bump takes the
+  // weights cubed, so the dominant material owns it and only a genuinely
+  // mixed class (or the rock that steep slopes add) blends.
+  vec4 bw = detailWeights * detailWeights * detailWeights;
+  bw /= max(dot(bw, vec4(1.0)), 1e-6);
 
-  // All three scales take a triplanar (past the gate, biplanar) world-space
-  // gradient, gated by their distance fades: steep faces get texture in
-  // proper proportion at every scale (an XY-only gradient smears down the
-  // fall line there, and a slope fade instead of it stripped cliffs down to
-  // the bare relief normals -- both tried and rejected). The macro centers
-  // are [tri]'s, already paid for by the material blend; mid and fine fetch
-  // their own. Below [triplanarSideGate] all of it collapses to the XY plane:
-  // 3 taps per scale, what the XY-only version cost.
-  float sideGate = triplanarSideGate(geomNormal);
+  // Each band is weighed by the share of its octaves the relief data cannot
+  // hold (see [bandShare]), so the texture does not bury the relief: in the
+  // 2.4 m rings the 125-31 m grooves are off and the 31-4 m band keeps under
+  // a third, on the 30 m base nearly all of it stays. A function of where
+  // the pixel is, not of its size -- the footprint law this replaces (data
+  // samples per pixel) made the texture change with the zoom. The base's
+  // sentinel step stands for its real 30 m here, and as the step is per
+  // metre of horizontal grid, along a steep face the posts sit 1/n_z further
+  // apart and the data holds less.
+  float ds = min(dataStep, 30.0) / max(geomNormal.z, 0.25);
+  vec4 band = vec4(bandShare(31.0, 125.0, ds), bandShare(4.0, 31.0, ds),
+                   bandShare(0.55, 9.0, ds), bandShare(0.08, 1.25, ds));
+
+  // One fetch per open projection plane per scale (past [triplanarSideGate]
+  // two planes, below it the XY plane alone).
   highp vec3 grad1 = vec3(0.);
-  if (mask_macro > 0.0)
-    grad1 = triplanarHeightGrad(tri, v_world_pos, 0.002, detailWeights,
-                                max(fp3, 1. / (0.002 * 1024.)));
   highp vec3 grad2 = vec3(0.);
-  if (fade_mid > 0.0)
-    grad2 = triplanarHeightGrad(
-        sampleTriplanar(v_world_pos, geomNormal, 0.014, sideGate), v_world_pos,
-        0.014, detailWeights, max(fp3, 1. / (0.014 * 1024.)));
   highp vec3 grad3 = vec3(0.);
+  if (mask_macro > 0.0) {
+    vec2 amp = vec2(dot(bw, BUMP_AMP_A[0]), dot(bw, BUMP_AMP_B[0])) * band.yx *
+               vec2(lodFade(31.0, fpL), lodFade(125.0, fpL));
+    // Forest: two copies of the layer, alternating over zones 700 m to 1.1 km
+    // across (a mask of incommensurate sinusoids): flat forest showed the
+    // 500 m tile repeating, with nothing in the relief to break it up.
+    float mix2 = 0.0;
+    if (bw.b > 0.05) {
+      highp vec2 q = v_world_pos.xy;
+      highp float wn = sin(q.x * 0.0071 + 0.4) * sin(q.y * 0.0089 + 2.0) +
+                       0.5 * sin((0.8 * q.x + 0.6 * q.y) * 0.0057 + 1.0);
+      mix2 = smoothstep(-0.35, 0.35, float(wn)) * smoothstep(0.05, 0.3, bw.b);
+    }
+    grad1 = bumpGrad(tri, v_world_pos, 0.002, 0, amp, vec2(1.0, 0.0), mix2);
+  }
+  if (fade_mid > 0.0)
+    grad2 =
+        bumpGrad(tri, v_world_pos, BUMP_SCALE_MID, 1,
+                 vec2(dot(bw, BUMP_AMP_A[1]), dot(bw, BUMP_AMP_B[1])) * band.z,
+                 vec2(0.866, 0.5), 0.0);
   if (fade_fine > 0.0)
-    grad3 = triplanarHeightGrad(
-        sampleTriplanar(v_world_pos, geomNormal, 0.1, sideGate), v_world_pos,
-        0.1, detailWeights, max(fp3, 1. / (0.1 * 1024.)));
+    grad3 =
+        bumpGrad(tri, v_world_pos, BUMP_SCALE_FINE, 2,
+                 vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B[2])) * band.w,
+                 vec2(0.454, 0.891), 0.0);
 
   // Per-scale: scalar height derivatives along the screen axes via the chain
   // rule, yielding the same screen-space quantity dFdx used to measure --

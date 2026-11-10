@@ -99,6 +99,7 @@ type terrain_uniforms = {
   hd_step : Gl.uniform_location array;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
+  u_bumpGrad : Gl.uniform_location;
   (* Lighting *)
   u_lightDir : Gl.uniform_location;
   (* CLC *)
@@ -273,6 +274,7 @@ let init_terrain_uniforms ctx pid =
     hd_step = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_step[%d]" i));
     ao = u "ao";
     u_detailMap = u "u_detailMap";
+    u_bumpGrad = u "u_bumpGrad";
     u_lightDir = u "u_lightDir";
     u_coverMap = u "u_coverMap";
     u_paletteTex = u "u_paletteTex";
@@ -424,7 +426,9 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.hd_relief.(1) 10;
   Gl.uniform1i ctx u.hd_relief_normal.(1) 11;
   Gl.uniform1i ctx u.hd_relief.(2) 12;
-  Gl.uniform1i ctx u.hd_relief_normal.(2) 13
+  Gl.uniform1i ctx u.hd_relief_normal.(2) 13;
+  (* Bound once for the session by [Viewer.make_bump_gradients]. *)
+  Gl.uniform1i ctx u.u_bumpGrad 14
 
 (** Upload static texture unit bindings for shadow shader. *)
 let upload_texture_units_shadow ctx (u : shadow_uniforms) =
