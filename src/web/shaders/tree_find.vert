@@ -32,6 +32,11 @@ uniform highp float u_radius;      // metres
 uniform mediump usampler2DArray u_coverMap;
 uniform mediump sampler2D u_paletteTex;
 uniform highp float u_invW; // 1 / the base grid's size
+// The EEA tree cover in the atlas's third region (terrain.frag's
+// [u_treeCoverMap]), here from arcseconds from the anchor: its leaf type,
+// where it has one, decides the species.
+uniform bool u_treeCoverOn;
+uniform highp vec4 u_treeCoverArc; // origin, then 1 / extent
 
 out vec4 f_pos;   // metres from the eye east and north, ground, height
 out vec4 f_shape; // crown radius, 1 for a conifer, two draws in [0, 1]
@@ -108,7 +113,7 @@ void main() {
   ivec2 cell =
       ivec2(gl_VertexID % u_grid, gl_VertexID / u_grid) - ivec2(u_grid / 2);
   ivec2 t0 = ivec2(floor(u_eyeTexel * 0.5)) * 2 + cell * 2;
-  // The near canopy is the left half of the atlas (Viewer.canopy_atlas).
+  // The near canopy is the first third of the atlas (Viewer.canopy_atlas).
   int csize = textureSize(u_canopy, 0).y;
   if (any(lessThan(t0, ivec2(2))) || any(greaterThan(t0, ivec2(csize - 4))))
     return;
@@ -169,6 +174,18 @@ void main() {
   bool conifer = share >= 0.98 ||
                  (share > 0.02 &&
                   share > valueNoise(arc * u_delta / 60.0 + vec2(53.0, 7.0)));
+
+  if (u_treeCoverOn) {
+    highp vec2 uv = (arc - u_treeCoverArc.xy) * u_treeCoverArc.zw;
+    if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) {
+      vec4 tc = texelFetch(
+          u_canopy,
+          ivec2(2 * csize + int(uv.x * float(csize)), int(uv.y * float(csize))),
+          0);
+      if (tc.b > 0.5 && abs(tc.g - 0.5) > 0.25)
+        conifer = tc.g > 0.5;
+    }
+  }
 
   highp vec2 base = arc * u_delta - u_centerOffset;
   highp float ground = groundAt(idx / float(textureSize(u_ground, 0).x));

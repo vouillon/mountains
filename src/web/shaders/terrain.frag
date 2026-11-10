@@ -29,13 +29,19 @@ uniform mediump sampler2DArray u_bumpGrad;
 // [u_canopySlot]'s normalised coordinate; -1 when there is no canopy for the
 // block on screen. The far canopy (Hd_dem.canopy_far, 5 m over the 5 m
 // ring's block) likewise through [u_canopyFarSlot]; both share [u_canopy]
-// (Viewer.canopy_atlas), the near one in its left half. [u_treesStand]: whether
-// tree.vert stands trees over the near canopy.
+// (Viewer.canopy_atlas), the near one in its first third. [u_treesStand]:
+// whether tree.vert stands trees over the near canopy.
 // Declared in radial_common.vert too, with the same precisions.
 uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
 uniform mediump int u_canopyFarSlot;
 uniform bool u_treesStand;
+// The EEA tree cover (Tree_cover, ~20 m over ~20 km), the atlas's third
+// region (see tree_cover_prep.frag): R density, G conifer share, B data. Read
+// at [reliefCoord * u_treeCoverMap.xy + u_treeCoverMap.zw], if
+// [u_treeCoverOn].
+uniform bool u_treeCoverOn;
+uniform highp vec4 u_treeCoverMap;
 const float BUMP_ENC = 4.0;
 // Forest crowns, layers 6-7 of u_bumpGrad (bump_gen.frag's crown fields): tile
 // size (big crowns up to ~9 m across, small ones 3-5 m), gradient encoding
@@ -414,10 +420,13 @@ uniform highp float grid_scale;
 
 // As in radial_common.vert.
 highp vec2 canopyNearUV(highp vec2 c) {
-  return vec2(0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+  return vec2(clamp(c.x, 0.0, 1.0) / 3.0, clamp(c.y, 0.0, 1.0));
 }
 highp vec2 canopyFarUV(highp vec2 c) {
-  return vec2(0.5 + 0.5 * clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0));
+  return vec2((1.0 + clamp(c.x, 0.0, 1.0)) / 3.0, clamp(c.y, 0.0, 1.0));
+}
+highp vec2 canopyCoverUV(highp vec2 c) {
+  return vec2((2.0 + clamp(c.x, 0.0, 1.0)) / 3.0, clamp(c.y, 0.0, 1.0));
 }
 float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
@@ -882,6 +891,23 @@ void main() {
   {
     vec3 ct = canopyTrees();
     canopyGeometry();
+    // Beyond the canopies, the EEA tree cover: forest where its density is
+    // over ~30-60%. Its leaf type (10 m) says conifer or broadleaf wherever it
+    // has trees, inside the canopies too: finer than the land cover's classes,
+    // and what tree_find.vert picks the trees' species by.
+    if (u_treeCoverOn) {
+      highp vec2 cu = reliefCoord * u_treeCoverMap.xy + u_treeCoverMap.zw;
+      vec4 tc = texture(u_canopy, canopyCoverUV(cu));
+      float e = canopyEdge(cu) * tc.b;
+      if (e > 0.0) {
+        float density = tc.r / tc.b;
+        float total = ct.y + (1.0 - ct.y) * e;
+        ct.x = mix(smoothstep(0.3, 0.6, density), ct.x, ct.y / total);
+        ct.y = total;
+        surface.conifer = mix(surface.conifer, clamp(tc.g, 0.0, 1.0),
+                              e * smoothstep(0.1, 0.4, density));
+      }
+    }
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
     // Where tree.vert stands the trees, this is the ground under them: no

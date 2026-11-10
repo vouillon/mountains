@@ -299,6 +299,18 @@
   (diff tree.vert tree.vert.fmt)))
 
 (rule
+ (target tree_cover_prep.frag.fmt)
+ (deps tree_cover_prep.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff tree_cover_prep.frag tree_cover_prep.frag.fmt)))
+
+(rule
  (target tree_find.vert.fmt)
  (deps tree_find.vert)
  (action
