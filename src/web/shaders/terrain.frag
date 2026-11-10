@@ -955,6 +955,10 @@ void main() {
         coverTrust += e;
       }
     }
+    // No forest on glaciers -- the canopy models read seracs and crevasses
+    // as a metre or two of trees -- nor above the treeline.
+    ct.x *= (1.0 - surface.detailWeights.a) *
+            (1.0 - smoothstep(2500.0, 2800.0, v_world_pos.z + center_height));
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
     // Where tree.vert stands the trees, this is the ground under them: no

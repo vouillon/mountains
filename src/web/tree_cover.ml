@@ -12,7 +12,14 @@
    resamples from its own grids (Web Mercator, ETRS89-LAEA). It answers raw
    values only as TIFF -- PNG comes out through its colour rendering -- here
    8-bit, uncompressed, in tiles, which [parse] locates; the renderer uploads
-   them straight from the response. *)
+   them straight from the response.
+
+   The service makes its samples square in degrees: asked for a size of
+   another shape than the box, it widens the box to fit (at 46 degrees north
+   a block asked for as [size] square came back 1.44 times as tall, its trees
+   shifted by kilometres towards its middle). So the block is asked for
+   [width] samples across, as many as its width in degrees needs, and the
+   renderer keeps [size] of them. *)
 
 let ( let* ) = Lwt.bind
 let ( and* ) = Lwt.both
@@ -25,6 +32,7 @@ let snap_deg level = if level = 0 then 0.05 else 0.2
 let lat_step level = if level = 0 then 0.00018 else 0.00072
 
 type t = {
+  width : int;
   west : float;
   south : float;
   east : float;
@@ -47,20 +55,23 @@ let block_id ~level ~lat ~lon =
   let w, s, _, _ = bounds ~level ~lat ~lon in
   Printf.sprintf "%d:%.4f,%.4f" level w s
 
-let request_url ~service ~interpolation (w, s, e, n) =
+let width_of (w, s, e, n) =
+  int_of_float (Float.round (float size *. (e -. w) /. (n -. s)))
+
+let request_url ~service ~interpolation ((w, s, e, n) as box) =
   Printf.sprintf
     "https://image.discomap.eea.europa.eu/arcgis/rest/services/GioLandPublic/%s/ImageServer/exportImage?bbox=%.6f,%.6f,%.6f,%.6f&bboxSR=4326&imageSR=4326&size=%d,%d&format=tiff&pixelType=U8&interpolation=%s&f=image"
-    service w s e n size size interpolation
+    service w s e n (width_of box) size interpolation
 
 let to_lwt f =
   let t, u = Lwt.task () in
   (Fut.await f @@ fun v -> Lwt.wakeup u v);
   t
 
-(* The byte offset of each tile of a little-endian, uncompressed, 8-bit,
-   [size]-square TIFF tiled by [tile], rows of tiles from the north; 0 for a
+(* The byte offset of each tile of a little-endian, uncompressed, 8-bit TIFF
+   [width] by [size] tiled by [tile], rows of tiles from the north; 0 for a
    tile the file leaves out (empty). [None] for any other layout. *)
-let parse (b : Brr.Tarray.uint8) =
+let parse ~width (b : Brr.Tarray.uint8) =
   let a = Brr.Tarray.to_bigarray1 b in
   let n = Bigarray.Array1.dim a in
   let u8 i = if i < n then a.{i} else 0 in
@@ -86,8 +97,7 @@ let parse (b : Brr.Tarray.uint8) =
       | Some (4, 1, v) -> Some (u32 v)
       | _ -> None
     in
-    let tiles_per_axis = size / tile in
-    let count = tiles_per_axis * tiles_per_axis in
+    let count = (width + tile - 1) / tile * (size / tile) in
     match
       ( scalar 256,
         scalar 257,
@@ -104,7 +114,7 @@ let parse (b : Brr.Tarray.uint8) =
         Some tw,
         Some th,
         Some (((4 | 3) as typ), c, v) )
-      when w = size && h = size && tw = tile && th = tile && c = count ->
+      when w = width && h = size && tw = tile && th = tile && c = count ->
         let at = u32 v in
         let offsets =
           Array.init count (fun k ->
@@ -124,7 +134,10 @@ let fetch_layer ~service ~interpolation box =
       match buf with
       | Ok buf ->
           let b = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf in
-          Lwt.return (Option.map (fun tiles -> (b, tiles)) (parse b))
+          Lwt.return
+            (Option.map
+               (fun tiles -> (b, tiles))
+               (parse ~width:(width_of box) b))
       | Error _ -> Lwt.return None)
   | Ok _ | Error _ -> Lwt.return None
 
@@ -144,6 +157,7 @@ let fetch ?(timeout_s = 60.) ~level ~lat ~lon () =
         Lwt.return
           (Some
              {
+               width = width_of box;
                west;
                south;
                east;

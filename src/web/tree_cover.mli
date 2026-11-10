@@ -9,6 +9,9 @@ val tile : int
 (** Samples per side of a tile of the responses. *)
 
 type t = {
+  width : int;
+      (** Samples across in the responses, more than [size] (the service's
+          samples are square in degrees); the block is [size] of them. *)
   west : float;
   south : float;
   east : float;
@@ -20,8 +23,8 @@ type t = {
   density_tiles : int array;
   leaf_type_tiles : int array;
       (** Byte offsets in each response of its [tile]-square tiles, rows of
-          tiles from the north, each row of a tile from the north; 0 for an
-          empty tile. *)
+          tiles from the north, each row of a tile from the north, the last tile
+          of a row padded out; 0 for an empty tile. *)
 }
 
 val block_id : level:int -> lat:float -> lon:float -> string

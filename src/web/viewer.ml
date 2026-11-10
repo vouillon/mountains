@@ -4060,9 +4060,11 @@ let tree_cover_texture ctx level (c : Tree_cover.t) =
   let input = Gl.create_texture ctx in
   Gl.active_texture ctx Gl.texture15;
   Gl.bind_texture ctx Gl.texture_2d (Some input);
-  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 (2 * size) size;
+  (* Whole tiles: the last of each row is padded out. *)
+  let n = (c.width + tile - 1) / tile in
+  let stride = n * tile in
+  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.r8 (2 * stride) size;
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
-  let n = size / tile in
   let upload ~x0 data tiles =
     Array.iteri
       (fun k o ->
@@ -4074,12 +4076,14 @@ let tree_cover_texture ctx level (c : Tree_cover.t) =
       tiles
   in
   upload ~x0:0 c.density c.density_tiles;
-  upload ~x0:size c.leaf_type c.leaf_type_tiles;
+  upload ~x0:stride c.leaf_type c.leaf_type_tiles;
   let pid = Web_utils.create_program ctx tree_cover_prep_program in
   Gl.use_program ctx pid;
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_input") 15;
   Gl.uniform1i ctx (u "u_size") size;
+  Gl.uniform1i ctx (u "u_width") c.width;
+  Gl.uniform1i ctx (u "u_stride") stride;
   let slot = 2 + level in
   Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
   let fbo = Gl.create_framebuffer ctx in

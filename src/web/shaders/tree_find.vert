@@ -89,9 +89,10 @@ highp float groundAt(highp vec2 norm) {
   return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 }
 
-// The land-cover palette's conifer share (R) and built-up flag (G) at [arc]
-// arcseconds from the anchor; the level choice is [sampleCLCBilinear]'s.
-vec2 coverAt(highp vec2 arc) {
+// The land-cover palette's conifer share (x) and built-up flag (y) at [arc]
+// arcseconds from the anchor, and (z) 1 on ice, as terrain.frag's
+// [getSurfaceFromID] tells it; the level choice is [sampleCLCBilinear]'s.
+vec3 coverAt(highp vec2 arc) {
   highp vec2 uv = arc * u_invW + 0.5 + 0.5 * u_invW;
   highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
   int level = clamp(int(ceil(7.0 + log2(d))), 0, 6);
@@ -99,7 +100,10 @@ vec2 coverAt(highp vec2 arc) {
   ivec2 size = textureSize(u_coverMap, 0).xy;
   ivec2 p = clamp(ivec2(floor(luv * vec2(size))), ivec2(0), size - 1);
   uint id = texelFetch(u_coverMap, ivec3(p, level), 0).r;
-  return texelFetch(u_paletteTex, ivec2(int(id) * 3 + 2, 0), 0).rg;
+  vec4 weights = texelFetch(u_paletteTex, ivec2(int(id) * 3 + 1, 0), 0);
+  bool ice = dot(weights.rgb, vec3(1.0)) < 0.05 && weights.a < 0.5;
+  return vec3(texelFetch(u_paletteTex, ivec2(int(id) * 3 + 2, 0), 0).rg,
+              ice ? 1.0 : 0.0);
 }
 
 highp vec2 arcAt(highp vec2 idx) {
@@ -166,12 +170,13 @@ void main() {
   // with up to half a metre of jitter, -> arcseconds -> metres from the eye.
   highp vec2 idx = vec2(tt) * 2.0 + 0.5 + (vec2(j0, j1) - 0.5);
   highp vec2 arc = arcAt(idx);
-  vec2 cover = coverAt(arc);
-  if (cover.g > 0.5)
+  // None on glaciers, whose seracs the canopy model carries as crowns.
+  vec3 cover = coverAt(arc);
+  if (cover.y > 0.5 || cover.z > 0.5)
     return;
   // Conifer stands within the class's share, as terrain.frag's [coniferAmt]
   // (its world position is metres from the anchor, as [arc * u_delta]).
-  float share = cover.r;
+  float share = cover.x;
   bool conifer = share >= 0.98 ||
                  (share > 0.02 &&
                   share > valueNoise(arc * u_delta / 60.0 + vec2(53.0, 7.0)));
@@ -190,6 +195,9 @@ void main() {
 
   highp vec2 base = arc * u_delta - u_centerOffset;
   highp float ground = groundAt(idx / float(textureSize(u_ground, 0).x));
+  // Thinning out over the treeline, as terrain.frag.
+  if (smoothstep(2500.0, 2800.0, ground) > float((hs >> 12u) & 0xffu) / 255.0)
+    return;
   // Crown radius: conifers narrow, broadleaves about as wide as half their
   // height (LIDAR crowns of 6-10 m across).
   float r = conifer ? clamp(0.22 * h, 1.0, 3.5) * (0.85 + 0.3 * j2)
