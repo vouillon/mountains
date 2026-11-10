@@ -58,6 +58,10 @@ uniform mediump float shadow_splits[3];
 // Per cascade: world metres per shadow texel, and the depth range its [0,1]
 // spans, both from the ortho box [calculate_shadow_matrices] builds.
 uniform highp vec2 shadow_cascades[3];
+// Shadow layer 3: the trees near the eye alone (Viewer.tree_shadow_box), if
+// it holds any.
+uniform highp mat4 u_treeShadowMatrix;
+uniform bool u_treeShadowOn;
 uniform vec3 u_lightDir; // Pre-normalized on CPU
 uniform highp float center_height;
 
@@ -1279,6 +1283,17 @@ void main() {
                             vec2(0.000488));
     if (proj_coords.z > 1.0)
       shadow_val = 1.0;
+    // The trees' shadows, at ~0.5 m per texel: the layer holds nothing else,
+    // so a small bias does (a trunk's buried foot is below the ground).
+    if (u_treeShadowOn && v_dist < 600.0) {
+      highp vec4 t_pos = u_treeShadowMatrix *
+                         vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
+      highp vec3 t_coords = t_pos.xyz / t_pos.w * 0.5 + 0.5;
+      if (all(greaterThan(t_coords.xy, vec2(0.0))) &&
+          all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z <= 1.0)
+        shadow_val *= pcf_shadow(3, t_coords.xy, t_coords.z - 0.3 / 4000.0,
+                                 vec2(0.000488));
+    }
   }
 
   // Environment reflection (sky color for glossy surfaces)

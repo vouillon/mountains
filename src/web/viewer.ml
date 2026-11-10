@@ -709,6 +709,35 @@ let shadow_cascade_extents () =
       if j mod 2 = 0 then 2. *. shadow_radius /. float shadow_map_size
       else 2. *. depth_range)
 
+(* The light's ortho box of half-width [shadow_radius] centred on [center],
+   [depth_range] deep on either side. *)
+let light_matrix ~light_dir ~center ~shadow_radius ~depth_range =
+  let p =
+    Matrix.ortho ~left:(-.shadow_radius) ~right:shadow_radius
+      ~bottom:(-.shadow_radius) ~top:shadow_radius ~near:(-.depth_range)
+      ~far:depth_range
+  in
+  let look_target =
+    Matrix.
+      {
+        x = center.x +. (light_dir.x *. shadow_radius);
+        y = center.y +. (light_dir.y *. shadow_radius);
+        z = center.z +. (light_dir.z *. shadow_radius);
+        w = 1.;
+      }
+  in
+  let view =
+    Matrix.look_at ~eye:look_target ~center
+      ~up:Matrix.{ x = 0.; y = 1.; z = 0.; w = 0. }
+  in
+  Matrix.(view * p)
+
+(* Shadow layer 3: the trees alone (tree.vert), at ~0.5 m per texel over the
+   500 m around the eye where they stand and cast, and 2 km deep either side
+   for the relief under them. Terrain (terrain.frag) and trees (tree.frag)
+   multiply it into their sun. *)
+let tree_shadow_box = (500., 2000.)
+
 let calculate_shadow_matrices ~light_dir ~world_center =
   let matrices = Array.make 3 (Array.make 16 0.) in
 
@@ -830,7 +859,8 @@ let init_graphics ctx =
   let ao_blur_pid = Web_utils.create_program ctx ao_blur_program in
   let terrain_pid = Web_utils.create_program ctx terrain_program in
 
-  let shadow_map = create_shadow_map ctx shadow_map_size shadow_map_size 3 in
+  (* Layers 0-2 the cascades, 3 the trees near the eye ([tree_shadow_box]). *)
+  let shadow_map = create_shadow_map ctx shadow_map_size shadow_map_size 4 in
   let shadow_fbo = create_shadow_fbo ctx shadow_map in
   let sky_uniforms = Render_state.init_sky_uniforms ctx sky_pid in
 
@@ -2235,7 +2265,7 @@ let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
    instance buffer's contents. *)
 let tree_grid = 170
 let tree_radius = 340.
-let conifer_vertices = 3 * 3 * 7
+let conifer_vertices = 3 * ((3 * 7) + 6)
 let broadleaf_vertices = 3 * ((4 * 7) + 6)
 
 let trees_enabled =
@@ -2339,7 +2369,7 @@ let get_trees_gl ctx =
    search runs at the next shadow pass. *)
 let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
     ~w ~lat ~eye_x ~eye_y ~eye_height ~light_dir ~fog_color ~zenith_color
-    ~shadow_matrix ~shadow_cascade:(texel, depth) =
+    ~shadow_matrix ~shadow_cascade:(texel, depth) ~tree_shadow_matrix =
   let t = get_trees_gl ctx in
   let ground_unit = hd_height_unit slot in
   let cx, cy = Render_state.compute_center_offset ~lat ~eye_x ~eye_y in
@@ -2376,6 +2406,8 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform_matrix4fv ctx (u "u_shadowMatrix") false
     (Brr.Tarray.of_bigarray1 (Matrix.array shadow_matrix));
   Gl.uniform2f ctx (u "u_shadowCascade") texel depth;
+  Gl.uniform_matrix4fv ctx (u "u_treeShadowMatrix") false
+    (Brr.Tarray.of_bigarray1 (Matrix.array tree_shadow_matrix));
   (* A publish that changes neither the block nor its ground (the coarser
      rings landing) keeps the trees found: the search stalls on its read
      back. *)
@@ -2488,28 +2520,43 @@ let draw_found_trees ctx prepare =
       Gl.uniform1i ctx t.u_broadleaf 1;
       Gl.bind_vertex_array ctx (Some t.broadleaf_vao);
       Gl.draw_arrays_instanced ctx Gl.triangles 0 broadleaf_vertices nb;
-      Gl.bind_vertex_array ctx None
-  | _ -> ()
+      Gl.bind_vertex_array ctx None;
+      true
+  | _ -> false
 
-(* In draw_shadows, for cascade [layer] with its FBO bound: the trees, all
-   within the first cascade, searched for first if needed. *)
-let draw_tree_shadows ctx ~matrices layer =
+(* In draw_shadows, after cascade [layer] with the shadow FBO bound: after the
+   first, shadow layer 3 ([tree_shadow_box], light matrix [matrix]), the trees
+   alone, searched for first if needed; and whether it holds any, for
+   terrain.frag. *)
+let draw_tree_shadows ctx ~shadow_map ~terrain_pid ~matrix layer =
   if layer = 0 then begin
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
+      shadow_map 0 3;
+    Gl.disable ctx Gl.scissor_test;
+    Gl.clear ctx Gl.depth_buffer_bit;
+    Gl.enable ctx Gl.scissor_test;
     find_trees ctx;
-    draw_found_trees ctx (fun t ->
-        Gl.uniform1i ctx t.u_shadow_pass 1;
-        Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false
-          (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(0))))
+    let drawn =
+      draw_found_trees ctx (fun t ->
+          Gl.uniform1i ctx t.u_shadow_pass 1;
+          Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false
+            (Brr.Tarray.of_bigarray1 (Matrix.array matrix)))
+    in
+    Gl.use_program ctx terrain_pid;
+    Gl.uniform1i ctx
+      (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowOn"))
+      (if drawn then 1 else 0)
   end
 
 (* In the frame, with the terrain's matrices. *)
 let draw_trees ctx ~proj_ta ~transform_ta =
   let cull = Gl.is_enabled ctx Gl.cull_face' in
   Gl.disable ctx Gl.cull_face';
-  draw_found_trees ctx (fun t ->
-      Gl.uniform1i ctx t.u_shadow_pass 0;
-      Gl.uniform_matrix4fv ctx t.u_proj false proj_ta;
-      Gl.uniform_matrix4fv ctx t.u_transform false transform_ta);
+  ignore
+    (draw_found_trees ctx (fun t ->
+         Gl.uniform1i ctx t.u_shadow_pass 0;
+         Gl.uniform_matrix4fv ctx t.u_proj false proj_ta;
+         Gl.uniform_matrix4fv ctx t.u_transform false transform_ta));
   if cull then Gl.enable ctx Gl.cull_face'
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
@@ -4234,6 +4281,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         (* view_proj is ignored in calculate_shadow_matrices *)
         calculate_shadow_matrices ~light_dir ~world_center
       in
+      let tree_shadow_matrix =
+        let shadow_radius, depth_range = tree_shadow_box in
+        light_matrix ~light_dir ~center:world_center ~shadow_radius ~depth_range
+      in
 
       (* Upload all location-static uniforms *)
       Render_state.upload_session_static ctx terrain_pid sky_pid shadow_pid
@@ -4241,6 +4292,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~shadow_cascades:(shadow_cascade_extents ())
         ~fog_color:fog_linear ~zenith_color:zenith_linear;
+      Gl.use_program ctx terrain_pid;
+      Gl.uniform_matrix4fv ctx
+        (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowMatrix"))
+        false
+        (Brr.Tarray.of_bigarray1 (Matrix.array tree_shadow_matrix));
       let hd_params =
         List.map
           (fun (g : Hd_dem.t) ->
@@ -4277,7 +4333,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            time_gpu ctx "draw_shadows" (fun () ->
                draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
                  ~matrices:shadow_matrices
-                 ~casters:(draw_tree_shadows ctx ~matrices:shadow_matrices)
+                 ~casters:
+                   (draw_tree_shadows ctx ~shadow_map ~terrain_pid
+                      ~matrix:tree_shadow_matrix)
                  ~terrain_geo ~index_count ~radial_params ~relief_texture
                  ~hd_slot_textures ctx);
            bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
@@ -4296,6 +4354,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              ~eye_height:(height +. 2.) ~light_dir ~fog_color:fog_linear
              ~zenith_color:zenith_linear ~shadow_matrix:shadow_matrices.(0)
              ~shadow_cascade:(cascades.(0), cascades.(1))
+             ~tree_shadow_matrix
        | _ -> trees_inputs := None);
       Gl.use_program ctx path_pid;
       Render_state.upload_path_session ctx path_uniforms ~w ~lat:alat ~eye_x
@@ -4306,7 +4365,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       time_gpu ctx "draw_shadows" (fun () ->
           draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
             ~matrices:shadow_matrices
-            ~casters:(draw_tree_shadows ctx ~matrices:shadow_matrices)
+            ~casters:
+              (draw_tree_shadows ctx ~shadow_map ~terrain_pid
+                 ~matrix:tree_shadow_matrix)
             ~terrain_geo ~index_count ~radial_params ~relief_texture
             ~hd_slot_textures ctx);
 

@@ -4,7 +4,7 @@ precision highp int;
 
 // Trees near the eye, one instance per tree found by tree_find.vert, drawn as
 // triangles from gl_VertexID alone: a conifer as three stacked cones with
-// ragged rims, a broadleaf as a lumpy ellipsoid on a trunk (one draw per
+// ragged rims, a broadleaf as a lumpy ellipsoid, both on a trunk (one draw per
 // species, [u_broadleaf]). Also drawn into the sun's shadow map
 // ([u_shadowPass]), so that trees cast shadows on the ground and on each
 // other.
@@ -25,6 +25,7 @@ out highp float v_dist;
 out highp float v_z; // metres, relative to the eye
 out float v_up;      // 0 at the crown's base, 1 at its top
 out highp vec3 v_world;
+out vec3 v_fromEye; // the eye to this point, metres
 flat out float v_tint;
 flat out float v_bark;
 
@@ -53,6 +54,7 @@ void collapse() {
   v_z = 0.0;
   v_up = 0.0;
   v_world = vec3(0.0);
+  v_fromEye = vec3(0.0, 0.0, 1.0);
   v_tint = 1.0;
   v_bark = 0.0;
 }
@@ -108,10 +110,30 @@ void main() {
   vec3 n;
   v_up = 0.0;
   v_bark = 0.0;
-  if (!u_broadleaf) {
+  // Crown triangles first, then the trunk's.
+  int crownTris = u_broadleaf ? 4 * SIDES : 3 * SIDES;
+  if (tri >= crownTris) {
+    // Trunk: a three-sided prism from below the ground into the crown.
+    int q = tri - crownTris;
+    int side = q / 2;
+    bool second = (q & 1) == 1;
+    bool upper = second ? corner != 0 : corner == 2;
+    int s = side + (second ? (corner == 2 ? 0 : 1) : (corner == 1 ? 1 : 0));
+    float a = float(s) * (TAU / 3.0) + spin;
+    vec2 dir = vec2(cos(a), sin(a));
+    float tr =
+        u_broadleaf ? clamp(0.03 * h, 0.15, 0.4) : clamp(0.025 * h, 0.12, 0.35);
+    p = vec3(a_pos.xy + dir * tr,
+             ground + (upper ? (u_broadleaf ? 0.5 : 0.4) * h : -0.5));
+    n = vec3(dir, 0.0);
+    v_tint = 1.0;
+    v_bark = 1.0;
+  } else if (!u_broadleaf) {
     int tier = tri / SIDES;
     int side = tri % SIDES;
-    highp float zb = 0.1 * h;
+    // The crown starts 8-25% of the way up: a bare trunk below, longer in
+    // some trees than others.
+    highp float zb = (0.08 + 0.17 * rand(seed, 11, 0)) * h;
     highp float len = h - zb;
     highp float bot = zb + TIER_BOTTOM[tier] * len;
     highp float top = zb + TIER_TOP[tier] * len;
@@ -133,7 +155,7 @@ void main() {
       v_up = TIER_BOTTOM[tier];
     }
     v_tint = (0.75 + 0.4 * a_shape.w) * (0.8 + 0.4 * rand(seed, 7, tri));
-  } else if (tri < 4 * SIDES) {
+  } else {
     // Broadleaf crown: an ellipsoid from 35% of the height to the top, as
     // rings (0 the bottom pole, 1 and 2 at -25 and +30 degrees, 3 the top),
     // their radii and the poles jittered per vertex into lumps. Triangles:
@@ -171,20 +193,6 @@ void main() {
     n = normalize(vec3(dir * (cp / r), sp / c + 0.15 / c));
     v_up = 0.5 + 0.5 * sp;
     v_tint = (0.75 + 0.4 * a_shape.w) * (0.8 + 0.4 * rand(seed, 7, tri));
-  } else {
-    // Trunk: a three-sided prism from below the ground into the crown.
-    int q = tri - 4 * SIDES;
-    int side = q / 2;
-    bool second = (q & 1) == 1;
-    bool upper = second ? corner != 0 : corner == 2;
-    int s = side + (second ? (corner == 2 ? 0 : 1) : (corner == 1 ? 1 : 0));
-    float a = float(s) * (TAU / 3.0) + spin;
-    vec2 dir = vec2(cos(a), sin(a));
-    float tr = clamp(0.03 * h, 0.15, 0.4);
-    p = vec3(a_pos.xy + dir * tr, ground + (upper ? 0.5 * h : -0.5));
-    n = vec3(dir, 0.0);
-    v_tint = 1.0;
-    v_bark = 1.0;
   }
   v_normal = n;
 
@@ -193,6 +201,7 @@ void main() {
   v_world = vec3(p.xy + u_centerOffset, p.z);
   v_z = p.z - u_eyeHeight;
   v_dist = length(vec3(p.xy, v_z));
+  v_fromEye = vec3(p.xy, v_z);
   gl_Position = u_shadowPass ? u_shadowViewProj * vec4(v_world, 1.0)
                              : proj * transform * vec4(p, 1.0);
 }
