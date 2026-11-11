@@ -125,21 +125,64 @@ let parse ~width (b : Brr.Tarray.uint8) =
         else None
     | _ -> None
 
+(* The responses are kept in the persistent data cache the service worker
+   keeps the tiles in (see service_worker.ml), for offline use and to spare
+   the service: each layer of a block is the same bytes for as long as the
+   2018 layers are served. Stored here rather than by the worker, and only
+   once [parse] accepts them: the service answers some bad requests with a
+   200 and a TIFF of a few bytes. Its [Vary: Origin] is moot -- every
+   request comes from this page -- and ignored in the lookups. *)
+let cache_name = Jstr.v "v1"
+let query_opts = Brr_io.Fetch.Cache.query_opts ~ignore_vary:true ()
+
 let fetch_layer ~service ~interpolation box =
   let open Brr_io.Fetch in
-  let* res = to_lwt (url (Jstr.v (request_url ~service ~interpolation box))) in
-  match res with
-  | Ok resp when Response.ok resp -> (
-      let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
-      match buf with
-      | Ok buf ->
-          let b = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf in
-          Lwt.return
-            (Option.map
-               (fun tiles -> (b, tiles))
-               (parse ~width:(width_of box) b))
-      | Error _ -> Lwt.return None)
-  | Ok _ | Error _ -> Lwt.return None
+  let width = width_of box in
+  let request = Request.v (Jstr.v (request_url ~service ~interpolation box)) in
+  let parsed resp =
+    let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
+    match buf with
+    | Ok buf ->
+        let b = Brr.Tarray.of_buffer Brr.Tarray.Uint8 buf in
+        Lwt.return (Option.map (fun tiles -> (b, tiles)) (parse ~width b))
+    | Error _ -> Lwt.return None
+  in
+  (* A cache that cannot be opened or read is a miss: [caches] is missing
+     outside secure contexts. *)
+  let* cache =
+    Lwt.catch
+      (fun () ->
+        let* c = to_lwt (Cache.Storage.open' (caches ()) cache_name) in
+        Lwt.return (Result.to_option c))
+      (fun _ -> Lwt.return None)
+  in
+  let* cached =
+    match cache with
+    | None -> Lwt.return None
+    | Some cache -> (
+        let* r = to_lwt (Cache.match' ~query_opts cache request) in
+        match r with
+        | Ok (Some resp) ->
+            let* p = parsed resp in
+            if Option.is_none p then
+              ignore (Cache.delete ~query_opts cache request)
+            else Format.eprintf "Tree cover: %s from the cache@." service;
+            Lwt.return p
+        | Ok None | Error _ -> Lwt.return None)
+  in
+  match cached with
+  | Some _ -> Lwt.return cached
+  | None -> (
+      let* res = to_lwt (Brr_io.Fetch.request request) in
+      match res with
+      | Ok resp when Response.ok resp ->
+          let copy = Response.of_response resp in
+          let* p = parsed resp in
+          (match (p, cache) with
+          | Some _, Some cache -> ignore (Cache.put cache request copy)
+          | _ -> ());
+          Lwt.return p
+      | Ok _ | Error _ -> Lwt.return None)
 
 (* Never fails: [None] when either layer could not be had, in [timeout_s]. *)
 let fetch ?(timeout_s = 60.) ~level ~lat ~lon () =

@@ -12,7 +12,7 @@ open Fut.Result_syntax
    The tiles are immutable and expensive to fetch, so they live in a separate,
    persistent cache which survives deploys. Its name is also hard-coded in the
    main thread ([Dem_loader.prefetch], [Clc_loader.prefetch_tile],
-   [Reader.prefetch]) and must be kept in sync. *)
+   [Reader.prefetch], [Tree_cover]) and must be kept in sync. *)
 let app_cache_name = Jstr.v ("mountains-" ^ Sw_version.version)
 let data_cache_name = Jstr.v "v1"
 
@@ -36,6 +36,16 @@ let is_tile url =
   || String.ends_with ~suffix:".clc" url
   || String.ends_with ~suffix:".tif" url
   || is_hd_dem url
+
+(* The EEA tree cover ([Tree_cover]) is stored in the data cache by the page
+   itself, which alone can tell a good response from a bad one; the requests
+   go straight through, but the entries are data and must survive
+   [prune_data_cache]. *)
+let is_tree_cover url =
+  String.starts_with
+    ~prefix:
+      "https://image.discomap.eea.europa.eu/arcgis/rest/services/GioLandPublic/"
+    url
 
 let contains_sub s sub =
   let n = String.length s and m = String.length sub in
@@ -104,8 +114,8 @@ let prune_data_cache () =
     Fut.of_list
       (List.filter_map
          (fun request ->
-           if is_tile (Jstr.to_string (Brr_io.Fetch.Request.url request)) then
-             None
+           let url = Jstr.to_string (Brr_io.Fetch.Request.url request) in
+           if is_tile url || is_tree_cover url then None
            else Some (Brr_io.Fetch.Cache.delete cache request))
          requests)
   in
