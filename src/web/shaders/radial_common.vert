@@ -193,9 +193,13 @@ float treesStood(highp float r, float nearEdge) {
 // where trees stand instead, and none around the eye itself, which stands on
 // the ground -- with no trees there (the near canopy missing or still on its
 // way, or trees turned off) the mesh would otherwise close over the viewer.
-// The clearing is the trees' own (tree_find.vert).
+// The clearing is the trees' own (tree_find.vert); without the near canopy it
+// is wider, the far one alone being a blanket that reads as hills from close
+// by, and raising buildings, which only the near one's trees leave out.
 float canopyRest(highp float r, float nearEdge) {
-  return (1.0 - treesStood(r, nearEdge)) * smoothstep(40.0, 80.0, r);
+  float clearing = u_canopySlot >= 0 ? smoothstep(40.0, 80.0, r)
+                                     : smoothstep(300.0, 600.0, r);
+  return (1.0 - treesStood(r, nearEdge)) * clearing;
 }
 
 // The canopy mip level the mesh reads at [grid_spacing] m between rings, for

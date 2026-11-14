@@ -464,7 +464,9 @@ float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
 }
 float canopyRest(highp float r, float nearEdge) {
-  return (1.0 - treesStood(r, nearEdge)) * smoothstep(40.0, 80.0, r);
+  float clearing = u_canopySlot >= 0 ? smoothstep(40.0, 80.0, r)
+                                     : smoothstep(300.0, 600.0, r);
+  return (1.0 - treesStood(r, nearEdge)) * clearing;
 }
 highp vec2 slotCoord(int slot) {
   return slot == 0 ? hdReliefCoord0
