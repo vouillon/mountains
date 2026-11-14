@@ -2253,7 +2253,11 @@ let delete_publish ctx { points; gpx_path; _ } =
    Per kind: [canopy_ring] the ring last published (its block id and its
    slot), [canopy_state] the block and context generation its region of the
    atlas holds, [canopy_raw] a fetched block not uploaded yet (and the anchor
-   it was fetched from), [canopy_fetching] the block a fetch is in flight for.
+   it was fetched from), [canopy_fetching] the block a fetch is in flight for,
+   [canopy_asked] the block the latest load asked for ("" for none: a fetch
+   for an earlier location landing late must not take [canopy_raw] from it),
+   [canopy_steps] the metres per sample of what the atlas holds (the layer's
+   own, but for La Reunion: see [Hd_dem.served_metres]).
    [canopy_atlas] is the texture and the context generation it was made in,
    [canopy_ready] what to run when a fetch lands (set by each publish, which
    holds the GL handles). *)
@@ -2274,6 +2278,7 @@ let canopy_raw : (string * int * Hd_dem.raw * (int * int)) option array =
   Array.make canopy_kinds None
 
 let canopy_fetching : (string * int) option array = Array.make canopy_kinds None
+let canopy_asked = Array.make canopy_kinds ""
 let canopy_mid_frame : (Hd_dem.frame * (int * int)) option ref = ref None
 let canopy_atlas : (int * Gl.texture) option ref = ref None
 let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
@@ -2282,7 +2287,8 @@ let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
    [find_trees]), shaders/tree_find.vert visits the canopy's 4 m cells on a
    square grid of [tree_grid] cells centred on the eye, cut to [tree_radius],
    and writes by transform feedback where each cell's tree stands, if it has
-   one; that is read back, compacted and sorted into an instance buffer by
+   one; once the GPU is done with it, a few frames later ([collect_trees]),
+   that is read back, compacted and sorted into an instance buffer by
    group: species, and near or beyond [tree_far], where a tree is a few pixels
    and drawn with a tenth of the triangles. Each frame, shaders/tree.vert draws
    the instances (one draw per group) before the terrain, so terrain behind
@@ -2294,9 +2300,13 @@ let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
 
    [trees_gl] holds the programs and buffers for the context generation it
    was made in; [trees_inputs] what the last publish gave the search (its
-   block, which must be the canopy's, and the textures it reads);
-   [trees_found] the block, generation and per-group counts of the instance
-   buffer's contents. *)
+   block, which must be the canopy's, the textures it reads and where the
+   eye stands in it, the trees being stored from the eye); [tree_cover_find]
+   where it reads the tree cover ([apply_tree_cover]); [trees_search] the
+   block and generation of a search the GPU has not finished, with the fence
+   that tells when it has; [trees_found] the block, generation and per-group
+   counts of the instance buffer's contents; [trees_ready] what to run when a
+   search's trees are in (set by each publish: their shadows). *)
 let tree_grid = 480
 let tree_radius = 960.
 let tree_far = 450.
@@ -2366,11 +2376,24 @@ type trees_inputs = {
   ground : Gl.texture;
   cover_map : Gl.texture;
   palette : Gl.texture;
+  eye_texel : float * float;
 }
 
 let trees_gl : trees_gl option ref = ref None
 let trees_inputs : trees_inputs option ref = ref None
+
+let tree_cover_find : ((float * float * float * float) option * float) ref =
+  ref (None, 1400.)
+
+let trees_search : (string * int * Gl.sync) option ref = ref None
 let trees_found : (string * int * int array) option ref = ref None
+let trees_ready : (unit -> unit) ref = ref (fun () -> ())
+
+(* What the search read has changed: the trees found, and any on their way,
+   are for something else. *)
+let forget_trees () =
+  trees_found := None;
+  trees_search := None
 
 let get_trees_gl ctx =
   match !trees_gl with
@@ -2431,7 +2454,7 @@ let get_trees_gl ctx =
         }
       in
       trees_gl := Some t;
-      trees_found := None;
+      forget_trees ();
       t
 
 (* Set the tree programs' uniforms for the 1 m ring [g] in slot [slot] (its
@@ -2447,7 +2470,7 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.use_program ctx t.find_pid;
   let u name = Gl.get_uniform_location ctx t.find_pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_canopy") 15;
-  Gl.uniform1i ctx (u "u_ground") (match slot with 0 -> 6 | 1 -> 10 | _ -> 12);
+  Gl.uniform1i ctx (u "u_ground") (ground_unit - Gl.texture0);
   Gl.uniform1f ctx (u "u_groundScale") (g.height_scale *. 255.);
   Gl.uniform1f ctx (u "u_groundOffset") g.height_offset;
   Render_state.upload_hd_mat ctx (u "u_ofMat") (u "u_ofBias") (u "u_ofQx")
@@ -2457,7 +2480,8 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform2f ctx (u "u_centerOffset") cx cy;
   (* Canopy texel j's centre is 1 m index 2 j + 0.5. *)
   let ix, iy = Warp.apply g.frame.to_index eye_x eye_y in
-  Gl.uniform2f ctx (u "u_eyeTexel") ((ix -. 0.5) /. 2.) ((iy -. 0.5) /. 2.);
+  let eye_texel = ((ix -. 0.5) /. 2., (iy -. 0.5) /. 2.) in
+  Gl.uniform2f ctx (u "u_eyeTexel") (fst eye_texel) (snd eye_texel);
   Gl.uniform1i ctx (u "u_grid") tree_grid;
   Gl.uniform1f ctx (u "u_radius") tree_radius;
   Gl.uniform1i ctx (u "u_coverMap") 7;
@@ -2481,13 +2505,17 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform2f ctx (u "u_shadowCascade") texel depth;
   Gl.uniform_matrix4fv ctx (u "u_treeShadowMatrix") false
     (Brr.Tarray.of_bigarray1 (Matrix.array tree_shadow_matrix));
-  (* A publish that changes neither the block nor its ground (the coarser
-     rings landing) keeps the trees found: the search stalls on its read
-     back. *)
+  (* A publish that changes nothing the search reads (the coarser rings
+     landing) keeps the trees found. One from elsewhere in the same block does
+     not: they are stored from the eye. *)
   (match !trees_inputs with
-  | Some i when i.block = block && i.ground == ground -> ()
-  | _ -> trees_found := None);
-  trees_inputs := Some { block; ground_unit; ground; cover_map; palette }
+  | Some i
+    when i.block = block && i.ground == ground && i.cover_map == cover_map
+         && i.palette == palette && i.eye_texel = eye_texel ->
+      ()
+  | _ -> forget_trees ());
+  trees_inputs :=
+    Some { block; ground_unit; ground; cover_map; palette; eye_texel }
 
 let point_trees ctx t vao ~first =
   Gl.bind_vertex_array ctx (Some vao);
@@ -2501,20 +2529,24 @@ let point_trees ctx t vao ~first =
   Gl.bind_vertex_array ctx None;
   Gl.bind_buffer ctx Gl.array_buffer None
 
-(* The search, if the canopy on screen is the block of the last publish and
-   it has not run for it yet. The read back stalls until the GPU is done, once
-   per publish. *)
+(* Start the search, if the canopy on screen is the block of the last publish
+   and it has neither run for it nor is running. Its results are not read back
+   here, which would stall until the GPU is done: a fence tells
+   [collect_trees] when they are there. *)
 let find_trees ctx =
   match (!trees_inputs, canopy_state.(0), !canopy_atlas) with
   | Some inp, Some (b, g), Some (g', canopy)
     when Lazy.force trees_enabled && b = inp.block && g = !context_generation
          && g' = g
+         && (not
+               (match !trees_found with
+               | Some (b', g', _) -> b' = b && g' = g
+               | None -> false))
          && not
-              (match !trees_found with
+              (match !trees_search with
               | Some (b', g', _) -> b' = b && g' = g
               | None -> false) ->
       let t = get_trees_gl ctx in
-      let t0 = now_ms () in
       Gl.active_texture ctx Gl.texture15;
       Gl.bind_texture ctx Gl.texture_2d (Some canopy);
       Gl.active_texture ctx inp.ground_unit;
@@ -2525,6 +2557,14 @@ let find_trees ctx =
       Gl.bind_texture ctx Gl.texture_2d (Some inp.palette);
       Gl.active_texture ctx Gl.texture0;
       Gl.use_program ctx t.find_pid;
+      let u name = Gl.get_uniform_location ctx t.find_pid (Jstr.v name) in
+      let arc, conifer_line = !tree_cover_find in
+      (match arc with
+      | Some (x0, y0, sx, sy) ->
+          Gl.uniform1i ctx (u "u_treeCoverOn") 1;
+          Gl.uniform4f ctx (u "u_treeCoverArc") x0 y0 sx sy
+      | None -> Gl.uniform1i ctx (u "u_treeCoverOn") 0);
+      Gl.uniform1f ctx (u "u_coniferLine") conifer_line;
       Gl.bind_vertex_array ctx (Some t.find_vao);
       Gl.bind_transform_feedback ctx Gl.transform_feedback (Some t.feedback);
       Gl.bind_buffer_base ctx Gl.transform_feedback_buffer 0 t.found;
@@ -2536,85 +2576,127 @@ let find_trees ctx =
       Gl.bind_transform_feedback ctx Gl.transform_feedback None;
       Gl.bind_buffer ctx Gl.transform_feedback_buffer None;
       Gl.bind_vertex_array ctx None;
-      let n = tree_grid * tree_grid in
-      let raw = Bigarray.(Array1.create float32 c_layout (n * 8)) in
-      Gl.bind_buffer ctx Gl.copy_read_buffer (Some t.found);
-      Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0
-        (Brr.Tarray.of_bigarray1 raw);
-      Gl.bind_buffer ctx Gl.copy_read_buffer None;
-      (* By group (see [tree_group_vertices]). *)
-      let group i =
-        let o = i * 8 in
-        (if raw.{o + 5} > 0.5 then 0 else 2)
-        + if Float.hypot raw.{o} raw.{o + 1} > tree_far then 1 else 0
-      in
-      let counts = Array.make 4 0 in
-      for i = 0 to n - 1 do
-        if raw.{(i * 8) + 3} > 0. then
-          let k = group i in
-          counts.(k) <- counts.(k) + 1
-      done;
-      let firsts = Array.make 4 0 in
-      for k = 1 to 3 do
-        firsts.(k) <- firsts.(k - 1) + counts.(k - 1)
-      done;
-      let total = firsts.(3) + counts.(3) in
-      (* Each group nearest first: the eye stays put for the whole location,
-         so drawn in this order the depth test rejects most of a forest's
-         hidden crowns before they are shaded. *)
-      let members = Array.map (fun c -> Array.make c (0., 0)) counts in
-      let next = Array.make 4 0 in
-      for i = 0 to n - 1 do
-        if raw.{(i * 8) + 3} > 0. then begin
-          let k = group i in
-          members.(k).(next.(k)) <-
-            (Float.hypot raw.{i * 8} raw.{(i * 8) + 1}, i);
-          next.(k) <- next.(k) + 1
-        end
-      done;
-      let out = Bigarray.(Array1.create float32 c_layout (max 1 total * 8)) in
-      Array.iteri
-        (fun k m ->
-          Array.sort (fun (a, _) (b, _) -> Float.compare a b) m;
-          Array.iteri
-            (fun j (_, i) ->
-              Bigarray.Array1.blit
-                (Bigarray.Array1.sub raw (i * 8) 8)
-                (Bigarray.Array1.sub out ((firsts.(k) + j) * 8) 8))
-            m)
-        members;
-      Gl.bind_buffer ctx Gl.array_buffer (Some t.instances);
-      Gl.buffer_data ctx Gl.array_buffer
-        (Brr.Tarray.of_bigarray1 out)
-        Gl.static_draw;
-      Gl.bind_buffer ctx Gl.array_buffer None;
-      Array.iteri
-        (fun k vao -> point_trees ctx t vao ~first:firsts.(k))
-        t.group_vaos;
-      Format.eprintf
-        "Trees: %d conifers, %d broadleaves (%d, %d within %.0f m), found in \
-         %.0f ms@."
-        (counts.(0) + counts.(1))
-        (counts.(2) + counts.(3))
-        counts.(0) counts.(2) tree_far
-        (now_ms () -. t0);
-      trees_found := Some (b, g, counts)
+      let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
+      Gl.flush ctx;
+      trees_search := Some (b, g, sync)
   | _ -> ()
 
+(* The search's output, read back whole: kept from one search to the next. *)
+let tree_readback =
+  lazy Bigarray.(Array1.create float32 c_layout (tree_grid * tree_grid * 8))
+
+(* Between frames: once the GPU is done with a search, read its trees back
+   into the instance buffer and have their shadows drawn ([trees_ready]). *)
+let collect_trees ctx =
+  match (!trees_search, !trees_gl) with
+  | Some (b, g, sync), Some t when g = !context_generation && t.gen = g ->
+      if Jv.to_int (Gl.get_sync_parameter ctx sync Gl.sync_status) = Gl.signaled
+      then begin
+        trees_search := None;
+        Gl.delete_sync ctx sync;
+        let t0 = now_ms () in
+        let n = tree_grid * tree_grid in
+        let raw = Lazy.force tree_readback in
+        Gl.bind_buffer ctx Gl.copy_read_buffer (Some t.found);
+        Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0
+          (Brr.Tarray.of_bigarray1 raw);
+        Gl.bind_buffer ctx Gl.copy_read_buffer None;
+        (* One pass over the read back (element access to a Bigarray is slow
+           under wasm_of_ocaml) for each cell's distance and group (see
+           [tree_group_vertices]; '\255' without a tree). *)
+        let dist = Array.make n 0. in
+        let groups = Bytes.make n '\255' in
+        let counts = Array.make 4 0 in
+        for i = 0 to n - 1 do
+          let o = i * 8 in
+          if raw.{o + 3} > 0. then begin
+            let d = Float.hypot raw.{o} raw.{o + 1} in
+            let k =
+              (if raw.{o + 5} > 0.5 then 0 else 2)
+              + if d > tree_far then 1 else 0
+            in
+            dist.(i) <- d;
+            Bytes.unsafe_set groups i (Char.unsafe_chr k);
+            counts.(k) <- counts.(k) + 1
+          end
+        done;
+        let firsts = Array.make 4 0 in
+        for k = 1 to 3 do
+          firsts.(k) <- firsts.(k - 1) + counts.(k - 1)
+        done;
+        let total = firsts.(3) + counts.(3) in
+        (* Each group nearest first: the eye stays put for the whole location,
+           so drawn in this order the depth test rejects most of a forest's
+           hidden crowns before they are shaded. *)
+        let members = Array.map (fun c -> Array.make c 0) counts in
+        let next = Array.make 4 0 in
+        for i = 0 to n - 1 do
+          let k = Char.code (Bytes.unsafe_get groups i) in
+          if k < 4 then begin
+            members.(k).(next.(k)) <- i;
+            next.(k) <- next.(k) + 1
+          end
+        done;
+        let out = Bigarray.(Array1.create float32 c_layout (max 1 total * 8)) in
+        Array.iteri
+          (fun k m ->
+            Array.sort (fun i j -> Float.compare dist.(i) dist.(j)) m;
+            (* A blit is a memcpy: faster than eight element copies. *)
+            Array.iteri
+              (fun j i ->
+                Bigarray.Array1.blit
+                  (Bigarray.Array1.sub raw (i * 8) 8)
+                  (Bigarray.Array1.sub out ((firsts.(k) + j) * 8) 8))
+              m)
+          members;
+        Gl.bind_buffer ctx Gl.array_buffer (Some t.instances);
+        Gl.buffer_data ctx Gl.array_buffer
+          (Brr.Tarray.of_bigarray1 out)
+          Gl.static_draw;
+        Gl.bind_buffer ctx Gl.array_buffer None;
+        Array.iteri
+          (fun k vao -> point_trees ctx t vao ~first:firsts.(k))
+          t.group_vaos;
+        Format.eprintf
+          "Trees: %d conifers, %d broadleaves (%d, %d within %.0f m), read \
+           back in %.0f ms@."
+          (counts.(0) + counts.(1))
+          (counts.(2) + counts.(3))
+          counts.(0) counts.(2) tree_far
+          (now_ms () -. t0);
+        trees_found := Some (b, g, counts);
+        force_redraw := true;
+        !trees_ready ()
+      end
+  | Some _, _ -> trees_search := None
+  | None, _ -> ()
+
+(* Near groups first, for the depth test. *)
+let tree_draw_order = [| 0; 2; 1; 3 |]
+
 (* The found trees, if they are for the canopy on screen: the groups [only]
-   selects by distance ([Some far]), or all of them; [prepare] sets the pass's
-   uniforms on the draw program. Whether there were any. *)
-let draw_found_trees ?only ctx prepare =
+   selects by distance ([Some far]), or all of them. For a shadow pass, [m] is
+   the light's matrix ([m'] is not read); in the frame, they are the
+   projection and the transform. Whether there were any. Takes no closure: it
+   runs every frame. *)
+let draw_found_trees ?only ctx ~shadow_pass m m' =
   match (!trees_gl, !trees_found, canopy_ring.(0)) with
   | Some t, Some (b, g, counts), Some (b', _)
     when Lazy.force trees_enabled && b = b' && g = !context_generation
          && t.gen = g ->
       Gl.use_program ctx t.draw_pid;
-      prepare t;
+      if shadow_pass then begin
+        Gl.uniform1i ctx t.u_shadow_pass 1;
+        Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false m
+      end
+      else begin
+        Gl.uniform1i ctx t.u_shadow_pass 0;
+        Gl.uniform_matrix4fv ctx t.u_proj false m;
+        Gl.uniform_matrix4fv ctx t.u_transform false m'
+      end;
       let drawn = ref false in
-      (* Near groups first, for the depth test. *)
       for j = 0 to 3 do
-        let k = [| 0; 2; 1; 3 |].(j) in
+        let k = tree_draw_order.(j) in
         if
           counts.(k) > 0
           && match only with Some far -> tree_group_far k = far | None -> true
@@ -2633,44 +2715,33 @@ let draw_found_trees ?only ctx prepare =
   | _ -> false
 
 (* In draw_shadows, after cascade [layer] with the shadow FBO bound: after the
-   first (light matrix [cascade]), the far trees into it, searched for first if
-   needed; then shadow layer 3 ([tree_shadow_box], light matrix [matrix]), the
-   near trees alone, and whether it holds any, for terrain.frag. *)
+   first (light matrix [cascade]), the far trees into it, their search started
+   first if needed; then shadow layer 3 ([tree_shadow_box], light matrix
+   [matrix]), the near trees alone, and whether it holds any, for
+   terrain.frag. *)
 let draw_tree_shadows ctx ~shadow_map ~terrain_pid ~cascade ~matrix layer =
   if layer = 0 then begin
     find_trees ctx;
-    ignore
-      (draw_found_trees ~only:true ctx (fun t ->
-           Gl.uniform1i ctx t.u_shadow_pass 1;
-           Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false
-             (Brr.Tarray.of_bigarray1 (Matrix.array cascade))));
+    let m = Brr.Tarray.of_bigarray1 (Matrix.array cascade) in
+    ignore (draw_found_trees ~only:true ctx ~shadow_pass:true m m);
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 3;
     Gl.disable ctx Gl.scissor_test;
     Gl.clear ctx Gl.depth_buffer_bit;
     Gl.enable ctx Gl.scissor_test;
-    let drawn =
-      draw_found_trees ~only:false ctx (fun t ->
-          Gl.uniform1i ctx t.u_shadow_pass 1;
-          Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false
-            (Brr.Tarray.of_bigarray1 (Matrix.array matrix)))
-    in
+    let m = Brr.Tarray.of_bigarray1 (Matrix.array matrix) in
+    let drawn = draw_found_trees ~only:false ctx ~shadow_pass:true m m in
     Gl.use_program ctx terrain_pid;
     Gl.uniform1i ctx
       (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowOn"))
       (if drawn then 1 else 0)
   end
 
-(* In the frame, with the terrain's matrices. *)
+(* In the frame, with the terrain's matrices. [draw] has culling on here. *)
 let draw_trees ctx ~proj_ta ~transform_ta =
-  let cull = Gl.is_enabled ctx Gl.cull_face' in
   Gl.disable ctx Gl.cull_face';
-  ignore
-    (draw_found_trees ctx (fun t ->
-         Gl.uniform1i ctx t.u_shadow_pass 0;
-         Gl.uniform_matrix4fv ctx t.u_proj false proj_ta;
-         Gl.uniform_matrix4fv ctx t.u_transform false transform_ta));
-  if cull then Gl.enable ctx Gl.cull_face'
+  ignore (draw_found_trees ctx ~shadow_pass:false proj_ta transform_ta);
+  Gl.enable ctx Gl.cull_face'
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     ~(terrain_uniforms : Render_state.terrain_uniforms)
@@ -3229,6 +3300,7 @@ let event_loop ~generation ctx draw =
     end;
     let orientation = !current_orientation in
     let z = !zoom in
+    if not !context_lost then collect_trees ctx;
 
     (* Optimization: Only draw if change is visible (> ~half a pixel).
        One pixel spans ~2 / (scale * zoom * max_dim) radians whatever the
@@ -3815,7 +3887,8 @@ let canopy_size = Hd_dem.canopy.size
    uploaded as the canopies are. Per level: [tree_cover_state] the block,
    context generation and bounds the region holds, [tree_cover_raw] a fetched
    block not uploaded yet, [tree_cover_fetching] the block a fetch is in
-   flight for. *)
+   flight for, [tree_cover_asked] the block the latest load asked for (as
+   [canopy_asked]). *)
 let tree_cover_wanted : string option array = [| None; None |]
 let tree_cover_frame : (int * int * int) option ref = ref None
 
@@ -3827,6 +3900,7 @@ let tree_cover_raw : (string * int * Tree_cover.t) option array =
   [| None; None |]
 
 let tree_cover_fetching : (string * int) option array = [| None; None |]
+let tree_cover_asked = [| ""; "" |]
 let tree_cover_ready : (unit -> unit) ref = ref (fun () -> ())
 
 let get_canopy_atlas ctx =
@@ -3849,32 +3923,27 @@ let get_canopy_atlas ctx =
       tree_cover_state.(1) <- None;
       tid
 
-(* Bake canopy [kind]'s raw heights into its half of the atlas: they go up as
-   they arrived (an R32F texture, no CPU pass over them -- element access to a
-   Bigarray is slow under wasm_of_ocaml, and a precompute here took ~400 ms on
-   the main thread), and shaders/canopy_prep.frag bakes them: height, slope
-   and crown tone per sample. *)
-let canopy_texture ctx kind raw =
-  let size = canopy_layers.(kind).Hd_dem.size in
-  assert (size = canopy_size);
-  let atlas = get_canopy_atlas ctx in
-  let src = Hd_dem.raw_samples raw in
-  let heights = Gl.create_texture ctx in
-  Gl.active_texture ctx Gl.texture15;
-  Gl.bind_texture ctx Gl.texture_2d (Some heights);
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f size size 0 Gl.red Gl.float
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 src))
-    0;
-  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
-  (* Read [heights] on unit 15 while baking into [atlas]. *)
-  let pid = Web_utils.create_program ctx canopy_prep_program in
-  Gl.use_program ctx pid;
+(* The two programs that bake into the atlas, kept for the context generation
+   they were made in: a location bakes up to five blocks. *)
+let canopy_prep_pid : (int * Gl.program) option ref = ref None
+let tree_cover_prep_pid : (int * Gl.program) option ref = ref None
+
+let prep_program ctx cache shaders =
+  match !cache with
+  | Some (g, pid) when g = !context_generation -> pid
+  | _ ->
+      let pid = Web_utils.create_program ctx shaders in
+      cache := Some (!context_generation, pid);
+      pid
+
+(* Bake into [slot] of [atlas] with [pid], in use with its own uniforms set,
+   from [input], bound on unit 15 and deleted afterwards. The atlas's mipmaps
+   are left stale: [atlas_mipmaps], once after a run of bakes. *)
+let bake_into_atlas ctx atlas pid ~slot ~input =
+  let size = canopy_size in
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
-  Gl.uniform1i ctx (u "u_heights") 15;
   Gl.uniform1i ctx (u "u_size") size;
-  let slot = canopy_slots.(kind) in
   Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
-  Gl.uniform1f ctx (u "u_step") canopy_steps.(kind);
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
@@ -3897,11 +3966,42 @@ let canopy_texture ctx kind raw =
     (Gl.drawing_buffer_width ctx)
     (Gl.drawing_buffer_height ctx);
   Gl.delete_framebuffer ctx fbo;
-  Gl.delete_program ctx pid;
-  Gl.delete_texture ctx heights;
+  Gl.delete_texture ctx input;
   Gl.bind_texture ctx Gl.texture_2d (Some atlas);
+  Gl.active_texture ctx Gl.texture0
+
+(* Rebuild the atlas's mipmaps after bakes into it; leaves it on unit 15. *)
+let atlas_mipmaps ctx =
+  Gl.active_texture ctx Gl.texture15;
+  Gl.bind_texture ctx Gl.texture_2d (Some (get_canopy_atlas ctx));
   Gl.generate_mipmap ctx Gl.texture_2d;
   Gl.active_texture ctx Gl.texture0
+
+(* Bake canopy [kind]'s raw heights, [step] m apart, into its slot of the
+   atlas: they go up as they arrived (an R32F texture, no CPU pass over them
+   -- element access to a Bigarray is slow under wasm_of_ocaml, and a
+   precompute here took ~400 ms on the main thread), and
+   shaders/canopy_prep.frag bakes them: height, slope and crown tone per
+   sample. *)
+let canopy_texture ctx kind raw ~step =
+  let size = canopy_layers.(kind).Hd_dem.size in
+  assert (size = canopy_size);
+  let atlas = get_canopy_atlas ctx in
+  let src = Hd_dem.raw_samples raw in
+  let heights = Gl.create_texture ctx in
+  Gl.active_texture ctx Gl.texture15;
+  Gl.bind_texture ctx Gl.texture_2d (Some heights);
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.r32f size size 0 Gl.red Gl.float
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array1 src))
+    0;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  (* Read [heights] on unit 15 while baking into [atlas]. *)
+  let pid = prep_program ctx canopy_prep_pid canopy_prep_program in
+  Gl.use_program ctx pid;
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  Gl.uniform1i ctx (u "u_heights") 15;
+  Gl.uniform1f ctx (u "u_step") step;
+  bake_into_atlas ctx atlas pid ~slot:canopy_slots.(kind) ~input:heights
 
 (* Bind the canopy atlas (or [placeholder]) on unit 15 and tell [pids] -- the
    terrain, shadow and path programs, which all read it -- which ring slot to
@@ -3970,6 +4070,7 @@ let apply_canopy ctx pids ~placeholder =
       Gl.uniform1i ctx (u "u_canopySlot") near;
       Gl.uniform1i ctx (u "u_canopyFarSlot") far;
       Gl.uniform1i ctx (u "u_treesStand") (if stand then 1 else 0);
+      Gl.uniform2f ctx (u "u_canopyStep") canopy_steps.(0) canopy_steps.(1);
       Gl.uniform1i ctx (u "u_canopyMidOn") (if mid = None then 0 else 1);
       Option.iter
         (fun m ->
@@ -3984,6 +4085,7 @@ let start_canopy ~lat ~lon =
   for kind = 0 to canopy_kinds - 1 do
     let block = Hd_dem.block_id canopy_ring_layers.(kind) ~lat ~lon in
     let generation = !context_generation in
+    canopy_asked.(kind) <- block;
     let held =
       (match canopy_state.(kind) with
         | Some (b, g) -> b = block && g = generation
@@ -4007,7 +4109,7 @@ let start_canopy ~lat ~lon =
             if canopy_fetching.(kind) = Some (block, generation) then
               canopy_fetching.(kind) <- None;
             match raw with
-            | Some raw ->
+            | Some raw when canopy_asked.(kind) = block ->
                 canopy_raw.(kind) <-
                   Some
                     ( block,
@@ -4016,7 +4118,7 @@ let start_canopy ~lat ~lon =
                       (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
                     );
                 !canopy_ready ()
-            | None -> ()
+            | Some _ | None -> ()
           end;
           Lwt.return_unit)
     end
@@ -4034,19 +4136,29 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
       match (canopy_ring.(kind), canopy_raw.(kind)) with
       | Some (b, _), Some (b', g, raw, anchor)
         when b = b' && g = !context_generation ->
-          canopy_texture ctx kind raw;
+          let frame = Hd_dem.raw_frame raw in
+          let step =
+            match frame.grid with
+            | Some grid -> grid.metres
+            | None -> 0.5 *. (frame.step_x_m +. frame.step_y_m)
+          in
+          canopy_texture ctx kind raw ~step;
+          canopy_steps.(kind) <- step;
           canopy_state.(kind) <- Some (b, g);
-          if kind = 2 then
-            canopy_mid_frame := Some (Hd_dem.raw_frame raw, anchor);
+          if kind = 2 then canopy_mid_frame := Some (frame, anchor);
           canopy_raw.(kind) <- None;
           force_redraw := true;
           uploaded := true
       | _ -> ()
     done;
+    if !uploaded then atlas_mipmaps ctx;
     apply_canopy ctx pids ~placeholder;
     if !uploaded && late then on_late ()
   in
-  (canopy_ready := fun () -> ready ~late:true);
+  (* The handles [ready] holds die with the context they were made in. *)
+  let generation = !context_generation in
+  (canopy_ready :=
+     fun () -> if !context_generation = generation then ready ~late:true);
   ready ~late:false
 
 (* Bake a fetched tree cover block of [level] into its region of the atlas:
@@ -4077,40 +4189,13 @@ let tree_cover_texture ctx level (c : Tree_cover.t) =
   in
   upload ~x0:0 c.density c.density_tiles;
   upload ~x0:stride c.leaf_type c.leaf_type_tiles;
-  let pid = Web_utils.create_program ctx tree_cover_prep_program in
+  let pid = prep_program ctx tree_cover_prep_pid tree_cover_prep_program in
   Gl.use_program ctx pid;
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_input") 15;
-  Gl.uniform1i ctx (u "u_size") size;
   Gl.uniform1i ctx (u "u_width") c.width;
   Gl.uniform1i ctx (u "u_stride") stride;
-  let slot = 2 + level in
-  Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
-  let fbo = Gl.create_framebuffer ctx in
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
-  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
-    atlas 0;
-  let depth = Gl.is_enabled ctx Gl.depth_test
-  and blend = Gl.is_enabled ctx Gl.blend
-  and cull = Gl.is_enabled ctx Gl.cull_face' in
-  Gl.disable ctx Gl.depth_test;
-  Gl.disable ctx Gl.blend;
-  Gl.disable ctx Gl.cull_face';
-  Gl.viewport ctx (slot mod 3 * size) (slot / 3 * size) size size;
-  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-  if depth then Gl.enable ctx Gl.depth_test;
-  if blend then Gl.enable ctx Gl.blend;
-  if cull then Gl.enable ctx Gl.cull_face';
-  Gl.bind_framebuffer ctx Gl.framebuffer None;
-  Gl.viewport ctx 0 0
-    (Gl.drawing_buffer_width ctx)
-    (Gl.drawing_buffer_height ctx);
-  Gl.delete_framebuffer ctx fbo;
-  Gl.delete_program ctx pid;
-  Gl.delete_texture ctx input;
-  Gl.bind_texture ctx Gl.texture_2d (Some atlas);
-  Gl.generate_mipmap ctx Gl.texture_2d;
-  Gl.active_texture ctx Gl.texture0
+  bake_into_atlas ctx atlas pid ~slot:(2 + level) ~input
 
 (* Tell the terrain program (both levels) and the tree search (the finer)
    where the tree cover is, for each level whose region holds the block for
@@ -4155,19 +4240,15 @@ let apply_tree_cover ctx ~terrain_pid =
     | Some (anchor_lat, _, _) when anchor_lat < 0 -> 1e5
     | _ -> 1400.
   in
-  let set_line pid =
-    Gl.uniform1f ctx
-      (Gl.get_uniform_location ctx pid (Jstr.v "u_coniferLine"))
-      conifer_line
-  in
   Gl.use_program ctx terrain_pid;
   set terrain_pid "u_treeCoverOn" "u_treeCoverMap" map0;
   set terrain_pid "u_treeCoverFarOn" "u_treeCoverFarMap" map1;
-  set_line terrain_pid;
-  let t = get_trees_gl ctx in
-  Gl.use_program ctx t.find_pid;
-  set t.find_pid "u_treeCoverOn" "u_treeCoverArc" arc0;
-  set_line t.find_pid
+  Gl.uniform1f ctx
+    (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_coniferLine"))
+    conifer_line;
+  (* The search takes its own when it runs ([find_trees]): its program is not
+     made before there are trees to look for. *)
+  tree_cover_find := (arc0, conifer_line)
 
 (* Start fetching the tree cover's blocks for a load at [lat]/[lon], unless
    they are held or on their way already. *)
@@ -4175,6 +4256,7 @@ let start_tree_cover ~lat ~lon =
   for level = 0 to 1 do
     let block = Tree_cover.block_id ~level ~lat ~lon in
     let generation = !context_generation in
+    tree_cover_asked.(level) <- block;
     let held =
       (match tree_cover_state.(level) with
         | Some (b, g, _) -> b = block && g = generation
@@ -4192,10 +4274,10 @@ let start_tree_cover ~lat ~lon =
             if tree_cover_fetching.(level) = Some (block, generation) then
               tree_cover_fetching.(level) <- None;
             match c with
-            | Some c ->
+            | Some c when tree_cover_asked.(level) = block ->
                 tree_cover_raw.(level) <- Some (block, generation, c);
                 !tree_cover_ready ()
-            | None -> ()
+            | Some _ | None -> ()
           end;
           Lwt.return_unit)
     end
@@ -4212,7 +4294,7 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
   done;
   tree_cover_frame := Some frame;
   let ready ~late =
-    let fine = ref false in
+    let fine = ref false and uploaded = ref false in
     for level = 0 to 1 do
       match tree_cover_raw.(level) with
       | Some (b, g, c)
@@ -4222,16 +4304,20 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
             Some (b, g, (c.west, c.south, c.east, c.north));
           tree_cover_raw.(level) <- None;
           if level = 0 then begin
-            trees_found := None;
+            forget_trees ();
             fine := true
           end;
+          uploaded := true;
           force_redraw := true
       | _ -> ()
     done;
+    if !uploaded then atlas_mipmaps ctx;
     apply_tree_cover ctx ~terrain_pid;
     if !fine && late then on_late ()
   in
-  (tree_cover_ready := fun () -> ready ~late:true);
+  let generation = !context_generation in
+  (tree_cover_ready :=
+     fun () -> if !context_generation = generation then ready ~late:true);
   ready ~late:false
 
 (* How far the eye may stand from the arcsecond its surroundings were baked on
@@ -4749,6 +4835,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            ~palette_texture ~hd_slot_textures
        in
        tree_cover_frame := Some (anchor_lat, anchor_lon, w);
+       (let generation = !context_generation in
+        trees_ready :=
+          fun () -> if !context_generation = generation then on_late ());
        update_canopy ctx
          [ terrain_pid; shadow_pid; path_pid ]
          ~placeholder:hd_placeholder ~on_late
@@ -4760,7 +4849,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        update_tree_cover ctx ~terrain_pid ~on_late ~lat:alat ~lon:alon
          ~frame:(anchor_lat, anchor_lon, w);
        match near_ring with
-       | Some (block, i) ->
+       | Some (block, i) when Lazy.force trees_enabled ->
            let ring = List.nth rings i in
            let cascades = shadow_cascade_extents () in
            set_tree_params ctx ~block ~slot:i ~g:ring.grid

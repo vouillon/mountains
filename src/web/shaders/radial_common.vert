@@ -160,6 +160,9 @@ uniform mediump int u_canopySlot;
 uniform mediump int u_canopyFarSlot;
 // Whether tree.vert stands trees over the near canopy (Viewer.apply_canopy).
 uniform bool u_treesStand;
+// Metres per sample of the near and far canopies, as served (4 m rather than
+// 5 for the far one over La Reunion: Hd_dem.served_metres).
+uniform mediump vec2 u_canopyStep;
 
 // Slot [slot] of the atlas (Viewer.canopy_atlas: three columns, two rows):
 // 0 the near canopy, 1 the far one, 2 and 3 the EEA tree cover's two levels,
@@ -184,6 +187,15 @@ float canopyEdge(highp vec2 c) {
 // the near block, whose edge [nearEdge] tree_find.vert thins them over too.
 float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
+}
+
+// The share of the canopy the mesh is raised by [r] m from the eye: none
+// where trees stand instead, and none around the eye itself, which stands on
+// the ground -- with no trees there (the near canopy missing or still on its
+// way, or trees turned off) the mesh would otherwise close over the viewer.
+// The clearing is the trees' own (tree_find.vert).
+float canopyRest(highp float r, float nearEdge) {
+  return (1.0 - treesStood(r, nearEdge)) * smoothstep(40.0, 80.0, r);
 }
 
 // The canopy mip level the mesh reads at [grid_spacing] m between rings, for
@@ -220,20 +232,21 @@ highp float liftAt(highp vec2 uv, float lod) {
 // [grid_spacing] m between rings: the near canopy inside its block, the far
 // one beyond, read at [canopyLod] so far vertices take the canopy averaged
 // into a smooth blanket rather than aliasing crowns. 0 where tree.vert stands
-// trees instead.
+// trees instead, and around the eye ([canopyRest]).
 highp float canopyLift(highp vec2 cn, highp vec2 cf, highp float r,
                        highp float grid_spacing) {
   float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
   float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
-  float rest = 1.0 - treesStood(r, nearEdge);
+  float rest = canopyRest(r, nearEdge);
   if (rest <= 0.0)
     return 0.0;
   highp float lift = 0.0;
   if (nearEdge > 0.0)
-    lift += nearEdge * liftAt(canopyNearUV(cn), canopyLod(grid_spacing, 2.0));
+    lift += nearEdge *
+            liftAt(canopyNearUV(cn), canopyLod(grid_spacing, u_canopyStep.x));
   if (nearEdge < 1.0 && farEdge > 0.0)
     lift += (1.0 - nearEdge) * farEdge *
-            liftAt(canopyFarUV(cf), canopyLod(grid_spacing, 5.0));
+            liftAt(canopyFarUV(cf), canopyLod(grid_spacing, u_canopyStep.y));
   return lift * rest;
 }
 

@@ -36,6 +36,7 @@ uniform mediump sampler2D u_canopy;
 uniform mediump int u_canopySlot;
 uniform mediump int u_canopyFarSlot;
 uniform bool u_treesStand;
+uniform mediump vec2 u_canopyStep; // as in radial_common.vert
 // The 20 m canopy (Hd_dem.canopy_mid, ~20 km), if [u_canopyMidOn]: slot 4 of
 // the atlas, through a map of its own from the base grid's coordinate.
 uniform bool u_canopyMidOn;
@@ -462,6 +463,9 @@ float canopyEdge(highp vec2 c) {
 float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
 }
+float canopyRest(highp float r, float nearEdge) {
+  return (1.0 - treesStood(r, nearEdge)) * smoothstep(40.0, 80.0, r);
+}
 highp vec2 slotCoord(int slot) {
   return slot == 0 ? hdReliefCoord0
                    : (slot == 1 ? hdReliefCoord1 : hdReliefCoord2);
@@ -475,7 +479,7 @@ void canopyGeometry() {
       u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
   float farEdge =
       u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
-  float rest = 1.0 - treesStood(v_dist, nearEdge);
+  float rest = canopyRest(v_dist, nearEdge);
   highp float spacing = grid_k * (v_dist + grid_scale);
   vec2 slope = vec2(0.0);
   float weight = 0.0;
@@ -483,7 +487,7 @@ void canopyGeometry() {
     float w = k == 0 ? nearEdge : (1.0 - nearEdge) * farEdge;
     if (w <= 0.0 || rest <= 0.0)
       continue;
-    float step = k == 0 ? 2.0 : 5.0;
+    float step = k == 0 ? u_canopyStep.x : u_canopyStep.y;
     highp vec2 uv = k == 0 ? canopyNearUV(slotCoord(u_canopySlot))
                            : canopyFarUV(slotCoord(u_canopyFarSlot));
     vec4 s = textureLod(u_canopy, uv, log2(max(spacing / step, 1.0)) + 2.0);
