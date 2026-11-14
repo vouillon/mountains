@@ -71,7 +71,7 @@ float valueNoise(highp vec2 p) {
 
 float canopyAt(ivec2 t) {
   vec4 s = texelFetch(u_canopy, t, 0);
-  return s.r > 0.995 ? -1.0 : s.r * (255.0 / 5.0);
+  return s.a < 0.5 / 255.0 ? -1.0 : s.r * (255.0 / 5.0);
 }
 
 highp float groundAt(highp vec2 norm) {

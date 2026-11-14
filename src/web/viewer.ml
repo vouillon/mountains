@@ -4001,6 +4001,7 @@ let canopy_texture ctx kind raw ~step =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_heights") 15;
   Gl.uniform1f ctx (u "u_step") step;
+  Gl.uniform1i ctx (u "u_flagged") (if kind = 2 then 1 else 0);
   bake_into_atlas ctx atlas pid ~slot:canopy_slots.(kind) ~input:heights
 
 (* Bind the canopy atlas (or [placeholder]) on unit 15 and tell [pids] -- the

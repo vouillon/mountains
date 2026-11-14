@@ -1,16 +1,26 @@
 // Bakes the canopy texture (Viewer.canopy_texture) from the raw LIDAR HD
 // canopy heights, once per block, RGBA8 per 2 m sample, rows from the south:
-// - R: height, 0.2 m per step up to 50.8 m, 255 for nodata;
+// - R: height, 0.2 m per step up to 50.8 m, 0 for nodata;
 // - G, B: its slope east and north (central differences), 1/32 per step
 //   around 128, clamped at +-4: what shades each crown on its sun side;
 // - A: crown tone, 1 at a crown's top falling to 0 six metres below the
 //   highest canopy within 4 m, and 0 under 2 m of canopy: tops lit, gaps dark.
+//   On steps 1 to 255: 0 is nodata, and a filtered read is of nodata alone
+//   only if its A is 0. Nodata is not a height: as the 255 it used to be,
+//   filtered with the open ground next to it, it read as a band of trees of
+//   every height along the edge of the data. As it is, the canopy just comes
+//   out lower over the data's last sample.
 // The neighbourhood is why this is a bake and not done per terrain pixel.
 
 uniform highp sampler2D u_heights; // R32F, rows north-up as served
 uniform int u_size;
 uniform ivec2 u_offset; // the target slot's first texel (Viewer.canopy_atlas)
 uniform float u_step;   // metres per sample
+// The 20 m canopy, of which only the height is read, filtered over many
+// samples at a distance: A is instead whether the sample has data, so that a
+// filtered read gives the share with data and, R divided by it, their mean
+// height.
+uniform bool u_flagged;
 
 out vec4 color;
 
@@ -33,7 +43,7 @@ void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) - u_offset;
   float v = H(p);
   if (v < 0.0) {
-    color = vec4(1.0, 128.0 / 255.0, 128.0 / 255.0, 0.0);
+    color = vec4(0.0, 128.0 / 255.0, 128.0 / 255.0, 0.0);
     return;
   }
   vec2 slope = vec2(N(p + ivec2(1, 0), v) - N(p - ivec2(1, 0), v),
@@ -45,5 +55,6 @@ void main() {
       top = max(top, H(p + ivec2(dx, dy)));
   float tone = v < 2.0 ? 0.0 : max(0.0, 1.0 - (top - v) / 6.0);
   color = vec4(min(254.0, floor(v * 5.0 + 0.5)) / 255.0,
-               clamp(floor(slope * 32.0 + 128.5), 0.0, 255.0) / 255.0, tone);
+               clamp(floor(slope * 32.0 + 128.5), 0.0, 255.0) / 255.0,
+               u_flagged ? 1.0 : (1.0 + floor(tone * 254.0 + 0.5)) / 255.0);
 }

@@ -146,7 +146,7 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
 }
 
 // The LIDAR HD canopy over the 1 m ring's block (see terrain.frag and
-// Viewer.canopy_texture): R is the height, 0.2 m per step, 255 for nodata.
+// Viewer.canopy_texture): R is the height, 0.2 m per step; A is 0 for nodata.
 // Shared by the terrain, shadow and path programs, so the forest the mesh
 // stands up, the forest that casts shadows and the forest a GPX trace is
 // draped over are one surface. Precisions explicit: terrain.frag declares the
@@ -224,7 +224,7 @@ float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 // ground models disagree).
 highp float liftAt(highp vec2 uv, float lod) {
   vec4 s = textureLod(u_canopy, uv, lod);
-  if (s.r > 0.995)
+  if (s.a < 0.5 / 255.0)
     return 0.0;
   float h = s.r * (255.0 / 5.0);
   return h * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *

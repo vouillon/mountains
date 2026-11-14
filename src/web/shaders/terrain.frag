@@ -494,10 +494,10 @@ void canopyGeometry() {
                            : canopyFarUV(slotCoord(u_canopyFarSlot));
     vec4 s = textureLod(u_canopy, uv, log2(max(spacing / step, 1.0)) + 2.0);
     float h = s.r * (255.0 / 5.0);
-    float c = s.r > 0.995 ? 0.0
-                          : w * smoothstep(1.0, 3.0, h) *
-                                (1.0 - smoothstep(40.0, 48.0, h)) *
-                                smoothstep(0.2, 0.4, s.a);
+    float c = s.a < 0.5 / 255.0 ? 0.0
+                                : w * smoothstep(1.0, 3.0, h) *
+                                      (1.0 - smoothstep(40.0, 48.0, h)) *
+                                      smoothstep(0.2, 0.4, s.a);
     slope += c * (s.gb * 255.0 - 128.0) / 32.0;
     weight += c;
   }
@@ -520,22 +520,24 @@ vec3 canopyTrees() {
   // whose implicit level the crown shading relies on, and for the 20 m one,
   // filtered with distance.
   g_canopy = texture(u_canopy, canopyNearUV(slotCoord(max(u_canopySlot, 0))));
-  vec4 m = u_canopyMidOn ? texture(u_canopy, atlasUV(cm, 4)) : vec4(1.0);
+  // Its A is the share of the read that has data, its R their heights'
+  // sum (canopy_prep.frag's [u_flagged]).
+  vec4 m = u_canopyMidOn ? texture(u_canopy, atlasUV(cm, 4)) : vec4(0.0);
   if (nearEdge + farEdge + midEdge <= 0.0)
     return vec3(0.0);
   vec4 f =
       farEdge > 0.0 && nearEdge < 1.0
           ? textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)), 0.0)
-          : vec4(1.0);
-  float wn = g_canopy.r > 0.995 ? 0.0 : nearEdge;
-  float wf = f.r > 0.995 ? 0.0 : (1.0 - wn) * farEdge;
-  float wm = m.r > 0.995 ? 0.0 : (1.0 - wn - wf) * midEdge;
+          : vec4(0.0);
+  float wn = g_canopy.a < 0.5 / 255.0 ? 0.0 : nearEdge;
+  float wf = f.a < 0.5 / 255.0 ? 0.0 : (1.0 - wn) * farEdge;
+  float wm = (1.0 - wn - wf) * midEdge * m.a;
   float wsum = wn + wf + wm;
   if (wsum <= 0.0)
     return vec3(0.0);
   float hn = g_canopy.r * (255.0 / 5.0);
   float hf = f.r * (255.0 / 5.0);
-  float hm = m.r * (255.0 / 5.0);
+  float hm = m.a > 0.0 ? m.r / m.a * (255.0 / 5.0) : 0.0;
   // The 20 m canopy is a mean over each sample: a sparse forest reads as a
   // metre or two.
   float share = (wn * smoothstep(1.5, 4.0, hn) + wf * smoothstep(1.5, 4.0, hf) +
