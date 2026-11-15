@@ -393,7 +393,18 @@ let decode_clc_dataset ~inst msg =
       let wc = copy_mem m_out_col water_verts in
       let wi = copy_mem m_out_ebo (water_indices * 4) in
       Lwt.return (wp, wc, wi))
-    else Lwt.return (Jv.null, Jv.null, Jv.null)
+    else begin
+      (* The nine streams are there all the same, empty: step over them, or
+         the POIs are read from the first of them (a tile of POIs alone,
+         extract_tiles --pois, or one with no water). *)
+      if is_clc4 || is_clc5 then
+        for _ = 1 to 9 do
+          offset :=
+            !offset + 4
+            + get_uint32_le_ba (Brr.Tarray.to_bigarray1 data_ta) !offset
+        done;
+      Lwt.return (Jv.null, Jv.null, Jv.null)
+    end
   in
 
   let read_and_inflate data_ta off =

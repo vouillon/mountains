@@ -38,11 +38,13 @@ let to_lwt f =
 (* Worker Pool Manager *)
 
 (* Path to a sub-tile file *)
-let path ?(step = 1) ~lat ~lon ~row ~col () =
+let path ?(step = 1) ?(cover = false) ~lat ~lon ~row ~col () =
   let lat_c = if lat >= 0 then 'N' else 'S' in
   let lon_c = if lon >= 0 then 'E' else 'W' in
   Printf.sprintf "data/%s/%c%02d_%c%03d_%d_%d.dem"
-    (if step = 1 then "dem" else Printf.sprintf "dem%d" step)
+    (if cover then Printf.sprintf "clc%d" step
+     else if step = 1 then "dem"
+     else Printf.sprintf "dem%d" step)
     lat_c (abs lat) lon_c (abs lon) row col
 
 (* [step] is the grid's spacing in arcseconds: 1 for the base tiles, 4 for the
@@ -52,8 +54,13 @@ let path ?(step = 1) ~lat ~lon ~row ~col () =
    sample's row is its northernmost arcsecond's, less one, over [step], plus
    one -- the sub-tiles' rows start one arcsecond north of the degree -- and
    its column its westernmost arcsecond's over [step]. A far tile that is not
-   there is open sea, and not a failure. *)
-let load ?(step = 1) ~lat ~lon ~size () =
+   there is open sea, and not a failure.
+
+   With [cover] the tiles are the far field's land cover (extract_tiles
+   --coarse), on the same samples and in the same framing: the "heights" are
+   palette indices, to be read raw, low byte first, and not through
+   [get_height]. *)
+let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
   let sub_tile_size = sub_tile_size / step in
   let degree = 3600 / step in
   Worker_pool.init ();
@@ -66,7 +73,7 @@ let load ?(step = 1) ~lat ~lon ~size () =
      [get_height]): sub-tiles that do not exist -- open sea, e.g. the
      Mediterranean south of Marseille -- must read as sea level, not as the
      -500 m that zero bytes decode to. 3449 = round (500 * 65535 / 9500). *)
-  let sea = 3449 in
+  let sea = if cover then Clc_palette.get_index 523 else 3449 in
   let sea_low = sea land 0xff and sea_high = sea lsr 8 in
   (* By doubling blits, which are memcpys: an element at a time, the 32 MB
      took 360 ms under wasm_of_ocaml, a frozen frame at the start of each
@@ -137,7 +144,8 @@ let load ?(step = 1) ~lat ~lon ~size () =
             && overlap_min_lon <= overlap_max_lon
           then begin
             let p =
-              path ~step ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col ()
+              path ~step ~cover ~lat:deg_lat ~lon:deg_lon ~row:sub_row
+                ~col:sub_col ()
             in
 
             (* Create a task for this sub-tile *)

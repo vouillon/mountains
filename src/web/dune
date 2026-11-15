@@ -37,6 +37,8 @@
  (deps
   (glob_files_rec ../../data/dem/**)
   (glob_files_rec ../../data/dem4/**)
+  (glob_files_rec ../../data/clc4/**)
+  (glob_files_rec ../../data/poi/**)
   (glob_files_rec ../../data/clc/**)
   ../../data/points.geojson)
  (action
@@ -44,6 +46,8 @@
    (run mkdir -p %{target})
    (run cp -r ../../data/dem %{target}/dem)
    (run cp -r ../../data/dem4 %{target}/dem4)
+   (run cp -r ../../data/clc4 %{target}/clc4)
+   (run cp -r ../../data/poi %{target}/poi)
    (run cp -r ../../data/clc %{target}/clc)
    (run cp ../../data/points.geojson %{target}/points.geojson))))
 

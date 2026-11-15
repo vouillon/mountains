@@ -377,7 +377,108 @@ end
 
 (* --- Main Pipeline --- *)
 
-let process_tile db_path output_dir tile_name =
+(* The far field's land cover: a degree cell as a grid of palette indices at 4
+   arcseconds, on the samples of the far field's elevation (compress_dem
+   --coarse) -- a sample's class is its centre's, 4 col + 1.5 arcseconds east
+   of the cell's west edge and 4 row + 1.5 south of its north one -- and cut
+   into the same nine sub-tiles, in the same framing: a .dem tile whose
+   heights are indices, so that the client reads both through one decoder. The
+   elevation range its header must state means nothing here. Land cover drawn
+   to 25 ha needs no more than this 45 km from the eye and beyond, and the
+   polygons themselves are megabytes a cell. *)
+module Coarse = struct
+  let size = 900
+  let sub_size = size / 3
+  let create () = Bytes.make (size * size) '\255'
+
+  (* Fill the samples whose centre a triangle covers, unless something has
+     them already: the features come smallest first, as the client draws
+     them. [verts] are (lon, lat) pairs. *)
+  let fill grid ~lon ~lat ~index verts indices tri_count =
+    let gx v = (((verts.(2 * v) -. lon) *. 3600.) -. 1.5) /. 4. in
+    let gy v = (((lat +. 1. -. verts.((2 * v) + 1)) *. 3600.) -. 1.5) /. 4. in
+    for t = 0 to tri_count - 1 do
+      let a = indices.(3 * t)
+      and b = indices.((3 * t) + 1)
+      and c = indices.((3 * t) + 2) in
+      let ax = gx a and ay = gy a in
+      let bx = gx b and by = gy b in
+      let cx = gx c and cy = gy c in
+      let area = ((bx -. ax) *. (cy -. ay)) -. ((by -. ay) *. (cx -. ax)) in
+      if area <> 0. then begin
+        let lo u v w = max 0 (int_of_float (ceil (Float.min u (Float.min v w))))
+        and hi u v w =
+          min (size - 1) (int_of_float (floor (Float.max u (Float.max v w))))
+        in
+        for row = lo ay by cy to hi ay by cy do
+          for col = lo ax bx cx to hi ax bx cx do
+            let x = float col and y = float row in
+            let side px py qx qy =
+              (((qx -. px) *. (y -. py)) -. ((qy -. py) *. (x -. px))) *. area
+            in
+            if
+              Bytes.get grid ((row * size) + col) = '\255'
+              && side ax ay bx by >= 0.
+              && side bx by cx cy >= 0.
+              && side cx cy ax ay >= 0.
+            then Bytes.set grid ((row * size) + col) (Char.chr index)
+          done
+        done
+      end
+    done
+
+  let zigzag n =
+    let n = n land 0xFFFF in
+    let n = if n >= 0x8000 then n - 0x10000 else n in
+    (n lsl 1) lxor (n asr 15) land 0xFFFF
+
+  (* compress_dem's [compress] and [write_output], over indices. *)
+  let write grid ~default ~row ~col path =
+    let at r c =
+      match
+        Bytes.get grid ((((row * sub_size) + r) * size) + (col * sub_size) + c)
+      with
+      | '\255' -> default
+      | i -> Char.code i
+    in
+    let n = sub_size * sub_size in
+    let high = Bytes.create n and low = Bytes.create n in
+    for r = 0 to sub_size - 1 do
+      for c = 0 to sub_size - 1 do
+        let predicted =
+          if r = 0 && c = 0 then 0
+          else if r = 0 then at r (c - 1)
+          else if c = 0 then at (r - 1) c
+          else at r (c - 1) + at (r - 1) c - at (r - 1) (c - 1)
+        in
+        let z = zigzag (at r c - predicted) in
+        Bytes.set high ((r * sub_size) + c) (Char.chr (z lsr 8));
+        Bytes.set low ((r * sub_size) + c) (Char.chr (z land 0xFF))
+      done
+    done;
+    let high = Encoder.compress_string (Bytes.to_string high)
+    and low = Encoder.compress_string (Bytes.to_string low) in
+    let oc = open_out_bin (path ^ ".tmp") in
+    let u32 v =
+      let b = Bytes.create 4 in
+      Bytes.set_int32_le b 0 v;
+      output_bytes oc b
+    in
+    output_string oc "DEM1";
+    u32 (Int32.of_int sub_size);
+    u32 (Int32.of_int sub_size);
+    u32 (Int32.bits_of_float (-500.));
+    u32 (Int32.bits_of_float 9000.);
+    u32 (Int32.of_int (String.length high));
+    u32 (Int32.of_int (String.length low));
+    output_string oc high;
+    output_string oc low;
+    close_out oc;
+    Sys.rename (path ^ ".tmp") path;
+    String.length high + String.length low
+end
+
+let process_tile ?(coarse = false) db_path output_dir tile_name =
   let lat, lon = parse_tile_string tile_name in
   Printf.printf "Processing Tile: %s (Lat: %.2f, Lon: %.2f)\n%!" tile_name lat
     lon;
@@ -751,6 +852,44 @@ let process_tile db_path output_dir tile_name =
       all_features
   in
 
+  if coarse then begin
+    let grid = Coarse.create () in
+    List.iter
+      (fun (_area, code, _, tri_count, _, verts, indices) ->
+        Coarse.fill grid ~lon ~lat
+          ~index:(Clc_palette.get_index code)
+          verts indices tri_count)
+      sorted_features;
+    ignore (Sqlite3.db_close db);
+    (* A cell CORINE has nothing for gets no tiles: the client takes a missing
+       one for open sea. *)
+    if sorted_features = [] then begin
+      Printf.printf "No features: nothing written.\n%!";
+      exit 0
+    end;
+    (* What CORINE does not cover is open sea. *)
+    let default = Clc_palette.get_index 523 in
+    let bytes = ref 0 in
+    for row = 0 to 2 do
+      for col = 0 to 2 do
+        (* Row 0 is the southern one, as for the elevation. *)
+        bytes :=
+          !bytes
+          + Coarse.write grid ~default ~row:(2 - row) ~col
+              (Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" output_dir
+                 (if lat >= 0. then 'N' else 'S')
+                 (int_of_float (Float.abs lat))
+                 (if lon >= 0. then 'E' else 'W')
+                 (int_of_float (Float.abs lon))
+                 row col)
+      done
+    done;
+    Printf.printf "Done. %d features over 9 tiles, %d bytes.\n%!"
+      (List.length sorted_features)
+      !bytes;
+    exit 0
+  end;
+
   (* Encode Sorted Features *)
   List.iter
     (fun ( _area,
@@ -1000,8 +1139,46 @@ let process_tile db_path output_dir tile_name =
     !entry_count !total_vertices !total_indices !water_entry_count
     !water_total_vertices !water_total_indices !poi_count
 
+(* The POIs of a tile on their own, as a tile with no land cover and no water
+   that the client reads like any other: what it takes of a cell it only sees
+   from afar, whose cover comes with [Coarse]. The POI streams are copied as
+   they are. *)
+let extract_pois input output =
+  let ic = open_in_bin input in
+  let data = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  if String.length data < 96 || String.sub data 0 4 <> "CLC5" then
+    failwith (input ^ ": not a CLC5 tile");
+  (* Magic, seven counts, eight floats; then seven streams of land cover and
+     nine of water, each behind its length. *)
+  let pos = ref 96 in
+  for _ = 1 to 16 do
+    pos := !pos + 4 + Int32.to_int (String.get_int32_le data !pos)
+  done;
+  let oc = open_out_bin (output ^ ".tmp") in
+  output_string oc "CLC5";
+  for _ = 1 to 6 do
+    output_binary_int oc 0
+  done;
+  output_string oc (String.sub data 28 (4 + 64));
+  for _ = 1 to 16 do
+    Encoder.write_block oc (Buffer.create 0)
+  done;
+  output_string oc (String.sub data !pos (String.length data - !pos));
+  close_out oc;
+  Sys.rename (output ^ ".tmp") output
+
 let () =
-  if Array.length Sys.argv < 4 then
-    Printf.printf "Usage: %s <DB> <Output Dir> <TileCode> (e.g. N45E006)\n"
-      Sys.argv.(0)
-  else process_tile Sys.argv.(1) Sys.argv.(2) Sys.argv.(3)
+  match Array.to_list Sys.argv with
+  | [ _; "--pois"; input; output ] -> extract_pois input output
+  | [ _; "--coarse"; db; output_dir; tile ] ->
+      process_tile ~coarse:true db output_dir tile
+  | [ _; db; output_dir; tile ] -> process_tile db output_dir tile
+  | _ ->
+      Printf.printf
+        "Usage: %s [--coarse] <DB> <Output Dir> <TileCode> (e.g. N45E006)\n\
+        \  --coarse: the far field's land cover instead, nine tiles of palette \
+         indices at 4 arcseconds\n\
+        \       %s --pois <tile.clc> <output.clc>\n\
+        \  the tile's POIs alone\n"
+        Sys.argv.(0) Sys.argv.(0)

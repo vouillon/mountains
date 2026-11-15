@@ -47,13 +47,16 @@ type clc_tile = {
 (** Decoded CLC tile data *)
 
 val load_tiles :
+  ?pois:bool ->
   lat:float ->
   lon:float ->
   size:int ->
+  unit ->
   (float * float * float * float * (clc_tile * float * float) list) Lwt.t
 (** Load CLC tiles for the given area. Returns: (dem_min_lon, dem_min_lat,
     dem_range_lon, dem_range_lat, tiles list) Each tile in the list has:
-    (tile_data, tile_range_lon, tile_range_lat) *)
+    (tile_data, tile_range_lon, tile_range_lat). With [pois], the tiles that
+    hold the POIs alone (extract_tiles --pois), for an area seen from afar. *)
 
 val prefetch : size:int -> lat:float -> lon:float -> unit Lwt.t
 (** Prefetch CLC tiles for the given range to warm browser cache. *)

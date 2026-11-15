@@ -1437,7 +1437,11 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
 
   (tid, nid)
 
-let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
+(* The far field (see radial_common.vert): a grid of [far_step] arcseconds over
+   a square twice the base grid's side, so of half as many samples a side. *)
+let far_step = 4
+
+let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
   (* CLC GPU Rasterization setup.
@@ -1744,6 +1748,40 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
             end)
       uploaded_tiles
   done;
+
+  (* The last level, over the far field's square, is not drawn from polygons
+     but copied from the far field's own land cover, a grid of palette indices
+     on the far elevation's samples ([Dem_loader.load ~cover]): megabytes less
+     to fetch for ground 45 km away and more. Those samples are a texel wide and
+     stand where [far_origin] has it, which leaves them a texel off, or none,
+     as the anchor is past a multiple of [far_step]. Without it the level keeps
+     what the polygons of the base grid's tiles drew, and sea around them. *)
+  Option.iter
+    (fun (cover : Dem_loader.t) ->
+      let n = cover_map_size in
+      if cover.size = n then begin
+        let shift a =
+          ((((a mod far_step) + far_step) mod far_step) + (far_step / 2))
+          / far_step
+        in
+        let dx = shift (Web_utils.arcsec_floor lon)
+        and dy = shift (Web_utils.arcsec_floor lat - 1) in
+        let ids = Bigarray.(Array1.create int8_unsigned c_layout (n * n)) in
+        for i = 0 to n - 1 do
+          let row = min (n - 1) (i + dy) in
+          for j = 0 to n - 1 do
+            ids.{(i * n) + j} <- cover.data.{row, 2 * min (n - 1) (j + dx)}
+          done
+        done;
+        Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+        Gl.pixel_storei ctx Gl.unpack_alignment 1;
+        Gl.tex_sub_image3d ctx Gl.texture_2d_array 0 0 0 (clc_levels - 1) n n 1
+          Gl.red_integer Gl.unsigned_byte
+          (Brr.Tarray.of_bigarray1 ids);
+        Gl.pixel_storei ctx Gl.unpack_alignment 4;
+        Gl.bind_texture ctx Gl.texture_2d_array None
+      end)
+    far_cover;
 
   (* Cleanup - delete pre-uploaded buffers *)
   List.iter
@@ -4454,10 +4492,6 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
    the rim is lost on one side; and the finest cover-map clipmap level, ~1 km
    across, is centred there too, so ground beyond it reads its land cover one
    level coarser. At 250 m of a 63 km horizon both are noise. *)
-(* The far field (see radial_common.vert): a grid of [far_step] arcseconds over
-   a square twice the base grid's side, so of half as many samples a side. *)
-let far_step = 4
-
 (* Where the far field's first sample stands, in arcseconds west and south of
    the anchor of a base grid of [w] samples: [w] and what the anchor is past a
    multiple of [far_step], less the 1.5 arcseconds that centre a sample in its
@@ -4708,22 +4742,31 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     match reused_base with
     | Some _ -> Lwt.return None
     | None ->
-        (* The land cover over the far field's square, twice the side. The far
-           field itself is not worth failing a location for: without it the
-           ground ends at the base grid, as it used to. *)
-        let* (tile, far_tile), (_, _, _, _, clc_tiles) =
+        (* The far field is not worth failing a location for: without it the
+           ground ends at the base grid, as it used to. Its land cover comes
+           as a grid like its elevation, and its POIs in tiles of their own:
+           the polygons of a cell seen from 45 km and more are megabytes for
+           nothing. *)
+        let far_grid cover =
+          Lwt.catch
+            (fun () ->
+              Lwt.map Option.some
+                (Dem_loader.load ~step:far_step ~cover ~size:(w / 2) ~lat:alat
+                   ~lon:alon ()))
+            (fun _ -> Lwt.return_none)
+        in
+        let* ( (tile, (far_tile, far_cover)),
+               ((_, _, _, _, clc_tiles), (_, _, _, _, poi_tiles)) ) =
           Lwt.both
             (Lwt.both
                (Dem_loader.load ~size:w ~lat:alat ~lon:alon ())
-               (Lwt.catch
-                  (fun () ->
-                    Lwt.map Option.some
-                      (Dem_loader.load ~step:far_step ~size:(w / 2) ~lat:alat
-                         ~lon:alon ()))
-                  (fun _ -> Lwt.return_none)))
-            (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:(2 * w))
+               (Lwt.both (far_grid false) (far_grid true)))
+            (Lwt.both
+               (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:w ())
+               (Clc_loader.load_tiles ~pois:true ~lat:alat ~lon:alon
+                  ~size:(2 * w) ()))
         in
-        Lwt.return (Some (tile, far_tile, clc_tiles))
+        Lwt.return (Some (tile, far_tile, far_cover, clc_tiles, poi_tiles))
   in
   (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
      not free -- the eye is anchored on the surface that is drawn, so folding a
@@ -4791,7 +4834,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       (* Nothing was fetched exactly when the anchor was held, which is exactly
          when there is a base to stand on. *)
       | None -> Option.get reused_base
-      | Some (tile, far_tile, clc_tiles) ->
+      | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles) ->
           let relief_texture, relief_normal_texture =
             let tile_texture = make_tile_texture ctx tile in
             let pyramids =
@@ -4832,12 +4875,18 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           (* The POIs of the base grid, and those beyond it as far as the far
              field has ground to stand them on: short of its edge, the two
              grids not being aligned. *)
-          let poi, far_poi =
-            poi_positions
-              ~reach:(if far_tile = None then 0 else (w / 2) - 8)
-              ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles
-            |> List.partition (fun (_, (x, y)) ->
-                x >= 0. && y >= 0. && x <= float (w - 1) && y <= float (h - 1))
+          let poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles in
+          let far_poi =
+            if far_tile = None then []
+            else
+              poi_positions
+                ~reach:((w / 2) - 8)
+                ~w ~h ~lat:alat ~lon:alon ~tile poi_tiles
+              |> List.filter (fun (_, (x, y)) ->
+                  not
+                    (x >= 0. && y >= 0.
+                    && x <= float (w - 1)
+                    && y <= float (h - 1)))
           in
           let ao_texture =
             time_gpu ctx "compute_ao" (fun () ->
@@ -4848,9 +4897,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           (* GPU rasterize CLC tiles to FBO *)
           let cover_map_texture =
             time_gpu ctx "rasterize_clc_tiles" (fun () ->
-                rasterize_clc_tiles ctx ~lat:alat ~lon:alon ~w ~clc_tiles
-                  ~clc_raster_pid ~water_raster_pid clc_raster_uniforms
-                  water_raster_uniforms)
+                rasterize_clc_tiles ?far_cover ctx ~lat:alat ~lon:alon ~w
+                  ~clc_tiles ~clc_raster_pid ~water_raster_pid
+                  clc_raster_uniforms water_raster_uniforms)
           in
           {
             anchor_lat;

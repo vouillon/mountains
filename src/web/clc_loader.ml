@@ -146,7 +146,8 @@ let tile_name lat lon =
   Printf.sprintf "%s%02d%s%03d.clc" lat_str (abs lat_int) lon_str (abs lon_int)
 
 (* Tile path for fetching *)
-let tile_path lat lon = "data/clc/" ^ tile_name lat lon
+let tile_path ?(pois = false) lat lon =
+  (if pois then "data/poi/" else "data/clc/") ^ tile_name lat lon
 
 let ( // ) x y =
   let q = x / y in
@@ -366,7 +367,7 @@ let load_full_clc_tile path_str =
   | _ -> Lwt.fail (Failure "Invalid response type for CLC")
 
 (* Load CLC tiles in parallel *)
-let load_tiles ~lat ~lon ~size =
+let load_tiles ?(pois = false) ~lat ~lon ~size () =
   let open Lwt.Syntax in
   let size_deg = float size /. 3600. in
   let dem_min_lat = lat -. (size_deg /. 2.) in
@@ -384,7 +385,9 @@ let load_tiles ~lat ~lon ~size =
   let tasks = ref [] in
   for tile_lat = min_tile_lat to max_tile_lat do
     for tile_lon = min_tile_lon to max_tile_lon do
-      let path = tile_path (float tile_lat +. 0.5) (float tile_lon +. 0.5) in
+      let path =
+        tile_path ~pois (float tile_lat +. 0.5) (float tile_lon +. 0.5)
+      in
       let task =
         Lwt.catch
           (fun () ->
