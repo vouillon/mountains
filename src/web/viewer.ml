@@ -237,10 +237,10 @@ type program = Web_utils.program_spec = {
 }
 
 let n_sectors = 512
-let n_rings = 1754
+let n_rings = 1979
 (*
 let k = 3.14 /. 2. /. float n_sectors;;
-log (70000. *. (exp(k) -. 1.) +. 1.) /. k +. 1.;;
+log (140000. *. (exp(k) -. 1.) +. 1.) /. k +. 1.;;
 *)
 
 (* The index buffer built by [build_indices] is block-major: [n_index_blocks]
@@ -1456,8 +1456,9 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   (* Create FBO for CLC rasterization *)
   let clc_fbo = Gl.create_framebuffer ctx in
 
-  (* Create R8UI texture array for CLC output (7 levels) *)
-  let clc_levels = 7 in
+  (* Create R8UI texture array for CLC output: seven levels down from the base
+     grid's extent, and one above them over the far field's, twice its side *)
+  let clc_levels = 8 in
   let cover_map_texture = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
@@ -1513,15 +1514,15 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     (float (Web_utils.arcsec_floor lon) /. 3600.) -. half_arcsec
   in
 
-  (* Largest level (Index 6) matches DEM extent exactly *)
+  (* Level 6 matches the DEM extent exactly; level 7 is the far field's *)
   let dem_extent_deg = float w /. 3600. in
 
   (* Pre-calculate view bounds for each level *)
   (* Level 6: extent = dem_extent. Scale = 1. *)
   (* Level 0: extent = dem_extent / 64. Scale = 64. *)
   let level_bounds =
-    Array.init 7 (fun level ->
-        (* level 0 is smallest, level 6 is largest *)
+    Array.init clc_levels (fun level ->
+        (* level 0 is smallest, level 7 is largest *)
         (* scale factor relative to DEM: 1.0 for level 6, 1/64 for level 0 *)
         let factor = 2.0 ** float (level - 6) in
         let extent = dem_extent_deg *. factor in
@@ -1629,7 +1630,7 @@ let rasterize_clc_tiles ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   in
 
   (* Render each level in turn *)
-  for level = 0 to 6 do
+  for level = 0 to clc_levels - 1 do
     let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, v_max_lon, v_max_lat =
       level_bounds.(level)
     in
@@ -2200,6 +2201,8 @@ type base = {
   poi : (Points.t * (float * float)) list;  (** in base-grid samples *)
   relief_texture : Gl.texture;
   relief_normal_texture : Gl.texture;
+  far : (Gl.texture * Gl.texture) option;
+      (** the far field's heights and normals, if its tiles came *)
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
 }
@@ -2229,10 +2232,21 @@ let delete_slot ctx = function
   | Pending | Blank _ -> ()
 
 let delete_base ctx
-    { relief_texture; relief_normal_texture; ao_texture; cover_map_texture; _ }
-    =
+    {
+      relief_texture;
+      relief_normal_texture;
+      far;
+      ao_texture;
+      cover_map_texture;
+      _;
+    } =
   Gl.delete_texture ctx relief_texture;
   Gl.delete_texture ctx relief_normal_texture;
+  Option.iter
+    (fun (heights, normals) ->
+      Gl.delete_texture ctx heights;
+      Gl.delete_texture ctx normals)
+    far;
   Gl.delete_texture ctx ao_texture;
   Gl.delete_texture ctx cover_map_texture
 
@@ -4435,6 +4449,42 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
    the rim is lost on one side; and the finest cover-map clipmap level, ~1 km
    across, is centred there too, so ground beyond it reads its land cover one
    level coarser. At 250 m of a 63 km horizon both are noise. *)
+(* The far field (see radial_common.vert): a grid of [far_step] arcseconds over
+   a square twice the base grid's side, so of half as many samples a side. *)
+let far_step = 4
+
+(* Bind the far field's pyramids on units 16 and 17 -- the first sixteen are
+   spoken for (Render_state.upload_texture_units), and nothing else touches
+   these, so they stay bound from here on -- and tell [pids], the terrain,
+   shadow and path programs, where it lies about the anchor of the base grid
+   of [w] samples. Dem_loader.load has where its samples stand: the first is
+   [w] arcseconds and what the anchor is past a multiple of [far_step] before
+   the anchor, and centred 1.5 arcseconds into its four. *)
+let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
+  let heights, normals =
+    match far with Some f -> f | None -> (placeholder, placeholder)
+  in
+  Gl.active_texture ctx Gl.texture16;
+  Gl.bind_texture ctx Gl.texture_2d (Some heights);
+  Gl.active_texture ctx Gl.texture17;
+  Gl.bind_texture ctx Gl.texture_2d (Some normals);
+  Gl.active_texture ctx Gl.texture0;
+  let past a = float (((a mod far_step) + far_step) mod far_step) in
+  let size = w / 2 in
+  List.iter
+    (fun pid ->
+      Gl.use_program ctx pid;
+      let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+      Gl.uniform1i ctx (u "far_valid") (if far = None then 0 else 1);
+      Gl.uniform1i ctx (u "far_relief") 16;
+      Gl.uniform1i ctx (u "far_relief_normal") 17;
+      Gl.uniform3f ctx (u "far_map")
+        (float w +. past anchor_lon -. 1.5)
+        (float w +. past (anchor_lat - 1) -. 1.5)
+        (1. /. float (far_step * size));
+      Gl.uniform1i ctx (u "far_max_lod") (Web_utils.log2 size))
+    pids
+
 let reuse_radius_m = 250.
 
 let near_anchor b ~lat ~lon =
@@ -4567,12 +4617,22 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     match reused_base with
     | Some _ -> Lwt.return None
     | None ->
-        let* tile, (_, _, _, _, clc_tiles) =
+        (* The land cover over the far field's square, twice the side. The far
+           field itself is not worth failing a location for: without it the
+           ground ends at the base grid, as it used to. *)
+        let* (tile, far_tile), (_, _, _, _, clc_tiles) =
           Lwt.both
-            (Dem_loader.load ~size:w ~lat:alat ~lon:alon)
-            (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:w)
+            (Lwt.both
+               (Dem_loader.load ~size:w ~lat:alat ~lon:alon ())
+               (Lwt.catch
+                  (fun () ->
+                    Lwt.map Option.some
+                      (Dem_loader.load ~step:far_step ~size:(w / 2) ~lat:alat
+                         ~lon:alon ()))
+                  (fun _ -> Lwt.return_none)))
+            (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:(2 * w))
         in
-        Lwt.return (Some (tile, clc_tiles))
+        Lwt.return (Some (tile, far_tile, clc_tiles))
   in
   (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
      not free -- the eye is anchored on the surface that is drawn, so folding a
@@ -4640,13 +4700,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       (* Nothing was fetched exactly when the anchor was held, which is exactly
          when there is a base to stand on. *)
       | None -> Option.get reused_base
-      | Some (tile, clc_tiles) ->
+      | Some (tile, far_tile, clc_tiles) ->
           let relief_texture, relief_normal_texture =
             let tile_texture = make_tile_texture ctx tile in
             let pyramids =
               time_gpu ctx "compute_relief" (fun () ->
-                  compute_relief ctx w h alat triangle_geo tile_texture
-                    normal_pid downsample_pid relief_uniforms
+                  (* No sunken border: the far field has the ground beyond the
+                     edge, and the shaders fade into it -- or down to the same
+                     depth without it. *)
+                  compute_relief ~border:false ctx w h alat triangle_geo
+                    tile_texture normal_pid downsample_pid relief_uniforms
                     downsample_uniforms)
             in
             (* Nothing reads the source grid on the GPU after the bake: it is not
@@ -4657,6 +4720,23 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                does with its own source. *)
             Gl.delete_texture ctx tile_texture;
             pyramids
+          in
+          let far =
+            Option.map
+              (fun far_tile ->
+                let tile_texture = make_tile_texture ctx far_tile in
+                let step = float far_step in
+                let pyramids =
+                  time_gpu ctx "compute_relief_far" (fun () ->
+                      compute_relief
+                        ~axes:((step *. deltax, 0.), (0., step *. deltay))
+                        ctx (w / 2) (h / 2) alat triangle_geo tile_texture
+                        normal_pid downsample_pid relief_uniforms
+                        downsample_uniforms)
+                in
+                Gl.delete_texture ctx tile_texture;
+                pyramids)
+              far_tile
           in
           let ao_texture =
             time_gpu ctx "compute_ao" (fun () ->
@@ -4678,6 +4758,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles;
             relief_texture;
             relief_normal_texture;
+            far;
             ao_texture;
             cover_map_texture;
           }
@@ -4908,6 +4989,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~shadow_cascades:(shadow_cascade_extents ())
         ~sun_tint ~fog_color ~zenith_color;
+      apply_far ctx
+        [ terrain_pid; shadow_pid; path_pid ]
+        ~placeholder:hd_placeholder ~w ~anchor_lat ~anchor_lon base.far;
       Gl.use_program ctx terrain_pid;
       Gl.uniform_matrix4fv ctx
         (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowMatrix"))

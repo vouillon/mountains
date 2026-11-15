@@ -218,7 +218,7 @@ let compute_radial_params ~n_sectors ~n_rings =
   let w_shift = Web_utils.log2 w_stride in
   let grid_k = Web_utils.pi /. 2. /. float n_sectors in
   let height_term = exp (grid_k *. float (n_rings - 1)) in
-  let grid_scale = 70000. /. (height_term -. 1.) in
+  let grid_scale = 140000. /. (height_term -. 1.) in
   {
     w_mask;
     w_shift;
@@ -615,7 +615,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   Gl.uniform2f ctx u.center_offset center_offset_x center_offset_y;
 
   (* CLC clipmap parameters *)
-  Gl.uniform1i ctx u.u_numLevels 7;
+  Gl.uniform1i ctx u.u_numLevels 8;
 
   (* Light direction *)
   Gl.uniform3f ctx u.u_lightDir light_dir.Matrix.x light_dir.Matrix.y

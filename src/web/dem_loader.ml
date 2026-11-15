@@ -38,13 +38,24 @@ let to_lwt f =
 (* Worker Pool Manager *)
 
 (* Path to a sub-tile file *)
-let path ~lat ~lon ~row ~col =
+let path ?(step = 1) ~lat ~lon ~row ~col () =
   let lat_c = if lat >= 0 then 'N' else 'S' in
   let lon_c = if lon >= 0 then 'E' else 'W' in
-  Printf.sprintf "data/dem/%c%02d_%c%03d_%d_%d.dem" lat_c (abs lat) lon_c
-    (abs lon) row col
+  Printf.sprintf "data/%s/%c%02d_%c%03d_%d_%d.dem"
+    (if step = 1 then "dem" else Printf.sprintf "dem%d" step)
+    lat_c (abs lat) lon_c (abs lon) row col
 
-let load ~lat ~lon ~size =
+(* [step] is the grid's spacing in arcseconds: 1 for the base tiles, 4 for the
+   far field's (compress_dem --coarse), whose sample [k] of a degree cell
+   stands for the base samples [4 k] to [4 k + 3]. Everything below is in
+   samples of that grid, the "arcsec" in the names being the base case: a
+   sample's row is its northernmost arcsecond's, less one, over [step], plus
+   one -- the sub-tiles' rows start one arcsecond north of the degree -- and
+   its column its westernmost arcsecond's over [step]. A far tile that is not
+   there is open sea, and not a failure. *)
+let load ?(step = 1) ~lat ~lon ~size () =
+  let sub_tile_size = sub_tile_size / step in
+  let degree = 3600 / step in
   Worker_pool.init ();
 
   (* Allocate full tile buffer (size * size * 2 bytes) *)
@@ -71,25 +82,25 @@ let load ~lat ~lon ~size =
   done;
 
   (* Convert center to arcseconds and compute bounds *)
-  let center_lat_arcsec = Web_utils.arcsec_floor lat in
-  let center_lon_arcsec = Web_utils.arcsec_floor lon in
+  let center_lat_arcsec = ((Web_utils.arcsec_floor lat - 1) // step) + 1 in
+  let center_lon_arcsec = Web_utils.arcsec_floor lon // step in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
   let min_lon_arcsec = center_lon_arcsec - (size / 2) in
   let max_lat_arcsec = min_lat_arcsec + size - 1 in
   let max_lon_arcsec = min_lon_arcsec + size - 1 in
 
-  let min_deg_lat = (min_lat_arcsec - 1) // 3600 in
-  let max_deg_lat = (max_lat_arcsec - 1) // 3600 in
-  let min_deg_lon = min_lon_arcsec // 3600 in
-  let max_deg_lon = max_lon_arcsec // 3600 in
+  let min_deg_lat = (min_lat_arcsec - 1) // degree in
+  let max_deg_lat = (max_lat_arcsec - 1) // degree in
+  let min_deg_lon = min_lon_arcsec // degree in
+  let max_deg_lon = max_lon_arcsec // degree in
 
   let tasks = ref [] in
   let loaded = ref 0 in
   let failed = ref 0 in
   for deg_lat = min_deg_lat to max_deg_lat do
-    let tile_base_lat_arcsec = (deg_lat * 3600) + 1 in
+    let tile_base_lat_arcsec = (deg_lat * degree) + 1 in
     for deg_lon = min_deg_lon to max_deg_lon do
-      let tile_base_lon_arcsec = deg_lon * 3600 in
+      let tile_base_lon_arcsec = deg_lon * degree in
 
       (* Sub-tile bounds *)
       let min_sub_row =
@@ -125,7 +136,9 @@ let load ~lat ~lon ~size =
             overlap_min_lat <= overlap_max_lat
             && overlap_min_lon <= overlap_max_lon
           then begin
-            let p = path ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col in
+            let p =
+              path ~step ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col ()
+            in
 
             (* Create a task for this sub-tile *)
             let task () =
@@ -163,7 +176,7 @@ let load ~lat ~lon ~size =
               match res with
               | Worker_pool.ResultDEM { heights = ba } ->
                   (* Blit sub-tile into full buffer. *)
-                  let sub_width = 1200 in
+                  let sub_width = sub_tile_size in
 
                   (* Copy row by row *)
                   (* overlap_* coordinates are in arcseconds. *)
@@ -208,13 +221,19 @@ let load ~lat ~lon ~size =
                   incr loaded;
                   Lwt.return ())
                 (fun exn ->
-                  incr failed;
-                  Brr.Console.error
-                    [
-                      Jstr.v
-                        (Printf.sprintf "DEM sub-tile %s not loaded: %s" p
-                           (Printexc.to_string exn));
-                    ];
+                  (match exn with
+                  | Failure msg
+                    when step > 1 && String.starts_with ~prefix:"HTTP 404 " msg
+                    ->
+                      ()
+                  | _ ->
+                      incr failed;
+                      Brr.Console.error
+                        [
+                          Jstr.v
+                            (Printf.sprintf "DEM sub-tile %s not loaded: %s" p
+                               (Printexc.to_string exn));
+                        ]);
                   Lwt.return ())
             in
             tasks := task :: !tasks
@@ -288,7 +307,9 @@ let prefetch ~lat ~lon ~size =
             overlap_min_lat <= overlap_max_lat
             && overlap_min_lon <= overlap_max_lon
           then begin
-            let p = path ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col in
+            let p =
+              path ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col ()
+            in
             let task =
               let to_lwt f =
                 let t, u = Lwt.task () in

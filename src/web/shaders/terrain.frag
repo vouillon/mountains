@@ -11,6 +11,10 @@ uniform highp sampler2D relief_normal;
 #define HD_SLOTS 3
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
+// Encoded normals of the far field, which has the ground beyond the base grid
+// (see radial_common.vert, which shares [far_valid]).
+uniform bool far_valid;
+uniform highp sampler2D far_relief_normal;
 // Each ring's sample pitch in metres (the coarser axis). The bump weighs
 // itself against it per pixel in [perturbNormal]: footprints far below the
 // pitch show scales no grid sample can express, footprints at the pitch and
@@ -98,6 +102,7 @@ in highp vec2 reliefCoord; // Highp for texture coords
 in highp vec2 hdReliefCoord0;
 in highp vec2 hdReliefCoord1;
 in highp vec2 hdReliefCoord2;
+in highp vec2 farReliefCoord;
 in highp float v_dist;
 in highp vec3 v_view_dir;
 in highp vec3 v_world_pos; // Highp for world coords
@@ -151,14 +156,14 @@ Surface sampleCLCBilinear(highp vec2 uv) {
   // Avoid log2(0)
   d_center = max(d_center, 0.000001);
 
-  // Formula: Level > 7 + log2(d)   (Assumes u_numLevels=7)
+  // Formula: Level > u_numLevels + log2(d)
   float level_pos = ceil(float(u_numLevels) + log2(d_center));
 
   int level = clamp(int(level_pos), 0, u_numLevels - 1);
 
   // Calculate texture coordinates for this concentric level
-  // Level 6 covers the whole tile (scale 1x)
-  // Level 0 covers 1/64th (scale 64x)
+  // The last level covers the whole map (scale 1x), each one below it half
+  // the side of the one above
   float scale = exp2(float((u_numLevels - 1) - level));
   // Texture coordinate: must be highp all the way to [texelPos]. At fp16 the
   // ulp of a [0, 1] coordinate is 2.4-4.9e-4, which is a quarter to a half of
@@ -330,6 +335,27 @@ mediump float ringFade(bool valid, highp vec2 c) {
     return 0.0;
   highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
   return smoothstep(0.0, 0.02, d);
+}
+
+// The base grid's weight at this fragment, as radial_common.vert's
+// [baseWeight] has it for the heights: 1 well inside it, fading to 0 at its
+// edge, beyond which the far field has the ground.
+mediump float baseFade() {
+  highp vec2 c = reliefCoord;
+  highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
+  return smoothstep(0.0, 0.03, d);
+}
+
+// The encoded normal beneath every ring: the base grid's, the far field's
+// beyond it, and both across the band where one fades into the other ([fb],
+// from [baseFade]).
+mediump vec2 baseNormal(mediump float fb) {
+  if (fb >= 1.0 || !far_valid)
+    return texture(relief_normal, reliefCoord).rg;
+  mediump vec2 n = texture(far_relief_normal, farReliefCoord).rg;
+  if (fb > 0.0)
+    n = mix(n, texture(relief_normal, reliefCoord).rg, fb);
+  return n;
 }
 
 // Per scale (macro, mid, fine), each material's amplitude of pattern A and of
@@ -883,6 +909,7 @@ void main() {
   mediump float f0 = ringFade(hd_valid[0], hdReliefCoord0);
   mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
   mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
+  mediump float fb = baseFade();
   mediump vec2 encodedN;
   // Highp: it is mixed down from the 60000 sentinel, and at fp16 (ulp 32 there)
   // a mix that should land on a ring's metre-scale pitch lands tens of metres
@@ -913,7 +940,7 @@ void main() {
         encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
         data_step = hd_step[2];
       } else {
-        encodedN = texture(relief_normal, reliefCoord).rg;
+        encodedN = baseNormal(fb);
         // The base gets the same sentinel [Render_state] uploads for empty
         // slots: far above any footprint, i.e. the full bump, exactly as the
         // base always had -- and mediump-safe, unlike an infinity.
@@ -949,7 +976,9 @@ void main() {
   vec3 final_normal = normal;
 
   // === CLC-Based Material ===
-  Surface surface = sampleCLCBilinear(reliefCoord);
+  // The cover map's outermost level spans the far field, twice the base
+  // grid's side about the same centre.
+  Surface surface = sampleCLCBilinear((reliefCoord - 0.5) * 0.5 + 0.5);
 
   // === Canopy (LIDAR HD) ===
   // Inside the 1 m ring's block, the canopy height says where the trees are:
@@ -1563,7 +1592,8 @@ void main() {
   // Baked AO measures sky visibility: it attenuates the ambient term and the
   // sky reflection, not the direct sun, which the shadow map already handles
   // (multiplying the whole color darkened sunlit couloirs twice).
-  float occlusion = texture(ao, reliefCoord).r;
+  // Baked over the base grid only: the far field is taken as open to the sky.
+  float occlusion = mix(1.0, texture(ao, reliefCoord).r, fb);
   vec3 lighting = (ambient * occlusion) + direct;
 
   // Diffuse lighting scales the albedo; reflected light is added on top.

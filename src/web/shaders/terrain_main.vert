@@ -9,6 +9,7 @@ out highp vec2 reliefCoord;
 out highp vec2 hdReliefCoord0;
 out highp vec2 hdReliefCoord1;
 out highp vec2 hdReliefCoord2;
+out highp vec2 farReliefCoord;
 out highp vec3 v_world_pos;
 out highp vec3 v_view_dir;
 
@@ -19,6 +20,8 @@ void main() {
   hdReliefCoord0 = rv.hd_coord[0] + hd_half_texel[0];
   hdReliefCoord1 = rv.hd_coord[1] + hd_half_texel[1];
   hdReliefCoord2 = rv.hd_coord[2] + hd_half_texel[2];
+  // Half a texel again: a far sample is four base steps wide.
+  farReliefCoord = rv.far_coord + 2.0 * far_map.z;
   v_world_pos = vec3(rv.coord_meters, rv.height - center_height);
 
   highp vec4 pos = transform * vec4(rv.pos_plane, rv.height, 1.0);

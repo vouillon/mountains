@@ -96,10 +96,12 @@ highp float groundAt(highp vec2 norm) {
 // arcseconds from the anchor, and (z) 1 on ice, as terrain.frag's
 // [getSurfaceFromID] tells it; the level choice is [sampleCLCBilinear]'s.
 vec3 coverAt(highp vec2 arc) {
-  highp vec2 uv = arc * u_invW + 0.5 + 0.5 * u_invW;
+  // Over the cover map, whose outermost level (7) is twice the base grid's
+  // side.
+  highp vec2 uv = (arc * u_invW + 0.5 * u_invW) * 0.5 + 0.5;
   highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
-  int level = clamp(int(ceil(7.0 + log2(d))), 0, 6);
-  highp vec2 luv = (uv - 0.5) * exp2(float(6 - level)) + 0.5;
+  int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
+  highp vec2 luv = (uv - 0.5) * exp2(float(7 - level)) + 0.5;
   ivec2 size = textureSize(u_coverMap, 0).xy;
   ivec2 p = clamp(ivec2(floor(luv * vec2(size))), ivec2(0), size - 1);
   uint id = texelFetch(u_coverMap, ivec3(p, level), 0).r;

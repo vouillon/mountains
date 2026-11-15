@@ -14,6 +14,20 @@ uniform highp float inv_avg_delta;
 uniform highp int max_lod;
 uniform highp sampler2D relief;
 
+// The far field: a second pyramid over a square twice the base grid's side,
+// on a grid four times coarser (compress_dem --coarse) and the base's
+// quantisation. A base-grid coordinate [c], in arcseconds from the anchor, is
+// at (c + far_map.xy) * far_map.z of it. It has the ground beyond the base
+// grid, which fades into it over its outer band ([baseWeight]); without it
+// ([far_valid] false: its tiles did not come) the ground sinks out of sight
+// there instead.
+uniform bool far_valid;
+uniform highp sampler2D far_relief;
+uniform highp vec3 far_map;
+uniform highp int far_max_lod;
+// log2 of the far grid's spacing over the base's.
+const highp float FAR_LOD_BIAS = -2.0;
+
 // Near-field refinement rings (IGN RGE ALTI over WMTS, LIDAR HD over WMS;
 // see [Hd_dem]). Extra height pyramids over squares that are neither centred on
 // the anchor arcsecond nor power-of-two refinements of the base grid: each
@@ -58,6 +72,7 @@ struct RadialVertex {
   highp vec2 coord_meters;       // Absolute world position in meters
   highp vec2 norm_coord;         // Normalized texture coordinate (0..1)
   highp vec2 hd_coord[HD_SLOTS]; // Same, over each refinement ring
+  highp vec2 far_coord;          // Same, over the far field
   highp float height;            // Terrain height at this position
 };
 
@@ -95,6 +110,16 @@ highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
                  offset;
 
   return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
+}
+
+// The base grid's share of the surface at its normalised coordinate [c]: all
+// of it well inside, none from its edge outwards, where the far field has the
+// ground. The two grids are not aligned -- the far one is absolute, the base
+// one stands on its anchor -- so they are faded into each other, heights here
+// and normals in terrain.frag, which must use the same band.
+highp float baseWeight(highp vec2 c) {
+  highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
+  return smoothstep(0.0, 0.03, d);
 }
 
 // Ring [i]'s normalized coordinate of a base-grid coordinate [c], in arcseconds
@@ -140,9 +165,20 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
         hd_relief[2], c2,
         min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]),
         hd_height_scale_n[2], hd_height_offset[2]);
-  return sampleReliefHeight(relief, norm_coord,
-                            min(int(max(0.0, lod_raw)), max_lod), BASE_SCALE_N,
-                            BASE_OFFSET);
+  highp float w = baseWeight(norm_coord);
+  highp float h = BASE_OFFSET;
+  if (w < 1.0 && far_valid)
+    h = sampleReliefHeight(
+        far_relief, (coord + far_map.xy) * far_map.z,
+        min(int(max(0.0, lod_raw + FAR_LOD_BIAS)), far_max_lod), BASE_SCALE_N,
+        BASE_OFFSET);
+  if (w > 0.0)
+    h = mix(h,
+            sampleReliefHeight(relief, norm_coord,
+                               min(int(max(0.0, lod_raw)), max_lod),
+                               BASE_SCALE_N, BASE_OFFSET),
+            w);
+  return h;
 }
 
 // The LIDAR HD canopy over the 1 m ring's block (see terrain.frag and
@@ -302,6 +338,7 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[0] = hdCoord(0, coord);
   v.hd_coord[1] = hdCoord(1, coord);
   v.hd_coord[2] = hdCoord(2, coord);
+  v.far_coord = (coord + far_map.xy) * far_map.z;
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
   v.height += canopyLift(
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),

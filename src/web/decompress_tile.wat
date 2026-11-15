@@ -149,6 +149,15 @@
         (br_if $loop_x (i32.lt_u (local.get $x) (local.get $block_w)))
       )
 
+      ;; A row whose width is not a multiple of 8 was read past its end, into
+      ;; the next one (the far field's tiles are 300 wide): step back. The
+      ;; lanes decoded past the end land in the scratch row beyond block_w and
+      ;; never reach the target, nor the lanes before them.
+      (local.set $low_ptr
+        (i32.sub (local.get $low_ptr) (i32.sub (local.get $x) (local.get $block_w))))
+      (local.set $high_ptr
+        (i32.sub (local.get $high_ptr) (i32.sub (local.get $x) (local.get $block_w))))
+
       ;; --- Flush Line to Target (Clipping Check) ---
       (local.set $abs_row (i32.add (local.get $start_row) (local.get $y)))
 
