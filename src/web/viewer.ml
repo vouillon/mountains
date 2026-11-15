@@ -2910,6 +2910,177 @@ let set_depth_range =
       (Jv.call (Jv.repr ctx) "depthRange"
          (match which with `Near -> near | `Far -> far | `Whole -> whole))
 
+(* The sight lines to the POIs, marched on the GPU (shaders/sight.vert): one
+   vertex per POI, over the height pyramids the mesh is drawn from, captured
+   by transform feedback as the trees are ([find_trees]). The program shares
+   radial_common.vert with the path's, and is fed as it is. *)
+type sight_gl = {
+  sight_gen : int;
+  sight_pid : Gl.program;
+  sight_uniforms : Render_state.path_uniforms;
+  sight_eye : Gl.uniform_location;
+  sight_vao : Gl.vertex_array_object;
+  sight_feedback : Gl.transform_feedback;
+}
+
+let sight_gl = ref None
+
+let get_sight_gl ctx ~radial_params =
+  match !sight_gl with
+  | Some s when s.sight_gen = !context_generation -> s
+  | _ ->
+      let pid =
+        let vid =
+          Web_utils.compile_shader ctx
+            ([%blob "shaders/terrain_prefix.vert"] ^ radial_vertex_common
+           ^ [%blob "shaders/sight.vert"])
+            Gl.vertex_shader
+        in
+        let fid =
+          Web_utils.compile_shader ctx [%blob "shaders/shadow.frag"]
+            Gl.fragment_shader
+        in
+        let pid = Gl.create_program ctx in
+        Gl.attach_shader ctx pid vid;
+        Gl.delete_shader ctx vid;
+        Gl.attach_shader ctx pid fid;
+        Gl.delete_shader ctx fid;
+        Gl.bind_attrib_location ctx pid 0 (Jstr.v "target");
+        Gl.transform_feedback_varyings ctx pid
+          [ Jstr.v "f_seen" ]
+          Gl.interleaved_attribs;
+        Gl.link_program ctx pid;
+        if not (Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status))
+        then
+          Brr.Console.error
+            [
+              Jstr.v "Sight line link failed:"; Gl.get_program_info_log ctx pid;
+            ];
+        pid
+      in
+      let uniforms = Render_state.init_path_uniforms ctx pid in
+      Gl.use_program ctx pid;
+      Render_state.upload_path_static ctx uniforms radial_params;
+      let s =
+        {
+          sight_gen = !context_generation;
+          sight_pid = pid;
+          sight_uniforms = uniforms;
+          sight_eye = Gl.get_uniform_location ctx pid (Jstr.v "center_height");
+          sight_vao = Gl.create_vertex_array ctx;
+          sight_feedback = Gl.create_transform_feedback ctx;
+        }
+      in
+      sight_gl := Some s;
+      s
+
+(* Have the sight lines to [targets] marched: positions on the eye's plane,
+   in metres east and north, and the height of the ground there. The program's uniforms and the height pyramids
+   are those of the location being published. The answer is in the buffer
+   returned, a float per target, once the GPU gets to it. *)
+let start_sight ctx s targets =
+  let n = List.length targets in
+  let data = Bigarray.(Array1.create float32 c_layout (max 1 (3 * n))) in
+  List.iteri
+    (fun i (px, py, h) ->
+      data.{3 * i} <- px;
+      data.{(3 * i) + 1} <- py;
+      data.{(3 * i) + 2} <- h)
+    targets;
+  let seen = Gl.create_buffer ctx in
+  Gl.bind_buffer ctx Gl.array_buffer (Some seen);
+  Gl.buffer_data_size ctx Gl.array_buffer (max 1 n * 4) Gl.stream_read;
+  Gl.use_program ctx s.sight_pid;
+  Gl.bind_vertex_array ctx (Some s.sight_vao);
+  let positions = Web_utils.create_buffer ctx Gl.array_buffer (Buffer data) in
+  Gl.enable_vertex_attrib_array ctx 0;
+  Gl.vertex_attrib_pointer ctx 0 3 Gl.float false 0 0;
+  Gl.bind_buffer ctx Gl.array_buffer None;
+  if n > 0 then
+    time_gpu ctx "sight_lines" (fun () ->
+        Gl.bind_transform_feedback ctx Gl.transform_feedback
+          (Some s.sight_feedback);
+        Gl.bind_buffer_base ctx Gl.transform_feedback_buffer 0 seen;
+        Gl.enable ctx Gl.rasterizer_discard;
+        Gl.begin_transform_feedback ctx Gl.points;
+        Gl.draw_arrays ctx Gl.points 0 n;
+        Gl.end_transform_feedback ctx;
+        Gl.disable ctx Gl.rasterizer_discard;
+        Gl.bind_transform_feedback ctx Gl.transform_feedback None;
+        Gl.bind_buffer ctx Gl.transform_feedback_buffer None);
+  Gl.bind_vertex_array ctx None;
+  (* The vertex array keeps it for the draw just issued. *)
+  Gl.delete_buffer ctx positions;
+  (n, seen)
+
+(* Read the answer back: for each target, whether it is seen. This waits for
+   the GPU to be done with all it was asked so far. A march that ran out of
+   steps (0.5) is given the benefit of the doubt. *)
+let read_sight ctx (n, seen) =
+  let raw = Bigarray.(Array1.create float32 c_layout (max 1 n)) in
+  Gl.bind_buffer ctx Gl.copy_read_buffer (Some seen);
+  Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0 (Brr.Tarray.of_bigarray1 raw);
+  Gl.bind_buffer ctx Gl.copy_read_buffer None;
+  Gl.delete_buffer ctx seen;
+  let unsure = ref 0 in
+  let res =
+    Array.init n (fun i ->
+        let v = raw.{i} in
+        if v > 0.25 && v < 0.75 then incr unsure;
+        v > 0.25)
+  in
+  if !unsure > 0 then
+    Format.eprintf "visibility: %d sight lines ran out of steps@." !unsure;
+  res
+
+(* The marches read back between frames, once the GPU is done with them, as
+   the trees are ([collect_trees], which says why the fence is made a frame
+   after the draw): the buffer, the context's generation, the fence once
+   made, whether the answer is still wanted, and who waits for it. *)
+let sight_pending = ref []
+
+let await_sight ~stale job =
+  let t, u = Lwt.task () in
+  sight_pending :=
+    (job, !context_generation, ref None, stale, u) :: !sight_pending;
+  t
+
+let collect_sight ctx =
+  if !sight_pending <> [] then begin
+    let ready = ref [] in
+    sight_pending :=
+      List.filter
+        (fun (((_, seen) as job), gen, sync, stale, u) ->
+          if gen <> !context_generation then begin
+            ready := (u, None) :: !ready;
+            false
+          end
+          else
+            match !sync with
+            | None ->
+                sync := Some (Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0);
+                Gl.flush ctx;
+                true
+            | Some fence ->
+                if stale () then begin
+                  Gl.delete_sync ctx fence;
+                  Gl.delete_buffer ctx seen;
+                  ready := (u, None) :: !ready;
+                  false
+                end
+                else if
+                  Jv.to_int (Gl.get_sync_parameter ctx fence Gl.sync_status)
+                  = Gl.signaled
+                then begin
+                  Gl.delete_sync ctx fence;
+                  ready := (u, Some (read_sight ctx job)) :: !ready;
+                  false
+                end
+                else true)
+        !sight_pending;
+    List.iter (fun (u, r) -> Lwt.wakeup u r) !ready
+  end
+
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
@@ -3507,7 +3678,10 @@ let event_loop ~generation ctx draw =
     end;
     let orientation = !current_orientation in
     let z = !zoom in
-    if not !context_lost then collect_trees ctx;
+    if not !context_lost then begin
+      collect_trees ctx;
+      collect_sight ctx
+    end;
 
     (* Optimization: Only draw if change is visible (> ~half a pixel).
        One pixel spans ~2 / (scale * zoom * max_dim) radians whatever the
@@ -4070,9 +4244,9 @@ let hd_settle_s = 0.75
    2.38 m ring it varies by more, so an eye placed 2 m above a single bilinear
    sample can end up *inside* a boulder or a moraine lip beside the anchor.
 
-   That is not only a rendering artefact. [Visibility.test_precise] starts its
-   finely-stepped phase at the source, so terrain standing above the eye there
-   makes it report every POI hidden -- the labels vanish wholesale rather than
+   That is not only a rendering artefact. The sight lines (shaders/sight.vert)
+   start their finely-stepped phase at the eye, so terrain standing above it
+   there makes them report every POI hidden -- the labels vanish wholesale rather than
    degrade. Taking the highest sample within this radius, instead of the
    interpolated value at one point, keeps the eye above its own surroundings. *)
 let eye_clearance_m = 4.
@@ -4581,75 +4755,6 @@ let far_height far_tile ~w ~anchor_lat ~anchor_lon =
     if i >= 0 && i < size && j >= 0 && j < size then
       Dem_loader.get_height far_tile i j
     else -500.
-
-(* Which of the far field's POIs the eye sees. A sight line apiece, walked a
-   base sample at a time as [Visibility] does for those of the base grid, would
-   take seconds: there are twice as many of them and they are three times as
-   far. Instead the horizon is swept once, a direction at a time: along each,
-   outwards, the steepest sight line to the ground so far is what a POI further
-   out must rise above. The ground is [near] for the first kilometres, where
-   what hides a summit may be a few metres across, at steps that grow with the
-   distance, and [far] beyond, a far sample at a time ([step] metres).
-
-   [pois] have their position on the eye's plane, in metres east and north,
-   and the height of the ground there; [grid] takes such a position to the
-   base grid's. The ground within [far_sight_exempt] of a POI does not hide
-   it, as in [Visibility]. Done a few milliseconds a frame; [None] if [stale]
-   came true meanwhile, and otherwise those seen, in their order. *)
-let far_sight_bins = 2048
-let far_sight_near = 3000.
-let far_sight_exempt = 300.
-
-let far_sight ~near ~far ~grid ~eye_h ~step ~reach ~stale pois =
-  let n = far_sight_bins in
-  let bins = Array.make n [] in
-  List.iteri
-    (fun i (_, (px, py, h)) ->
-      let d = Float.hypot px py in
-      let a = Float.atan2 px py /. (2. *. Float.pi) in
-      let b = int_of_float (float n *. (a +. 1.)) mod n in
-      let slope = (h -. Visibility.curvature_drop (d *. d) -. eye_h) /. d in
-      bins.(b) <- (d, slope, i) :: bins.(b))
-    pois;
-  let seen = Array.make (List.length pois) false in
-  let sweep b =
-    let a = (float b +. 0.5) *. 2. *. Float.pi /. float n in
-    let ux = sin a and uy = cos a in
-    (* The POIs of this direction the sweep has not reached, nearest first,
-       and the steepest sight line so far. *)
-    let rec walk todo top r =
-      match todo with
-      | [] -> ()
-      | (d, slope, i) :: rest when d -. far_sight_exempt <= r ->
-          (* A metre of slack, as [Visibility.test] has. *)
-          seen.(i) <- slope +. (1. /. d) >= top;
-          walk rest top r
-      | _ when r >= reach -> ()
-      | _ ->
-          let bx, by = grid (ux *. r) (uy *. r) in
-          let ground = if r < far_sight_near then near bx by else far bx by in
-          let slope =
-            (ground -. Visibility.curvature_drop (r *. r) -. eye_h) /. r
-          in
-          walk todo (Float.max top slope)
-            (if r < far_sight_near then r *. 1.03 else r +. step)
-    in
-    walk
-      (List.sort (fun (d, _, _) (d', _, _) -> Float.compare d d') bins.(b))
-      Float.neg_infinity 20.
-  in
-  let rec go b t0 =
-    if b = n then
-      Lwt.return_some (List.filteri (fun i _ -> seen.(i)) pois |> List.map fst)
-    else begin
-      if bins.(b) <> [] then sweep b;
-      if now_ms () -. t0 > 4. then
-        let* () = request_animation_frame () in
-        if stale () then Lwt.return_none else go (b + 1) (now_ms ())
-      else go (b + 1) t0
-    end
-  in
-  go 0 (now_ms ())
 
 (* Bind the far field's pyramids and its ambient occlusion on units 16 to 18
    -- the first sixteen are
@@ -5226,7 +5331,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         ~shadow_cascades:(shadow_cascade_extents ())
         ~sun_tint ~fog_color ~zenith_color;
       apply_far ctx
-        [ terrain_pid; shadow_pid; path_pid ]
+        [
+          terrain_pid;
+          shadow_pid;
+          path_pid;
+          (get_sight_gl ctx ~radial_params).sight_pid;
+        ]
         ~placeholder:hd_placeholder ~w ~anchor_lat ~anchor_lon base.far;
       Gl.use_program ctx terrain_pid;
       Gl.uniform_matrix4fv ctx
@@ -5338,60 +5448,39 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       (let r, g, b = fog_color in
        Gl.clear_color ctx r g b 1.);
 
-      (* Sight lines must be traced over the surface that is actually drawn: the
-         eye is anchored on the high-resolution grid now, and it sits up to 60 m
-         from the base DEM on a summit the 30 m grid smooths away, so a ray
-         traced over the base terrain would clear ridges the viewer cannot see
-         over -- or be blocked by ground that is no longer there.
-
-         [hd_at] reads that grid at a fractional *base*-grid position.
-         [ray_height] hands the whole test the same surface at base resolution
-         (both endpoints, the curvature frame and the Bresenham phase), while
-         [~fine] lets the near phase, where the ray hugs the terrain, sample it
-         at its own 0.31 arcsec. Without HD both collapse to exactly the
-         previous call. *)
-      (* One refinement per ring, innermost first, exactly the order the shader
-         tests them in. [step] is half the ring's spacing in base pixels, which
-         keeps a grazing ray from being walked finer than the data it reads. *)
-      let refinements =
-        List.map
-          (fun (g : Hd_dem.t) ->
-            let get_h = Hd_dem.get_height g in
-            let limit = float (g.layer.size - 2) in
-            {
-              Visibility.step = 0.5 *. g.frame.arcsec_step;
-              sample =
-                (fun bx by ->
-                  (* [bx]/[by] index the base grid and the frame is stated
-                     from the anchor, which sits at its centre -- not at the
-                     eye, which is free to stand elsewhere in the tile. *)
-                  let hx, hy =
-                    Warp.apply g.frame.to_index
-                      (bx -. float (w / 2))
-                      (by -. float (h / 2))
-                  in
-                  if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
-                    Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
-                  else None);
-            })
-          hd_grids
-      in
-      let hd_at bx by =
-        List.find_map (fun r -> r.Visibility.sample bx by) refinements
-      in
-      let ray_height =
+      (* The height of the ground at a sample of the base grid, on the surface
+         that is actually drawn: the innermost ring that covers it, which
+         resolves summits the 30 m base grid smooths away, and the base grid
+         elsewhere. The frame of a ring is stated from the anchor, which sits
+         at the centre of the base grid -- not at the eye, which is free to
+         stand elsewhere in the tile. *)
+      let ground_at =
         let base = Dem_loader.get_height tile in
-        if hd_grids = [] then base
-        else fun row col ->
-          match hd_at (float col) (float row) with
+        let rings =
+          List.map
+            (fun (g : Hd_dem.t) ->
+              let get_h = Hd_dem.get_height g in
+              let limit = float (g.layer.size - 2) in
+              fun gx gy ->
+                let hx, hy =
+                  Warp.apply g.frame.to_index
+                    (gx -. float (w / 2))
+                    (gy -. float (h / 2))
+                in
+                if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+                  Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+                else None)
+            hd_grids
+        in
+        fun row col ->
+          match List.find_map (fun r -> r (float col) (float row)) rings with
           | Some h -> h
           | None -> base row col
       in
-      let fine = refinements in
       (* A position of the base grid, in its samples, on the eye's plane, in
          metres east and north of it: the inverse of the grid mapping in
          radial_common.vert (meridian convergence to second order); two
-         fixed-point iterations converge to millimetres. And that mapping. *)
+         fixed-point iterations converge to millimetres. *)
       let conv = Render_state.meridian_convergence ~lat:alat in
       let plane_of gx gy =
         let ge = deltax *. (gx -. float x -. off_x) in
@@ -5402,38 +5491,50 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         let py = gn +. (px *. px *. conv /. 2.) in
         (px, py)
       in
-      let grid_of px py =
-        ( float x +. off_x +. (px *. (1. +. (py *. conv)) /. deltax),
-          float y +. off_y +. ((py -. (0.5 *. px *. px *. conv)) /. deltay) )
+      let all_poi = poi @ far_poi in
+      let sight_targets =
+        let far_at =
+          match far_tile with
+          | Some far -> far_height far ~w ~anchor_lat ~anchor_lon
+          | None -> fun _ _ -> -500.
+        in
+        let target at (_, (gx, gy)) =
+          let px, py = plane_of gx gy in
+          (px, py, at gx gy)
+        in
+        List.rev_append
+          (List.rev_map
+             (target (fun gx gy ->
+                  ground_at
+                    (int_of_float (Float.round gy))
+                    (int_of_float (Float.round gx))))
+             poi)
+          (List.map (target far_at) far_poi)
       in
-      let sees (_, (gx, gy)) =
-        let dx = (gx -. float x) *. deltax in
-        let dy = (gy -. float y) *. deltay in
-        let dist_sq = (dx *. dx) +. (dy *. dy) in
-        if dist_sq > 19600000000. then false
-        else
-          (* The test walks whole texels; its summit exemption (10 texels)
-                 dwarfs the half-texel rounding of the destination. *)
-          let dst_x = int_of_float (Float.round gx) in
-          let dst_y = int_of_float (Float.round gy) in
-          Visibility.test_precise ray_height ~src_h:(height +. 2.)
-            ~curvature:(deltax, deltay) ~fine ~off_x ~off_y ~src_x:x ~src_y:y
-            ~dst_x ~dst_y ()
-      in
-      (* The first publish of a load tests the sight lines at once. A
-         refinement keeps the POIs seen so far and tests them again a few
-         milliseconds per frame ([resee] below): over the finer rings the
-         whole pass takes 50 to 130 ms, a frozen frame at each ring, to move
-         a label or two. *)
+      (* The sight lines, to the POIs of the base grid and then to those of
+         the far field, marched on the GPU ([start_sight]) over the surface
+         this publish draws. The first publish of a load waits for the
+         answer: its labels go to screen with it. A refinement keeps the POIs
+         seen so far and takes the answer when the GPU has it, a few frames
+         on, rather than freeze one at each ring to move a label or two. *)
+      let sight = get_sight_gl ctx ~radial_params in
+      Gl.use_program ctx sight.sight_pid;
+      Render_state.upload_path_session ctx sight.sight_uniforms ~w ~lat:alat
+        ~eye_x ~eye_y;
+      Render_state.upload_path_hd_params ctx sight.sight_uniforms hd_params;
+      Gl.uniform1f ctx sight.sight_eye (height +. 2.);
+      let sight_job = start_sight ctx sight sight_targets in
+      let seen_of seen = List.filteri (fun i _ -> seen.(i)) all_poi in
       let provisional = !visible in
       let kept =
         match provisional with
         | Some kept -> kept
         | None ->
             let t_vis = now_ms () in
-            let kept = List.filter sees poi in
+            let seen = read_sight ctx sight_job in
+            let kept = seen_of seen in
             Format.eprintf "visibility: %d/%d POIs in %.0f ms@."
-              (List.length kept) (List.length poi)
+              (List.length kept) (List.length all_poi)
               (now_ms () -. t_vis);
             visible := Some kept;
             kept
@@ -5549,72 +5650,20 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               force_redraw := true
             end
       in
-      (* The POIs of the far field, after those of the base grid ([near_seen])
-         and over the frames whatever the publish: the far field is where most
-         of them are. *)
-      let far_then near_seen =
-        match far_tile with
-        | Some far when far_poi <> [] -> (
-            let far_at = far_height far ~w ~anchor_lat ~anchor_lon in
-            let base_at = Dem_loader.get_height tile in
+      if Option.is_some provisional then
+        Lwt.async (fun () ->
             let t0 = now_ms () in
-            let* far_seen =
-              far_sight
-                ~near:(fun bx by ->
-                  match hd_at bx by with
-                  | Some h -> h
-                  | None -> Visibility.bilinear_height base_at ~x:bx ~y:by)
-                ~far:far_at ~grid:grid_of ~eye_h:(height +. 2.)
-                ~step:(float far_step *. 0.5 *. (deltax +. deltay))
-                ~reach:140000. ~stale
-                (List.map
-                   (fun ((_, (gx, gy)) as p) ->
-                     let px, py = plane_of gx gy in
-                     (p, (px, py, far_at gx gy)))
-                   far_poi)
-            in
-            match far_seen with
-            | None -> Lwt.return_unit
-            | Some far_seen ->
+            let* seen = await_sight ~stale sight_job in
+            Option.iter
+              (fun seen ->
+                let now = seen_of seen in
                 Format.eprintf
-                  "visibility: %d/%d far POIs in %.0f ms, over the frames@."
-                  (List.length far_seen) (List.length far_poi)
+                  "visibility: %d/%d POIs, %.0f ms after the publish@."
+                  (List.length now) (List.length all_poi)
                   (now_ms () -. t0);
-                settle (near_seen @ far_seen);
-                Lwt.return_unit)
-        | Some _ | None ->
-            settle near_seen;
-            Lwt.return_unit
-      in
-      if Option.is_some provisional then begin
-        let spent = ref 0. in
-        let rec resee todo seen =
-          let* () = request_animation_frame () in
-          if stale () then Lwt.return_unit
-          else begin
-            let t0 = now_ms () in
-            let rec slice todo seen =
-              match todo with
-              | [] -> ([], seen)
-              | p :: todo ->
-                  let seen = if sees p then p :: seen else seen in
-                  if now_ms () -. t0 > 4. then (todo, seen) else slice todo seen
-            in
-            let todo, seen = slice todo seen in
-            spent := !spent +. (now_ms () -. t0);
-            match todo with
-            | _ :: _ -> resee todo seen
-            | [] ->
-                let seen = List.rev seen in
-                Format.eprintf
-                  "visibility: %d/%d POIs in %.0f ms, over the frames@."
-                  (List.length seen) (List.length poi) !spent;
-                far_then seen
-          end
-        in
-        Lwt.async (fun () -> resee poi [])
-      end
-      else Lwt.async (fun () -> far_then kept)
+                settle now)
+              seen;
+            Lwt.return_unit)
     in
     publish ~keep:reused_slots ~slots:in_time;
     if refine_later then begin

@@ -191,6 +191,18 @@
   (diff shadow_prefix.vert shadow_prefix.vert.fmt)))
 
 (rule
+ (target sight.vert.fmt)
+ (deps sight.vert)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff sight.vert sight.vert.fmt)))
+
+(rule
  (target sky.frag.fmt)
  (deps sky.frag)
  (action
