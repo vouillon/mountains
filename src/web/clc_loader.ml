@@ -158,9 +158,9 @@ let rec parallel_iter min max f =
   if min > max then Lwt.return ()
   else Lwt.join [ f min; parallel_iter (min + 1) max f ]
 
-let prefetch_tile ~lat ~lon =
+let prefetch_tile ?pois ~lat ~lon () =
   let open Lwt.Syntax in
-  let f = tile_path (float lat +. 0.5) (float lon +. 0.5) in
+  let f = tile_path ?pois (float lat +. 0.5) (float lon +. 0.5) in
   let request = Brr_io.Fetch.Request.v (Jstr.v f) in
   let* cache =
     to_lwt
@@ -173,7 +173,7 @@ let prefetch_tile ~lat ~lon =
       Format.eprintf "Prefetching CLC %s@." f;
       to_lwt (Brr_io.Fetch.Cache.add cache request)
 
-let prefetch ~size ~lat ~lon =
+let prefetch ?(pois = false) ~size ~lat ~lon () =
   let min_lat = Web_utils.arcsec_floor lat - (size / 2) in
   let min_lon = Web_utils.arcsec_floor lon - (size / 2) in
   let max_lat = min_lat + size - 1 in
@@ -181,7 +181,13 @@ let prefetch ~size ~lat ~lon =
   let* () =
     parallel_iter ((min_lat - 1) // 3600) ((max_lat - 1) // 3600) @@ fun lat ->
     parallel_iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
-    prefetch_tile ~lat ~lon
+    (* Not every cell has POIs of its own (extract_tiles --pois), and one
+       that has none is no reason to give up on the others. *)
+    if pois then
+      Lwt.catch
+        (fun () -> prefetch_tile ~pois ~lat ~lon ())
+        (fun _ -> Lwt.return_unit)
+    else prefetch_tile ~lat ~lon ()
   in
   Lwt.return ()
 

@@ -58,5 +58,7 @@ val load_tiles :
     (tile_data, tile_range_lon, tile_range_lat). With [pois], the tiles that
     hold the POIs alone (extract_tiles --pois), for an area seen from afar. *)
 
-val prefetch : size:int -> lat:float -> lon:float -> unit Lwt.t
-(** Prefetch CLC tiles for the given range to warm browser cache. *)
+val prefetch :
+  ?pois:bool -> size:int -> lat:float -> lon:float -> unit -> unit Lwt.t
+(** Prefetch CLC tiles for the given range to warm browser cache: with [pois],
+    those that hold the POIs alone. *)

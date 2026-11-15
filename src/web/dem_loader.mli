@@ -26,7 +26,14 @@ val load :
     same samples: each is a palette index in its low byte, and {!get_height}
     means nothing. Uses Web Workers for decompression. *)
 
-val prefetch : lat:float -> lon:float -> size:int -> unit Lwt.t
+val prefetch :
+  ?step:int ->
+  ?cover:bool ->
+  lat:float ->
+  lon:float ->
+  size:int ->
+  unit ->
+  unit Lwt.t
 (** Proactively fetch DEM tiles into browser cache. *)
 
 val in_range :

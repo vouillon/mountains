@@ -7583,8 +7583,20 @@ let main () =
            not run. *)
         let request = Jv.get Jv.global "requestPersistentStorage" in
         if not (Jv.is_none request) then ignore (Jv.apply request [||]);
-        Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon);
-        Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon);
+        Lwt.async (fun () -> Dem_loader.prefetch ~size:7200 ~lat ~lon ());
+        Lwt.async (fun () -> Clc_loader.prefetch ~size:7200 ~lat ~lon ());
+        (* And the far field of those surroundings: its elevation, its land
+           cover and its POIs, as far beyond them as it is beyond the base
+           grid. *)
+        (let far = 7200 + tile_width in
+         List.iter
+           (fun cover ->
+             Lwt.async (fun () ->
+                 Dem_loader.prefetch ~step:far_step ~cover
+                   ~size:(far / far_step) ~lat ~lon ()))
+           [ false; true ];
+         Lwt.async (fun () ->
+             Clc_loader.prefetch ~pois:true ~size:far ~lat ~lon ()));
         Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon)
       end
   in

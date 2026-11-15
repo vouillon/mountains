@@ -263,25 +263,29 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
   let heights = reshape_2 (genarray_of_array1 full_ba) size (size * 2) in
   Lwt.return { data = heights; size }
 
-let prefetch ~lat ~lon ~size =
+(* The tiles [load] would fetch, with the same [step] and [cover] and the same
+   meaning of [size]. *)
+let prefetch ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
   (* Simple prefetch to warm browser cache *)
-  let center_lat_arcsec = Web_utils.arcsec_floor lat in
-  let center_lon_arcsec = Web_utils.arcsec_floor lon in
+  let sub_tile_size = sub_tile_size / step in
+  let degree = 3600 / step in
+  let center_lat_arcsec = ((Web_utils.arcsec_floor lat - 1) // step) + 1 in
+  let center_lon_arcsec = Web_utils.arcsec_floor lon // step in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
   let min_lon_arcsec = center_lon_arcsec - (size / 2) in
   let max_lat_arcsec = min_lat_arcsec + size - 1 in
   let max_lon_arcsec = min_lon_arcsec + size - 1 in
 
-  let min_deg_lat = (min_lat_arcsec - 1) // 3600 in
-  let max_deg_lat = (max_lat_arcsec - 1) // 3600 in
-  let min_deg_lon = min_lon_arcsec // 3600 in
-  let max_deg_lon = max_lon_arcsec // 3600 in
+  let min_deg_lat = (min_lat_arcsec - 1) // degree in
+  let max_deg_lat = (max_lat_arcsec - 1) // degree in
+  let min_deg_lon = min_lon_arcsec // degree in
+  let max_deg_lon = max_lon_arcsec // degree in
 
   let prefetch_tasks = ref [] in
   for deg_lat = min_deg_lat to max_deg_lat do
-    let tile_base_lat_arcsec = (deg_lat * 3600) + 1 in
+    let tile_base_lat_arcsec = (deg_lat * degree) + 1 in
     for deg_lon = min_deg_lon to max_deg_lon do
-      let tile_base_lon_arcsec = deg_lon * 3600 in
+      let tile_base_lon_arcsec = deg_lon * degree in
       let min_sub_row =
         max 0 ((min_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
@@ -316,7 +320,8 @@ let prefetch ~lat ~lon ~size =
             && overlap_min_lon <= overlap_max_lon
           then begin
             let p =
-              path ~lat:deg_lat ~lon:deg_lon ~row:sub_row ~col:sub_col ()
+              path ~step ~cover ~lat:deg_lat ~lon:deg_lon ~row:sub_row
+                ~col:sub_col ()
             in
             let task =
               let to_lwt f =
@@ -342,6 +347,12 @@ let prefetch ~lat ~lon ~size =
               | _ ->
                   Format.eprintf "  Prefetching %s@." p;
                   Brr_io.Fetch.Cache.add cache request
+            in
+            (* A far tile that is not there is open sea: nothing to keep,
+               and no reason to give up on the others. *)
+            let task =
+              if step = 1 then task
+              else Lwt.catch (fun () -> task) (fun _ -> Lwt.return_unit)
             in
             prefetch_tasks := task :: !prefetch_tasks
           end
