@@ -2199,6 +2199,11 @@ type base = {
   anchor_lon : int;
   tile : Dem_loader.t;
   poi : (Points.t * (float * float)) list;  (** in base-grid samples *)
+  far_poi : (Points.t * (float * float)) list;
+      (** those beyond the base grid, over the far field: in base-grid samples
+          still, so outside the grid *)
+  far_tile : Dem_loader.t option;
+      (** the far field's grid, if its tiles came *)
   relief_texture : Gl.texture;
   relief_normal_texture : Gl.texture;
   far : (Gl.texture * Gl.texture) option;
@@ -3494,10 +3499,10 @@ let set_own_position : (bool -> unit) ref = ref (fun _ -> ())
    the last switch wins. *)
 let location_epoch = ref 0
 
-(* POIs of the loaded CLC tiles, restricted to the DEM tile and positioned in
-   DEM pixel coordinates. *)
-let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
-  let d = float (w / 2) /. 3600. in
+(* POIs of the loaded CLC tiles, restricted to the DEM tile and [reach] of its
+   samples beyond it on every side, and positioned in DEM pixel coordinates. *)
+let poi_positions ?(reach = 0) ~w ~h ~lat ~lon ~tile clc_tiles =
+  let d = float ((w / 2) + reach) /. 3600. in
   let tile_coord = { Points.lon = lon -. d; lat = lat -. d } in
   let tile_coord' = { Points.lon = lon +. d; lat = lat +. d } in
   (* Extract POIs from all loaded tiles and convert to Points.t format *)
@@ -3538,15 +3543,15 @@ let poi_positions ~w ~h ~lat ~lon ~tile clc_tiles =
                marker and its silhouette anchor to line up with. Only the
                visibility test rounds to whole texels. *)
             let x =
-              Float.max 0.
+              Float.max (float (-reach))
                 (Float.min
-                   (float (w - 1))
+                   (float (w - 1 + reach))
                    ((pt_lon *. 3600.) -. float min_lon_int))
             in
             let y =
-              Float.max 0.
+              Float.max (float (-reach))
                 (Float.min
-                   (float (h - 1))
+                   (float (h - 1 + reach))
                    ((pt_lat *. 3600.) -. float min_lat_int))
             in
             (pt, (x, y)))
@@ -4453,13 +4458,101 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
    a square twice the base grid's side, so of half as many samples a side. *)
 let far_step = 4
 
+(* Where the far field's first sample stands, in arcseconds west and south of
+   the anchor of a base grid of [w] samples: [w] and what the anchor is past a
+   multiple of [far_step], less the 1.5 arcseconds that centre a sample in its
+   four (Dem_loader.load has the grid). *)
+let far_origin ~w ~anchor_lat ~anchor_lon =
+  let past a = float (((a mod far_step) + far_step) mod far_step) in
+  (float w +. past anchor_lon -. 1.5, float w +. past (anchor_lat - 1) -. 1.5)
+
+(* The far field's height at a position of the base grid, in its samples: the
+   nearest far sample's, and the depth the ground sinks to outside it. *)
+let far_height far_tile ~w ~anchor_lat ~anchor_lon =
+  let origin_x, origin_y = far_origin ~w ~anchor_lat ~anchor_lon in
+  let size = far_tile.Dem_loader.size and half = float (w / 2) in
+  let step = float far_step in
+  fun bx by ->
+    let j = int_of_float (Float.round ((bx -. half +. origin_x) /. step))
+    and i = int_of_float (Float.round ((by -. half +. origin_y) /. step)) in
+    if i >= 0 && i < size && j >= 0 && j < size then
+      Dem_loader.get_height far_tile i j
+    else -500.
+
+(* Which of the far field's POIs the eye sees. A sight line apiece, walked a
+   base sample at a time as [Visibility] does for those of the base grid, would
+   take seconds: there are twice as many of them and they are three times as
+   far. Instead the horizon is swept once, a direction at a time: along each,
+   outwards, the steepest sight line to the ground so far is what a POI further
+   out must rise above. The ground is [near] for the first kilometres, where
+   what hides a summit may be a few metres across, at steps that grow with the
+   distance, and [far] beyond, a far sample at a time ([step] metres).
+
+   [pois] have their position on the eye's plane, in metres east and north,
+   and the height of the ground there; [grid] takes such a position to the
+   base grid's. The ground within [far_sight_exempt] of a POI does not hide
+   it, as in [Visibility]. Done a few milliseconds a frame; [None] if [stale]
+   came true meanwhile, and otherwise those seen, in their order. *)
+let far_sight_bins = 2048
+let far_sight_near = 3000.
+let far_sight_exempt = 300.
+
+let far_sight ~near ~far ~grid ~eye_h ~step ~reach ~stale pois =
+  let n = far_sight_bins in
+  let bins = Array.make n [] in
+  List.iteri
+    (fun i (_, (px, py, h)) ->
+      let d = Float.hypot px py in
+      let a = Float.atan2 px py /. (2. *. Float.pi) in
+      let b = int_of_float (float n *. (a +. 1.)) mod n in
+      let slope = (h -. Visibility.curvature_drop (d *. d) -. eye_h) /. d in
+      bins.(b) <- (d, slope, i) :: bins.(b))
+    pois;
+  let seen = Array.make (List.length pois) false in
+  let sweep b =
+    let a = (float b +. 0.5) *. 2. *. Float.pi /. float n in
+    let ux = sin a and uy = cos a in
+    (* The POIs of this direction the sweep has not reached, nearest first,
+       and the steepest sight line so far. *)
+    let rec walk todo top r =
+      match todo with
+      | [] -> ()
+      | (d, slope, i) :: rest when d -. far_sight_exempt <= r ->
+          (* A metre of slack, as [Visibility.test] has. *)
+          seen.(i) <- slope +. (1. /. d) >= top;
+          walk rest top r
+      | _ when r >= reach -> ()
+      | _ ->
+          let bx, by = grid (ux *. r) (uy *. r) in
+          let ground = if r < far_sight_near then near bx by else far bx by in
+          let slope =
+            (ground -. Visibility.curvature_drop (r *. r) -. eye_h) /. r
+          in
+          walk todo (Float.max top slope)
+            (if r < far_sight_near then r *. 1.03 else r +. step)
+    in
+    walk
+      (List.sort (fun (d, _, _) (d', _, _) -> Float.compare d d') bins.(b))
+      Float.neg_infinity 20.
+  in
+  let rec go b t0 =
+    if b = n then
+      Lwt.return_some (List.filteri (fun i _ -> seen.(i)) pois |> List.map fst)
+    else begin
+      if bins.(b) <> [] then sweep b;
+      if now_ms () -. t0 > 4. then
+        let* () = request_animation_frame () in
+        if stale () then Lwt.return_none else go (b + 1) (now_ms ())
+      else go (b + 1) t0
+    end
+  in
+  go 0 (now_ms ())
+
 (* Bind the far field's pyramids on units 16 and 17 -- the first sixteen are
    spoken for (Render_state.upload_texture_units), and nothing else touches
    these, so they stay bound from here on -- and tell [pids], the terrain,
    shadow and path programs, where it lies about the anchor of the base grid
-   of [w] samples. Dem_loader.load has where its samples stand: the first is
-   [w] arcseconds and what the anchor is past a multiple of [far_step] before
-   the anchor, and centred 1.5 arcseconds into its four. *)
+   of [w] samples ([far_origin]). *)
 let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
   let heights, normals =
     match far with Some f -> f | None -> (placeholder, placeholder)
@@ -4469,8 +4562,8 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
   Gl.active_texture ctx Gl.texture17;
   Gl.bind_texture ctx Gl.texture_2d (Some normals);
   Gl.active_texture ctx Gl.texture0;
-  let past a = float (((a mod far_step) + far_step) mod far_step) in
   let size = w / 2 in
+  let origin_x, origin_y = far_origin ~w ~anchor_lat ~anchor_lon in
   List.iter
     (fun pid ->
       Gl.use_program ctx pid;
@@ -4478,9 +4571,7 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
       Gl.uniform1i ctx (u "far_valid") (if far = None then 0 else 1);
       Gl.uniform1i ctx (u "far_relief") 16;
       Gl.uniform1i ctx (u "far_relief_normal") 17;
-      Gl.uniform3f ctx (u "far_map")
-        (float w +. past anchor_lon -. 1.5)
-        (float w +. past (anchor_lat - 1) -. 1.5)
+      Gl.uniform3f ctx (u "far_map") origin_x origin_y
         (1. /. float (far_step * size));
       Gl.uniform1i ctx (u "far_max_lod") (Web_utils.log2 size))
     pids
@@ -4738,6 +4829,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                 pyramids)
               far_tile
           in
+          (* The POIs of the base grid, and those beyond it as far as the far
+             field has ground to stand them on: short of its edge, the two
+             grids not being aligned. *)
+          let poi, far_poi =
+            poi_positions
+              ~reach:(if far_tile = None then 0 else (w / 2) - 8)
+              ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles
+            |> List.partition (fun (_, (x, y)) ->
+                x >= 0. && y >= 0. && x <= float (w - 1) && y <= float (h - 1))
+          in
           let ao_texture =
             time_gpu ctx "compute_ao" (fun () ->
                 compute_ao ctx w h (deltax, deltay) relief_texture
@@ -4755,7 +4856,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             anchor_lat;
             anchor_lon;
             tile;
-            poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles;
+            poi;
+            far_poi;
+            far_tile;
             relief_texture;
             relief_normal_texture;
             far;
@@ -4770,6 +4873,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       relief_normal_texture;
       ao_texture;
       cover_map_texture;
+      far_poi;
+      far_tile;
       _;
     } =
       base
@@ -5152,11 +5257,29 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           | None -> base row col
       in
       let fine = refinements in
+      (* A position of the base grid, in its samples, on the eye's plane, in
+         metres east and north of it: the inverse of the grid mapping in
+         radial_common.vert (meridian convergence to second order); two
+         fixed-point iterations converge to millimetres. And that mapping. *)
+      let conv = Render_state.meridian_convergence ~lat:alat in
+      let plane_of gx gy =
+        let ge = deltax *. (gx -. float x -. off_x) in
+        let gn = deltay *. (gy -. float y -. off_y) in
+        let px = ge /. (1. +. (gn *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        let px = ge /. (1. +. (py *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        (px, py)
+      in
+      let grid_of px py =
+        ( float x +. off_x +. (px *. (1. +. (py *. conv)) /. deltax),
+          float y +. off_y +. ((py -. (0.5 *. px *. px *. conv)) /. deltay) )
+      in
       let sees (_, (gx, gy)) =
         let dx = (gx -. float x) *. deltax in
         let dy = (gy -. float y) *. deltay in
         let dist_sq = (dx *. dx) +. (dy *. dy) in
-        if dist_sq > 4900000000. then false
+        if dist_sq > 19600000000. then false
         else
           (* The test walks whole texels; its summit exemption (10 texels)
                  dwarfs the half-texel rounding of the destination. *)
@@ -5185,7 +5308,6 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             kept
       in
       let label points =
-        let conv = Render_state.meridian_convergence ~lat:alat in
         let inv_avg_delta = 2. /. (deltax +. deltay) in
         List.map
           (fun ({ Points.name; elevation; _ }, (x', y')) ->
@@ -5195,15 +5317,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                 | None -> name
                 | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
             in
-            (* Plane position: inverse of the grid mapping in
-               radial_common.vert (meridian convergence to second order); two
-               fixed-point iterations converge to millimetres. *)
-            let ge = deltax *. (x' -. float x -. off_x) in
-            let gn = deltay *. (y' -. float y -. off_y) in
-            let px = ge /. (1. +. (gn *. conv)) in
-            let py = gn +. (px *. px *. conv /. 2.) in
-            let px = ge /. (1. +. (py *. conv)) in
-            let py = gn +. (px *. px *. conv /. 2.) in
+            let px, py = plane_of x' y' in
             let r2 = (px *. px) +. (py *. py) in
             (* Anchor at the silhouette as drawn (mip-level height at this
                distance), with the same curvature drop as the mesh. Inside the
@@ -5231,9 +5345,24 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                        ~size:g.layer.size ~r ~gx:hd_x ~gy:hd_y)
                 else None
               in
-              match List.find_map from_ring hd_grids with
-              | Some z -> z
-              | None ->
+              match (List.find_map from_ring hd_grids, far_tile) with
+              | Some z, _ -> z
+              | None, Some far
+                when not
+                       (x' >= 0. && y' >= 0.
+                       && x' <= float (w - 1)
+                       && y' <= float (h - 1)) ->
+                  (* Beyond the base grid the mesh reads the far field's
+                     pyramid, a far sample being [far_step] base ones. *)
+                  let ox, oy = far_origin ~w ~anchor_lat ~anchor_lon in
+                  let step = float far_step in
+                  rendered_height
+                    ~get_height:(Dem_loader.get_height far)
+                    ~radial_params ~inv_avg_delta:(inv_avg_delta /. step)
+                    ~size:far.size ~r
+                    ~gx:((x' -. float (w / 2) +. ox) /. step)
+                    ~gy:((y' -. float (h / 2) +. oy) /. step)
+              | None, _ ->
                   rendered_height
                     ~get_height:(Dem_loader.get_height tile)
                     ~radial_params ~inv_avg_delta ~size:w ~r ~gx:x' ~gy:y'
@@ -5269,13 +5398,68 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       session := Some { height; points; gpx_path; base; slots };
       (* Any earlier pass is over a surface this publish has replaced. *)
       incr sight_pass;
+      let pass = !sight_pass in
+      let stale () = !sight_pass <> pass || !location_epoch <> epoch in
+      (* What is seen once the sight lines of this publish are all tested, in
+         the order of [poi] then [far_poi], as [kept] is: the labels follow if
+         it is not what they were made from. *)
+      let settle seen =
+        match !session with
+        | None -> ()
+        | Some s ->
+            visible := Some seen;
+            (* Both are sublists of the POIs, in their order. *)
+            if
+              List.compare_lengths seen kept <> 0
+              || not (List.for_all2 ( == ) seen kept)
+            then begin
+              delete_labels ctx s.points;
+              session := Some { s with points = label seen };
+              force_redraw := true
+            end
+      in
+      (* The POIs of the far field, after those of the base grid ([near_seen])
+         and over the frames whatever the publish: the far field is where most
+         of them are. *)
+      let far_then near_seen =
+        match far_tile with
+        | Some far when far_poi <> [] -> (
+            let far_at = far_height far ~w ~anchor_lat ~anchor_lon in
+            let base_at = Dem_loader.get_height tile in
+            let t0 = now_ms () in
+            let* far_seen =
+              far_sight
+                ~near:(fun bx by ->
+                  match hd_at bx by with
+                  | Some h -> h
+                  | None -> Visibility.bilinear_height base_at ~x:bx ~y:by)
+                ~far:far_at ~grid:grid_of ~eye_h:(height +. 2.)
+                ~step:(float far_step *. 0.5 *. (deltax +. deltay))
+                ~reach:140000. ~stale
+                (List.map
+                   (fun ((_, (gx, gy)) as p) ->
+                     let px, py = plane_of gx gy in
+                     (p, (px, py, far_at gx gy)))
+                   far_poi)
+            in
+            match far_seen with
+            | None -> Lwt.return_unit
+            | Some far_seen ->
+                Format.eprintf
+                  "visibility: %d/%d far POIs in %.0f ms, over the frames@."
+                  (List.length far_seen) (List.length far_poi)
+                  (now_ms () -. t0);
+                settle (near_seen @ far_seen);
+                Lwt.return_unit)
+        | Some _ | None ->
+            settle near_seen;
+            Lwt.return_unit
+      in
       if Option.is_some provisional then begin
-        let pass = !sight_pass in
         let spent = ref 0. in
         let rec resee todo seen =
           let* () = request_animation_frame () in
-          if !sight_pass <> pass || !location_epoch <> epoch then
-            Lwt.return_unit
+          if stale () then Lwt.return_unit
           else begin
             let t0 = now_ms () in
             let rec slice todo seen =
@@ -5287,29 +5471,19 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             in
             let todo, seen = slice todo seen in
             spent := !spent +. (now_ms () -. t0);
-            match (todo, !session) with
-            | _ :: _, _ -> resee todo seen
-            | [], None -> Lwt.return_unit
-            | [], Some s ->
+            match todo with
+            | _ :: _ -> resee todo seen
+            | [] ->
                 let seen = List.rev seen in
                 Format.eprintf
                   "visibility: %d/%d POIs in %.0f ms, over the frames@."
                   (List.length seen) (List.length poi) !spent;
-                visible := Some seen;
-                (* Both are sublists of [poi], in its order. *)
-                if
-                  List.compare_lengths seen kept <> 0
-                  || not (List.for_all2 ( == ) seen kept)
-                then begin
-                  delete_labels ctx s.points;
-                  session := Some { s with points = label seen };
-                  force_redraw := true
-                end;
-                Lwt.return_unit
+                far_then seen
           end
         in
         Lwt.async (fun () -> resee poi [])
       end
+      else Lwt.async (fun () -> far_then kept)
     in
     publish ~keep:reused_slots ~slots:in_time;
     if refine_later then begin
