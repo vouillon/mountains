@@ -76,14 +76,38 @@ let start () =
 let align8 x = (x + 7) land lnot 7
 
 let run (p : Blend_core.params) ~samples ~win =
-  (* The wat hoists one source row pair per source row and precomputes the
-     column indices once, both of which assume the two grids share axes. A ring
-     on a projected grid over the graticule-aligned surface beneath it does not,
-     and takes the OCaml path -- 1024^2, which measured ~65 ms there before it
-     was ported, against a fetch of several seconds. *)
-  match if Blend_core.axis_aligned p then !exports else None with
-  | None -> Blend_core.run p ~samples ~win
-  | Some exports ->
+  let aligned = Blend_core.axis_aligned p in
+  match !exports with
+  (* A module from before it took turned axes, out of a stale cache, is no
+     better than none for them. *)
+  | Some exports when aligned || Jv.is_some (Jv.get exports "set_warp") ->
+      (* The wat hoists one source row pair per source row and precomputes the
+         column indices once, both of which assume the two grids share axes. A
+         ring on a projected grid over the graticule-aligned surface beneath it
+         does not: it is given the whole map, and pays a full bilinear per
+         sample -- 1024^2, which took 140 ms in OCaml. *)
+      if not aligned then begin
+        let w = p.to_src in
+        let m = w.Warp.lin in
+        ignore
+          (Jv.apply
+             (Jv.get exports "set_warp")
+             (Array.map Jv.of_float
+                [|
+                  m.Affine.a;
+                  m.b;
+                  m.c;
+                  m.d;
+                  m.e;
+                  m.f;
+                  w.xuu;
+                  w.xuv;
+                  w.xvv;
+                  w.yuu;
+                  w.yuv;
+                  w.yvv;
+                |]))
+      end;
       let g = Blend_core.geometry p in
       let size = p.size in
       let n = size * size in
@@ -142,3 +166,4 @@ let run (p : Blend_core.params) ~samples ~win =
             range = Array1.unsafe_get r (i + 2);
           }
       end
+  | Some _ | None -> Blend_core.run p ~samples ~win

@@ -48,6 +48,46 @@
   ;; The refinement-to-source mapping.
   (global $g_src_max (mut f64) (f64.const 0)) ;; f64(src_size - 2)
 
+  ;; The map itself when the two grids do not share axes ($set_warp): the twelve
+  ;; coefficients of [Warp.t], and the refinement row being resampled.
+  (global $g_turned (mut i32) (i32.const 0))
+  (global $w_a (mut f64) (f64.const 0))
+  (global $w_b (mut f64) (f64.const 0))
+  (global $w_c (mut f64) (f64.const 0))
+  (global $w_d (mut f64) (f64.const 0))
+  (global $w_e (mut f64) (f64.const 0))
+  (global $w_f (mut f64) (f64.const 0))
+  (global $w_xuu (mut f64) (f64.const 0))
+  (global $w_xuv (mut f64) (f64.const 0))
+  (global $w_xvv (mut f64) (f64.const 0))
+  (global $w_yuu (mut f64) (f64.const 0))
+  (global $w_yuv (mut f64) (f64.const 0))
+  (global $w_yvv (mut f64) (f64.const 0))
+  (global $g_v (mut f64) (f64.const 0))
+
+  ;; Has the next $blend resample through the whole map rather than one index
+  ;; per axis: a ring on a projected grid over the graticule-aligned surface
+  ;; beneath it. $blend clears it again.
+  (func (export "set_warp")
+    (param $a f64) (param $b f64) (param $c f64)
+    (param $d f64) (param $e f64) (param $f f64)
+    (param $xuu f64) (param $xuv f64) (param $xvv f64)
+    (param $yuu f64) (param $yuv f64) (param $yvv f64)
+    (global.set $w_a (local.get $a))
+    (global.set $w_b (local.get $b))
+    (global.set $w_c (local.get $c))
+    (global.set $w_d (local.get $d))
+    (global.set $w_e (local.get $e))
+    (global.set $w_f (local.get $f))
+    (global.set $w_xuu (local.get $xuu))
+    (global.set $w_xuv (local.get $xuv))
+    (global.set $w_xvv (local.get $xvv))
+    (global.set $w_yuu (local.get $yuu))
+    (global.set $w_yuv (local.get $yuv))
+    (global.set $w_yvv (local.get $yvv))
+    (global.set $g_turned (i32.const 1))
+  )
+
   ;; Height in metres of source sample (row, col), absolute indices, decoded
   ;; with the source's own quantisation. Clamping the indices into the window
   ;; reproduces the clamp to the tile's last row and column that the unwindowed
@@ -81,8 +121,8 @@
 ;; Fractional source index along one axis, clamped so the bilinear pair stays
   ;; inside the grid: [$m] is the source samples per refinement sample and [$k]
   ;; the source index of refinement sample zero, i.e. one row of the affine map
-  ;; [Blend_core.to_src]. Only reached with axes that agree -- the caller runs
-  ;; the OCaml path when they do not -- so one index per axis is enough.
+  ;; [Blend_core.to_src]. Only used with axes that agree, where one index per
+  ;; axis is enough; $span_turned has the whole map otherwise.
   (func $index_of (param $m f64) (param $k f64) (param $j i32) (result f64)
     (f64.max (f64.const 0)
       (f64.min (global.get $g_src_max)
@@ -158,6 +198,109 @@
                      (call $quantise (local.get $vf)))
         (local.set $j (i32.add (local.get $j) (i32.const 1)))
         (br_if $col (i32.le_s (local.get $j) (local.get $j1)))))
+  )
+
+  ;; $span_slow with turned axes: the source row under a sample changes along
+  ;; the row, so there is no row pair to hoist and every sample pays a full
+  ;; bilinear at [Warp.apply]'s index -- [Blend_core.run]'s second loop, in its
+  ;; order and grouping. The fade and the store are $span_slow's.
+  (func $span_turned (param $j0 i32) (param $j1 i32)
+    (local $j i32) (local $ic i32) (local $ir i32)
+    (local $u f64) (local $v f64) (local $uu f64) (local $uv f64) (local $vv f64)
+    (local $c f64) (local $r f64) (local $fc f64) (local $fr f64)
+    (local $tc f64) (local $h00 f64) (local $h01 f64) (local $b0 f64)
+    (local $bh f64) (local $h f64) (local $t f64) (local $vf f64)
+    (local.set $v (global.get $g_v))
+    (local.set $vv (f64.mul (local.get $v) (local.get $v)))
+    (local.set $j (local.get $j0))
+    (block $done
+      (br_if $done (i32.gt_s (local.get $j) (local.get $j1)))
+      (loop $col
+        (local.set $u (f64.convert_i32_s (local.get $j)))
+        (local.set $uu (f64.mul (local.get $u) (local.get $u)))
+        (local.set $uv (f64.mul (local.get $u) (local.get $v)))
+        (local.set $c
+          (f64.add
+            (f64.add
+              (f64.add
+                (f64.add
+                  (f64.add (f64.mul (global.get $w_a) (local.get $u))
+                           (f64.mul (global.get $w_b) (local.get $v)))
+                  (global.get $w_c))
+                (f64.mul (global.get $w_xuu) (local.get $uu)))
+              (f64.mul (global.get $w_xuv) (local.get $uv)))
+            (f64.mul (global.get $w_xvv) (local.get $vv))))
+        (local.set $r
+          (f64.add
+            (f64.add
+              (f64.add
+                (f64.add
+                  (f64.add (f64.mul (global.get $w_d) (local.get $u))
+                           (f64.mul (global.get $w_e) (local.get $v)))
+                  (global.get $w_f))
+                (f64.mul (global.get $w_yuu) (local.get $uu)))
+              (f64.mul (global.get $w_yuv) (local.get $uv)))
+            (f64.mul (global.get $w_yvv) (local.get $vv))))
+        (local.set $c (f64.max (f64.const 0)
+          (f64.min (global.get $g_src_max) (local.get $c))))
+        (local.set $r (f64.max (f64.const 0)
+          (f64.min (global.get $g_src_max) (local.get $r))))
+        (local.set $fc (f64.floor (local.get $c)))
+        (local.set $fr (f64.floor (local.get $r)))
+        (local.set $ic (i32.trunc_sat_f64_s (local.get $fc)))
+        (local.set $ir (i32.trunc_sat_f64_s (local.get $fr)))
+        (local.set $tc (f64.sub (local.get $c) (local.get $fc)))
+        (local.set $h00 (call $get_base (local.get $ir) (local.get $ic)))
+        (local.set $h01 (call $get_base (i32.add (local.get $ir) (i32.const 1))
+                                        (local.get $ic)))
+        (local.set $b0 (f64.add (local.get $h00)
+          (f64.mul (local.get $tc)
+            (f64.sub (call $get_base (local.get $ir)
+                                     (i32.add (local.get $ic) (i32.const 1)))
+                     (local.get $h00)))))
+        (local.set $bh (f64.add (local.get $h01)
+          (f64.mul (local.get $tc)
+            (f64.sub (call $get_base (i32.add (local.get $ir) (i32.const 1))
+                                     (i32.add (local.get $ic) (i32.const 1)))
+                     (local.get $h01)))))
+        (local.set $bh (f64.add (local.get $b0)
+          (f64.mul (f64.sub (local.get $r) (local.get $fr))
+                   (f64.sub (local.get $bh) (local.get $b0)))))
+        (local.set $h (f64.promote_f32
+          (f32.load (i32.add (global.get $g_samples)
+                      (i32.shl (i32.add (global.get $g_src_row) (local.get $j))
+                               (i32.const 2))))))
+        (if (f64.lt (local.get $h) (f64.const -500))
+          (then (local.set $vf (local.get $bh)))
+          (else
+            (local.set $t (f64.min
+              (f64.load (i32.add (global.get $g_ex)
+                          (i32.shl (local.get $j) (i32.const 3))))
+              (global.get $g_edge_y)))
+            (if (global.get $g_nodata)
+              (then
+                (local.set $t (f64.min (local.get $t)
+                  (f64.div
+                    (f64.convert_i32_u (i32.load8_u
+                      (i32.add (global.get $g_dist)
+                        (i32.add (global.get $g_src_row) (local.get $j)))))
+                    (global.get $g_fade_nd))))))
+            (local.set $vf (f64.add (local.get $bh)
+              (f64.mul (call $smoothstep (local.get $t))
+                       (f64.sub (local.get $h) (local.get $bh)))))))
+        (i32.store16 (i32.add (global.get $g_dst)
+                       (i32.shl (local.get $j) (i32.const 1)))
+                     (call $quantise (local.get $vf)))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br_if $col (i32.le_s (local.get $j) (local.get $j1)))))
+  )
+
+  ;; The surface beneath interpolated over columns [$j0, $j1] of the current
+  ;; row, however the two grids lie.
+  (func $span_under (param $j0 i32) (param $j1 i32)
+    (if (global.get $g_turned)
+      (then (call $span_turned (local.get $j0) (local.get $j1)))
+      (else (call $span_slow (local.get $j0) (local.get $j1))))
   )
 
   ;; Columns [$j0, $j1] of a row where the refinement is known to be fully faded
@@ -437,7 +580,10 @@
               (then (local.set $hi (local.get $h))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan)))
-    (if (i32.eqz (local.get $has_data)) (then (return (i32.const 0))))
+    (if (i32.eqz (local.get $has_data))
+      (then
+        (global.set $g_turned (i32.const 0))
+        (return (i32.const 0))))
 
     (local.set $fade_nd (f64.min (local.get $fade_x) (local.get $fade_y)))
     (if (local.get $has_nodata)
@@ -568,6 +714,8 @@
     (local.set $cur_by (i32.const -1))
     (local.set $u (i32.const 0))
     (loop $row_loop
+      (global.set $g_v (f64.convert_i32_s (local.get $u)))
+      (if (i32.eqz (global.get $g_turned)) (then
       (local.set $cby (call $index_of (local.get $m_row) (local.get $k_row)
                                       (local.get $u)))
       (local.set $by (i32.trunc_sat_f64_s (f64.floor (local.get $cby))))
@@ -607,6 +755,7 @@
                                   (local.get $a)))))
           (local.set $k (i32.add (local.get $k) (i32.const 1)))
           (br $rv)))
+      ))
 
       (local.set $mj (local.get $u))
       (local.set $t2 (i32.sub (local.get $last) (local.get $u)))
@@ -637,15 +786,16 @@
                     (i32.or (i32.lt_s (local.get $rrow) (local.get $nr0))
                             (i32.gt_s (local.get $rrow) (local.get $nr1)))))
         (then
-          (call $span_slow (i32.const 0)
+          (call $span_under (i32.const 0)
                            (i32.sub (local.get $flo) (i32.const 1)))
           (call $span_fast (local.get $flo) (local.get $fhi))
-          (call $span_slow (i32.add (local.get $fhi) (i32.const 1))
+          (call $span_under (i32.add (local.get $fhi) (i32.const 1))
                            (local.get $last)))
-        (else (call $span_slow (i32.const 0) (local.get $last))))
+        (else (call $span_under (i32.const 0) (local.get $last))))
       (local.set $u (i32.add (local.get $u) (i32.const 1)))
       (br_if $row_loop (i32.lt_u (local.get $u) (local.get $size))))
 
+    (global.set $g_turned (i32.const 0))
     (f64.store (local.get $result) (local.get $hs))
     (f64.store offset=8 (local.get $result) (local.get $ho))
     (f64.store offset=16 (local.get $result)
