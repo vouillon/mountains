@@ -2654,6 +2654,7 @@ let collect_trees ctx =
         Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0
           (Brr.Tarray.of_bigarray1 raw);
         Gl.bind_buffer ctx Gl.copy_read_buffer None;
+        let t_read = now_ms () -. t0 in
         (* One pass over the read back (element access to a Bigarray is slow
            under wasm_of_ocaml) for each cell's distance and group (see
            [tree_group_vertices]; '\255' without a tree). *)
@@ -2702,7 +2703,9 @@ let collect_trees ctx =
         for i = 0 to n - 1 do
           if Bytes.unsafe_get groups i <> '\255' then begin
             let k = key i in
-            (* A blit is a memcpy: faster than eight element copies. *)
+            (* A blit is a memcpy: faster than eight element copies, and
+               than a copy within one typed array, which took four times as
+               long. *)
             Bigarray.Array1.blit
               (Bigarray.Array1.sub raw (i * 8) 8)
               (Bigarray.Array1.sub out (next.(k) * 8) 8);
@@ -2719,11 +2722,12 @@ let collect_trees ctx =
           t.group_vaos;
         Format.eprintf
           "Trees: %d conifers, %d broadleaves (%d, %d within %.0f m), read \
-           back in %.0f ms@."
+           back in %.0f ms, %.0f of them the read@."
           (counts.(0) + counts.(1))
           (counts.(2) + counts.(3))
           counts.(0) counts.(2) tree_far
-          (now_ms () -. t0);
+          (now_ms () -. t0)
+          t_read;
         trees_found := Some (b, g, counts);
         force_redraw := true;
         !trees_ready ()
