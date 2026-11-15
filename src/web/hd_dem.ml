@@ -496,12 +496,37 @@ let raw_rest (r : raw) = r.rest
    region at nodata, which the blend turns back into the base. *)
 exception Outside_coverage
 
-let fetch_one req =
+let rec fetch_one ?(retries = [ 3.; 6. ]) req =
   let open Brr_io.Fetch in
+  (* A request that could not be made, or was refused for a reason that is
+     not about it, is made again after a few seconds: the service answers a
+     valid request with a 400 now and then (it allows 40 a second, and is
+     said to refuse all for 5 s past that), and a tile given up on is a hole
+     in its block for as long as the block is kept. *)
+  let again e =
+    match retries with
+    | [] -> Lwt.fail e
+    (* Not offline, where nothing will come and the load is waiting. *)
+    | _ :: _
+      when not (Jv.to_bool (Jv.get (Jv.get Jv.global "navigator") "onLine")) ->
+        Lwt.fail e
+    | s :: retries ->
+        let t, u = Lwt.task () in
+        ignore
+          (Brr.G.set_timeout
+             ~ms:(truncate (s *. 1000.))
+             (fun () -> Lwt.wakeup u ()));
+        let* () = t in
+        fetch_one ~retries req
+  in
   let* res = to_lwt (url (Jstr.v req.url)) in
   match res with
-  | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
+  | Error e -> again (Failure (Jstr.to_string (Jv.Error.message e)))
   | Ok resp when Response.status resp = 404 -> Lwt.fail Outside_coverage
+  | Ok resp
+    when let s = Response.status resp in
+         s = 400 || s = 429 || s >= 500 ->
+      again (Failure (Printf.sprintf "HTTP %d" (Response.status resp)))
   | Ok resp when not (Response.ok resp) ->
       Lwt.fail (Failure (Printf.sprintf "HTTP %d" (Response.status resp)))
   | Ok resp -> (

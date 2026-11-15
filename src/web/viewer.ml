@@ -4131,8 +4131,12 @@ let apply_canopy ctx pids ~placeholder =
   apply_trees_stand ctx pids
 
 (* Start fetching the canopies for the rings a load at [lat]/[lon] will have,
-   unless they are held or on their way already. *)
-let start_canopy ~lat ~lon =
+   unless they are held or on their way already. The service sends some
+   1.6 MB a second, whatever the number of requests sharing it, and a load
+   asks it for 33 MB: the far and 20 m canopies, 8 MB of them, are asked for
+   only [after] the 5 m ring has come, so as not to hold it, the 1 m ring and
+   the near canopy -- the terrain and its trees -- back. *)
+let start_canopy ~after ~lat ~lon =
   for kind = 0 to canopy_kinds - 1 do
     let block = Hd_dem.block_id canopy_ring_layers.(kind) ~lat ~lon in
     let generation = !context_generation in
@@ -4153,8 +4157,12 @@ let start_canopy ~lat ~lon =
              often takes longer than that to serve a quarter of a block nobody
              asked for recently -- which then stayed bare for the whole
              visit. *)
+          let* () = if kind = 0 then Lwt.return_unit else after in
           let* raw =
-            Hd_dem.fetch ~timeout_s:120. canopy_layers.(kind) ~lat ~lon
+            (* Another location may have been asked for meanwhile. *)
+            if !context_generation = generation && canopy_asked.(kind) = block
+            then Hd_dem.fetch ~timeout_s:120. canopy_layers.(kind) ~lat ~lon
+            else Lwt.return None
           in
           if !context_generation = generation then begin
             if canopy_fetching.(kind) = Some (block, generation) then
@@ -4512,13 +4520,19 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      can take [Hd_dem.timeout_s] to answer, and awaiting it holds the whole
      location -- base tiles that may well be in cache included -- behind that
      ceiling. *)
-  start_canopy ~lat:alat ~lon:alon;
-  start_tree_cover ~lat:alat ~lon:alon;
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
     |> List.map (fun layer ->
         (layer, ref (Hd_dem.fetch layer ~lat:alat ~lon:alon)))
   in
+  start_canopy ~lat:alat ~lon:alon
+    ~after:
+      (* The 5 m ring's fetch, if there is one, for half a minute at most:
+         it waits for as long as it has no tile. *)
+      (match List.assq_opt Hd_dem.lidar_5m hd_fetches with
+      | Some p -> Lwt.choose [ Lwt.map ignore !p; sleep 30. ]
+      | None -> Lwt.return_unit);
+  start_tree_cover ~lat:alat ~lon:alon;
   let* fetched =
     match reused_base with
     | Some _ -> Lwt.return None
