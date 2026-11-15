@@ -2162,6 +2162,9 @@ type ring = {
           actually drawn *)
   hd_relief_texture : Gl.texture;
   hd_relief_normal_texture : Gl.texture;
+  more : Hd_dem.raw option Lwt.t;
+      (** the block again, if it was blended before all its tiles were in and
+          more have come since ([Hd_dem.raw_rest]) *)
 }
 (** One near-field high-resolution refinement of a location (see [Hd_dem]),
     blended onto the surface beneath it and baked. *)
@@ -4156,19 +4159,25 @@ let start_canopy ~lat ~lon =
           if !context_generation = generation then begin
             if canopy_fetching.(kind) = Some (block, generation) then
               canopy_fetching.(kind) <- None;
-            match raw with
-            | Some raw when canopy_asked.(kind) = block ->
-                canopy_raw.(kind) <-
-                  Some
-                    ( block,
-                      generation,
-                      raw,
-                      (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
-                    );
-                !canopy_ready ()
-            | Some _ | None -> ()
-          end;
-          Lwt.return_unit)
+            (* And again with the tiles that came past the timeout, if any. *)
+            let rec got = function
+              | Some raw
+                when !context_generation = generation
+                     && canopy_asked.(kind) = block ->
+                  canopy_raw.(kind) <-
+                    Some
+                      ( block,
+                        generation,
+                        raw,
+                        (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
+                      );
+                  !canopy_ready ();
+                  Lwt.bind (Hd_dem.raw_rest raw) got
+              | Some _ | None -> Lwt.return_unit
+            in
+            got raw
+          end
+          else Lwt.return_unit)
     end
   done
 
@@ -4199,6 +4208,8 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
           if kind = 2 then canopy_mid_frame := Some (frame, anchor);
           canopy_raw.(kind) <- None;
           force_redraw := true;
+          (* The same block again, with more of it: its trees too. *)
+          if kind = 0 then refresh_trees ();
           if kind < 2 then layers := 2;
           uploaded := true
       | _ -> ()
@@ -4477,7 +4488,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
               match slot with
               | Blank b when b = block -> Blank b :: take layers slots
-              | Blended (b, r) when b = block ->
+              (* Not one blended short of tiles that may still come, or have:
+                 only the load that asked for them hears of it. Asked for
+                 again, they are in the cache by now. *)
+              | Blended (b, r)
+                when b = block && Lwt.state r.more = Lwt.Return None ->
                   Blended
                     ( b,
                       {
@@ -4501,7 +4516,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   start_tree_cover ~lat:alat ~lon:alon;
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
-    |> List.map (fun layer -> (layer, Hd_dem.fetch layer ~lat:alat ~lon:alon))
+    |> List.map (fun layer ->
+        (layer, ref (Hd_dem.fetch layer ~lat:alat ~lon:alon)))
   in
   let* fetched =
     match reused_base with
@@ -4524,7 +4540,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let* () =
     Lwt.choose
       [
-        (let* _ = Lwt.all (List.map snd hd_fetches) in
+        (let* _ = Lwt.all (List.map (fun (_, p) -> !p) hd_fetches) in
          Lwt.return_unit);
         sleep hd_grace_s;
       ]
@@ -4547,7 +4563,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       List.length
         (List.filter
            (fun (_, p) ->
-             match Lwt.state p with Lwt.Return (Some _) -> true | _ -> false)
+             match Lwt.state !p with Lwt.Return (Some _) -> true | _ -> false)
            hd_fetches)
     in
     (* Everything the previous location owned that this one is not standing on is
@@ -4656,7 +4672,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         List.fold_left
           (fun (slots, source) (layer, p) ->
             let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
-            match Lwt.state p with
+            match Lwt.state !p with
             | Lwt.Sleep -> (Pending :: slots, source)
             | Lwt.Fail _ | Lwt.Return None -> (Blank block :: slots, source)
             | Lwt.Return (Some raw) -> (
@@ -4682,6 +4698,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                             grid = g;
                             hd_relief_texture;
                             hd_relief_normal_texture;
+                            more = Hd_dem.raw_rest raw;
                           } )
                       :: slots,
                       Hd_dem.as_source g )))
@@ -4696,7 +4713,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     let in_time = build ~keep:reused_slots in
     let refine_later =
       List.exists
-        (function Pending -> true | Blank _ | Blended _ -> false)
+        (function
+          | Pending -> true
+          | Blended (_, r) -> Lwt.state r.more = Lwt.Sleep
+          | Blank _ -> false)
         in_time
     in
 
@@ -5172,8 +5192,28 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          settled, and returns with that ring arrived but never published.
          Nothing can settle under the first publish here -- it is synchronous
          from [build] on -- but the loop must not depend on that. *)
+      (* A ring blended short of tiles that have come in since ([Hd_dem]'s
+         [rest]) is blended again, and the finer ones onto it: [stale] is the
+         outermost such slot. *)
+      let stale = ref None in
+      let absorb () =
+        List.iteri
+          (fun i (_, p) ->
+            match Lwt.state !p with
+            | Lwt.Return (Some raw) -> (
+                match Lwt.state (Hd_dem.raw_rest raw) with
+                | Lwt.Return (Some _ as full) ->
+                    p := Lwt.return full;
+                    let i = i + kept_rings in
+                    stale :=
+                      Some (match !stale with Some j -> min i j | None -> i)
+                | Lwt.Return None | Lwt.Sleep | Lwt.Fail _ -> ())
+            | Lwt.Return None | Lwt.Sleep | Lwt.Fail _ -> ())
+          hd_fetches
+      in
       let rec refine () =
-        if arrived () > !shown then begin
+        absorb ();
+        if arrived () > !shown || Option.is_some !stale then begin
           shown := arrived ();
           (* Everything up to the first ring that was still missing stands: its
              data and the surface beneath it are what they were. From there in,
@@ -5189,6 +5229,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             | Some { slots; _ } -> settled slots
             | None -> reused_slots
           in
+          let keep =
+            match !stale with
+            | Some i -> List.filteri (fun j _ -> j < i) keep
+            | None -> keep
+          in
+          stale := None;
           (* [Hd_dem.blend] is synchronous, so the epoch test that guarded
              entry still holds: no [draw] has run since. *)
           publish ~keep ~slots:(build ~keep);
@@ -5207,14 +5253,21 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         else wait ()
       and wait () =
         match
-          List.filter
+          List.concat_map
             (fun (_, p) ->
-              match Lwt.state p with Lwt.Sleep -> true | _ -> false)
+              match Lwt.state !p with
+              | Lwt.Sleep -> [ Lwt.map ignore !p ]
+              | Lwt.Return (Some raw) -> (
+                  let rest = Hd_dem.raw_rest raw in
+                  match Lwt.state rest with
+                  | Lwt.Sleep -> [ Lwt.map ignore rest ]
+                  | Lwt.Return _ | Lwt.Fail _ -> [])
+              | Lwt.Return None | Lwt.Fail _ -> [])
             hd_fetches
         with
         | [] -> Lwt.return_unit
         | pending ->
-            let* _ = Lwt.nchoose_split (List.map snd pending) in
+            let* () = Lwt.choose pending in
             let* () = sleep hd_settle_s in
             if !location_epoch <> epoch then Lwt.return_unit else refine ()
       in

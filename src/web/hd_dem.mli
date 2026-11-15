@@ -67,12 +67,13 @@ val raw_samples :
 val fetch :
   ?timeout_s:float -> layer -> lat:float -> lon:float -> raw option Lwt.t
 (** Fetch [layer]'s block around [lat]/[lon]. Never fails: [None] (not a single
-    tile obtained, whether the requests failed or the deadline expired first)
-    means the caller must carry on without this layer. Individual tiles that
-    fail -- including the 404 of a tile outside coverage, and those still in
-    flight when the deadline expires -- are nodata, which {!blend} turns back
-    into the coarser surface. The deadline is [timeout_s] seconds, 25 by
-    default. *)
+    tile obtained, every request having failed) means the caller must carry on
+    without this layer. Individual tiles that fail -- including the 404 of a
+    tile outside coverage, and those still in flight when the deadline expires
+    -- are nodata, which {!blend} turns back into the coarser surface. The
+    deadline is [timeout_s] seconds without a tile arriving, 25 by default, once
+    the block holds one: an empty block goes on waiting. See {!raw_rest} for the
+    tiles that arrive past it. *)
 
 val block_id : layer -> lat:float -> lon:float -> string
 (** Identity of the block [fetch] would ask for at [lat]/[lon]: two locations
@@ -123,6 +124,12 @@ type frame = {
 val raw_frame : raw -> frame
 (** Where a fetched block's samples sit, from the anchor arcsecond of the
     location it was fetched for. *)
+
+val raw_rest : raw -> raw option Lwt.t
+(** A block is handed out short of the tiles still on their way once none has
+    arrived for [timeout_s]. This is the block again with those that came in
+    since, once every request has settled; [None] if none did, or none was
+    missing. *)
 
 type t = {
   layer : layer;  (** the layer this grid came from *)

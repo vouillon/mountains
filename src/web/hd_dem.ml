@@ -257,7 +257,8 @@ let served_metres crs metres =
 (* How long a block waits for its next tile once it holds one. Expiring is not
    an error: the block is published with whatever has arrived by then -- the
    tiles still in flight are nodata, which the blend fades back into the base
-   like any other gap. A block without a single tile has nothing to publish
+   like any other gap, and the block comes again as its [rest] if they
+   arrive after all. A block without a single tile has nothing to publish
    and goes on waiting, the location being on screen without it meanwhile: the
    service answers a cold request after 15 to 30 s, all its tiles at once, and
    giving up on it left the ring out -- and the trees with the 1 m one --
@@ -480,10 +481,15 @@ type raw = {
       (* [layer.size] x [layer.size], row 0 northernmost *)
   frame : frame;
   missing : int;
+  rest : raw option Lwt.t;
+      (* for a block handed out before all its requests had settled: the
+         block again with the tiles that came in since, once they all have,
+         if any did *)
 }
 
 let raw_samples (r : raw) = r.samples
 let raw_frame (r : raw) = r.frame
+let raw_rest (r : raw) = r.rest
 
 (* One tile. A tile fully outside RGE ALTI coverage answers 404 with an
    exception report; that -- like any other per-tile failure -- just leaves its
@@ -540,11 +546,13 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
      that says whether the block is worth publishing. *)
       let arrived = ref 0 in
       (* Set as soon as [full] is handed out. A tile arriving after that must not be
-     blitted: the raw block is published by reference, and the late write would
-     land in a buffer the caller has already started reading. The request itself
-     is not cancelled, so its response still reaches the service worker's cache
-     and the next visit to this location gets it for free. *)
+     blitted into it: the raw block is published by reference, and the late
+     write would land in a buffer the caller has already started reading. It
+     goes into a copy, [late], handed out in turn as the block's [rest] once
+     every request has settled. *)
       let published = ref false in
+      let late = ref None in
+      let rest, set_rest = Lwt.wait () in
       let t0 = Brr.(Performance.now_ms G.performance) in
       let last = ref t0 in
       (* Every request is issued at once: the browser multiplexes them over one
@@ -555,7 +563,20 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
             Lwt.catch
               (fun () ->
                 let* tile = fetch_one req in
-                if not !published then begin
+                let full =
+                  if not !published then full
+                  else
+                    match !late with
+                    | Some copy -> copy
+                    | None ->
+                        let copy =
+                          Brr.Tarray.of_jv
+                            (Jv.call (Brr.Tarray.to_jv full) "slice" [||])
+                        in
+                        late := Some copy;
+                        copy
+                in
+                begin
                   (* Blit row by row: the response is contiguous, the destination is
                  strided by the width of the whole block. *)
                   for i = 0 to req.px - 1 do
@@ -592,13 +613,32 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
               samples = Brr.Tarray.to_bigarray1 full;
               frame;
               missing = total - !arrived;
+              rest;
             }
       in
       let all =
         let* () = Lwt.join tasks in
         (* The timeout got there first; [Lwt.choose] discards this. *)
-        if !published then Lwt.return None
+        if !published then begin
+          (match !late with
+          | None -> Lwt.wakeup_later set_rest None
+          | Some copy ->
+              Format.eprintf "%s: %d/%d tiles in %.0f ms, past the timeout@."
+                (describe layer) !arrived total
+                (Brr.(Performance.now_ms G.performance) -. t0);
+              Lwt.wakeup_later set_rest
+                (Some
+                   {
+                     layer;
+                     samples = Brr.Tarray.to_bigarray1 copy;
+                     frame;
+                     missing = total - !arrived;
+                     rest = Lwt.return None;
+                   }));
+          Lwt.return None
+        end
         else begin
+          Lwt.wakeup_later set_rest None;
           if !arrived = 0 then
             Brr.Console.error
               [
