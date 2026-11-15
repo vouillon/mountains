@@ -2313,7 +2313,7 @@ let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
    eye stands in it, the trees being stored from the eye); [tree_cover_find]
    where it reads the tree cover ([apply_tree_cover]); [trees_search] the
    block and generation of a search the GPU has not finished, with the fence
-   that tells when it has; [trees_found] the block, generation and per-group
+   that tells when it has, once [collect_trees] has made it; [trees_found] the block, generation and per-group
    counts of the instance buffer's contents, and [trees_stale] whether they
    are to be searched for again all the same, staying drawn meanwhile;
    [trees_ready] what to run when a search's trees are in (set by each
@@ -2396,7 +2396,7 @@ let trees_inputs : trees_inputs option ref = ref None
 let tree_cover_find : ((float * float * float * float) option * float) ref =
   ref (None, 1400.)
 
-let trees_search : (string * int * Gl.sync) option ref = ref None
+let trees_search : (string * int * Gl.sync option) option ref = ref None
 let trees_found : (string * int * int array) option ref = ref None
 let trees_stale = ref false
 let trees_ready : (unit -> unit) ref = ref (fun () -> ())
@@ -2574,8 +2574,8 @@ let point_trees ctx t vao ~first =
 
 (* Start the search, if the canopy on screen is the block of the last publish
    and it has neither run for it nor is running. Its results are not read back
-   here, which would stall until the GPU is done: a fence tells
-   [collect_trees] when they are there. *)
+   here, which would stall until the GPU is done: [collect_trees] does, once
+   it is. *)
 let find_trees ctx =
   match (!trees_inputs, canopy_state.(0), !canopy_atlas) with
   | Some inp, Some (b, g), Some (g', canopy)
@@ -2619,10 +2619,8 @@ let find_trees ctx =
       Gl.bind_transform_feedback ctx Gl.transform_feedback None;
       Gl.bind_buffer ctx Gl.transform_feedback_buffer None;
       Gl.bind_vertex_array ctx None;
-      let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
-      Gl.flush ctx;
       trees_stale := false;
-      trees_search := Some (b, g, sync)
+      trees_search := Some (b, g, None)
   | _ -> ()
 
 (* The search's output, read back whole: kept from one search to the next. *)
@@ -2630,10 +2628,21 @@ let tree_readback =
   lazy Bigarray.(Array1.create float32 c_layout (tree_grid * tree_grid * 8))
 
 (* Between frames: once the GPU is done with a search, read its trees back
-   into the instance buffer and have their shadows drawn ([trees_ready]). *)
+   into the instance buffer and have their shadows drawn ([trees_ready]).
+
+   Reading back waits for the GPU to be done with everything asked of it so
+   far, not with the search alone (Chrome keeps no copy to read from, whatever
+   it says of one). The search runs in the middle of a shadow pass: fenced
+   there, it was read back while the rest of the pass was still being drawn
+   -- a frame frozen for as long, 50 ms on a phone. So the fence is made
+   here, after the frame that asked for the search. *)
 let collect_trees ctx =
   match (!trees_search, !trees_gl) with
-  | Some (b, g, sync), Some t when g = !context_generation && t.gen = g ->
+  | Some (b, g, None), Some t when g = !context_generation && t.gen = g ->
+      let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
+      Gl.flush ctx;
+      trees_search := Some (b, g, Some sync)
+  | Some (b, g, Some sync), Some t when g = !context_generation && t.gen = g ->
       if Jv.to_int (Gl.get_sync_parameter ctx sync Gl.sync_status) = Gl.signaled
       then begin
         trees_search := None;
