@@ -875,7 +875,9 @@ let () =
               Gl.bind_texture Gl.texture_2d current_tex;
               Gl.uniform1i w_u_palette 0;
               Gl.uniform2f w_u_range range_x range_y;
-              Gl.uniform1f w_u_scale water_scale_x;
+              (* [water_scale_x] is quanta per degree; the shader wants
+                 quanta per tile range *)
+              Gl.uniform1f w_u_scale (range_x *. water_scale_x);
               Gl.uniform2f w_u_min t_min_x t_min_y;
               Gl.uniform2f w_u_view_scale sx sy;
               Gl.uniform2f w_u_view_offset !cx !cy;
