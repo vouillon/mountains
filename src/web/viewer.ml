@@ -2305,8 +2305,10 @@ let canopy_ready : (unit -> unit) ref = ref (fun () -> ())
    where it reads the tree cover ([apply_tree_cover]); [trees_search] the
    block and generation of a search the GPU has not finished, with the fence
    that tells when it has; [trees_found] the block, generation and per-group
-   counts of the instance buffer's contents; [trees_ready] what to run when a
-   search's trees are in (set by each publish: their shadows). *)
+   counts of the instance buffer's contents, and [trees_stale] whether they
+   are to be searched for again all the same, staying drawn meanwhile;
+   [trees_ready] what to run when a search's trees are in (set by each
+   publish: their shadows). *)
 let tree_grid = 480
 let tree_radius = 960.
 let tree_far = 450.
@@ -2387,13 +2389,45 @@ let tree_cover_find : ((float * float * float * float) option * float) ref =
 
 let trees_search : (string * int * Gl.sync) option ref = ref None
 let trees_found : (string * int * int array) option ref = ref None
+let trees_stale = ref false
 let trees_ready : (unit -> unit) ref = ref (fun () -> ())
 
 (* What the search read has changed: the trees found, and any on their way,
    are for something else. *)
 let forget_trees () =
   trees_found := None;
+  trees_stale := false;
   trees_search := None
+
+(* What the search read has changed, but not where the trees stand (their
+   species, with the tree cover): the trees found stay drawn until those of
+   a new search are in. *)
+let refresh_trees () =
+  trees_stale := true;
+  trees_search := None
+
+(* Whether there are trees to draw over the near canopy on screen. Until
+   there are (the search takes a few frames), the mesh is raised by the
+   canopy there as it is elsewhere: [apply_trees_stand]. *)
+let trees_stand () =
+  Lazy.force trees_enabled
+  &&
+  match (canopy_ring.(0), canopy_state.(0), !canopy_atlas, !trees_found) with
+  | Some (b, _), Some (b', g), Some (g', _), Some (b'', g'', _) ->
+      b = b' && b = b'' && g = !context_generation && g' = g && g'' = g
+  | _ -> false
+
+(* Tell [pids] -- the terrain, shadow and path programs -- whether trees
+   stand over the near canopy. *)
+let apply_trees_stand ctx pids =
+  let stand = if trees_stand () then 1 else 0 in
+  List.iter
+    (fun pid ->
+      Gl.use_program ctx pid;
+      Gl.uniform1i ctx
+        (Gl.get_uniform_location ctx pid (Jstr.v "u_treesStand"))
+        stand)
+    pids
 
 let get_trees_gl ctx =
   match !trees_gl with
@@ -2540,7 +2574,7 @@ let find_trees ctx =
          && g' = g
          && (not
                (match !trees_found with
-               | Some (b', g', _) -> b' = b && g' = g
+               | Some (b', g', _) -> b' = b && g' = g && not !trees_stale
                | None -> false))
          && not
               (match !trees_search with
@@ -2578,6 +2612,7 @@ let find_trees ctx =
       Gl.bind_vertex_array ctx None;
       let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
       Gl.flush ctx;
+      trees_stale := false;
       trees_search := Some (b, g, sync)
   | _ -> ()
 
@@ -4026,7 +4061,6 @@ let apply_canopy ctx pids ~placeholder =
   Gl.bind_texture ctx Gl.texture_2d
     (Some (Option.value atlas ~default:placeholder));
   Gl.active_texture ctx Gl.texture0;
-  let stand = Lazy.force trees_enabled && near >= 0 in
   (* The 20 m canopy's map from the base grid's normalised coordinate [c] (see
      radial_common.vert: arcseconds from the anchor are [w (c - 1/2) - 1/2])
      to its own, through its frame restated from the location's anchor. *)
@@ -4070,7 +4104,6 @@ let apply_canopy ctx pids ~placeholder =
       Gl.uniform1i ctx (u "u_canopy") 15;
       Gl.uniform1i ctx (u "u_canopySlot") near;
       Gl.uniform1i ctx (u "u_canopyFarSlot") far;
-      Gl.uniform1i ctx (u "u_treesStand") (if stand then 1 else 0);
       Gl.uniform2f ctx (u "u_canopyStep") canopy_steps.(0) canopy_steps.(1);
       Gl.uniform1i ctx (u "u_canopyMidOn") (if mid = None then 0 else 1);
       Option.iter
@@ -4078,7 +4111,8 @@ let apply_canopy ctx pids ~placeholder =
           Render_state.upload_hd_mat ctx (u "u_canopyMidMat")
             (u "u_canopyMidBias") (u "u_canopyMidQx") (u "u_canopyMidQy") m)
         mid)
-    pids
+    pids;
+  apply_trees_stand ctx pids
 
 (* Start fetching the canopies for the rings a load at [lat]/[lon] will have,
    unless they are held or on their way already. *)
@@ -4305,7 +4339,7 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
             Some (b, g, (c.west, c.south, c.east, c.north));
           tree_cover_raw.(level) <- None;
           if level = 0 then begin
-            forget_trees ();
+            refresh_trees ();
             fine := true
           end;
           uploaded := true;
@@ -4836,9 +4870,14 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            ~palette_texture ~hd_slot_textures
        in
        tree_cover_frame := Some (anchor_lat, anchor_lon, w);
+       (* Trees found: the mesh stands down under them, and they cast. *)
        (let generation = !context_generation in
         trees_ready :=
-          fun () -> if !context_generation = generation then on_late ());
+          fun () ->
+            if !context_generation = generation then begin
+              apply_trees_stand ctx [ terrain_pid; shadow_pid; path_pid ];
+              on_late ()
+            end);
        update_canopy ctx
          [ terrain_pid; shadow_pid; path_pid ]
          ~placeholder:hd_placeholder ~on_late
@@ -4861,6 +4900,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              ~shadow_cascade:(cascades.(0), cascades.(1))
              ~tree_shadow_matrix
        | _ -> trees_inputs := None);
+      (* The trees of a previous publish may just have been forgotten. *)
+      apply_trees_stand ctx [ terrain_pid; shadow_pid; path_pid ];
       Gl.use_program ctx path_pid;
       Render_state.upload_path_session ctx path_uniforms ~w ~lat:alat ~eye_x
         ~eye_y;
