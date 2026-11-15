@@ -635,10 +635,11 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   float targetRoughness = dot(detailWeights, roughnessWeights);
   float material_roughness = mix(roughness, targetRoughness, 0.8);
 
-  // Water/Ice gloss fix
-  if (detailWeights.a > 0.1) {
-    material_roughness = min(material_roughness, 0.3);
-  }
+  // Water/Ice gloss fix, eased in with the ice: a threshold on the
+  // height-blended weight switched the bump's strength in patches.
+  material_roughness =
+      mix(material_roughness, min(material_roughness, 0.3),
+          smoothstep(0.05, 0.2, detailWeights.a));
 
   float bumpStrength = 4.0 * material_roughness;
 
@@ -1371,8 +1372,14 @@ void main() {
   // its separation between materials and came out very nearly pure blue. Land
   // now takes the sky through the ambient term, and reflects on top of it only
   // what the sheen below adds.
-  float mirror = (iceAmount > 0.1 || waterMask > 0.1) ? 0.4 : 0.0;
-  bool is_mirror = mirror > 0.0;
+  // Ice mirrors a fixed share; water takes its own from the Fresnel term
+  // below, starting from none. Both ease in: as thresholds, ice drew a line
+  // where steepness thins it out, and water was given the ice's share over its
+  // shore band -- a fifth of the sky at half a mask, where open water seen
+  // from above returns a few percent -- which rimmed every lake in pale blue.
+  float iceMirror = smoothstep(0.05, 0.2, iceAmount);
+  float waterGloss = smoothstep(0.0, 0.1, waterMask);
+  float mirror = 0.4 * 0.3 * iceMirror;
 
   // === Specular & Environment Reflection ===
   // Highp, and guarded: looking straight at the sun past a ridge the two
@@ -1477,7 +1484,8 @@ void main() {
 
   // Specular and reflection are incident light: they are added after the
   // diffuse lighting multiply at the end, not folded into the albedo.
-  float specBoost = (waterMask > 0.01 || iceAmount > 0.5) ? 2.5 : 1.0;
+  float specBoost =
+      mix(1.0, 2.5, max(waterGloss, smoothstep(0.4, 0.6, iceAmount)));
   vec3 specColor = vec3(1.0, 0.98, 0.95) * specular *
                    (1.0 - material_roughness) * shadow_val * specBoost;
 
@@ -1489,9 +1497,6 @@ void main() {
     // Removed explicit fog mixing here; let distance fog handle it
     // envColor = mix(envColor, fog_color, waterMask);
   }
-
-  // Reflection strength (remove damping for water); applied at the end
-  float reflectDamp = (waterMask > 0.01) ? 1.0 : 0.3;
 
   // === Lighting ===
 
@@ -1564,16 +1569,17 @@ void main() {
   // reflection by the diffuse term, turning grazing lakes muddy, and applied
   // the (already shadowed) specular through the shadowed direct term twice.
   vec3 lit = lighting * terrain_color;
-  lit = mix(lit, envColor * occlusion, mirror * reflectDamp);
+  lit = mix(lit, envColor * occlusion, mirror);
   // What land returns of the sky: a few percent face-on, rising towards
   // grazing, and added on top of the material rather than in place of it.
   // Scaled by AMBIENT_LIGHT because it is the same sky the ambient term carries
   // and has to stay in proportion to it, and by smoothness because a rough
   // surface scatters it too wide to show.
-  if (!is_mirror) {
+  float landShare = (1.0 - iceMirror) * (1.0 - waterGloss);
+  if (landShare > 0.0) {
     float sheen = 0.04 + 0.6 * pow(1.0 - NdotV, 5.0);
     lit += envColor * occlusion * AMBIENT_LIGHT * sheen *
-           (1.0 - material_roughness);
+           (1.0 - material_roughness) * landShare;
   }
   lit += specColor * 0.4;
 
