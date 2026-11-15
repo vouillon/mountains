@@ -338,6 +338,42 @@ let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
 (* Tile size: 3600 / 3 = 1200 *)
 let sub_tile_size = 1200
 
+(* Coarse tiles for the far field: the same nine sub-tiles per degree cell, at
+   4 arcseconds (300 x 300), in the same format. Each sample is the soft
+   maximum of a 4 x 4 block of the source -- two levels of the client's pyramid
+   downsampling (downsample.frag, [Viewer.downsample_k], which this must
+   match) -- so that a coarse sample is what the client's own pyramid holds two
+   levels up, and a distant summit keeps its height instead of being averaged
+   into its flanks.
+
+   Rows run north to south, as in the source. Sample (row, col) stands for the
+   block whose centre is 4 col + 1.5 arcseconds east of the sub-tile's western
+   sample column and 4 row + 1.5 arcseconds south of its northern sample
+   row. *)
+let coarse_sub_tile_size = sub_tile_size / 4
+let downsample_k = 0.25
+
+let soft_max h00 h10 h01 h11 =
+  let m = Float.max (Float.max h00 h10) (Float.max h01 h11) in
+  let w h = exp (downsample_k *. (h -. m)) in
+  m +. (log ((w h00 +. w h10 +. w h01 +. w h11) /. 4.) /. downsample_k)
+
+let halve heights =
+  let h = Bigarray.Array2.dim1 heights / 2
+  and w = Bigarray.Array2.dim2 heights / 2 in
+  let r = Bigarray.(Array2.create Float32 C_layout) h w in
+  for row = 0 to h - 1 do
+    for col = 0 to w - 1 do
+      r.{row, col} <-
+        soft_max
+          heights.{2 * row, 2 * col}
+          heights.{2 * row, (2 * col) + 1}
+          heights.{(2 * row) + 1, 2 * col}
+          heights.{(2 * row) + 1, (2 * col) + 1}
+    done
+  done;
+  r
+
 (* Parse lat/lon from Copernicus DEM filename like:
    Copernicus_DSM_COG_10_N45_00_E006_00_DEM.tif -> (45, 6) *)
 let parse_lat_lon filename =
@@ -382,8 +418,17 @@ let fetch_from_aws lat lon dest =
       Failed))
 
 let () =
-  if Array.length Sys.argv < 3 then begin
-    Printf.eprintf "Usage: %s <input.tif | lat lon> <output_dir>\n" Sys.argv.(0);
+  let coarse = Array.length Sys.argv > 1 && Sys.argv.(1) = "--coarse" in
+  let argv =
+    if coarse then
+      Array.append
+        [| Sys.argv.(0) |]
+        (Array.sub Sys.argv 2 (Array.length Sys.argv - 2))
+    else Sys.argv
+  in
+  if Array.length argv < 3 then begin
+    Printf.eprintf "Usage: %s [--coarse] <input.tif | lat lon> <output_dir>\n"
+      argv.(0);
     Printf.eprintf "  Examples:\n";
     Printf.eprintf "    %s input.tif data/dem\n" Sys.argv.(0);
     Printf.eprintf "    %s 45 6 data/dem\n" Sys.argv.(0);
@@ -393,14 +438,17 @@ let () =
       "  Lat/lon are parsed from input filename (Copernicus format) or \
        provided directly.\n";
     Printf.eprintf "  Row 0 = bottom (south), Col 0 = left (west)\n";
+    Printf.eprintf
+      "  --coarse: the same tiles at 4 arcseconds, in output_dir/dem4;\n\
+      \  nothing is written for a cell with no data (open sea).\n";
     exit 1
   end;
 
   let input_path, output_dir, lat, lon =
-    if Array.length Sys.argv = 4 then
-      let lat = int_of_string Sys.argv.(1) in
-      let lon = int_of_string Sys.argv.(2) in
-      let output_dir = Sys.argv.(3) in
+    if Array.length argv = 4 then
+      let lat = int_of_string argv.(1) in
+      let lon = int_of_string argv.(2) in
+      let output_dir = argv.(3) in
       let lat_c = if lat >= 0 then 'N' else 'S' in
       let lon_c = if lon >= 0 then 'E' else 'W' in
       let path =
@@ -409,8 +457,8 @@ let () =
       in
       (path, output_dir, lat, lon)
     else
-      let path = Sys.argv.(1) in
-      let out = Sys.argv.(2) in
+      let path = argv.(1) in
+      let out = argv.(2) in
       match parse_lat_lon path with
       | Some (lat, lon) -> (path, out, lat, lon)
       | None ->
@@ -432,6 +480,9 @@ let () =
       | Fetched ->
           is_temp := true;
           read_dem input_path
+      | NotFound when coarse ->
+          Printf.eprintf "No data for this cell: nothing written.\n%!";
+          exit 0
       | NotFound ->
           let w, h = (3600, 3600) in
           let heights = Bigarray.(Array2.create Float32 C_layout) h w in
@@ -450,7 +501,13 @@ let () =
 
   (* Ensure the output dir and its dem/ subdir exist *)
   if not (Sys.file_exists output_dir) then Unix.mkdir output_dir 0o775;
-  let dem_dir = Filename.concat output_dir "dem" in
+  (* The grid to cut up, the side of a sub-tile in its samples, and where they
+     go. *)
+  let heights, sub_tile_size, subdir =
+    if coarse then (halve (halve heights), coarse_sub_tile_size, "dem4")
+    else (heights, sub_tile_size, "dem")
+  in
+  let dem_dir = Filename.concat output_dir subdir in
   if not (Sys.file_exists dem_dir) then Unix.mkdir dem_dir 0o775;
 
   Printf.eprintf "Splitting into 9 tiles of %dx%d...\n%!" sub_tile_size
@@ -462,8 +519,8 @@ let () =
       let lat_c = if lat >= 0 then 'N' else 'S' in
       let lon_c = if lon >= 0 then 'E' else 'W' in
       let output_path =
-        Printf.sprintf "%s/dem/%c%02d_%c%03d_%d_%d.dem" output_dir lat_c
-          (abs lat) lon_c (abs lon) tile_row tile_col
+        Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" dem_dir lat_c (abs lat)
+          lon_c (abs lon) tile_row tile_col
       in
       process_tile heights ~src_row ~src_col ~tile_width:sub_tile_size
         ~tile_height:sub_tile_size output_path
