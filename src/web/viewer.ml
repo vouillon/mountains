@@ -1114,8 +1114,9 @@ let make_gpu_state ctx =
 
 (* Rendering Passes *)
 
-let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
-    ao_blur_pid (bake_u : Render_state.ao_bake_uniforms)
+let compute_ao ?radius_width ctx width height scale relief_texture
+    nearest_sampler ao_bake_pid ao_blur_pid
+    (bake_u : Render_state.ao_bake_uniforms)
     (blur_u : Render_state.ao_blur_uniforms) =
   (* Helper to create FBO and R8 Texture. [mipmap] allocates the full mip chain
      and enables trilinear + anisotropic filtering; only the texture sampled
@@ -1153,8 +1154,12 @@ let compute_ao ctx width height scale relief_texture nearest_sampler ao_bake_pid
   Gl.use_program ctx ao_bake_pid;
 
   Gl.uniform1i ctx bake_u.relief 0;
-  (* Keep generating noise/radius based on FULL width for consistent world scale *)
-  Gl.uniform1i ctx bake_u.width width;
+  (* Keep generating noise/radius based on FULL width for consistent world scale.
+     The radius is 50 texels of a grid [radius_width] wide, and [scale] that
+     grid's metres per texel: the far field passes the base grid's for both,
+     so that its occlusion is gathered over the same ground, a quarter as many
+     of its own texels. *)
+  Gl.uniform1i ctx bake_u.width (Option.value ~default:width radius_width);
   let scale_x, scale_y = scale in
   Gl.uniform2f ctx bake_u.scale scale_x scale_y;
 
@@ -2244,8 +2249,9 @@ type base = {
       (** the far field's grid, if its tiles came *)
   relief_texture : Gl.texture;
   relief_normal_texture : Gl.texture;
-  far : (Gl.texture * Gl.texture) option;
-      (** the far field's heights and normals, if its tiles came *)
+  far : (Gl.texture * Gl.texture * Gl.texture) option;
+      (** the far field's heights, normals and ambient occlusion, if its tiles
+          came *)
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
 }
@@ -2286,9 +2292,10 @@ let delete_base ctx
   Gl.delete_texture ctx relief_texture;
   Gl.delete_texture ctx relief_normal_texture;
   Option.iter
-    (fun (heights, normals) ->
+    (fun (heights, normals, ao) ->
       Gl.delete_texture ctx heights;
-      Gl.delete_texture ctx normals)
+      Gl.delete_texture ctx normals;
+      Gl.delete_texture ctx ao)
     far;
   Gl.delete_texture ctx ao_texture;
   Gl.delete_texture ctx cover_map_texture
@@ -4582,19 +4589,24 @@ let far_sight ~near ~far ~grid ~eye_h ~step ~reach ~stale pois =
   in
   go 0 (now_ms ())
 
-(* Bind the far field's pyramids on units 16 and 17 -- the first sixteen are
+(* Bind the far field's pyramids and its ambient occlusion on units 16 to 18
+   -- the first sixteen are
    spoken for (Render_state.upload_texture_units), and nothing else touches
    these, so they stay bound from here on -- and tell [pids], the terrain,
    shadow and path programs, where it lies about the anchor of the base grid
    of [w] samples ([far_origin]). *)
 let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
-  let heights, normals =
-    match far with Some f -> f | None -> (placeholder, placeholder)
+  let heights, normals, ao =
+    match far with
+    | Some f -> f
+    | None -> (placeholder, placeholder, placeholder)
   in
   Gl.active_texture ctx Gl.texture16;
   Gl.bind_texture ctx Gl.texture_2d (Some heights);
   Gl.active_texture ctx Gl.texture17;
   Gl.bind_texture ctx Gl.texture_2d (Some normals);
+  Gl.active_texture ctx Gl.texture18;
+  Gl.bind_texture ctx Gl.texture_2d (Some ao);
   Gl.active_texture ctx Gl.texture0;
   let size = w / 2 in
   let origin_x, origin_y = far_origin ~w ~anchor_lat ~anchor_lon in
@@ -4605,6 +4617,7 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
       Gl.uniform1i ctx (u "far_valid") (if far = None then 0 else 1);
       Gl.uniform1i ctx (u "far_relief") 16;
       Gl.uniform1i ctx (u "far_relief_normal") 17;
+      Gl.uniform1i ctx (u "far_ao") 18;
       Gl.uniform3f ctx (u "far_map") origin_x origin_y
         (1. /. float (far_step * size));
       Gl.uniform1i ctx (u "far_max_lod") (Web_utils.log2 size))
@@ -4869,7 +4882,14 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                         downsample_uniforms)
                 in
                 Gl.delete_texture ctx tile_texture;
-                pyramids)
+                let heights, normals = pyramids in
+                let ao =
+                  time_gpu ctx "compute_ao_far" (fun () ->
+                      compute_ao ~radius_width:w ctx (w / 2) (h / 2)
+                        (deltax, deltay) heights nearest_sampler ao_bake_pid
+                        ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+                in
+                (heights, normals, ao))
               far_tile
           in
           (* The POIs of the base grid, and those beyond it as far as the far

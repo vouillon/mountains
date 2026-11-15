@@ -15,6 +15,7 @@ uniform highp sampler2D hd_relief_normal[HD_SLOTS];
 // (see radial_common.vert, which shares [far_valid]).
 uniform bool far_valid;
 uniform highp sampler2D far_relief_normal;
+uniform mediump sampler2D far_ao; // and its ambient occlusion
 // Each ring's sample pitch in metres (the coarser axis). The bump weighs
 // itself against it per pixel in [perturbNormal]: footprints far below the
 // pitch show scales no grid sample can express, footprints at the pitch and
@@ -1592,8 +1593,13 @@ void main() {
   // Baked AO measures sky visibility: it attenuates the ambient term and the
   // sky reflection, not the direct sun, which the shadow map already handles
   // (multiplying the whole color darkened sunlit couloirs twice).
-  // Baked over the base grid only: the far field is taken as open to the sky.
-  float occlusion = mix(1.0, texture(ao, reliefCoord).r, fb);
+  // The far field has its own bake beyond the base grid, faded into like the
+  // normals; without it the ground there is taken as open to the sky.
+  float occlusion = 1.0;
+  if (fb < 1.0 && far_valid)
+    occlusion = texture(far_ao, farReliefCoord).r;
+  if (fb > 0.0)
+    occlusion = mix(occlusion, texture(ao, reliefCoord).r, fb);
   vec3 lighting = (ambient * occlusion) + direct;
 
   // Diffuse lighting scales the albedo; reflected light is added on top.
