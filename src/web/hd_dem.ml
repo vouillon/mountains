@@ -254,12 +254,15 @@ let served_metres crs metres =
     Float.pow 2. (Float.floor (Float.log2 metres +. 1e-9))
   else metres
 
-(* Ceiling on the whole set of tile requests. The location cannot be published
-   before this resolves, so it is also the worst-case load-time penalty;
-   expiring is not an error, the block is published with whatever has arrived by
-   then -- the tiles still in flight are nodata, which the blend fades back into
-   the base like any other gap. Only a block without a single tile falls back to
-   the base alone. *)
+(* How long a block waits for its next tile once it holds one. Expiring is not
+   an error: the block is published with whatever has arrived by then -- the
+   tiles still in flight are nodata, which the blend fades back into the base
+   like any other gap. A block without a single tile has nothing to publish
+   and goes on waiting, the location being on screen without it meanwhile: the
+   service answers a cold request after 15 to 30 s, all its tiles at once, and
+   giving up on it left the ring out -- and the trees with the 1 m one --
+   until the block changed. It falls back to the base alone once every request
+   has failed. *)
 let timeout_s = 25.
 
 (* The base grid's u16 quantisation, shared with the .dem pipeline
@@ -508,6 +511,16 @@ let fetch_one req =
                     (Brr.Tarray.Buffer.byte_length buf)))
           else Lwt.return (Brr.Tarray.of_buffer Brr.Tarray.Float32 buf))
 
+(* A layer, for the console. *)
+let describe layer =
+  match layer.kind with
+  | Wmts { matrix_level; _ } -> Printf.sprintf "RGE ALTI level %d" matrix_level
+  | Wms_projected { stem; metres; _ } ->
+      Printf.sprintf "LIDAR HD %s at %g m"
+        (if String.starts_with ~prefix:"IGNF_LIDAR-HD_MNH" stem then "canopy"
+         else "ground")
+        metres
+
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
 let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
@@ -533,6 +546,7 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
      and the next visit to this location gets it for free. *)
       let published = ref false in
       let t0 = Brr.(Performance.now_ms G.performance) in
+      let last = ref t0 in
       (* Every request is issued at once: the browser multiplexes them over one
      HTTP/2 connection. *)
       let tasks =
@@ -550,6 +564,7 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
                       (Brr.Tarray.sub tile ~start:(i * req.px)
                          ~stop:((i + 1) * req.px))
                   done;
+                  (last := Brr.(Performance.now_ms G.performance));
                   incr arrived
                 end;
                 Lwt.return ())
@@ -586,30 +601,44 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
         else begin
           if !arrived = 0 then
             Brr.Console.error
-              [ Jstr.v "High-resolution elevation: no tile could be fetched" ]
+              [
+                Jstr.v
+                  (Printf.sprintf "%s: no tile could be fetched"
+                     (describe layer));
+              ]
           else
-            Format.eprintf "RGE ALTI: %d/%d tiles in %.0f ms@." !arrived total
+            Format.eprintf "%s: %d/%d tiles in %.0f ms@." (describe layer)
+              !arrived total
               (Brr.(Performance.now_ms G.performance) -. t0);
           Lwt.return (publish ())
         end
       in
       let timeout =
         let t, w = Lwt.task () in
-        ignore
-          (Brr.G.set_timeout
-             ~ms:(truncate (timeout_s *. 1000.))
-             (fun () ->
-               if not !published then begin
-                 if !arrived = 0 then
-                   Brr.Console.error
-                     [ Jstr.v "High-resolution elevation: request timed out" ]
-                 else
-                   Format.eprintf
-                     "RGE ALTI: timed out with %d/%d tiles after %.0f ms@."
-                     !arrived total
-                     (Brr.(Performance.now_ms G.performance) -. t0);
-                 Lwt.wakeup_later w (publish ())
-               end));
+        let ceiling = timeout_s *. 1000. in
+        let rec arm ms =
+          ignore
+            (Brr.G.set_timeout ~ms:(truncate ms) (fun () ->
+                 if not !published then begin
+                   let now = Brr.(Performance.now_ms G.performance) in
+                   let idle = now -. !last in
+                   if !arrived = 0 then begin
+                     if now -. t0 < 1.5 *. ceiling then
+                       Format.eprintf
+                         "%s: no tile after %.0f s, still waiting@."
+                         (describe layer) timeout_s;
+                     arm ceiling
+                   end
+                   else if idle < ceiling -. 1. then arm (ceiling -. idle)
+                   else begin
+                     Format.eprintf
+                       "%s: timed out with %d/%d tiles after %.0f ms@."
+                       (describe layer) !arrived total (now -. t0);
+                     Lwt.wakeup_later w (publish ())
+                   end
+                 end))
+        in
+        arm ceiling;
         t
       in
       Lwt.choose [ all; timeout ]
