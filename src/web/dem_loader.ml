@@ -57,9 +57,17 @@ let load ~lat ~lon ~size =
      -500 m that zero bytes decode to. 3449 = round (500 * 65535 / 9500). *)
   let sea = 3449 in
   let sea_low = sea land 0xff and sea_high = sea lsr 8 in
-  for i = 0 to (Array1.dim full_ba / 2) - 1 do
-    Array1.unsafe_set full_ba (2 * i) sea_low;
-    Array1.unsafe_set full_ba ((2 * i) + 1) sea_high
+  (* By doubling blits, which are memcpys: an element at a time, the 32 MB
+     took 360 ms under wasm_of_ocaml, a frozen frame at the start of each
+     load. *)
+  let n = Array1.dim full_ba in
+  Array1.unsafe_set full_ba 0 sea_low;
+  Array1.unsafe_set full_ba 1 sea_high;
+  let filled = ref 2 in
+  while !filled < n do
+    let len = min !filled (n - !filled) in
+    Array1.blit (Array1.sub full_ba 0 len) (Array1.sub full_ba !filled len);
+    filled := !filled + len
   done;
 
   (* Convert center to arcseconds and compute bounds *)
