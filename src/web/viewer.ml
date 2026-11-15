@@ -2888,6 +2888,28 @@ let draw_trees ctx ~proj_ta ~transform_ta =
   ignore (draw_found_trees ctx ~shadow_pass:false proj_ta transform_ta);
   Gl.enable ctx Gl.cull_face'
 
+(* The two ranges of depth the ground is drawn in (see [draw]): the rings from
+   [far_depth_radius] metres out -- no nearer than a GPX trace reaches
+   ([build_gpx_path]) -- with the near plane at [far_depth_near], into the
+   depths from [far_depth_split] on. Anything of those rings in view is at
+   least the radius times the cosine of the widest angle off the view's axis
+   from the eye: an eighth of it allows 82 degrees. *)
+let far_depth_radius = 20000.
+let far_depth_near = far_depth_radius /. 8.
+let far_depth_split = 0.9
+
+(* [Gl.depth_range] is the name of an enumerant too, which hides the call. The
+   ranges are few and fixed: no allocation in [draw]. *)
+let set_depth_range =
+  let range a b = [| Jv.of_float a; Jv.of_float b |] in
+  let near = range 0. far_depth_split
+  and far = range far_depth_split 1.
+  and whole = range 0. 1. in
+  fun ctx which ->
+    ignore
+      (Jv.call (Jv.repr ctx) "depthRange"
+         (match which with `Near -> near | `Far -> far | `Whole -> whole))
+
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     ~(terrain_uniforms : Render_state.terrain_uniforms)
     ~(triangle_uniforms : Render_state.triangle_uniforms)
@@ -3086,39 +3108,78 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
      [g_lo, g_hi] (their wedge-local index is g + b_off), clipped to the
      needed range: the central wedge in one call with full rings, the extra
      rotations per block with rings capped. *)
-  let draw_wedge_seg rot g_lo g_hi b_off =
+  (* Of each block, the strips [first, last): a strip joins a ring to the next
+     one out, and a block's strips follow each other from the eye outwards. *)
+  let draw_wedge_seg ~first ~last rot g_lo g_hi b_off =
     let lo = max gmin g_lo and hi = min gmax g_hi in
-    if lo <= hi then begin
+    let last = if rot = 0 then last else min last extra_ring_cap in
+    if lo <= hi && first < last then begin
       Gl.uniform1f ctx terrain_uniforms.snapped_alpha
         (snapped_alpha +. (float rot *. (pi /. 2.)));
       let b_lo = lo + b_off and b_hi = hi + b_off in
-      if rot = 0 then
+      for b = b_lo to b_hi do
         Gl.draw_elements ctx Gl.triangle_strip
-          ((b_hi - b_lo + 1) * indices_per_block)
+          ((last - first) * strip_indices)
           Gl.unsigned_int
-          (b_lo * indices_per_block * 4)
-      else
-        for b = b_lo to b_hi do
-          Gl.draw_elements ctx Gl.triangle_strip
-            (extra_ring_cap * strip_indices)
-            Gl.unsigned_int
-            (b * indices_per_block * 4)
-        done
+          (((b * indices_per_block) + (first * strip_indices)) * 4)
+      done
     end
+  in
+  let draw_rings ~first ~last =
+    draw_wedge_seg ~first ~last 0 (-8) 7 8;
+    draw_wedge_seg ~first ~last 1 8 23 (-8);
+    draw_wedge_seg ~first ~last 3 (-24) (-9) 24;
+    draw_wedge_seg ~first ~last 2 24 31 (-24);
+    draw_wedge_seg ~first ~last 2 (-32) (-25) 40
+  in
+  (* The ground is drawn in two ranges of depth, split at the first ring
+     [far_depth_radius] out. With the near plane a metre from the eye, a step
+     of the depth buffer is some 500 m at 90 km and over a kilometre at 140,
+     and the depths of two ridges closer than that come out in either order:
+     glaciers flickered through the rock in front of them. The rings beyond
+     the split are drawn with the plane [far_depth_near] out, which nothing of
+     them in view comes nearer than, and so to centimetres; they take the last
+     tenth of the buffer, behind everything else, which is where they are --
+     along any one direction the ground only gets further. The trees and the
+     GPX trace stand within the split and keep the first range with the
+     rings there. *)
+  let split_ring =
+    min (n_rings - 1)
+      (int_of_float
+         (ceil
+            (log
+               ((far_depth_radius /. radial_params.Render_state.grid_scale)
+               +. 1.)
+            /. grid_k)))
   in
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
   Matrix.blit transform transform_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
+  set_depth_range ctx `Near;
   draw_trees ctx ~proj_ta ~transform_ta;
   Gl.use_program ctx terrain_pid;
   Gl.bind_vertex_array ctx (Some terrain_geo);
-  draw_wedge_seg 0 (-8) 7 8;
-  draw_wedge_seg 1 8 23 (-8);
-  draw_wedge_seg 3 (-24) (-9) 24;
-  draw_wedge_seg 2 24 31 (-24);
-  draw_wedge_seg 2 (-32) (-25) 40;
+  (* The ground is drawn from the eye outwards along every direction, and what
+     hides what does so along one: where two ridges come to the same depth --
+     a step of the depth buffer is some 500 m at 90 km -- the nearer one, drawn
+     first, must keep the pixel. With [lequal] the further one took it, and a
+     glacier showed through the rock in front of it. *)
+  Gl.depth_func ctx Gl.less;
+  draw_rings ~first:0 ~last:split_ring;
+  (* The same projection but for its near plane, which is all of its
+     fifteenth entry: set there, and back for the trace. *)
+  set_depth_range ctx `Far;
+  proj.(14) <- -2. *. far_depth_near;
+  Matrix.blit proj proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  draw_rings ~first:split_ring ~last:(n_rings - 1);
+  proj.(14) <- -2.;
+  Matrix.blit proj proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  set_depth_range ctx `Near;
+  Gl.depth_func ctx Gl.lequal;
   Gl.bind_vertex_array ctx None;
 
   (* Draw 3D GPX Path *)
@@ -3137,6 +3198,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   | None -> ());
 
   (* Draw Sky (Optimized: Z=1.0, Blit, Late Draw) *)
+  set_depth_range ctx `Whole;
   Gl.depth_mask ctx false;
   (* Draw if Z <= 1.0 (Far Plane) *)
   Gl.disable ctx Gl.cull_face';
