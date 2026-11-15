@@ -1049,8 +1049,9 @@ void main() {
       ground = gs > 0.05 ? ground / gs : vec4(0.1, 0.9, 0.0, 0.0);
       // Treeless ground on a steep slope is mostly rock and scree, not
       // meadow: from ~32 to ~49 degrees, below where the steepness rule of
-      // [applySlopeModification] takes over.
-      float bare = smoothstep(0.15, 0.35, slope);
+      // [applySlopeModification] takes over. Not ice, which stays on a
+      // glacier's slopes until that rule thins it.
+      float bare = smoothstep(0.15, 0.35, slope) * (1.0 - ground.a);
       ground = mix(ground, vec4(1.0, 0.0, 0.0, 0.0), bare);
       surface.detailWeights = mix(
           w, mix(ground, vec4(0.0, 0.0, 1.0, 0.0), ct.x) * dot(w, vec4(1.0)),
