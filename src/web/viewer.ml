@@ -50,6 +50,7 @@ module Gpu_timer = struct
     let module Gl = Brr_canvas.Gl in
     match !extension with
     | None -> ()
+    | Some _ when !pending_queries = [] -> ()
     | Some ext ->
         (* Check if GPU was disjoint (results may be invalid) *)
         let disjoint =
@@ -1772,7 +1773,7 @@ let hd_normal_unit = function
   | 1 -> Gl.texture11
   | _ -> Gl.texture13
 
-let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
+let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~casters
     ~terrain_geo ~index_count ~(radial_params : Render_state.radial_params)
     ~relief_texture ~(hd_slot_textures : (Gl.texture * Gl.texture) array) ctx =
@@ -1817,7 +1818,9 @@ let draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map
   (* Render shadow map with 4 rotations to cover full 360° terrain *)
   let rotation_angles = [| 0.; pi /. 2.; pi; 3. *. pi /. 2. |] in
 
-  for layer = 0 to 2 do
+  (* A late redraw is of the first [layers] cascades only, the others
+     keeping what they hold. *)
+  for layer = 0 to layers - 1 do
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 layer;
 
@@ -4162,11 +4165,14 @@ let start_canopy ~lat ~lon =
 (* Called on every publish with the canopies' rings now on screen, if any (for
    kind 2, its block): uploads a fetched canopy for its ring's block, and shows
    whatever is current. A canopy landing after the publish raises the mesh
-   under shadows drawn without it: [on_late] redraws them. *)
+   under shadows drawn without it: [on_late] redraws the cascades it
+   reaches: the first two, which terrain.frag reads within 8 km of the eye,
+   the near and far canopies' blocks ending 2 and 5.5 km from it at most; none
+   for the 20 m canopy, which only the shading reads. *)
 let update_canopy ctx pids ~placeholder ~on_late rings =
   Array.blit rings 0 canopy_ring 0 canopy_kinds;
   let ready ~late =
-    let uploaded = ref false in
+    let uploaded = ref false and layers = ref 0 in
     for kind = 0 to canopy_kinds - 1 do
       match (canopy_ring.(kind), canopy_raw.(kind)) with
       | Some (b, _), Some (b', g, raw, anchor)
@@ -4183,12 +4189,13 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
           if kind = 2 then canopy_mid_frame := Some (frame, anchor);
           canopy_raw.(kind) <- None;
           force_redraw := true;
+          if kind < 2 then layers := 2;
           uploaded := true
       | _ -> ()
     done;
     if !uploaded then atlas_mipmaps ctx;
     apply_canopy ctx pids ~placeholder;
-    if !uploaded && late then on_late ()
+    if late && !layers > 0 then on_late !layers
   in
   (* The handles [ready] holds die with the context they were made in. *)
   let generation = !context_generation in
@@ -4321,8 +4328,8 @@ let start_tree_cover ~lat ~lon =
 (* Called on every publish with the location on screen's tree cover blocks
    ([lat]/[lon]) and frame (anchor, base grid size): uploads fetched blocks
    for it, and shows whatever is current. The finer block landing late changes
-   the trees' species: [on_late] redraws the shadows, which searches for them
-   again. *)
+   the trees' species: [on_late] redraws the first cascade, which searches for
+   them again. *)
 let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
   for level = 0 to 1 do
     tree_cover_wanted.(level) <- Some (Tree_cover.block_id ~level ~lat ~lon)
@@ -4348,7 +4355,7 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
     done;
     if !uploaded then atlas_mipmaps ctx;
     apply_tree_cover ctx ~terrain_pid;
-    if !fine && late then on_late ()
+    if !fine && late then on_late 1
   in
   let generation = !context_generation in
   (tree_cover_ready :=
@@ -4856,10 +4863,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          match (block, slot) with Some b, Some i -> Some (b, i) | _ -> None
        in
        let near_ring = ring_of Hd_dem.lidar_2m in
-       let on_late () =
+       let on_late layers =
          time_gpu ctx "draw_shadows" (fun () ->
-             draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
-               ~matrices:shadow_matrices
+             draw_shadows ~layers ~shadow_pid ~shadow_fbo ~shadow_map
+               shadow_uniforms ~matrices:shadow_matrices
                ~casters:
                  (draw_tree_shadows ctx ~shadow_map ~terrain_pid
                     ~cascade:shadow_matrices.(0) ~matrix:tree_shadow_matrix)
@@ -4876,7 +4883,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           fun () ->
             if !context_generation = generation then begin
               apply_trees_stand ctx [ terrain_pid; shadow_pid; path_pid ];
-              on_late ()
+              on_late 1
             end);
        update_canopy ctx
          [ terrain_pid; shadow_pid; path_pid ]
