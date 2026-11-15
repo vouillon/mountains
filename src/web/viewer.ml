@@ -26,7 +26,7 @@ module Gpu_timer = struct
     in
     if Jv.is_some ext then begin
       let time_elapsed_ext = Jv.to_int (Jv.get ext "TIME_ELAPSED_EXT") in
-      let gpu_disjoint = Jv.to_int (Jv.get ext "GPU_DISJOINT") in
+      let gpu_disjoint = Jv.to_int (Jv.get ext "GPU_DISJOINT_EXT") in
       extension := Some { time_elapsed_ext; gpu_disjoint };
       Brr.Console.(
         log [ Jstr.v "GPU Timer: Using EXT_disjoint_timer_query_webgl2" ])
