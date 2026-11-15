@@ -2222,12 +2222,7 @@ let delete_base ctx
 (* What one publish owns outright: the trace geometry and the labels [draw_text]
    has materialised since. The base and the rings are shared with whatever comes
    next and are retired separately. *)
-let delete_publish ctx { points; gpx_path; _ } =
-  Option.iter
-    (fun (vao, vbo, _) ->
-      Gl.delete_vertex_array ctx vao;
-      Gl.delete_buffer ctx vbo)
-    gpx_path;
+let delete_labels ctx points =
   (* The POI textures are created lazily by [draw_text], hence the option. *)
   List.iter
     (fun ({ texture; _ }, _) ->
@@ -2235,6 +2230,14 @@ let delete_publish ctx { points; gpx_path; _ } =
       | Some (tid, _) -> Gl.delete_texture ctx tid
       | None -> ())
     points
+
+let delete_publish ctx { points; gpx_path; _ } =
+  Option.iter
+    (fun (vao, vbo, _) ->
+      Gl.delete_vertex_array ctx vao;
+      Gl.delete_buffer ctx vbo)
+    gpx_path;
+  delete_labels ctx points
 
 (* The canopy height over the 1 m ring's block (Hd_dem.canopy, kind 0) and
    over the 5 m ring's (Hd_dem.canopy_far, kind 1), as the two halves of one
@@ -2665,28 +2668,35 @@ let collect_trees ctx =
         let total = firsts.(3) + counts.(3) in
         (* Each group nearest first: the eye stays put for the whole location,
            so drawn in this order the depth test rejects most of a forest's
-           hidden crowns before they are shaded. *)
-        let members = Array.map (fun c -> Array.make c 0) counts in
-        let next = Array.make 4 0 in
+           hidden crowns before they are shaded. Half a metre is order enough
+           for that: a counting sort on it, a comparison sort of this many
+           trees taking 160 ms. *)
+        let buckets = 2048 in
+        let key i =
+          (Char.code (Bytes.unsafe_get groups i) * buckets)
+          + min (buckets - 1) (int_of_float (dist.(i) *. 2.))
+        in
+        let next = Array.make ((4 * buckets) + 1) 0 in
         for i = 0 to n - 1 do
-          let k = Char.code (Bytes.unsafe_get groups i) in
-          if k < 4 then begin
-            members.(k).(next.(k)) <- i;
+          if Bytes.unsafe_get groups i <> '\255' then begin
+            let k = key i + 1 in
             next.(k) <- next.(k) + 1
           end
         done;
+        for k = 1 to 4 * buckets do
+          next.(k) <- next.(k) + next.(k - 1)
+        done;
         let out = Bigarray.(Array1.create float32 c_layout (max 1 total * 8)) in
-        Array.iteri
-          (fun k m ->
-            Array.sort (fun i j -> Float.compare dist.(i) dist.(j)) m;
+        for i = 0 to n - 1 do
+          if Bytes.unsafe_get groups i <> '\255' then begin
+            let k = key i in
             (* A blit is a memcpy: faster than eight element copies. *)
-            Array.iteri
-              (fun j i ->
-                Bigarray.Array1.blit
-                  (Bigarray.Array1.sub raw (i * 8) 8)
-                  (Bigarray.Array1.sub out ((firsts.(k) + j) * 8) 8))
-              m)
-          members;
+            Bigarray.Array1.blit
+              (Bigarray.Array1.sub raw (i * 8) 8)
+              (Bigarray.Array1.sub out (next.(k) * 8) 8);
+            next.(k) <- next.(k) + 1
+          end
+        done;
         Gl.bind_buffer ctx Gl.array_buffer (Some t.instances);
         Gl.buffer_data ctx Gl.array_buffer
           (Brr.Tarray.of_bigarray1 out)
@@ -4715,6 +4725,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        land-cover raster, and each ring's own pyramid -- are anchored, not
        observed: what is left here is the eye height, the shadow map, the sight
        lines and the POI replicas anchored on both. *)
+    (* The POIs the last sight-line pass of this load saw, and a count of its
+       publishes, each of which ends the pass before it. *)
+    let visible = ref None and sight_pass = ref 0 in
     let publish ~keep ~slots =
       (* Innermost first, which is the order the shader tests the rings in and
          the order [upload_hd_params] assigns texture slots. *)
@@ -4986,31 +4999,39 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           | None -> base row col
       in
       let fine = refinements in
-      let points =
-        let t_vis = Brr.(Performance.now_ms G.performance) in
-        let kept =
-          List.filter
-            (fun (_, (gx, gy)) ->
-              let dx = (gx -. float x) *. deltax in
-              let dy = (gy -. float y) *. deltay in
-              let dist_sq = (dx *. dx) +. (dy *. dy) in
-              if dist_sq > 4900000000. then false
-              else
-                (* The test walks whole texels; its summit exemption (10 texels)
+      let sees (_, (gx, gy)) =
+        let dx = (gx -. float x) *. deltax in
+        let dy = (gy -. float y) *. deltay in
+        let dist_sq = (dx *. dx) +. (dy *. dy) in
+        if dist_sq > 4900000000. then false
+        else
+          (* The test walks whole texels; its summit exemption (10 texels)
                  dwarfs the half-texel rounding of the destination. *)
-                let dst_x = int_of_float (Float.round gx) in
-                let dst_y = int_of_float (Float.round gy) in
-                Visibility.test_precise ray_height ~src_h:(height +. 2.)
-                  ~curvature:(deltax, deltay) ~fine ~off_x ~off_y ~src_x:x
-                  ~src_y:y ~dst_x ~dst_y ())
-            poi
-        in
-        Format.eprintf "visibility: %d/%d POIs in %.0f ms@." (List.length kept)
-          (List.length poi)
-          (Brr.(Performance.now_ms G.performance) -. t_vis);
-        kept
+          let dst_x = int_of_float (Float.round gx) in
+          let dst_y = int_of_float (Float.round gy) in
+          Visibility.test_precise ray_height ~src_h:(height +. 2.)
+            ~curvature:(deltax, deltay) ~fine ~off_x ~off_y ~src_x:x ~src_y:y
+            ~dst_x ~dst_y ()
       in
-      let points =
+      (* The first publish of a load tests the sight lines at once. A
+         refinement keeps the POIs seen so far and tests them again a few
+         milliseconds per frame ([resee] below): over the finer rings the
+         whole pass takes 50 to 130 ms, a frozen frame at each ring, to move
+         a label or two. *)
+      let provisional = !visible in
+      let kept =
+        match provisional with
+        | Some kept -> kept
+        | None ->
+            let t_vis = now_ms () in
+            let kept = List.filter sees poi in
+            Format.eprintf "visibility: %d/%d POIs in %.0f ms@."
+              (List.length kept) (List.length poi)
+              (now_ms () -. t_vis);
+            visible := Some kept;
+            kept
+      in
+      let label points =
         let conv = Render_state.meridian_convergence ~lat:alat in
         let inv_avg_delta = 2. /. (deltax +. deltay) in
         List.map
@@ -5072,12 +5093,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             in
             ((texture, (px, py, z)), h))
           points
-      in
-      let points =
-        points
         |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
         |> List.map fst
       in
+      let points = label kept in
       let gpx_path = build_gpx_path ctx ~lat ~lon ~radial_params in
       (* A refinement supersedes the first publish of this same location, and
          that record shares its surroundings and its settled rings with this
@@ -5094,7 +5113,50 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       (* Publish the new location: from the epoch check that guards this call to
          here there is no await, so the swap is atomic as far as [draw] is
          concerned. *)
-      session := Some { height; points; gpx_path; base; slots }
+      session := Some { height; points; gpx_path; base; slots };
+      (* Any earlier pass is over a surface this publish has replaced. *)
+      incr sight_pass;
+      if Option.is_some provisional then begin
+        let pass = !sight_pass in
+        let spent = ref 0. in
+        let rec resee todo seen =
+          let* () = request_animation_frame () in
+          if !sight_pass <> pass || !location_epoch <> epoch then
+            Lwt.return_unit
+          else begin
+            let t0 = now_ms () in
+            let rec slice todo seen =
+              match todo with
+              | [] -> ([], seen)
+              | p :: todo ->
+                  let seen = if sees p then p :: seen else seen in
+                  if now_ms () -. t0 > 4. then (todo, seen) else slice todo seen
+            in
+            let todo, seen = slice todo seen in
+            spent := !spent +. (now_ms () -. t0);
+            match (todo, !session) with
+            | _ :: _, _ -> resee todo seen
+            | [], None -> Lwt.return_unit
+            | [], Some s ->
+                let seen = List.rev seen in
+                Format.eprintf
+                  "visibility: %d/%d POIs in %.0f ms, over the frames@."
+                  (List.length seen) (List.length poi) !spent;
+                visible := Some seen;
+                (* Both are sublists of [poi], in its order. *)
+                if
+                  List.compare_lengths seen kept <> 0
+                  || not (List.for_all2 ( == ) seen kept)
+                then begin
+                  delete_labels ctx s.points;
+                  session := Some { s with points = label seen };
+                  force_redraw := true
+                end;
+                Lwt.return_unit
+          end
+        in
+        Lwt.async (fun () -> resee poi [])
+      end
     in
     publish ~keep:reused_slots ~slots:in_time;
     if refine_later then begin
