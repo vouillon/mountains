@@ -104,6 +104,7 @@ type terrain_uniforms = {
   u_canopySlot : Gl.uniform_location;
   (* Lighting *)
   u_lightDir : Gl.uniform_location;
+  u_sunTint : Gl.uniform_location;
   (* CLC *)
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;
@@ -154,6 +155,7 @@ type shadow_uniforms = {
 type sky_uniforms = {
   inv_view : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
+  u_sunTint : Gl.uniform_location;
   sky_params : Gl.uniform_location; (* x_scale, y_scale, unused, unused *)
   u_fogColor : Gl.uniform_location;
   u_zenithColor : Gl.uniform_location;
@@ -280,6 +282,7 @@ let init_terrain_uniforms ctx pid =
     u_canopy = u "u_canopy";
     u_canopySlot = u "u_canopySlot";
     u_lightDir = u "u_lightDir";
+    u_sunTint = u "u_sunTint";
     u_coverMap = u "u_coverMap";
     u_paletteTex = u "u_paletteTex";
     u_numLevels = u "u_numLevels";
@@ -336,6 +339,7 @@ let init_sky_uniforms ctx pid =
   {
     inv_view = u "inv_view";
     u_lightDir = u "u_lightDir";
+    u_sunTint = u "u_sunTint";
     sky_params = u "sky_params";
     u_fogColor = u "u_fogColor";
     u_zenithColor = u "u_zenithColor";
@@ -588,13 +592,13 @@ let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     These uniforms don't change during the session:
     - Tile parameters (inv_w, max_lod, inv_delta, inv_avg_delta, center_offset)
     - CLC parameters (u_cameraOffset, u_baseExtent, u_numLevels)
-    - Light direction (u_lightDir)
+    - Light direction and sun tint (u_lightDir, u_sunTint)
     - Shadow matrices and splits
     - Fog Color *)
 let upload_session_static ctx terrain_pid sky_pid shadow_pid
     (u : terrain_uniforms) (sky_u : sky_uniforms) (shadow_u : shadow_uniforms)
     ~w ~lat ~eye_x ~eye_y ~light_dir ~shadow_matrices ~shadow_splits
-    ~shadow_cascades ~fog_color ~zenith_color =
+    ~shadow_cascades ~sun_tint ~fog_color ~zenith_color =
   let deltax, deltay, avg_delta = compute_deltas ~lat in
   let max_lod = Web_utils.log2 w in
   let center_offset_x, center_offset_y =
@@ -616,6 +620,8 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   (* Light direction *)
   Gl.uniform3f ctx u.u_lightDir light_dir.Matrix.x light_dir.Matrix.y
     light_dir.Matrix.z;
+  let sr, sg, sb = sun_tint in
+  Gl.uniform3f ctx u.u_sunTint sr sg sb;
 
   (* Fog & Zenith Color *)
   let r, g, b = fog_color in
@@ -657,6 +663,7 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   Gl.use_program ctx sky_pid;
   Gl.uniform3f ctx sky_u.u_lightDir light_dir.Matrix.x light_dir.Matrix.y
     light_dir.Matrix.z;
+  Gl.uniform3f ctx sky_u.u_sunTint sr sg sb;
   Gl.uniform3f ctx sky_u.u_fogColor r g b;
   Gl.uniform3f ctx sky_u.u_zenithColor zr zg zb
 

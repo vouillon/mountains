@@ -89,6 +89,9 @@ uniform highp vec2 shadow_cascades[3];
 uniform highp mat4 u_treeShadowMatrix;
 uniform bool u_treeShadowOn;
 uniform vec3 u_lightDir; // Pre-normalized on CPU
+// What the air leaves of the sun's colour at its height (Viewer.sun_tint):
+// white with the sun high, warmer and dimmer as it drops.
+uniform vec3 u_sunTint;
 uniform highp float center_height;
 
 in highp vec2 reliefCoord; // Highp for texture coords
@@ -637,9 +640,8 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
 
   // Water/Ice gloss fix, eased in with the ice: a threshold on the
   // height-blended weight switched the bump's strength in patches.
-  material_roughness =
-      mix(material_roughness, min(material_roughness, 0.3),
-          smoothstep(0.05, 0.2, detailWeights.a));
+  material_roughness = mix(material_roughness, min(material_roughness, 0.3),
+                           smoothstep(0.05, 0.2, detailWeights.a));
 
   float bumpStrength = 4.0 * material_roughness;
 
@@ -1486,7 +1488,7 @@ void main() {
   // diffuse lighting multiply at the end, not folded into the albedo.
   float specBoost =
       mix(1.0, 2.5, max(waterGloss, smoothstep(0.4, 0.6, iceAmount)));
-  vec3 specColor = vec3(1.0, 0.98, 0.95) * specular *
+  vec3 specColor = vec3(1.0, 0.98, 0.95) * u_sunTint * specular *
                    (1.0 - material_roughness) * shadow_val * specBoost;
 
   // Fresnel for water
@@ -1538,7 +1540,7 @@ void main() {
   float finalMicroAO = normalAO * noiseAO;
   ambient *= finalMicroAO;
 
-  vec3 sun_color = vec3(1.0, 0.95, 0.9);
+  vec3 sun_color = vec3(1.0, 0.95, 0.9) * u_sunTint;
   vec3 direct = sun_color * final_l * shadow_val * DIRECT_LIGHT;
 
   // A canopy is not a Lambertian surface: it is crowns standing proud of the

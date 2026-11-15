@@ -10,6 +10,7 @@
 precision highp int;
 
 uniform vec3 u_lightDir;
+uniform vec3 u_sunTint; // terrain.frag's
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 uniform highp float u_eyeHeight;
@@ -183,7 +184,7 @@ void main() {
   float sun = lit_side > 0.0 && relief > 0.0
                   ? relief * (u_far ? 1.0 : treeShadow(n))
                   : 0.0;
-  vec3 sunColor = vec3(1.0, 0.95, 0.9);
+  vec3 sunColor = vec3(1.0, 0.95, 0.9) * u_sunTint;
   vec3 direct = sunColor * lit_side * sun * mix(0.6, 1.0, v_up);
   // Against the sun, the edges of a crown glow: light through the foliage,
   // strongest towards the sun's direction and where the crown is seen edge on

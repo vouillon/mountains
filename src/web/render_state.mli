@@ -74,6 +74,7 @@ type terrain_uniforms = {
   u_canopy : Gl.uniform_location;
   u_canopySlot : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
+  u_sunTint : Gl.uniform_location;
   u_coverMap : Gl.uniform_location;
   u_paletteTex : Gl.uniform_location;
   u_numLevels : Gl.uniform_location;
@@ -117,6 +118,7 @@ type shadow_uniforms = {
 type sky_uniforms = {
   inv_view : Gl.uniform_location;
   u_lightDir : Gl.uniform_location;
+  u_sunTint : Gl.uniform_location;
   sky_params : Gl.uniform_location;
   u_fogColor : Gl.uniform_location;
   u_zenithColor : Gl.uniform_location;
@@ -261,6 +263,7 @@ val upload_session_static :
   shadow_matrices:Matrix.t array ->
   shadow_splits:float array ->
   shadow_cascades:float array ->
+  sun_tint:float * float * float ->
   fog_color:float * float * float ->
   zenith_color:float * float * float ->
   unit

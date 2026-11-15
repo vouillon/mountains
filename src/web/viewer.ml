@@ -210,6 +210,20 @@ let navigate_to uri =
 let fog_linear = (0.18, 0.42, 0.85)
 let zenith_linear = (0.01, 0.10, 0.45)
 
+(* What the air leaves of the sun's colour when it stands at [sz] (the sine of
+   its height): red, green and blue fade at different rates with the air the
+   light crosses, counted from what a high sun crosses, so that the light is
+   white from about 60 degrees up and warmer and dimmer below -- at the lowest
+   sun shown (0.2), 0.87, 0.72 and 0.46. *)
+let sun_tint sz =
+  let m = Float.max 0. ((1. /. Float.max sz 0.1) -. 1.15) in
+  (exp (-0.035 *. m), exp (-0.085 *. m), exp (-0.20 *. m))
+
+(* A sky colour under that sun: its tint to the power [p], well under 1 -- the
+   sky's light has crossed less air than the sun's own. *)
+let tint_sky (r, g, b) (tr, tg, tb) p =
+  (r *. (tr ** p), g *. (tg ** p), b *. (tb ** p))
+
 (* Web Utils Aliases *)
 let pi = Web_utils.pi
 let next_power_of_two = Web_utils.next_power_of_two
@@ -2505,8 +2519,9 @@ let get_trees_gl ctx =
    [eye_y] arcseconds from the anchor over a base grid of [w] samples; the
    search runs at the next shadow pass. *)
 let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
-    ~w ~lat ~eye_x ~eye_y ~eye_height ~light_dir ~fog_color ~zenith_color
-    ~shadow_matrix ~shadow_cascade:(texel, depth) ~tree_shadow_matrix =
+    ~w ~lat ~eye_x ~eye_y ~eye_height ~light_dir ~sun_tint ~fog_color
+    ~zenith_color ~shadow_matrix ~shadow_cascade:(texel, depth)
+    ~tree_shadow_matrix =
   let t = get_trees_gl ctx in
   let ground_unit = hd_height_unit slot in
   let cx, cy = Render_state.compute_center_offset ~lat ~eye_x ~eye_y in
@@ -2537,6 +2552,8 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform2f ctx (u "u_centerOffset") cx cy;
   Gl.uniform3f ctx (u "u_lightDir") light_dir.Matrix.x light_dir.Matrix.y
     light_dir.Matrix.z;
+  let r, gg, b = sun_tint in
+  Gl.uniform3f ctx (u "u_sunTint") r gg b;
   let r, gg, b = fog_color in
   Gl.uniform3f ctx (u "u_fogColor") r gg b;
   let r, gg, b = zenith_color in
@@ -4763,6 +4780,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       Matrix.{ x = sx; y = sy; z = sz; w = 0. }
     in
+    (* The sun's colour at that height, and the sky's under it: the horizon
+       takes more of the tint than the zenith. *)
+    let sun_tint = sun_tint light_dir.Matrix.z in
+    let fog_color = tint_sky fog_linear sun_tint 0.3 in
+    let zenith_color = tint_sky zenith_linear sun_tint 0.1 in
     let splits_dist = [| 2000.; 8000.; 25000. |] in
 
     (* Everything that depends on where the eye stands, gathered so that the
@@ -4885,7 +4907,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         terrain_uniforms sky_uniforms shadow_uniforms ~w ~lat:alat ~eye_x ~eye_y
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~shadow_cascades:(shadow_cascade_extents ())
-        ~fog_color:fog_linear ~zenith_color:zenith_linear;
+        ~sun_tint ~fog_color ~zenith_color;
       Gl.use_program ctx terrain_pid;
       Gl.uniform_matrix4fv ctx
         (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowMatrix"))
@@ -4962,8 +4984,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
            set_tree_params ctx ~block ~slot:i ~g:ring.grid
              ~ground:ring.hd_relief_texture ~cover_map:cover_map_texture
              ~palette:palette_texture ~w ~lat:alat ~eye_x ~eye_y
-             ~eye_height:(height +. 2.) ~light_dir ~fog_color:fog_linear
-             ~zenith_color:zenith_linear ~shadow_matrix:shadow_matrices.(0)
+             ~eye_height:(height +. 2.) ~light_dir ~sun_tint ~fog_color
+             ~zenith_color ~shadow_matrix:shadow_matrices.(0)
              ~shadow_cascade:(cascades.(0), cascades.(1))
              ~tree_shadow_matrix
        | _ -> trees_inputs := None);
@@ -4993,7 +5015,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          after the bake passes above, which set their own clear colours. *)
       Gl.use_program ctx terrain_pid;
       Gl.uniform1f ctx terrain_uniforms.center_height (height +. 2.);
-      (let r, g, b = fog_linear in
+      (let r, g, b = fog_color in
        Gl.clear_color ctx r g b 1.);
 
       (* Sight lines must be traced over the surface that is actually drawn: the

@@ -2,6 +2,7 @@
 precision mediump float;
 uniform highp mat4 inv_view;
 uniform highp vec3 u_lightDir;
+uniform vec3 u_sunTint; // terrain.frag's
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 uniform vec2 sky_params; // x_scale, y_scale
@@ -48,7 +49,7 @@ void main() {
     halo = pow(cos_gamma, 20.0) * 0.2;
   }
 
-  vec3 sun_color = vec3(1.0, 0.9, 0.7);
+  vec3 sun_color = vec3(1.0, 0.9, 0.7) * u_sunTint;
   vec3 sky = sky_base + sun_color * (mie + halo);
 
   // Sun disc, ~0.53 degrees across with a soft limb (the real angular size;
@@ -57,7 +58,7 @@ void main() {
   // to 1 (fp16 ulp near 1 is ~5e-4).
   const highp float disc_outer = 0.9999870; // cos(0.29 deg)
   const highp float disc_inner = 0.9999910; // cos(0.24 deg)
-  sky = mix(sky, vec3(1.0, 0.95, 0.8) * 20.0,
+  sky = mix(sky, vec3(1.0, 0.95, 0.8) * u_sunTint * 20.0,
             smoothstep(disc_outer, disc_inner, cos_gamma));
 
   // Tone curve -- the same one the terrain applies, so the horizon they share
