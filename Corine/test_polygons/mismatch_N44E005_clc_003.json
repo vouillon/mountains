@@ -1,8 +1,8 @@
 {
   "tile": "N44E005",
   "type": "clc",
-  "expected_area": 0.000317325,
-  "actual_area": 0.000317325,
+  "expected_area": 0.000318413,
+  "actual_area": 0.000318413,
   "ratio": 1.0,
   "outer": [
     [ 5.315640235170539, 44.1082855550726 ],

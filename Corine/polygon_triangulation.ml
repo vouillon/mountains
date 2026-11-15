@@ -373,7 +373,8 @@ module Triangulator = struct
      Used for O(1) lookup of touching points between holes and outer ring. *)
   type outer_vertex_map = (float * float, int) Hashtbl.t
 
-  (* Build hash table from outer ring vertices *)
+  (* Build hash table from outer ring vertices. A point the ring passes
+     through several times keeps one entry per pass. *)
   let build_outer_map (verts : float array) outer_node poly_list =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
@@ -384,14 +385,48 @@ module Triangulator = struct
     while !loop do
       let vi = vert_idx.(!curr) in
       let key = (get_x verts vi, get_y verts vi) in
-      Hashtbl.replace map key !curr;
+      Hashtbl.add map key !curr;
       curr := next.(!curr);
       if !curr = outer_node then loop := false
     done;
     map
 
+  (* Counter-clockwise angle in [0, 2pi) from direction (ux, uy) to (vx, vy),
+     with near-parallel directions snapped to 0 *)
+  let ccw_angle ux uy vx vy =
+    let a = Float.atan2 ((ux *. vy) -. (uy *. vx)) ((ux *. vx) +. (uy *. vy)) in
+    if a < -1e-9 then a +. (2. *. Float.pi) else Float.max a 0.
+
+  (* Whether splicing hole node [h] into outer node [o] (same point T) keeps
+     the ring weakly simple. Both rings keep the polygon on their left, so
+     the outer interior at T is the sector swept counter-clockwise from its
+     outgoing to its incoming edge, and the hole occupies the sector from its
+     incoming to its outgoing edge. The hole sector must lie within the outer
+     one. Clipped rings can pass through T several times, with edges
+     collinear with the outer ones (e.g. a hole running along both sides of
+     a tile corner): only one of the passes is adjacent to the outer one. *)
+  let hole_sector_fits verts poly_list o h =
+    let open PolygonList in
+    let vert_idx = poly_list.vert_idx in
+    let tx, ty = (get_x verts vert_idx.(o), get_y verts vert_idx.(o)) in
+    let dir n =
+      let vi = vert_idx.(n) in
+      (get_x verts vi -. tx, get_y verts vi -. ty)
+    in
+    let ox, oy = dir poly_list.next.(o) in
+    let angle n =
+      let vx, vy = dir n in
+      ccw_angle ox oy vx vy
+    in
+    let a_in_h = angle poly_list.prev.(h) in
+    let a_out_h = angle poly_list.next.(h) in
+    let a_in_o = angle poly_list.prev.(o) in
+    a_in_h <= a_out_h +. 1e-9 && a_out_h <= a_in_o +. 1e-9
+
   (* Find if any vertex in the hole touches (has same coordinates as) any vertex
-     in the current outer ring. Uses hash table for O(1) lookup per hole vertex. *)
+     in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
+     Prefers a pair whose sectors are compatible (see [hole_sector_fits]),
+     falling back to the first touching pair. *)
   let find_touching_point (verts : float array) hole_start_node
       (outer_map : outer_vertex_map) poly_list =
     let open PolygonList in
@@ -399,17 +434,23 @@ module Triangulator = struct
     let next = poly_list.next in
     let hole_curr = ref hole_start_node in
     let hole_loop = ref true in
+    let first = ref None in
     let result = ref None in
     while !hole_loop && !result = None do
       let h_vi = vert_idx.(!hole_curr) in
       let key = (get_x verts h_vi, get_y verts h_vi) in
-      (match Hashtbl.find_opt outer_map key with
-      | Some outer_node -> result := Some (!hole_curr, outer_node)
-      | None -> ());
+      List.iter
+        (fun outer_node ->
+          if !first = None then first := Some (!hole_curr, outer_node);
+          if
+            !result = None
+            && hole_sector_fits verts poly_list outer_node !hole_curr
+          then result := Some (!hole_curr, outer_node))
+        (Hashtbl.find_all outer_map key);
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done;
-    !result
+    if !result = None then !first else !result
 
   (* Add all hole vertices to outer_map for future touching-point lookups.
      Must be called only once the hole is known to merge into the outer ring,
@@ -426,8 +467,7 @@ module Triangulator = struct
     while !hole_loop do
       let h_vi = vert_idx.(!hole_curr) in
       let key = (get_x verts h_vi, get_y verts h_vi) in
-      if not (Hashtbl.mem outer_map key) then
-        Hashtbl.add outer_map key !hole_curr;
+      Hashtbl.add outer_map key !hole_curr;
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
     done
@@ -445,16 +485,15 @@ module Triangulator = struct
         o_idx;
     (* The hole traversal order is: hole_touch -> ... -> hole_prev -> hole_touch
        We want to insert the hole between outer_touch and outer_next.
-       After merge: outer_touch -> hole_next -> ... -> hole_prev -> outer_next *)
-    let hole_prev = poly_list.prev.(hole_touch_node) in
+       After merge:
+       outer_touch -> hole_next -> ... -> hole_prev -> hole_touch -> outer_next
+       The shared point is visited twice, once on each side of the hole. *)
     let hole_next = poly_list.next.(hole_touch_node) in
     let outer_next = poly_list.next.(outer_touch_node) in
-    (* Connect outer_touch to hole_next (skipping hole_touch since it's the same point) *)
     poly_list.next.(outer_touch_node) <- hole_next;
     poly_list.prev.(hole_next) <- outer_touch_node;
-    (* Connect hole_prev back to outer_next *)
-    poly_list.next.(hole_prev) <- outer_next;
-    poly_list.prev.(outer_next) <- hole_prev;
+    poly_list.next.(hole_touch_node) <- outer_next;
+    poly_list.prev.(outer_next) <- hole_touch_node;
     (* Return the outer touch node as the new start *)
     outer_touch_node
 
