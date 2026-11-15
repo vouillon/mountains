@@ -14,7 +14,8 @@ uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 uniform highp float u_eyeHeight;
 uniform bool u_broadleaf;
-uniform bool u_far; // beyond Viewer.tree_far: cheaper shadows
+uniform bool u_shadowPass; // tree.vert's
+uniform bool u_far;        // beyond Viewer.tree_far: cheaper shadows
 uniform highp sampler2DArrayShadow shadow_map;
 uniform highp mat4 u_shadowMatrix; // the first cascade's
 // That cascade's world metres per shadow texel and the depth its [0,1] spans
@@ -158,6 +159,11 @@ float foliage(inout vec3 n, highp float fp) {
 }
 
 void main() {
+  // Depth alone (Viewer.draw_tree_shadows): colour is masked off.
+  if (u_shadowPass) {
+    color = vec4(0.0);
+    return;
+  }
   vec3 n = normalize(v_normal);
   // The pixel's footprint, outside any branch (bark is per triangle).
   highp float fp = max(length(dFdx(v_local)), length(dFdy(v_local)));

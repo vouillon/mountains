@@ -37,6 +37,12 @@ float radialVertexHeight(vec2 pos_plane) {
   // Same selector as the mesh: a trace resolving its height from a different
   // ring than the ground under it would float or sink.
   float height = sampleTerrainHeight(coord, norm_coord, lod_raw);
+  // And the canopy the mesh is raised by, as [computeRadialVertex].
+  highp vec2 c0 = hdCoord(0, coord);
+  highp vec2 c1 = hdCoord(1, coord);
+  highp vec2 c2 = hdCoord(2, coord);
+  height += canopyLift(slotCoord(c0, c1, c2, u_canopySlot),
+                       slotCoord(c0, c1, c2, u_canopyFarSlot), r, grid_spacing);
   return height - r * r * 6.8306e-8;
 }
 

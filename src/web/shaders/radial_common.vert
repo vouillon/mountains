@@ -219,11 +219,9 @@ float canopyLod(highp float grid_spacing, float step) {
 // terrain.frag weighs the slope it shades with by the same factor.
 float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 
-// The lift from one canopy's sample at atlas [uv], level [lod]: 0 under
-// 1.5 m of canopy, without data, and above 40 m (cliffs, where surface and
-// ground models disagree).
-highp float liftAt(highp vec2 uv, float lod) {
-  vec4 s = textureLod(u_canopy, uv, lod);
+// The lift from one canopy's sample [s]: 0 under 1.5 m of canopy, without
+// data, and above 40 m (cliffs, where surface and ground models disagree).
+highp float liftOf(vec4 s) {
   if (s.a < 0.5 / 255.0)
     return 0.0;
   float h = s.r * (255.0 / 5.0);
@@ -241,16 +239,24 @@ highp float canopyLift(highp vec2 cn, highp vec2 cf, highp float r,
                        highp float grid_spacing) {
   float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
   float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
+  // Where the near canopy has no data (across a border, a tile that did not
+  // come) it is not there: no trees stand on it (tree_find.vert), and the
+  // far canopy has the ground, which would otherwise be bare.
+  vec4 sn = vec4(0.0);
+  if (nearEdge > 0.0) {
+    sn = textureLod(u_canopy, canopyNearUV(cn),
+                    canopyLod(grid_spacing, u_canopyStep.x));
+    if (sn.a < 0.5 / 255.0)
+      nearEdge = 0.0;
+  }
   float rest = canopyRest(r, nearEdge);
   if (rest <= 0.0)
     return 0.0;
-  highp float lift = 0.0;
-  if (nearEdge > 0.0)
-    lift += nearEdge *
-            liftAt(canopyNearUV(cn), canopyLod(grid_spacing, u_canopyStep.x));
+  highp float lift = nearEdge * liftOf(sn);
   if (nearEdge < 1.0 && farEdge > 0.0)
     lift += (1.0 - nearEdge) * farEdge *
-            liftAt(canopyFarUV(cf), canopyLod(grid_spacing, u_canopyStep.y));
+            liftOf(textureLod(u_canopy, canopyFarUV(cf),
+                              canopyLod(grid_spacing, u_canopyStep.y)));
   return lift * rest;
 }
 

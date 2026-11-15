@@ -9,6 +9,10 @@
 // (Tree_cover.t's [width]: the service's samples are square in degrees): the
 // density (percent) from the left, the leaf type (1 broadleaved, 2
 // coniferous) [u_stride] texels on.
+// The column below is a product of two indices, over a million: beyond the
+// 16 bits of a mediump int (Mali's).
+precision highp int;
+
 uniform highp sampler2D u_input;
 uniform int u_size;
 uniform int u_width;

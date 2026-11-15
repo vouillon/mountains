@@ -77,6 +77,7 @@ const vec3 TIER_TOP = vec3(0.55, 0.8, 1.0);
 const vec3 TIER_RADIUS = vec3(1.0, 0.72, 0.45);
 
 void main() {
+  highp mat4 view_proj = proj * transform;
   highp float h = a_pos.w;
   float r = a_shape.x;
   highp uint seed =
@@ -102,8 +103,8 @@ void main() {
   if (!u_shadowPass) {
     // Off screen: the tree's axis against the side, top, bottom and near
     // planes, as a capsule of its crown radius.
-    highp vec4 lo = proj * transform * vec4(a_pos.xy, ground - 1.0, 1.0);
-    highp vec4 hi = proj * transform * vec4(a_pos.xy, ground + h, 1.0);
+    highp vec4 lo = view_proj * vec4(a_pos.xy, ground - 1.0, 1.0);
+    highp vec4 hi = view_proj * vec4(a_pos.xy, ground + h, 1.0);
     highp vec2 m =
         (r + 1.0) *
         sqrt(vec2(proj[0][0] * proj[0][0], proj[1][1] * proj[1][1]) + 1.0);
@@ -243,5 +244,5 @@ void main() {
   v_dist = length(vec3(p.xy, v_z));
   v_fromEye = vec3(p.xy, v_z);
   gl_Position = u_shadowPass ? u_shadowViewProj * vec4(v_world, 1.0)
-                             : proj * transform * vec4(p, 1.0);
+                             : view_proj * vec4(p, 1.0);
 }

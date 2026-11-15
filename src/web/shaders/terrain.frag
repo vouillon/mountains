@@ -460,6 +460,12 @@ float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
   return smoothstep(0.0, 0.03, min(e.x, e.y));
 }
+// The ring radius the mesh, the search and the trees measure from the eye
+// with: across the ground. Not [v_dist], which takes in the height between
+// them -- on a slope 400 m below the eye the two are 100 m apart, and the
+// ground under standing trees was shaded as canopy still.
+uniform highp vec2 center_offset;
+highp float eyeRadius() { return length(v_world_pos.xy - center_offset); }
 float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
 }
@@ -475,24 +481,32 @@ highp vec2 slotCoord(int slot) {
 
 // Read the canopies at the level the mesh did, and the share of each the
 // mesh was raised by -- the same factors as [canopyLift] (its [canopyCover]
-// included), with the distance to the eye for the ring radius.
+// included, and the near canopy counting for nothing where it has no data).
 void canopyGeometry() {
   float nearEdge =
       u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
   float farEdge =
       u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
-  float rest = canopyRest(v_dist, nearEdge);
-  highp float spacing = grid_k * (v_dist + grid_scale);
+  highp float r = eyeRadius();
+  highp float spacing = grid_k * (r + grid_scale);
+  vec4 sn = vec4(0.0);
+  if (nearEdge > 0.0) {
+    sn = textureLod(u_canopy, canopyNearUV(slotCoord(u_canopySlot)),
+                    log2(max(spacing / u_canopyStep.x, 1.0)) + 2.0);
+    if (sn.a < 0.5 / 255.0)
+      nearEdge = 0.0;
+  }
+  float rest = canopyRest(r, nearEdge);
   vec2 slope = vec2(0.0);
   float weight = 0.0;
   for (int k = 0; k < 2; k++) {
     float w = k == 0 ? nearEdge : (1.0 - nearEdge) * farEdge;
     if (w <= 0.0 || rest <= 0.0)
       continue;
-    float step = k == 0 ? u_canopyStep.x : u_canopyStep.y;
-    highp vec2 uv = k == 0 ? canopyNearUV(slotCoord(u_canopySlot))
-                           : canopyFarUV(slotCoord(u_canopyFarSlot));
-    vec4 s = textureLod(u_canopy, uv, log2(max(spacing / step, 1.0)) + 2.0);
+    vec4 s = k == 0
+                 ? sn
+                 : textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)),
+                              log2(max(spacing / u_canopyStep.y, 1.0)) + 2.0);
     float h = s.r * (255.0 / 5.0);
     float c = s.a < 0.5 / 255.0 ? 0.0
                                 : w * smoothstep(1.0, 3.0, h) *
@@ -506,8 +520,12 @@ void canopyGeometry() {
 }
 
 // The share of this fragment's canopy reading taken from the near canopy:
-// only it resolves crowns.
+// only it resolves crowns. And how far tree_find.vert has trees to stand
+// here: where the near canopy has data and is the 3 m it takes for one --
+// lower, it is scrub, shaded as canopy rather than as the ground under trees
+// that are not there.
 float g_canopyNear = 0.0;
+float g_canopyStands = 0.0;
 
 vec3 canopyTrees() {
   float nearEdge =
@@ -518,8 +536,9 @@ vec3 canopyTrees() {
   float midEdge = u_canopyMidOn ? canopyEdge(cm) : 0.0;
   // Fetched whatever the edges: uniform control flow for the near read,
   // whose implicit level the crown shading relies on, and for the 20 m one,
-  // filtered with distance.
-  g_canopy = texture(u_canopy, canopyNearUV(slotCoord(max(u_canopySlot, 0))));
+  // filtered with distance. A uniform says whether there is one to read.
+  if (u_canopySlot >= 0)
+    g_canopy = texture(u_canopy, canopyNearUV(slotCoord(u_canopySlot)));
   // Its A is the share of the read that has data, its R their heights'
   // sum (canopy_prep.frag's [u_flagged]).
   vec4 m = u_canopyMidOn ? texture(u_canopy, atlasUV(cm, 4)) : vec4(0.0);
@@ -545,6 +564,7 @@ vec3 canopyTrees() {
                 wsum;
   float h = (wn * hn + wf * hf + wm * hm) / wsum;
   g_canopyNear = wn / wsum;
+  g_canopyStands = wn * smoothstep(2.5, 3.5, hn);
   return vec3(share, wsum * (1.0 - smoothstep(40.0, 48.0, h)), h);
 }
 
@@ -957,7 +977,12 @@ void main() {
         continue;
       highp vec4 m = level == 0 ? u_treeCoverMap : u_treeCoverFarMap;
       highp vec2 cu = reliefCoord * m.xy + m.zw;
-      vec4 tc = texture(u_canopy, canopyCoverUV(cu, level));
+      // Not where the finer level has it all: with the level its own
+      // gradients give, the read being in a branch.
+      highp vec2 uv = canopyCoverUV(cu, level);
+      highp vec2 dx = dFdx(uv), dy = dFdy(uv);
+      vec4 tc =
+          coverTrust < 1.0 ? textureGrad(u_canopy, uv, dx, dy) : vec4(0.0);
       float e = canopyEdge(cu) * tc.b * (1.0 - coverTrust);
       if (e > 0.0) {
         float density = tc.r / tc.b;
@@ -979,8 +1004,7 @@ void main() {
     // Where tree.vert stands the trees, this is the ground under them: no
     // canopy, crowns or forest bump of its own, but forest floor -- the open
     // ground's detail, and needle litter and moss for colour.
-    float stood = treesStood(
-        v_dist, u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0);
+    float stood = treesStood(eyeRadius(), g_canopyStands);
     float floorShare = ct.x * stood;
     ct.x *= 1.0 - stood;
     g_canopyReal = trust * ct.x * g_canopyNear;
