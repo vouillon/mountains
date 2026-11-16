@@ -355,7 +355,9 @@ RadialVertex computeRadialVertex() {
   // meridians converge (the east-west scale shrinks with northing) and
   // parallels curve relative to great circles. Validated against exact
   // geodesics: residual <= 6 m at the 89 km corner where the linear mapping
-  // was off by 660 m (0.42 deg of azimuth). Must match the inverse used for
+  // was off by 660 m (0.42 deg of azimuth). At the 140 km the far field
+  // reaches, computed on a sphere: at most 37 m (a third of a far sample, 55
+  // arcseconds of azimuth), against 1900 m. Must match the inverse used for
   // POI placement in viewer.ml.
   highp vec2 proj =
       vec2(v.pos_plane.x * (1.0 + v.pos_plane.y * meridian_conv),
