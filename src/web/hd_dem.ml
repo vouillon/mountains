@@ -848,8 +848,9 @@ let blend ~lat:_ ~(source : source) (raw : raw) =
   | None -> None
   | Some { data; height_scale; height_offset; range } ->
       Format.eprintf
-        "RGE ALTI blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
+        "%s blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
          steps)@."
+        (describe raw.layer)
         (Brr.(Performance.now_ms G.performance) -. t0)
         raw.missing range (height_scale *. 100.);
       Some
