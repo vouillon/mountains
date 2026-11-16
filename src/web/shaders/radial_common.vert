@@ -255,6 +255,37 @@ float canopyLod(highp float grid_spacing, float step) {
 // terrain.frag weighs the slope it shades with by the same factor.
 float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 
+// The land cover (terrain.frag's, on the same units, hence the precisions):
+// the canopy model has crowns over the water along a wooded shore, and what
+// it has on open water is noise, neither of which may raise the water.
+uniform mediump usampler2DArray u_coverMap;
+uniform mediump sampler2D u_paletteTex;
+
+// Whether the land cover is water at the base grid's normalised coordinate
+// [c]: the nearest texel of the level terrain.frag's [sampleCLCBilinear]
+// reads there.
+bool overWater(highp vec2 c) {
+  highp vec2 uv = (c + 0.5 * inv_w - 0.5) * 0.5 + 0.5;
+  highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
+  int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
+  highp vec2 luv = (uv - 0.5) * exp2(float(7 - level)) + 0.5;
+  ivec2 size = textureSize(u_coverMap, 0).xy;
+  ivec2 p = clamp(ivec2(floor(luv * vec2(size))), ivec2(0), size - 1);
+  uint id = texelFetch(u_coverMap, ivec3(p, level), 0).r;
+  return texelFetch(u_paletteTex, ivec2(int(id) * 3 + 1, 0), 0).a > 0.5;
+}
+
+// Whether there is water within a mesh interval, [s] m, of [c]: a vertex
+// raised beside one on the water would draw the water between them up the
+// side of the canopy.
+bool nearWater(highp vec2 c, highp float s) {
+  highp vec2 e = s * inv_delta * inv_w;
+  for (int k = 0; k < 9; k++)
+    if (overWater(c + e * vec2(float(k % 3 - 1), float(k / 3 - 1))))
+      return true;
+  return false;
+}
+
 // The lift from one canopy's sample [s]: 0 under 1.5 m of canopy, without
 // data, and above 40 m (cliffs, where surface and ground models disagree).
 highp float liftOf(vec4 s) {
@@ -270,9 +301,10 @@ highp float liftOf(vec4 s) {
 // [grid_spacing] m between rings: the near canopy inside its block, the far
 // one beyond, read at [canopyLod] so far vertices take the canopy averaged
 // into a smooth blanket rather than aliasing crowns. 0 where tree.vert stands
-// trees instead, and around the eye ([canopyRest]).
-highp float canopyLift(highp vec2 cn, highp vec2 cf, highp float r,
-                       highp float grid_spacing) {
+// trees instead, around the eye ([canopyRest]), and on the water or next to
+// it, [c] being the base grid's normalised coordinate.
+highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
+                       highp float r, highp float grid_spacing) {
   float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
   float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
   // Where the near canopy has no data (across a border, a tile that did not
@@ -293,6 +325,9 @@ highp float canopyLift(highp vec2 cn, highp vec2 cf, highp float r,
     lift += (1.0 - nearEdge) * farEdge *
             liftOf(textureLod(u_canopy, canopyFarUV(cf),
                               canopyLod(grid_spacing, u_canopyStep.y)));
+  if (lift <= 0.0 ||
+      nearWater(c, max(grid_spacing, r * inv_sectors_div * 1.5708)))
+    return 0.0;
   return lift * rest;
 }
 
@@ -341,6 +376,7 @@ RadialVertex computeRadialVertex() {
   v.far_coord = (coord + far_map.xy) * far_map.z;
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
   v.height += canopyLift(
+      v.norm_coord,
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopyFarSlot),
       r, grid_spacing);

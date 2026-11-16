@@ -28,7 +28,7 @@ uniform int u_grid;                // cells per side
 uniform highp float u_radius;      // metres
 // The land cover, as terrain.frag's [sampleCLCBilinear] reads it (nearest
 // here): the species, and no trees in built-up areas, whose roofs the
-// canopy model carries as crowns.
+// canopy model carries as crowns, nor over water.
 uniform mediump usampler2DArray u_coverMap;
 uniform mediump sampler2D u_paletteTex;
 uniform highp float u_invW; // 1 / the base grid's size
@@ -93,9 +93,10 @@ highp float groundAt(highp vec2 norm) {
 }
 
 // The land-cover palette's conifer share (x) and built-up flag (y) at [arc]
-// arcseconds from the anchor, and (z) 1 on ice, as terrain.frag's
-// [getSurfaceFromID] tells it; the level choice is [sampleCLCBilinear]'s.
-vec3 coverAt(highp vec2 arc) {
+// arcseconds from the anchor, (z) 1 on ice, as terrain.frag's
+// [getSurfaceFromID] tells it, and (w) the water factor; the level choice is
+// [sampleCLCBilinear]'s.
+vec4 coverAt(highp vec2 arc) {
   // Over the cover map, whose outermost level (7) is twice the base grid's
   // side.
   highp vec2 uv = (arc * u_invW + 0.5 * u_invW) * 0.5 + 0.5;
@@ -107,8 +108,8 @@ vec3 coverAt(highp vec2 arc) {
   uint id = texelFetch(u_coverMap, ivec3(p, level), 0).r;
   vec4 weights = texelFetch(u_paletteTex, ivec2(int(id) * 3 + 1, 0), 0);
   bool ice = dot(weights.rgb, vec3(1.0)) < 0.05 && weights.a < 0.5;
-  return vec3(texelFetch(u_paletteTex, ivec2(int(id) * 3 + 2, 0), 0).rg,
-              ice ? 1.0 : 0.0);
+  return vec4(texelFetch(u_paletteTex, ivec2(int(id) * 3 + 2, 0), 0).rg,
+              ice ? 1.0 : 0.0, weights.a);
 }
 
 highp vec2 arcAt(highp vec2 idx) {
@@ -175,9 +176,10 @@ void main() {
   // with up to half a metre of jitter, -> arcseconds -> metres from the eye.
   highp vec2 idx = vec2(tt) * 2.0 + 0.5 + (vec2(j0, j1) - 0.5);
   highp vec2 arc = arcAt(idx);
-  // None on glaciers, whose seracs the canopy model carries as crowns.
-  vec3 cover = coverAt(arc);
-  if (cover.y > 0.5 || cover.z > 0.5)
+  // None on glaciers, whose seracs the canopy model carries as crowns, nor
+  // over water, where it has boats, and the crowns that overhang the shore.
+  vec4 cover = coverAt(arc);
+  if (cover.y > 0.5 || cover.z > 0.5 || cover.w > 0.5)
     return;
   highp float ground = groundAt(idx / float(textureSize(u_ground, 0).x));
   // Conifer stands within the class's share, as terrain.frag's [coniferAmt]

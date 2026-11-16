@@ -954,6 +954,14 @@ let init_graphics ctx =
 
   Gl.use_program ctx shadow_pid;
   Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
+  (* The land cover's units ([apply_canopy] sets them again): left at 0, an
+     array sampler would share the relief's unit, and no draw is valid then. *)
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "u_coverMap"))
+    7;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "u_paletteTex"))
+    8;
   Render_state.upload_texture_units_shadow ctx shadow_uniforms;
 
   let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
@@ -977,6 +985,12 @@ let init_graphics ctx =
   let path_pid = Web_utils.create_program ctx path_program in
   let path_uniforms = Render_state.init_path_uniforms ctx path_pid in
   Gl.use_program ctx path_pid;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx path_pid (Jstr.v "u_coverMap"))
+    7;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx path_pid (Jstr.v "u_paletteTex"))
+    8;
   Render_state.upload_path_static ctx path_uniforms radial_params;
 
   (* Create nearest sampler for AO passes (relief texture needs nearest filtering there) *)
@@ -1924,7 +1938,8 @@ let hd_normal_unit = function
 let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~casters
     ~terrain_geo ~index_count ~(radial_params : Render_state.radial_params)
-    ~relief_texture ~(hd_slot_textures : (Gl.texture * Gl.texture) array) ctx =
+    ~relief_texture ~cover_map_texture ~palette_texture
+    ~(hd_slot_textures : (Gl.texture * Gl.texture) array) ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
 
@@ -1949,6 +1964,12 @@ let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
       Gl.active_texture ctx (hd_height_unit i);
       Gl.bind_texture ctx Gl.texture_2d (Some heights))
     hd_slot_textures;
+  (* And the land cover, which keeps the canopy off the water: a location's
+     first bake comes before [bind_terrain_textures]. *)
+  Gl.active_texture ctx Gl.texture7;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
+  Gl.active_texture ctx Gl.texture8;
+  Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
   Gl.active_texture ctx Gl.texture0;
 
   Gl.bind_vertex_array ctx (Some terrain_geo);
@@ -4538,6 +4559,11 @@ let apply_canopy ctx pids ~placeholder =
       Gl.use_program ctx pid;
       let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
       Gl.uniform1i ctx (u "u_canopy") 15;
+      (* The land cover the canopy is kept off the water by
+         (radial_common.vert's [overWater]), where [bind_terrain_textures]
+         has it. *)
+      Gl.uniform1i ctx (u "u_coverMap") 7;
+      Gl.uniform1i ctx (u "u_paletteTex") 8;
       Gl.uniform1i ctx (u "u_canopySlot") near;
       Gl.uniform1i ctx (u "u_canopyFarSlot") far;
       Gl.uniform2f ctx (u "u_canopyStep") canopy_steps.(0) canopy_steps.(1);
@@ -5475,7 +5501,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                  (draw_tree_shadows ctx ~shadow_map ~terrain_pid
                     ~cascade:shadow_matrices.(0) ~matrix:tree_shadow_matrix)
                ~terrain_geo ~index_count ~radial_params ~relief_texture
-               ~hd_slot_textures ctx);
+               ~cover_map_texture ~palette_texture ~hd_slot_textures ctx);
          bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
            ~ao_texture ~detail_map ~shadow_map ~cover_map_texture
            ~palette_texture ~hd_slot_textures
@@ -5526,7 +5552,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               (draw_tree_shadows ctx ~shadow_map ~terrain_pid
                  ~cascade:shadow_matrices.(0) ~matrix:tree_shadow_matrix)
             ~terrain_geo ~index_count ~radial_params ~relief_texture
-            ~hd_slot_textures ctx);
+            ~cover_map_texture ~palette_texture ~hd_slot_textures ctx);
 
       (* Bind all terrain textures - after all textures are created *)
       bind_terrain_textures ctx ~relief_texture ~relief_normal_texture

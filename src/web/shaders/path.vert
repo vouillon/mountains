@@ -41,7 +41,7 @@ float radialVertexHeight(vec2 pos_plane) {
   highp vec2 c0 = hdCoord(0, coord);
   highp vec2 c1 = hdCoord(1, coord);
   highp vec2 c2 = hdCoord(2, coord);
-  height += canopyLift(slotCoord(c0, c1, c2, u_canopySlot),
+  height += canopyLift(norm_coord, slotCoord(c0, c1, c2, u_canopySlot),
                        slotCoord(c0, c1, c2, u_canopyFarSlot), r, grid_spacing);
   return height - r * r * 6.8306e-8;
 }
