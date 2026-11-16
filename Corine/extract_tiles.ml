@@ -380,7 +380,8 @@ end
 (* The far field's land cover: a degree cell as a grid of palette indices at 4
    arcseconds, on the samples of the far field's elevation (compress_dem
    --coarse) -- a sample's class is its centre's, 4 col + 1.5 arcseconds east
-   of the cell's west edge and 4 row + 1.5 south of its north one -- and cut
+   of the cell's west edge and 4 row + 1.5 south of its north one, or water
+   where half of the sixteen arcseconds around it are -- and cut
    into the same nine sub-tiles, in the same framing: a .dem tile whose
    heights are indices, so that the client reads both through one decoder. The
    elevation range its header must state means nothing here. Land cover drawn
@@ -391,12 +392,19 @@ module Coarse = struct
   let sub_size = size / 3
   let create () = Bytes.make (size * size) '\255'
 
+  (* The arcseconds of a sample, each way: the water is drawn on them. *)
+  let per = 4
+  let create_fine () = Bytes.make (size * per * size * per) '\255'
+
   (* Fill the samples whose centre a triangle covers, unless something has
      them already: the features come smallest first, as the client draws
-     them. [verts] are (lon, lat) pairs. *)
-  let fill grid ~lon ~lat ~index verts indices tri_count =
-    let gx v = (((verts.(2 * v) -. lon) *. 3600.) -. 1.5) /. 4. in
-    let gy v = (((lat +. 1. -. verts.((2 * v) + 1)) *. 3600.) -. 1.5) /. 4. in
+     them. [verts] are (lon, lat) pairs. [grid] is one of samples, or of
+     arcseconds with [fine]. *)
+  let fill ?(fine = false) grid ~lon ~lat ~index verts indices tri_count =
+    let size = if fine then size * per else size in
+    let pos d = if fine then d *. 3600. else ((d *. 3600.) -. 1.5) /. 4. in
+    let gx v = pos (verts.(2 * v) -. lon) in
+    let gy v = pos (lat +. 1. -. verts.((2 * v) + 1)) in
     for t = 0 to tri_count - 1 do
       let a = indices.(3 * t)
       and b = indices.((3 * t) + 1)
@@ -424,6 +432,81 @@ module Coarse = struct
             then Bytes.set grid ((row * size) + col) (Char.chr index)
           done
         done
+      end
+    done
+
+  (* The water, drawn by the arcsecond ([fill ~fine]), onto the samples: one
+     is water when half of its arcseconds are, and of the class most of those
+     have. A sample's centre alone makes a dotted line of a river narrower
+     than the samples are apart, and the same river comes out whole, or not
+     at all, this way. *)
+  let fill_water grid water =
+    let counts = Array.make 256 0 in
+    for row = 0 to size - 1 do
+      for col = 0 to size - 1 do
+        let total = ref 0 in
+        for r = 0 to per - 1 do
+          for c = 0 to per - 1 do
+            let i =
+              Char.code
+                (Bytes.get water
+                   ((((row * per) + r) * size * per) + (col * per) + c))
+            in
+            if i <> 255 then begin
+              counts.(i) <- counts.(i) + 1;
+              incr total
+            end
+          done
+        done;
+        if !total > 0 then begin
+          let best = ref 0 and most = ref 0 in
+          Array.iteri
+            (fun i n ->
+              if n > !most then begin
+                best := i;
+                most := n
+              end;
+              counts.(i) <- 0)
+            counts;
+          if 2 * !total >= per * per then
+            Bytes.set grid ((row * size) + col) (Char.chr !best)
+        end
+      done
+    done
+
+  (* Take back the patches of water, samples that touch by a side or a
+     corner, that are all of class [index] and fewer than [min]: where a water
+     course is about half as wide as the samples are apart, [fill_water] has
+     it by fits and starts. To call while [grid] has nothing but water. *)
+  let drop_specks grid ~index ~min =
+    let seen = Bytes.make (size * size) '\000' in
+    let patch = Array.make min 0 in
+    let stack = Stack.create () in
+    for start = 0 to (size * size) - 1 do
+      if Bytes.get grid start <> '\255' && Bytes.get seen start = '\000' then begin
+        let count = ref 0 and only = ref true in
+        Bytes.set seen start '\001';
+        Stack.push start stack;
+        while not (Stack.is_empty stack) do
+          let i = Stack.pop stack in
+          if !count < min then patch.(!count) <- i;
+          incr count;
+          if Char.code (Bytes.get grid i) <> index then only := false;
+          let row = i / size and col = i mod size in
+          for r = max 0 (row - 1) to Int.min (size - 1) (row + 1) do
+            for c = max 0 (col - 1) to Int.min (size - 1) (col + 1) do
+              let j = (r * size) + c in
+              if Bytes.get grid j <> '\255' && Bytes.get seen j = '\000' then begin
+                Bytes.set seen j '\001';
+                Stack.push j stack
+              end
+            done
+          done
+        done;
+        if !only && !count < min then
+          for k = 0 to !count - 1 do
+            Bytes.set grid patch.(k) '\255'
+          done
       end
     done
 
@@ -1026,17 +1109,21 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     let grid = Coarse.create () in
     (* The water of OSM first, which then has its samples, and in place of
        CORINE's: what that leaves empty is filled with the land around. But
-       for the water courses, which stay CORINE's, and the smaller ponds: at
-       a sample every 4 arcseconds (some 120 m by 85) a river is a dotted
-       line, where its centres happen to fall, and each pond that has one a
-       sample of water, when CORINE draws neither under 100 m across. *)
+       for the smaller ponds: each would be a sample of water, when CORINE
+       draws nothing under 100 m across. And the water courses are those of
+       both: CORINE draws one 100 m across whole, when what OSM has of its
+       water is too narrow for the samples here and there, and has the bed of
+       gravel of a wider one for sand, where OSM has the water. *)
+    let water = Coarse.create_fine () in
     List.iter
       (fun (code, verts, _, indices, tri_count, _) ->
-        if code <> 511 && Coarse.area verts indices tri_count >= 4. then
-          Coarse.fill grid ~lon ~lat
+        if code = 511 || Coarse.area verts indices tri_count >= 4. then
+          Coarse.fill ~fine:true water ~lon ~lat
             ~index:(Clc_palette.get_index code)
             verts indices tri_count)
       water_pieces;
+    Coarse.fill_water grid water;
+    Coarse.drop_specks grid ~index:(Clc_palette.get_index 511) ~min:8;
     List.iter
       (fun (_area, code, _, tri_count, _, verts, indices) ->
         if overture = None || code = 511 || not (is_water_code code) then
