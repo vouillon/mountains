@@ -202,6 +202,16 @@ type clc_raster_uniforms = {
 }
 (** Cached uniform locations for the CLC raster shader. *)
 
+type cover_fill_uniforms = {
+  u_cover : Gl.uniform_location;
+  u_seeds : Gl.uniform_location;
+  u_coarse : Gl.uniform_location;
+  u_step : Gl.uniform_location;
+  u_has_coarse : Gl.uniform_location;
+  u_default : Gl.uniform_location;
+}
+(** Cached uniform locations for the cover fill shader. *)
+
 type water_raster_uniforms = {
   u_tile_range : Gl.uniform_location;
   u_water_scale : Gl.uniform_location;
@@ -387,6 +397,19 @@ let init_clc_raster_uniforms ctx pid =
     u_tile_min = u "u_tile_min";
     u_tex_min = u "u_tex_min";
     u_tex_range = u "u_tex_range";
+  }
+
+(** Initialize cover fill uniform locations. Call once after program creation.
+*)
+let init_cover_fill_uniforms ctx pid =
+  let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  {
+    u_cover = u "u_cover";
+    u_seeds = u "u_seeds";
+    u_coarse = u "u_coarse";
+    u_step = u "u_step";
+    u_has_coarse = u "u_has_coarse";
+    u_default = u "u_default";
   }
 
 (** Initialize Water raster uniform locations. Call once after program creation.

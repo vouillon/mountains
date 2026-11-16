@@ -383,6 +383,15 @@ let clc_raster_program =
     attributes = [ "in_norm_pos"; "in_color_idx" ];
   }
 
+(* Fills the holes the CLC rasterization leaves for water with the land
+   around *)
+let cover_fill_program =
+  {
+    vertex_shader = quad_vertex_shader;
+    fragment_shader = [%blob "shaders/cover_fill.frag"];
+    attributes = [];
+  }
+
 let water_raster_program =
   {
     vertex_shader = [%blob "shaders/water_raster.vert"];
@@ -823,8 +832,10 @@ type graphics_resources = {
   ao_bake_uniforms : Render_state.ao_bake_uniforms;
   ao_blur_uniforms : Render_state.ao_blur_uniforms;
   clc_raster_pid : Gl.program;
+  cover_fill_pid : Gl.program;
   water_raster_pid : Gl.program;
   clc_raster_uniforms : Render_state.clc_raster_uniforms;
+  cover_fill_uniforms : Render_state.cover_fill_uniforms;
   water_raster_uniforms : Render_state.water_raster_uniforms;
   radial_params : Render_state.radial_params;
   nearest_sampler : Gl.sampler;
@@ -955,6 +966,10 @@ let init_graphics ctx =
   let clc_raster_uniforms =
     Render_state.init_clc_raster_uniforms ctx clc_raster_pid
   in
+  let cover_fill_pid = Web_utils.create_program ctx cover_fill_program in
+  let cover_fill_uniforms =
+    Render_state.init_cover_fill_uniforms ctx cover_fill_pid
+  in
   let water_raster_pid = Web_utils.create_program ctx water_raster_program in
   let water_raster_uniforms =
     Render_state.init_water_raster_uniforms ctx water_raster_pid
@@ -997,8 +1012,10 @@ let init_graphics ctx =
     ao_bake_uniforms;
     ao_blur_uniforms;
     clc_raster_pid;
+    cover_fill_pid;
     water_raster_pid;
     clc_raster_uniforms;
+    cover_fill_uniforms;
     water_raster_uniforms;
     radial_params;
     nearest_sampler;
@@ -1447,7 +1464,8 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
 let far_step = 4
 
 let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
-    ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
+    ~cover_fill_pid ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
+    (fill_u : Render_state.cover_fill_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
   (* CLC GPU Rasterization setup.
 
@@ -1489,13 +1507,42 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     rb
   in
 
-  (* Attach to FBO (attach layer 0 initially) *)
+  (* The polygons of a level are not drawn into the level itself but into
+     [raw_tex], where the water CORINE has leaves holes: [cover_fill.frag]
+     writes the level from it, the holes filled with the land around, and the
+     OSM water is drawn over that. [seeds] are the two sides of its jump flood,
+     and [coarse_tex] the level above as filled, before its water, for the
+     holes whose nearest land is beyond the level. 16 MiB in all, for the time
+     of the bake. *)
+  let scratch format size =
+    let tex = Gl.create_texture ctx in
+    Gl.bind_texture ctx Gl.texture_2d (Some tex);
+    Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+    Gl.tex_storage2d ctx Gl.texture_2d 1 format size size;
+    tex
+  in
+  let seeds_size = cover_map_size / 2 in
+  let seeds = [| scratch Gl.r32ui seeds_size; scratch Gl.r32ui seeds_size |] in
+  let coarse_tex = scratch Gl.r8ui cover_map_size in
+  let raw_tex = scratch Gl.r8ui cover_map_size in
+  let fill_fbo = Gl.create_framebuffer ctx in
+  Gl.active_texture ctx Gl.texture2;
+  Gl.bind_texture ctx Gl.texture_2d (Some coarse_tex);
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some raw_tex);
+  Gl.use_program ctx cover_fill_pid;
+  Gl.uniform1i ctx fill_u.u_cover 0;
+  Gl.uniform1i ctx fill_u.u_seeds 1;
+  Gl.uniform1i ctx fill_u.u_coarse 2;
+  (* Where a hole has no land in reach, the water stays *)
+  Gl.uniform1ui ctx fill_u.u_default (Clc_palette.get_index 512);
+
+  (* Attach to FBO *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
-  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-    cover_map_texture 0 0;
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    raw_tex 0;
   Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.depth_attachment
     Gl.renderbuffer clc_depth_rb;
-  Gl.bind_texture ctx Gl.texture_2d None;
 
   (* Prepare FBO *)
   Gl.viewport ctx 0 0 cover_map_size cover_map_size;
@@ -1638,17 +1685,18 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
       clc_tiles
   in
 
-  (* Render each level in turn *)
-  for level = 0 to clc_levels - 1 do
+  (* Render each level in turn, the widest first: a level takes from the one
+     above it the land around those of its holes that reach its border *)
+  for level = clc_levels - 1 downto 0 do
     let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, v_max_lon, v_max_lat =
       level_bounds.(level)
     in
 
-    (* Switch FBO to this level ONCE. The depth attachment is the same buffer
-       for every level and was bound before the loop; the clear below is what
-       makes it reusable. *)
-    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-      cover_map_texture 0 level;
+    (* The depth attachment is the same buffer for every level and was bound
+       before the loop; the clear below is what makes it reusable. *)
+    Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);
+    Gl.viewport ctx 0 0 cover_map_size cover_map_size;
+    Gl.bind_vertex_array ctx (Some vao);
 
     (* Clear color to sea and depth buffer *)
     Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val;
@@ -1658,7 +1706,90 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
     Gl.enable ctx Gl.depth_test;
     Gl.depth_func ctx Gl.less;
 
-    (* WATER PASS for this level *)
+    (* LAND PASS for this level *)
+    Gl.use_program ctx clc_raster_pid;
+
+    List.iter
+      (fun ( tile_range_lon,
+             tile_range_lat,
+             t_min_lon,
+             t_min_lat,
+             t_max_lon,
+             t_max_lat,
+             land_buffers,
+             _water_buffers ) ->
+        match land_buffers with
+        | None -> ()
+        | Some (pos_buf, col_buf, idx_buf, index_count) ->
+            if
+              Web_utils.intersects
+                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
+                ( v_min_lon,
+                  v_min_lat,
+                  v_ext_lon,
+                  v_ext_lat,
+                  v_max_lon,
+                  v_max_lat )
+            then begin
+              (* Bind pre-uploaded buffers *)
+              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
+              Gl.enable_vertex_attrib_array ctx 0;
+              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+
+              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
+              Gl.enable_vertex_attrib_array ctx 1;
+              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
+
+              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
+
+              (* Set Uniforms *)
+              Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
+              Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
+              Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
+              Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
+
+              Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
+            end)
+      uploaded_tiles;
+
+    (* FILL PASS for this level: the holes take the nearest land *)
+    Gl.bind_vertex_array ctx None;
+    Gl.disable ctx Gl.depth_test;
+    Gl.use_program ctx cover_fill_pid;
+    Gl.bind_framebuffer ctx Gl.framebuffer (Some fill_fbo);
+    Gl.viewport ctx 0 0 seeds_size seeds_size;
+    Gl.uniform1i ctx fill_u.u_has_coarse
+      (if level < clc_levels - 1 then 1 else 0);
+    Gl.active_texture ctx Gl.texture1;
+    let flood step src =
+      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+        Gl.texture_2d
+        seeds.(1 - src)
+        0;
+      Gl.bind_texture ctx Gl.texture_2d (Some seeds.(src));
+      Gl.uniform1i ctx fill_u.u_step step;
+      Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+      1 - src
+    in
+    let rec floods step src =
+      if step = 0 then src else floods (step / 2) (flood step src)
+    in
+    let found = floods (seeds_size / 2) (flood 0 0) in
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+      cover_map_texture 0 level;
+    Gl.viewport ctx 0 0 cover_map_size cover_map_size;
+    Gl.bind_texture ctx Gl.texture_2d (Some seeds.(found));
+    Gl.uniform1i ctx fill_u.u_step (-1);
+    Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+    (* Keep the level as filled for the next one *)
+    if level > 0 then begin
+      Gl.active_texture ctx Gl.texture2;
+      Gl.copy_tex_sub_image2d ctx Gl.texture_2d 0 0 0 0 0 cover_map_size
+        cover_map_size
+    end;
+    Gl.bind_vertex_array ctx (Some vao);
+
+    (* WATER PASS for this level, over the land *)
     Gl.use_program ctx water_raster_pid;
 
     List.iter
@@ -1704,52 +1835,6 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
 
               Gl.draw_elements ctx Gl.triangles water_index_count
                 Gl.unsigned_int 0
-            end)
-      uploaded_tiles;
-
-    (* LAND PASS for this level *)
-    Gl.use_program ctx clc_raster_pid;
-
-    List.iter
-      (fun ( tile_range_lon,
-             tile_range_lat,
-             t_min_lon,
-             t_min_lat,
-             t_max_lon,
-             t_max_lat,
-             land_buffers,
-             _water_buffers ) ->
-        match land_buffers with
-        | None -> ()
-        | Some (pos_buf, col_buf, idx_buf, index_count) ->
-            if
-              Web_utils.intersects
-                (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
-                ( v_min_lon,
-                  v_min_lat,
-                  v_ext_lon,
-                  v_ext_lat,
-                  v_max_lon,
-                  v_max_lat )
-            then begin
-              (* Bind pre-uploaded buffers *)
-              Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
-              Gl.enable_vertex_attrib_array ctx 0;
-              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
-
-              Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
-              Gl.enable_vertex_attrib_array ctx 1;
-              Gl.vertex_attrib_ipointer ctx 1 1 Gl.unsigned_byte 0 0;
-
-              Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
-
-              (* Set Uniforms *)
-              Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
-              Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
-              Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
-              Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
-
-              Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
             end)
       uploaded_tiles
   done;
@@ -1815,6 +1900,11 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   Gl.bind_renderbuffer ctx Gl.renderbuffer None;
   Gl.delete_framebuffer ctx clc_fbo;
   Gl.delete_renderbuffer ctx clc_depth_rb;
+  Gl.delete_framebuffer ctx fill_fbo;
+  Gl.active_texture ctx Gl.texture0;
+  Array.iter (Gl.delete_texture ctx) seeds;
+  Gl.delete_texture ctx coarse_tex;
+  Gl.delete_texture ctx raw_tex;
 
   cover_map_texture
 
@@ -4822,8 +4912,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     ao_bake_uniforms;
     ao_blur_uniforms;
     clc_raster_pid;
+    cover_fill_pid;
     water_raster_pid;
     clc_raster_uniforms;
+    cover_fill_uniforms;
     water_raster_uniforms;
     radial_params;
     nearest_sampler;
@@ -5085,8 +5177,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           let cover_map_texture =
             time_gpu ctx "rasterize_clc_tiles" (fun () ->
                 rasterize_clc_tiles ?far_cover ctx ~lat:alat ~lon:alon ~w
-                  ~clc_tiles ~clc_raster_pid ~water_raster_pid
-                  clc_raster_uniforms water_raster_uniforms)
+                  ~clc_tiles ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
+                  clc_raster_uniforms cover_fill_uniforms water_raster_uniforms)
           in
           {
             anchor_lat;

@@ -165,6 +165,16 @@ type clc_raster_uniforms = {
 }
 (** Cached uniform locations for the CLC raster shader. *)
 
+type cover_fill_uniforms = {
+  u_cover : Gl.uniform_location;
+  u_seeds : Gl.uniform_location;
+  u_coarse : Gl.uniform_location;
+  u_step : Gl.uniform_location;
+  u_has_coarse : Gl.uniform_location;
+  u_default : Gl.uniform_location;
+}
+(** Cached uniform locations for the cover fill shader. *)
+
 type water_raster_uniforms = {
   u_tile_range : Gl.uniform_location;
   u_water_scale : Gl.uniform_location;
@@ -185,6 +195,7 @@ val init_downsample_uniforms : Gl.t -> Gl.program -> downsample_uniforms
 val init_ao_bake_uniforms : Gl.t -> Gl.program -> ao_bake_uniforms
 val init_ao_blur_uniforms : Gl.t -> Gl.program -> ao_blur_uniforms
 val init_clc_raster_uniforms : Gl.t -> Gl.program -> clc_raster_uniforms
+val init_cover_fill_uniforms : Gl.t -> Gl.program -> cover_fill_uniforms
 val init_water_raster_uniforms : Gl.t -> Gl.program -> water_raster_uniforms
 val upload_radial_static : Gl.t -> terrain_uniforms -> radial_params -> unit
 

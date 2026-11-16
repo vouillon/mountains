@@ -83,6 +83,18 @@
   (diff common_header.frag common_header.frag.fmt)))
 
 (rule
+ (target cover_fill.frag.fmt)
+ (deps cover_fill.frag)
+ (action
+  (with-stdout-to %{target}
+   (run clang-format %{deps}))))
+
+(rule
+ (alias fmt)
+ (action
+  (diff cover_fill.frag cover_fill.frag.fmt)))
+
+(rule
  (target downsample.frag.fmt)
  (deps downsample.frag)
  (action
