@@ -3283,10 +3283,15 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
       points
   in
 
-  (* Clear color (the fog colour) is static, set once in [load_location] *)
+  (* Clear color (the fog colour) is static, set once in [load_location].
+     The depth mask first: the sky pass of the previous frame leaves it off,
+     and a clear under it leaves the depth alone. The implicit clear after a
+     presentation hid that, until two draws came without one in between
+     (Firefox, window unfocused): the ground then failed against its own
+     depth, and the fog colour stood in its place. *)
+  Gl.depth_mask ctx true;
   Gl.clear ctx (Gl.color_buffer_bit lor Gl.depth_buffer_bit);
 
-  Gl.depth_mask ctx true;
   Gl.depth_func ctx Gl.lequal;
   Gl.use_program ctx terrain_pid;
   Gl.enable ctx Gl.depth_test;
