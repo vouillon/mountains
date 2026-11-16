@@ -1032,71 +1032,119 @@ let blend ~lat:_ ~(source : source) (raw : raw) =
           height_offset;
         }
 
-(* Warm the persistent cache for offline use, like [Dem_loader.prefetch]: a
-   block twice the extent's width centred on the same anchor gives every
-   location within [block_tiles / 2] tiles (~10 km) of [lat]/[lon] its full
-   extent offline, for ~40 MB on the wire. The geoplateforme exempts the WMTS
-   from its rate limiting, so all the requests are issued at once, like the
-   extent's own.
+(* Fetch, [parallel] at a time, every one of [urls] that the persistent data
+   cache does not hold yet, and say how many that was.
 
    The requests are made through the service worker, which stores every
    response in the persistent data cache -- a 404 included, since it means
-   "outside French territory" and is served back rather than asked again.
-   [Cache.add] would reject those, hence fetches rather than the direct cache
-   writes of [Dem_loader.prefetch]. *)
-let rec prefetch layer ~lat ~lon =
-  match layer.kind with
-  (* WMS blocks are deliberately not prefetched: 4 MB buys ~600 m of offline
-     roaming against the ~40 MB that buys ~10 km for [l13], which is the wrong
-     trade. Their absence offline is invisible -- the blend falls back to the
-     coarser surface. *)
-  | Wms_projected _ | Own_tiles _ -> Lwt.return_unit
-  | Wmts { matrix_level; tiles_per_axis; block_tiles; _ } ->
-      prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon
-
-and prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon =
-  let _, _, anchor_row, anchor_col = anchor_corner ~tiles_per_axis ~lat ~lon in
-  let n = 2 * block_tiles in
-  let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
+   "no data there" and is served back rather than asked again. [Cache.add]
+   would reject those, hence fetches rather than the direct cache writes of
+   [Dem_loader.prefetch]. *)
+let warm_cache ~parallel urls =
   let* cache =
     to_lwt
       (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
          (Jstr.v Data_cache.name))
   in
   match cache with
-  | Error _ -> Lwt.return_unit
+  | Error _ -> Lwt.return 0
   | Ok cache ->
-      let fetched = ref 0 in
-      let tasks =
+      let fetched = ref 0 and queue = ref urls in
+      let rec worker () =
+        match !queue with
+        | [] -> Lwt.return_unit
+        | url :: rest ->
+            queue := rest;
+            let* () =
+              Lwt.catch
+                (fun () ->
+                  let url = Jstr.v url in
+                  let* cached =
+                    to_lwt
+                      (Brr_io.Fetch.Cache.match' cache
+                         (Brr_io.Fetch.Request.v url))
+                  in
+                  match cached with
+                  | Ok (Some _) -> Lwt.return_unit
+                  | Ok None | Error _ -> (
+                      let* res = to_lwt (Brr_io.Fetch.url url) in
+                      match res with
+                      | Ok _ ->
+                          incr fetched;
+                          Lwt.return_unit
+                      | Error _ -> Lwt.return_unit))
+                (fun _ -> Lwt.return_unit)
+            in
+            worker ()
+      in
+      let* () = Lwt.join (List.init (max 1 parallel) (fun _ -> worker ())) in
+      Lwt.return !fetched
+
+(* How far around the start our own tiles are warmed, each way: a drive of half
+   an hour to three quarters in the mountains. For the 8 m ground that is ~900
+   tiles, ~60 MB in the Ubaye, and every location within ~22 km keeps its whole
+   ring offline; the 16 m canopy adds ~250 tiles, ~10 MB. *)
+let own_prefetch_reach = 30_000.
+
+(* Warm the persistent cache for offline use, like [Dem_loader.prefetch].
+
+   For [Wmts], a block twice the extent's width centred on the same anchor gives
+   every location within [block_tiles / 2] tiles (~10 km) of [lat]/[lon] its
+   full extent offline, for ~40 MB on the wire. The geoplateforme exempts the
+   WMTS from its rate limiting, so all the requests are issued at once, like the
+   extent's own.
+
+   For [Own_tiles], every tile within [own_prefetch_reach] of [lat]/[lon]: a
+   third of the bytes per square kilometre of the WMTS, so three times the area
+   for the same download. Sixteen at a time, so as not to crowd out whatever the
+   view asks for next. *)
+let prefetch layer ~lat ~lon =
+  match layer.kind with
+  (* WMS blocks are deliberately not prefetched: 4 MB buys ~600 m of offline
+     roaming against the ~40 MB that buys ~10 km for [l13], which is the wrong
+     trade. Their absence offline is invisible -- the blend falls back to the
+     coarser surface. *)
+  | Wms_projected _ -> Lwt.return_unit
+  | Wmts { matrix_level; tiles_per_axis; block_tiles; _ } ->
+      let _, _, anchor_row, anchor_col =
+        anchor_corner ~tiles_per_axis ~lat ~lon
+      in
+      let n = 2 * block_tiles in
+      let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
+      let urls =
         List.concat_map
           (fun br ->
             List.map
               (fun bc ->
-                Lwt.catch
-                  (fun () ->
-                    let url =
-                      Jstr.v
-                        (wmts_url ~matrix_level ~row:(row0 + br) ~col:(col0 + bc))
-                    in
-                    let* cached =
-                      to_lwt
-                        (Brr_io.Fetch.Cache.match' cache
-                           (Brr_io.Fetch.Request.v url))
-                    in
-                    match cached with
-                    | Ok (Some _) -> Lwt.return_unit
-                    | Ok None | Error _ -> (
-                        let* res = to_lwt (Brr_io.Fetch.url url) in
-                        match res with
-                        | Ok _ ->
-                            incr fetched;
-                            Lwt.return_unit
-                        | Error _ -> Lwt.return_unit))
-                  (fun _ -> Lwt.return_unit))
+                wmts_url ~matrix_level ~row:(row0 + br) ~col:(col0 + bc))
               (List.init n Fun.id))
           (List.init n Fun.id)
       in
-      let* () = Lwt.join tasks in
-      if !fetched > 0 then
-        Format.eprintf "RGE ALTI: prefetched %d tiles@." !fetched;
+      let* fetched = warm_cache ~parallel:(List.length urls) urls in
+      if fetched > 0 then
+        Format.eprintf "RGE ALTI: prefetched %d tiles@." fetched;
       Lwt.return_unit
+  | Own_tiles { base_url; product; metres } -> (
+      match Projection.of_location ~lat ~lon with
+      | Some crs ->
+          let x, y = Projection.forward crs ~lat ~lon in
+          let tile_m = float tile_px *. metres in
+          let index v = int_of_float (Float.floor (v /. tile_m)) in
+          let range v =
+            let lo = index (v -. own_prefetch_reach) in
+            List.init (index (v +. own_prefetch_reach) - lo + 1) (( + ) lo)
+          in
+          let urls =
+            List.concat_map
+              (fun r ->
+                List.map
+                  (fun c -> own_url ~base_url ~crs ~product ~metres c r)
+                  (range x))
+              (range y)
+          in
+          let* fetched = warm_cache ~parallel:16 urls in
+          if fetched > 0 then
+            Format.eprintf "%s: prefetched %d of %d tiles@." (describe layer)
+              fetched (List.length urls);
+          Lwt.return_unit
+      | _ -> Lwt.return_unit)

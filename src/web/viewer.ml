@@ -7831,7 +7831,10 @@ let main () =
            [ false; true ];
          Lwt.async (fun () ->
              Clc_loader.prefetch ~pois:true ~size:far ~lat ~lon ()));
-        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon)
+        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon);
+        (* Nothing with IGN's canopy, a WMS; with our own tiles, the trees of
+           the same surroundings. *)
+        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.canopy_mid ~lat ~lon)
       end
   in
   update_startup_status "Loading Terrain..." true;

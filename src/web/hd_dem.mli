@@ -160,9 +160,10 @@ val reanchor : t -> old_anchor:int * int -> anchor:int * int -> t
 val prefetch : layer -> lat:float -> lon:float -> unit Lwt.t
 (** Warm the persistent tile cache for offline use with a block twice the
     extent's width around [lat]/[lon] (~40 MB for {!l13}), so every location
-    within about half an extent keeps its full near field offline. Tiles already
-    cached (a cached 404 included) are not requested again; failures are
-    ignored. *)
+    within about half an extent keeps its full near field offline; with our own
+    tiles, every tile within 30 km instead. Tiles already cached (a cached 404
+    included) are not requested again; failures are ignored. Does nothing for a
+    WMS layer. *)
 
 type source
 (** The surface a refinement is mixed into: any u16 grid with a known origin and

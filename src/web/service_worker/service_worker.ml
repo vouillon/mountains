@@ -31,8 +31,15 @@ let open_cache name =
    stored and matched with the query included. *)
 let is_hd_dem url = String.starts_with ~prefix:"https://data.geopf.fr/" url
 
+(* Our own elevation tiles ([Hd_dem.Own_tiles]), wherever they are hosted. An
+   absent one is nodata -- sea, abroad -- which for a given tile set is as
+   permanent as a WMTS 404, so it is cached and served back the same way. A
+   tile set that grows must therefore move to a new URL. *)
+let is_own_hd_tile url = String.ends_with ~suffix:".hdt" url
+
 let is_tile url =
-  String.ends_with ~suffix:".dem" url
+  is_own_hd_tile url
+  || String.ends_with ~suffix:".dem" url
   || String.ends_with ~suffix:".clc" url
   || String.ends_with ~suffix:".tif" url
   || is_hd_dem url
@@ -305,6 +312,9 @@ let () =
                 if is_map_basemap url then Brr_io.Fetch.request request
                 else if is_hd_dem url then
                   use_cache_first ~serve_not_found:true request
+                else if is_own_hd_tile url then
+                  use_cache_first ~serve_not_found:true ~query_opts:match_opts
+                    request
                 else if is_tile url then
                   use_cache_first ~query_opts:match_opts request
                 else if is_shell url then
