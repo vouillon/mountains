@@ -179,16 +179,24 @@ let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
    detail is off, and it is absent from the native grid. It also makes the
    graticule-aligned +-1.22 x 0.87 km anisotropic grid a square one.
 
-   [stem] is shared: one product, two resolutions of it, and the coarser output is
-   the exact 2 x 2 box mean of the finer, so the inner ring's fade onto the middle
-   one hides no product difference at all. Only the middle ring's fade onto l13
-   crosses products, and it has 600 m of annulus for a 3 m worst case.
+   [stem] is shared: one product, two resolutions of it, so the inner ring's fade
+   onto the middle one hides no product difference. It is not an exact nesting,
+   though. Measured 2026-11-16 against the 1 m output over the very boxes [plan]
+   asks for (three places, two pieces each): the Lambert-93 5 m output lands
+   1.00 m south of where it belongs, every time, and even shifted back differs
+   from a 5 x 5 box mean of the 1 m data by 0.15-0.38 m RMS -- the service builds
+   it with some other filter. Left uncorrected: a fifth of a sample, inside a
+   300 m fade, and a fix on IGN's side would turn a correction here into the
+   same error the other way. Over La Reunion the ring is served at 4 m (see
+   [served_metres]), which was an exact 4 x 4 box mean of the 1 m output (on 1
+   km boxes, not on [plan]'s). Only the middle ring's fade onto l13 crosses
+   products, and it has 600 m of annulus for a 3 m worst case.
 
-   The middle ring: 5 m, 1024 samples, so 5120 m per side. Sized by reach rather
-   than by spacing: with the alignment rule below it covers at least 1920 m in
-   every direction, against the 1832 m worst case of the +-2.44 x 1.70 km ring it
-   replaces, and what lies beyond it falls through to l13 at 9.5 m. 2 x 2 GetMaps
-   of 512^2, 4.0 MB. *)
+   The middle ring: 5 m, 1024 samples, so 5120 m per side (4 m and 4096 m over La
+   Reunion). Sized by reach rather than by spacing: with the alignment rule below
+   it covers at least 1920 m in every direction (1536 m over La Reunion), against
+   the 1832 m worst case of the +-2.44 x 1.70 km ring it replaces, and what lies
+   beyond it falls through to l13 at 9.5 m. 2 x 2 GetMaps of 512^2, 4.0 MB. *)
 let lidar_5m =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:600.
@@ -199,8 +207,9 @@ let lidar_5m =
    compress).
 
    [fade_metres] is 300 rather than [l13]'s 1500: the extent is a sixteenth of the
-   width and the surface underneath is the same product, so the annulus has to
-   hide nothing at all here, only the quantisation change.
+   width and the surface underneath is the same product, so the annulus has
+   little to hide here: the quantisation change, and the middle ring's own
+   filtering and 1 m offset (see [lidar_5m]).
 
    RGE ALTI cannot serve this: below level 14 its WMS output is
    nearest-neighbour replication of the 4.77 m grid (100% of 4x4 blocks

@@ -27,16 +27,18 @@ val l13 : layer
     samples per side, 19.5 x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)
 
 val lidar_5m : layer
-(** LIDAR HD bare earth, in the CRS the product is stored in: 4 m square, 1024
-    samples, 4096 m per side. 2 x 2 GetMaps of 512^2, 4.0 MB in total. Nests
-    inside {!l13}; {!lidar_1m} nests inside it, exactly box-consistent with it.
-*)
+(** LIDAR HD bare earth, in the CRS the product is stored in: 5 m square, 1024
+    samples, 5120 m per side (4 m and 4096 m over La Reunion, where the service
+    resamples other spacings badly). 2 x 2 GetMaps of 512^2, 4.0 MB in total.
+    Nests inside {!l13}; {!lidar_1m} nests inside it. Not exactly box-consistent
+    with it over metropolitan France: the service's 5 m output sits 1 m south of
+    the 1 m one and is filtered differently (measured, left uncorrected; see the
+    implementation). *)
 
 val lidar_1m : layer
 (** LIDAR HD bare earth at the product's own 1 m, so nothing resamples it: 2048
     samples, 2048 m per side. 2 x 2 GetMaps of 1024^2, 16.0 MB (this endpoint
-    does not compress). Exactly box-consistent with {!lidar_5m}, both being
-    resolutions of one layer.
+    does not compress). The same layer as {!lidar_5m}, at another resolution.
 
     Absent, like {!lidar_5m}, wherever {!Projection} has no CRS for the
     location: {!fetch} answers [None] and the blend falls back to {!l13}. *)
