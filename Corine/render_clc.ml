@@ -168,351 +168,75 @@ let water_vs_src =
 
 (* --- 3. CLC Loading --- *)
 
-(* Helper to read f64 bits as float *)
-let read_f64_as_float ic =
-  let b0 = Int64.of_int (input_byte ic) in
-  let b1 = Int64.of_int (input_byte ic) in
-  let b2 = Int64.of_int (input_byte ic) in
-  let b3 = Int64.of_int (input_byte ic) in
-  let b4 = Int64.of_int (input_byte ic) in
-  let b5 = Int64.of_int (input_byte ic) in
-  let b6 = Int64.of_int (input_byte ic) in
-  let b7 = Int64.of_int (input_byte ic) in
-  let bits =
-    Int64.logor
-      (Int64.logor
-         (Int64.logor
-            (Int64.logor
-               (Int64.logor
-                  (Int64.logor
-                     (Int64.logor b0 (Int64.shift_left b1 8))
-                     (Int64.shift_left b2 16))
-                  (Int64.shift_left b3 24))
-               (Int64.shift_left b4 32))
-            (Int64.shift_left b5 40))
-         (Int64.shift_left b6 48))
-      (Int64.shift_left b7 56)
-  in
-  Int64.float_of_bits bits
-
 type poi_type = Peak | Saddle
 type poi = { lon : float; lat : float; poi_type : poi_type }
 
 let load_clc file =
   Printf.printf "Loading %s...\n%!" file;
-  let ic = open_in_bin file in
-
-  let magic = really_input_string ic 4 in
-  let is_clc4 = magic = "CLC4" in
-  let is_clc5 = magic = "CLC5" in
-  if magic <> "CLC3" && magic <> "CLC4" && magic <> "CLC5" then
-    failwith ("Invalid magic: " ^ magic);
-
-  let count = input_binary_int ic in
-  let total_verts_header = input_binary_int ic in
-  let total_indices_header = input_binary_int ic in
-
-  (* CLC4/5 has additional water counts, CLC5 also has POI count *)
-  let water_count, water_verts_header, water_indices_header, poi_count =
-    if is_clc5 then
-      let c = input_binary_int ic in
-      let v = input_binary_int ic in
-      let i = input_binary_int ic in
-      let p = input_binary_int ic in
-      (c, v, i, p)
-    else if is_clc4 then
-      let c = input_binary_int ic in
-      let v = input_binary_int ic in
-      let i = input_binary_int ic in
-      (c, v, i, 0)
-    else (0, 0, 0, 0)
+  let tile = Clc_file.read file in
+  let float i =
+    Int64.float_of_bits (String.get_int64_le tile.Clc_file.floats (8 * i))
   in
-
-  let min_lon = read_f64_as_float ic in
-  let min_lat = read_f64_as_float ic in
-  let scale_x = read_f64_as_float ic in
-  let scale_y = read_f64_as_float ic in
-
-  (* CLC4/5 has water scales, CLC5 also has POI scales *)
-  let water_scale_x, water_scale_y, poi_scale_x, poi_scale_y =
-    if is_clc5 then
-      let ws_x = read_f64_as_float ic in
-      let ws_y = read_f64_as_float ic in
-      let ps_x = read_f64_as_float ic in
-      let ps_y = read_f64_as_float ic in
-      (ws_x, ws_y, ps_x, ps_y)
-    else if is_clc4 then (read_f64_as_float ic, read_f64_as_float ic, 0.0, 0.0)
-    else (0.0, 0.0, 0.0, 0.0)
-  in
-
-  Printf.printf
-    "Header: count=%d, verts=%d, indices=%d, origin=(%.2f, %.2f)\n%!" count
-    total_verts_header total_indices_header min_lon min_lat;
-  if is_clc4 || is_clc5 then
-    Printf.printf "Water: count=%d, verts=%d, indices=%d\n%!" water_count
-      water_verts_header water_indices_header;
-  if is_clc5 then Printf.printf "POIs: %d\n%!" poi_count;
-
-  (* Pre-allocate Bigarrays for CLC *)
-  let n_verts = total_verts_header in
-  let n_indices = total_indices_header in
-  let arr_pos = Array1.create int16_unsigned c_layout (n_verts * 2) in
-  let arr_col = Array1.create int8_unsigned c_layout n_verts in
-  let arr_ebo = Array1.create int32 c_layout n_indices in
-
-  (* Pre-allocate for water - use int32 to preserve 24-bit precision *)
-  let water_arr_pos = Array1.create int32 c_layout (water_verts_header * 2) in
-  let water_arr_col = Array1.create int8_unsigned c_layout water_verts_header in
-  let water_arr_ebo = Array1.create int32 c_layout water_indices_header in
+  let min_lon = float 0 and min_lat = float 1 in
+  let scale_x = float 2 and scale_y = float 3 in
+  let water_scale_x = float 4 and water_scale_y = float 5 in
+  let poi_scale_x = float 6 and poi_scale_y = float 7 in
 
   let unknown_codes = Hashtbl.create 5 in
 
-  let read_stream () =
-    let b0 = input_byte ic in
-    let b1 = input_byte ic in
-    let b2 = input_byte ic in
-    let b3 = input_byte ic in
-    let comp_len = b0 lor (b1 lsl 8) lor (b2 lsl 16) lor (b3 lsl 24) in
-    let compressed = really_input_string ic comp_len in
-
-    let uncompress_string str =
-      let input_pos = ref 0 in
-      let len = String.length str in
-      let input_cb buf =
-        let n = min (Bytes.length buf) (len - !input_pos) in
-        if n > 0 then (
-          Bytes.blit_string str !input_pos buf 0 n;
-          input_pos := !input_pos + n);
-        n
-      in
-      let out_buf = Buffer.create (String.length str * 4) in
-      let output_cb buf n = Buffer.add_subbytes out_buf buf 0 n in
-      Zlib.uncompress input_cb output_cb;
-      Buffer.contents out_buf
+  (* The features' vertices and triangles, one feature after another *)
+  let flatten (features : Clc_codec.feature array) =
+    let nv =
+      Array.fold_left (fun a f -> a + Array.length f.Clc_codec.xs) 0 features
     in
-    uncompress_string compressed
+    let ni =
+      Array.fold_left (fun a f -> a + Array.length f.Clc_codec.tris) 0 features
+    in
+    let pos = Array.make (2 * nv) 0 in
+    let col = Array1.create int8_unsigned c_layout nv in
+    let ebo = Array1.create int32 c_layout ni in
+    let v = ref 0 and i = ref 0 in
+    Array.iter
+      (fun (f : Clc_codec.feature) ->
+        if not (Hashtbl.mem code_map f.code || Hashtbl.mem unknown_codes f.code)
+        then begin
+          Printf.printf "Warning: Unknown CLC Code %d \n" f.code;
+          Hashtbl.add unknown_codes f.code true
+        end;
+        let code_idx = get_code_index f.code in
+        Array.iteri
+          (fun k x ->
+            pos.(2 * (!v + k)) <- x;
+            pos.((2 * (!v + k)) + 1) <- f.ys.(k);
+            Array1.set col (!v + k) code_idx)
+          f.xs;
+        Array.iteri
+          (fun k t -> Array1.set ebo (!i + k) (Int32.of_int (!v + t)))
+          f.tris;
+        v := !v + Array.length f.xs;
+        i := !i + Array.length f.tris)
+      features;
+    (pos, col, ebo, ni)
   in
+  let pos, arr_col, arr_ebo, n_indices = flatten tile.cover in
+  let arr_pos = Array1.create int16_unsigned c_layout (Array.length pos) in
+  Array.iteri (Array1.set arr_pos) pos;
+  let wpos, water_arr_col, water_arr_ebo, water_indices = flatten tile.water in
+  let water_arr_pos = Array1.create int32 c_layout (Array.length wpos) in
+  Array.iteri (fun k x -> Array1.set water_arr_pos k (Int32.of_int x)) wpos;
+  Printf.printf
+    "Decoded CLC: %d verts, %d indices; water: %d verts, %d indices\n%!"
+    (Array.length pos / 2)
+    n_indices
+    (Array.length wpos / 2)
+    water_indices;
 
-  let meta_str = read_stream () in
-  let high_x = read_stream () in
-  let low_x = read_stream () in
-  let high_y = read_stream () in
-  let low_y = read_stream () in
-  let high_indices = read_stream () in
-  let low_indices = read_stream () in
-
-  (* Read water streams if CLC4 - use sequential lets for defined order *)
-  let ( water_meta_str,
-        water_high_x,
-        water_mid_x,
-        water_low_x,
-        water_high_y,
-        water_mid_y,
-        water_low_y,
-        water_high_indices,
-        water_low_indices ) =
-    if (is_clc4 || is_clc5) && water_count > 0 then
-      let s1 = read_stream () in
-      let s2 = read_stream () in
-      let s3 = read_stream () in
-      let s4 = read_stream () in
-      let s5 = read_stream () in
-      let s6 = read_stream () in
-      let s7 = read_stream () in
-      let s8 = read_stream () in
-      let s9 = read_stream () in
-      (s1, s2, s3, s4, s5, s6, s7, s8, s9)
-    else ("", "", "", "", "", "", "", "", "")
-  in
-
-  let prev_x = ref 0 in
-  let prev_y = ref 0 in
-  let prev_idx = ref 0 in
-  let global_v_offset = ref 0 in
-  let global_i_offset = ref 0 in
-
-  let zigzag_decode n = (n lsr 1) lxor -(n land 1) in
-
-  let meta_pos = ref 0 in
-  let v_pos = ref 0 in
-  let i_pos = ref 0 in
-
-  let read_u16_meta str pos =
-    let b0 = Char.code str.[!pos] in
-    let b1 = Char.code str.[!pos + 1] in
-    pos := !pos + 2;
-    b0 lor (b1 lsl 8)
-  in
-
-  (* Decode CLC features *)
-  for _ = 1 to count do
-    let code = read_u16_meta meta_str meta_pos in
-    let v_count = read_u16_meta meta_str meta_pos in
-    let t_count = read_u16_meta meta_str meta_pos in
-
-    let code_idx = get_code_index code in
-
-    if not (Hashtbl.mem code_map code) then
-      if not (Hashtbl.mem unknown_codes code) then (
-        Printf.printf "Warning: Unknown CLC Code %d \n" code;
-        Hashtbl.add unknown_codes code true);
-
-    prev_x := 0;
-    prev_y := 0;
-    let base_v = !global_v_offset in
-
-    for k = 0 to v_count - 1 do
-      let idx = !v_pos + k in
-
-      let hx = Char.code high_x.[idx] in
-      let lx = Char.code low_x.[idx] in
-      let zx = lx lor (hx lsl 8) in
-      let sdx = zigzag_decode zx in
-      let qx = (!prev_x + sdx) land 0xFFFF in
-      prev_x := qx;
-
-      let hy = Char.code high_y.[idx] in
-      let ly = Char.code low_y.[idx] in
-      let zy = ly lor (hy lsl 8) in
-      let sdy = zigzag_decode zy in
-      let qy = (!prev_y + sdy) land 0xFFFF in
-      prev_y := qy;
-
-      let out_idx = base_v + k in
-      Array1.set arr_pos (out_idx * 2) qx;
-      Array1.set arr_pos ((out_idx * 2) + 1) qy;
-      Array1.set arr_col out_idx code_idx
-    done;
-
-    v_pos := !v_pos + v_count;
-    global_v_offset := !global_v_offset + v_count;
-
-    prev_idx := 0;
-    let num_indices = t_count * 3 in
-
-    for k = 0 to num_indices - 1 do
-      let idx = !i_pos + k in
-      let hi = Char.code high_indices.[idx] in
-      let li = Char.code low_indices.[idx] in
-      let zi = li lor (hi lsl 8) in
-      let sdi = zigzag_decode zi in
-      let idx_val = (!prev_idx + sdi) land 0xFFFF in
-      prev_idx := idx_val;
-
-      let final_idx = base_v + idx_val in
-      Array1.set arr_ebo (!global_i_offset + k) (Int32.of_int final_idx)
-    done;
-    i_pos := !i_pos + num_indices;
-    global_i_offset := !global_i_offset + num_indices
-  done;
-
-  Printf.printf "Decoded CLC: %d verts, %d indices\n%!" !global_v_offset
-    !global_i_offset;
-
-  (* Decode water features if CLC4 *)
-  let water_global_v_offset = ref 0 in
-  let water_global_i_offset = ref 0 in
-
-  if (is_clc4 || is_clc5) && water_count > 0 then begin
-    Printf.printf "Decoding water: count=%d, expected verts=%d, indices=%d\n%!"
-      water_count water_verts_header water_indices_header;
-    Printf.printf
-      "  Stream sizes: meta=%d, hx=%d, mx=%d, lx=%d, hy=%d, my=%d, ly=%d, \
-       hi=%d, li=%d\n\
-       %!"
-      (String.length water_meta_str)
-      (String.length water_high_x)
-      (String.length water_mid_x)
-      (String.length water_low_x)
-      (String.length water_high_y)
-      (String.length water_mid_y)
-      (String.length water_low_y)
-      (String.length water_high_indices)
-      (String.length water_low_indices);
-    let water_meta_pos = ref 0 in
-    let water_v_pos = ref 0 in
-    let water_i_pos = ref 0 in
-
-    for feat_i = 1 to water_count do
-      let code = read_u16_meta water_meta_str water_meta_pos in
-      let v_count = read_u16_meta water_meta_str water_meta_pos in
-      let t_count = read_u16_meta water_meta_str water_meta_pos in
-
-      let code_idx = get_code_index code in
-
-      prev_x := 0;
-      prev_y := 0;
-      let base_v = !water_global_v_offset in
-
-      (* Bounds check before vertex decode *)
-      if !water_v_pos + v_count > String.length water_high_x then
-        failwith
-          (Printf.sprintf
-             "Water vertex overflow at feature %d: v_pos=%d, v_count=%d, \
-              stream_len=%d"
-             feat_i !water_v_pos v_count
-             (String.length water_high_x));
-
-      (* 3-byte coordinate decoding - scale to 16-bit range for GL compatibility *)
-      for k = 0 to v_count - 1 do
-        let idx = !water_v_pos + k in
-
-        let hx = Char.code water_high_x.[idx] in
-        let mx = Char.code water_mid_x.[idx] in
-        let lx = Char.code water_low_x.[idx] in
-        let zx = lx lor (mx lsl 8) lor (hx lsl 16) in
-        let sdx = zigzag_decode zx in
-        (* 24-bit modular: mask with 0xFFFFFF *)
-        let qx = (!prev_x + sdx) land 0xFFFFFF in
-        prev_x := qx;
-
-        let hy = Char.code water_high_y.[idx] in
-        let my = Char.code water_mid_y.[idx] in
-        let ly = Char.code water_low_y.[idx] in
-        let zy = ly lor (my lsl 8) lor (hy lsl 16) in
-        let sdy = zigzag_decode zy in
-        let qy = (!prev_y + sdy) land 0xFFFFFF in
-        prev_y := qy;
-
-        (* Store full 24-bit precision coords as int32 *)
-        let out_idx = base_v + k in
-        Array1.set water_arr_pos (out_idx * 2) (Int32.of_int qx);
-        Array1.set water_arr_pos ((out_idx * 2) + 1) (Int32.of_int qy);
-        Array1.set water_arr_col out_idx code_idx
-      done;
-
-      water_v_pos := !water_v_pos + v_count;
-      water_global_v_offset := !water_global_v_offset + v_count;
-
-      prev_idx := 0;
-      let num_indices = t_count * 3 in
-
-      for k = 0 to num_indices - 1 do
-        let idx = !water_i_pos + k in
-        let hi = Char.code water_high_indices.[idx] in
-        let li = Char.code water_low_indices.[idx] in
-        let zi = li lor (hi lsl 8) in
-        let sdi = zigzag_decode zi in
-        let idx_val = (!prev_idx + sdi) land 0xFFFF in
-        prev_idx := idx_val;
-
-        let final_idx = base_v + idx_val in
-        Array1.set water_arr_ebo
-          (!water_global_i_offset + k)
-          (Int32.of_int final_idx)
-      done;
-      water_i_pos := !water_i_pos + num_indices;
-      water_global_i_offset := !water_global_i_offset + num_indices
-    done
-  end;
-
-  (* Read and decode POI streams if CLC5 *)
+  let poi_count = tile.poi_count in
   let pois =
-    if is_clc5 && poi_count > 0 then begin
-      let names_str = read_stream () in
-      let coords_str = read_stream () in
-      let elevs_str = read_stream () in
-      let types_str = read_stream () in
+    if poi_count > 0 then begin
+      let names_str = List.nth tile.pois 0 in
+      let coords_str = List.nth tile.pois 1 in
+      let types_str = List.nth tile.pois 3 in
 
       let pois = ref [] in
       let names_pos = ref 0 in
@@ -543,9 +267,6 @@ let load_clc file =
         let lon = min_lon +. (float qx /. poi_scale_x) in
         let lat = min_lat +. (float qy /. poi_scale_y) in
 
-        (* Skip elevation for now - just types *)
-        let _ = elevs_str in
-
         (* Read type *)
         let typ = Char.code types_str.[!types_pos] in
         incr types_pos;
@@ -559,8 +280,6 @@ let load_clc file =
     else []
   in
 
-  close_in ic;
-
   (* Return CLC data, water data, POI data, and metadata *)
   ( n_indices,
     arr_pos,
@@ -570,7 +289,7 @@ let load_clc file =
     min_lat,
     scale_x,
     scale_y,
-    water_indices_header,
+    water_indices,
     water_arr_pos,
     water_arr_col,
     water_arr_ebo,

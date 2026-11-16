@@ -24,7 +24,8 @@
   overture
   poi_fetch
   proj_3035
-  proj_2975)
+  proj_2975
+  clc_codec)
  (libraries static_r_tree yojson unix))
 
 (executables
@@ -49,7 +50,8 @@
   render_dem
   triangulate_test
   polygon_to_svg
-  analyze_polygon)
+  analyze_polygon
+  clc_file)
  (libraries
   corine_core
   static_r_tree
@@ -65,8 +67,18 @@
   (-cclib -lGLESv2)))
 
 (executables
- (names triangulation_tests data_tests run_earcut_tests run_earcut_bench)
- (modules triangulation_tests data_tests run_earcut_tests run_earcut_bench)
+ (names
+  triangulation_tests
+  data_tests
+  clc_codec_tests
+  run_earcut_tests
+  run_earcut_bench)
+ (modules
+  triangulation_tests
+  data_tests
+  clc_codec_tests
+  run_earcut_tests
+  run_earcut_bench)
  (libraries corine_core static_r_tree))
 
 (rule
@@ -91,3 +103,8 @@
   (with-stdout-to
    data_tests.output
    (run ./data_tests.exe))))
+
+(rule
+ (alias runtest)
+ (action
+  (run ./clc_codec_tests.exe)))

@@ -33,134 +33,16 @@ let strip_closing_point (ring : Wkb_decode.point list) =
 
 (* --- Encoding / Quantization --- *)
 
+(* A feature's vertices on the tile's grid: [scale] steps per degree from
+   [min], rounded to the nearest one and clamped to [0, limit]. *)
+let quantize (verts : float array) (min_x, min_y) (scale_x, scale_y) limit =
+  let q v m s = max 0 (min limit (int_of_float (((v -. m) *. s) +. 0.5))) in
+  ( Array.init (Array.length verts / 2) (fun i -> q verts.(2 * i) min_x scale_x),
+    Array.init
+      (Array.length verts / 2)
+      (fun i -> q verts.((2 * i) + 1) min_y scale_y) )
+
 module Encoder = struct
-  type t = {
-    (* We write raw bytes to these buffers, then compress them later *)
-    (* 
-       Columnar Storage Buffers:
-       We separate attributes into distinct streams to improve compression.
-       - 'high_x'/'low_x': Splitting 16-bit coordinates into high/low bytes puts similar bytes together.
-         High bytes (e.g. 0x41) tend to stay constant or change slowly for local features, compression well.
-         Low bytes are noisier (random bits), but isolating them prevents them from disrupting high byte entropy.
-    *)
-    meta : Buffer.t; (* Code (u16), VCount (u16), TCount (u16) per feature *)
-    high_x : Buffer.t;
-    high_y : Buffer.t;
-    low_x : Buffer.t;
-    low_y : Buffer.t;
-    high_indices : Buffer.t;
-    low_indices : Buffer.t;
-  }
-
-  let create () =
-    {
-      meta = Buffer.create 1024;
-      high_x = Buffer.create 1024;
-      low_x = Buffer.create 1024;
-      high_y = Buffer.create 1024;
-      low_y = Buffer.create 1024;
-      high_indices = Buffer.create 1024;
-      low_indices = Buffer.create 1024;
-    }
-
-  let write_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xFF))
-
-  let write_u16 buf v =
-    write_u8 buf (v land 0xFF);
-    write_u8 buf ((v lsr 8) land 0xFF)
-
-  (* 
-     ZigZag Encoding:
-     Standard int16 representation uses two's complement. Small negative numbers (e.g. -1) are 0xFFFF,
-     which has high Hamming distance from 0 or 1. This prevents Gzip from identifying small delta patterns.
-     
-     ZigZag maps signed integers to unsigned integers such that small absolute values (positive or negative)
-     become small positive values:
-       0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4 ...
-     
-     Formula: (n << 1) ^ (n >> 31)
-  *)
-  let zigzag_encode n = (n lsl 1) lxor (n asr 31)
-
-  let encode_meta t code v_count t_count =
-    (* Counts are stored as u16 and indices are delta-encoded mod 2^16, so
-       larger features would be silently corrupted. The recursive splitting
-       in the pipeline is supposed to keep features below this limit. *)
-    if v_count > 0xFFFF || t_count > 0xFFFF then
-      failwith
-        (Printf.sprintf
-           "Feature exceeds 16-bit encoding limits: %d vertices, %d triangles"
-           v_count t_count);
-    write_u16 t.meta code;
-    write_u16 t.meta v_count;
-    write_u16 t.meta t_count
-
-  let encode_vertices t (verts : float array) num_verts (min_x, min_y)
-      (scale_x, scale_y) =
-    let prev_x = ref 0 in
-    let prev_y = ref 0 in
-
-    for i = 0 to num_verts - 1 do
-      let x = verts.(i * 2) in
-      let y = verts.((i * 2) + 1) in
-
-      (* Quantize, rounding to nearest grid point *)
-      let qx = int_of_float (((x -. min_x) *. scale_x) +. 0.5) in
-      let qy = int_of_float (((y -. min_y) *. scale_y) +. 0.5) in
-
-      (* Clamp to u16 range just in case *)
-      let qx = max 0 (min 65535 qx) in
-      let qy = max 0 (min 65535 qy) in
-
-      (* 
-         Modular Delta Encoding:
-         Instead of handling boundary checks for wrapping, we embrace 16-bit modular arithmetic.
-         (curr - prev) land 0xFFFF gives the "shortest path" difference in the u16 ring 
-         assuming the step is small (which it is for geometry).
-         
-         We then interpret this unsigned u16 diff as a signed 16-bit integer (sdx/sdy).
-         e.g., if diff is 0xFFFF (65535), it's interpreted as -1.
-      *)
-      let dx = (qx - !prev_x) land 0xFFFF in
-      let dy = (qy - !prev_y) land 0xFFFF in
-      prev_x := qx;
-      prev_y := qy;
-
-      let sdx = if dx >= 0x8000 then dx - 0x10000 else dx in
-      let sdy = if dy >= 0x8000 then dy - 0x10000 else dy in
-
-      (* ZigZag Encoding *)
-      let zx = zigzag_encode sdx in
-      let zy = zigzag_encode sdy in
-
-      (* Split Bytes *)
-      write_u8 t.low_x (zx land 0xFF);
-      write_u8 t.high_x ((zx lsr 8) land 0xFF);
-
-      write_u8 t.low_y (zy land 0xFF);
-      write_u8 t.high_y ((zy lsr 8) land 0xFF)
-    done
-
-  let encode_indices t indices count =
-    let prev_idx = ref 0 in
-    for i = 0 to count - 1 do
-      let idx = indices.(i) in
-
-      (* Delta Encoding (Modular u16) *)
-      let di = (idx - !prev_idx) land 0xFFFF in
-      prev_idx := idx;
-
-      (* Interpret as signed 16-bit for ZigZag *)
-      let sdi = if di >= 0x8000 then di - 0x10000 else di in
-
-      (* ZigZag Encoding *)
-      let zi = zigzag_encode sdi in
-
-      (* Split Bytes *)
-      write_u8 t.low_indices (zi land 0xFF);
-      write_u8 t.high_indices ((zi lsr 8) land 0xFF)
-    done
-
   let compress_string str =
     let input_pos = ref 0 in
     let len = String.length str in
@@ -175,126 +57,6 @@ module Encoder = struct
     let output_cb buf n = Buffer.add_subbytes out_buf buf 0 n in
     Zlib.compress input_cb output_cb;
     Buffer.contents out_buf
-
-  let write_block out_ch buf =
-    let raw_str = Buffer.contents buf in
-    let compressed = compress_string raw_str in
-    let comp_len = String.length compressed in
-
-    (* Write Compressed Length (u32) *)
-    output_byte out_ch (comp_len land 0xFF);
-    output_byte out_ch ((comp_len lsr 8) land 0xFF);
-    output_byte out_ch ((comp_len lsr 16) land 0xFF);
-    output_byte out_ch ((comp_len lsr 24) land 0xFF);
-
-    output_string out_ch compressed
-end
-
-(* Water encoder with 3-byte coordinates for ~30-50cm precision *)
-module Water_encoder = struct
-  type t = {
-    meta : Buffer.t; (* Code (u16), VCount (u16), TCount (u16) per feature *)
-    high_x : Buffer.t;
-    mid_x : Buffer.t;
-    low_x : Buffer.t;
-    high_y : Buffer.t;
-    mid_y : Buffer.t;
-    low_y : Buffer.t;
-    high_indices : Buffer.t;
-    low_indices : Buffer.t;
-  }
-
-  let create () =
-    {
-      meta = Buffer.create 1024;
-      high_x = Buffer.create 1024;
-      mid_x = Buffer.create 1024;
-      low_x = Buffer.create 1024;
-      high_y = Buffer.create 1024;
-      mid_y = Buffer.create 1024;
-      low_y = Buffer.create 1024;
-      high_indices = Buffer.create 1024;
-      low_indices = Buffer.create 1024;
-    }
-
-  let write_u8 buf v = Buffer.add_char buf (Char.chr (v land 0xFF))
-
-  let write_u16 buf v =
-    write_u8 buf (v land 0xFF);
-    write_u8 buf ((v lsr 8) land 0xFF)
-
-  (* ZigZag encoding for 24-bit values *)
-  let zigzag_encode n = (n lsl 1) lxor (n asr 31)
-
-  let encode_meta t code v_count t_count =
-    (* Counts and indices are 16-bit here too (only coordinates are 3-byte) *)
-    if v_count > 0xFFFF || t_count > 0xFFFF then
-      failwith
-        (Printf.sprintf
-           "Water feature exceeds 16-bit encoding limits: %d vertices, %d \
-            triangles"
-           v_count t_count);
-    write_u16 t.meta code;
-    write_u16 t.meta v_count;
-    write_u16 t.meta t_count
-
-  (* 3-byte coordinate encoding for water layer *)
-  let encode_vertices t (verts : float array) num_verts (min_x, min_y)
-      (scale_x, scale_y) =
-    let prev_x = ref 0 in
-    let prev_y = ref 0 in
-
-    for i = 0 to num_verts - 1 do
-      let x = verts.(i * 2) in
-      let y = verts.((i * 2) + 1) in
-
-      (* Quantize to 24-bit range (rounding to nearest) but use limited
-         scale for ~40cm precision *)
-      let qx = int_of_float (((x -. min_x) *. scale_x) +. 0.5) in
-      let qy = int_of_float (((y -. min_y) *. scale_y) +. 0.5) in
-
-      (* Clamp to 24-bit range (0 to 16777215) *)
-      let qx = max 0 (min 0xFFFFFF qx) in
-      let qy = max 0 (min 0xFFFFFF qy) in
-
-      (* Modular Delta Encoding for 24-bit values *)
-      let dx = (qx - !prev_x) land 0xFFFFFF in
-      let dy = (qy - !prev_y) land 0xFFFFFF in
-      prev_x := qx;
-      prev_y := qy;
-
-      (* Convert to signed for zigzag *)
-      let sdx = if dx >= 0x800000 then dx - 0x1000000 else dx in
-      let sdy = if dy >= 0x800000 then dy - 0x1000000 else dy in
-
-      (* ZigZag Encoding *)
-      let zx = zigzag_encode sdx in
-      let zy = zigzag_encode sdy in
-
-      (* Split into 3 bytes *)
-      write_u8 t.low_x (zx land 0xFF);
-      write_u8 t.mid_x ((zx lsr 8) land 0xFF);
-      write_u8 t.high_x ((zx lsr 16) land 0xFF);
-
-      write_u8 t.low_y (zy land 0xFF);
-      write_u8 t.mid_y ((zy lsr 8) land 0xFF);
-      write_u8 t.high_y ((zy lsr 16) land 0xFF)
-    done
-
-  (* Index encoding unchanged from CLC (16-bit sufficient) *)
-  let encode_indices t indices count =
-    let prev_idx = ref 0 in
-    for i = 0 to count - 1 do
-      let idx = indices.(i) in
-      let di = (idx - !prev_idx) land 0xFFFF in
-      prev_idx := idx;
-      let sdi = if di >= 0x8000 then di - 0x10000 else di in
-      let zi = zigzag_encode sdi in
-      write_u8 t.low_indices (zi land 0xFF);
-      write_u8 t.high_indices ((zi lsr 8) land 0xFF)
-    done
-
-  let write_block out_ch buf = Encoder.write_block out_ch buf
 end
 
 (* POI encoder for peaks and saddles *)
@@ -366,8 +128,6 @@ module Poi_encoder = struct
       match poi.poi_type with Poi_fetch.Peak -> 0 | Poi_fetch.Saddle -> 1
     in
     write_u8 t.types type_byte
-
-  let write_block out_ch buf = Encoder.write_block out_ch buf
 end
 
 module type PROJ = sig
@@ -705,7 +465,6 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     }
   in
 
-  let encoder = Encoder.create () in
   let entry_count = ref 0 in
   let total_vertices = ref 0 in
   let total_indices = ref 0 in
@@ -1164,49 +923,40 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     exit 0
   end;
 
-  (* Encode Sorted Features *)
-  List.iter
-    (fun ( _area,
-           code,
-           v_count,
-           tri_count,
-           valid_i_count,
-           final_verts,
-           final_indices ) ->
-      Encoder.encode_meta encoder code v_count tri_count;
-
-      let _ =
-        Encoder.encode_vertices encoder final_verts v_count (min_lon, min_lat)
-          (scale_x, scale_y)
-      in
-      let _ = Encoder.encode_indices encoder final_indices valid_i_count in
-      ())
-    sorted_features;
+  let cover =
+    Array.of_list
+      (List.map
+         (fun (_area, code, _, _, valid_i_count, final_verts, final_indices) ->
+           let xs, ys =
+             quantize final_verts (min_lon, min_lat) (scale_x, scale_y) 0xFFFF
+           in
+           {
+             Clc_codec.code;
+             xs;
+             ys;
+             tris = Array.sub final_indices 0 valid_i_count;
+           })
+         sorted_features)
+  in
 
   (* === WATER LAYER ENCODING === *)
   (* Water scale: ~220000 values for 1.1° gives ~40cm precision *)
   let water_scale_x = 220000.0 /. range_x in
   let water_scale_y = 220000.0 /. range_y in
 
-  let water_encoder = Water_encoder.create () in
-  let water_entry_count = ref 0 in
-  let water_total_vertices = ref 0 in
-  let water_total_indices = ref 0 in
-
-  List.iter
-    (fun (clc_code, final_verts, v_count, final_indices, tri_count, i_count) ->
-      incr water_entry_count;
-      water_total_vertices := !water_total_vertices + v_count;
-      water_total_indices := !water_total_indices + i_count;
-      Water_encoder.encode_meta water_encoder clc_code v_count tri_count;
-      Water_encoder.encode_vertices water_encoder final_verts v_count
-        (min_lon, min_lat)
-        (water_scale_x, water_scale_y);
-      Water_encoder.encode_indices water_encoder final_indices i_count)
-    water_pieces;
-
-  Printf.printf "Processed %d water features (%d verts, %d indices)\n%!"
-    !water_entry_count !water_total_vertices !water_total_indices;
+  let water =
+    Array.of_list
+      (List.map
+         (fun (code, final_verts, _, final_indices, _, i_count) ->
+           let xs, ys =
+             quantize final_verts (min_lon, min_lat)
+               (water_scale_x, water_scale_y)
+               0xFFFFFF
+           in
+           { Clc_codec.code; xs; ys; tris = Array.sub final_indices 0 i_count })
+         water_pieces)
+  in
+  Printf.printf "Processed %d water features\n%!" (Array.length water);
 
   (* === POI LAYER PROCESSING === *)
   let poi_encoder = Poi_encoder.create () in
@@ -1237,116 +987,73 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
 
   Printf.printf "Processed %d POIs\n%!" !poi_count;
 
-  (* === FILE OUTPUT (CLC5 Format) === *)
-  (* Write to a temporary file and rename at the end, so an interrupted run
-     cannot leave a plausible-looking partial tile behind *)
+  (* === FILE OUTPUT (CLC6 Format, see Clc_file) === *)
   let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
-  let tmp_file_path = output_file_path ^ ".tmp" in
-  let out_ch = open_out_bin tmp_file_path in
-
-  (* Write Header (Magic + Counts + Bounds + Scales) *)
-  output_string out_ch "CLC5";
-
-  (* CLC counts *)
-  output_binary_int out_ch !entry_count;
-  output_binary_int out_ch !total_vertices;
-  output_binary_int out_ch !total_indices;
-
-  (* Water counts *)
-  output_binary_int out_ch !water_entry_count;
-  output_binary_int out_ch !water_total_vertices;
-  output_binary_int out_ch !water_total_indices;
-
-  (* POI count *)
-  output_binary_int out_ch !poi_count;
-
-  (* Write float params (bounds + scales) for reconstruction *)
-  let write_float64 f =
-    let bits = Int64.bits_of_float f in
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 0) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 8) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 16) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 24) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 32) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 40) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 48) land 0xFF);
-    output_byte out_ch (Int64.to_int (Int64.shift_right bits 56) land 0xFF)
+  let floats = Bytes.create 64 in
+  List.iteri
+    (fun i f -> Bytes.set_int64_le floats (8 * i) (Int64.bits_of_float f))
+    [
+      min_lon;
+      min_lat;
+      scale_x;
+      scale_y;
+      water_scale_x;
+      water_scale_y;
+      poi_scale_x;
+      poi_scale_y;
+    ];
+  let sizes =
+    Clc_file.write output_file_path
+      {
+        Clc_file.floats = Bytes.to_string floats;
+        cover;
+        water;
+        poi_count = !poi_count;
+        pois =
+          List.map Buffer.contents
+            [
+              poi_encoder.names;
+              poi_encoder.coords;
+              poi_encoder.elevations;
+              poi_encoder.types;
+            ];
+      }
   in
-  write_float64 min_lon;
-  write_float64 min_lat;
-  write_float64 scale_x;
-  write_float64 scale_y;
-  write_float64 water_scale_x;
-  write_float64 water_scale_y;
-  write_float64 poi_scale_x;
-  write_float64 poi_scale_y;
-
-  (* Write CLC Streams *)
-  Encoder.write_block out_ch encoder.meta;
-  Encoder.write_block out_ch encoder.high_x;
-  Encoder.write_block out_ch encoder.low_x;
-  Encoder.write_block out_ch encoder.high_y;
-  Encoder.write_block out_ch encoder.low_y;
-  Encoder.write_block out_ch encoder.high_indices;
-  Encoder.write_block out_ch encoder.low_indices;
-
-  (* Write Water Streams (3-byte coords) *)
-  Water_encoder.write_block out_ch water_encoder.meta;
-  Water_encoder.write_block out_ch water_encoder.high_x;
-  Water_encoder.write_block out_ch water_encoder.mid_x;
-  Water_encoder.write_block out_ch water_encoder.low_x;
-  Water_encoder.write_block out_ch water_encoder.high_y;
-  Water_encoder.write_block out_ch water_encoder.mid_y;
-  Water_encoder.write_block out_ch water_encoder.low_y;
-  Water_encoder.write_block out_ch water_encoder.high_indices;
-  Water_encoder.write_block out_ch water_encoder.low_indices;
-
-  (* Write POI Streams *)
-  Poi_encoder.write_block out_ch poi_encoder.names;
-  Poi_encoder.write_block out_ch poi_encoder.coords;
-  Poi_encoder.write_block out_ch poi_encoder.elevations;
-  Poi_encoder.write_block out_ch poi_encoder.types;
-
-  Printf.printf "Streams Written.\n%!";
-
-  close_out out_ch;
-  Sys.rename tmp_file_path output_file_path;
   ignore (Sqlite3.db_close db);
   Printf.printf
     "Done. Extracted %d CLC features (%d verts, %d indices) + %d water \
-     features (%d verts, %d indices) + %d POIs.\n\
+     features + %d POIs: %d bytes.\n\
      %!"
-    !entry_count !total_vertices !total_indices !water_entry_count
-    !water_total_vertices !water_total_indices !poi_count
+    !entry_count !total_vertices !total_indices (Array.length water) !poi_count
+    (List.fold_left ( + ) 112 (List.map (fun n -> n + 8) sizes))
 
 (* The POIs of a tile on their own, as a tile with no land cover and no water
    that the client reads like any other: what it takes of a cell it only sees
    from afar, whose cover comes with [Coarse]. The POI streams are copied as
    they are. *)
 let extract_pois input output =
-  let ic = open_in_bin input in
-  let data = really_input_string ic (in_channel_length ic) in
-  close_in ic;
-  if String.length data < 96 || String.sub data 0 4 <> "CLC5" then
-    failwith (input ^ ": not a CLC5 tile");
-  (* Magic, seven counts, eight floats; then seven streams of land cover and
-     nine of water, each behind its length. *)
-  let pos = ref 96 in
-  for _ = 1 to 16 do
-    pos := !pos + 4 + Int32.to_int (String.get_int32_le data !pos)
-  done;
-  let oc = open_out_bin (output ^ ".tmp") in
-  output_string oc "CLC5";
-  for _ = 1 to 6 do
-    output_binary_int oc 0
-  done;
-  output_string oc (String.sub data 28 (4 + 64));
-  for _ = 1 to 16 do
-    Encoder.write_block oc (Buffer.create 0)
-  done;
-  output_string oc (String.sub data !pos (String.length data - !pos));
-  close_out oc;
-  Sys.rename (output ^ ".tmp") output
+  let tile = Clc_file.read input in
+  ignore (Clc_file.write output { tile with cover = [||]; water = [||] })
+
+(* A tile, CLC5 or CLC6, rewritten as CLC6: the same features, read back from
+   the file written and compared with those read. *)
+let convert input output =
+  let tile = Clc_file.read input in
+  let sizes = Clc_file.write output tile in
+  let back = Clc_file.read output in
+  (match
+     ( Clc_codec.differences tile.cover back.cover,
+       Clc_codec.differences tile.water back.water )
+   with
+  | None, None -> ()
+  | Some d, _ -> failwith (output ^ ": land cover differs, " ^ d)
+  | _, Some d -> failwith (output ^ ": water differs, " ^ d));
+  if back.pois <> tile.pois || back.poi_count <> tile.poi_count then
+    failwith (output ^ ": POIs differ");
+  Printf.printf "%s: %d -> %d bytes (%s)\n%!" output
+    (Unix.stat input).Unix.st_size
+    (List.fold_left ( + ) 112 (List.map (fun n -> n + 8) sizes))
+    (String.concat " " (List.map string_of_int sizes))
 
 let () =
   let rec options ?(coarse = false) ?overture = function
@@ -1363,9 +1070,12 @@ let () =
           \  --overture: the water, the sea included, and the POIs from the \
            files of <dir> (fetch_overture.sh) and not from the Overpass API\n\
           \       %s --pois <tile.clc> <output.clc>\n\
-          \  the tile's POIs alone\n"
-          Sys.argv.(0) Sys.argv.(0)
+          \  the tile's POIs alone\n\
+          \       %s --convert <tile.clc> <output.clc>\n\
+          \  a CLC5 tile as CLC6, checked\n"
+          Sys.argv.(0) Sys.argv.(0) Sys.argv.(0)
   in
   match List.tl (Array.to_list Sys.argv) with
   | [ "--pois"; input; output ] -> extract_pois input output
+  | [ "--convert"; input; output ] -> convert input output
   | args -> options args
