@@ -1548,8 +1548,8 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
   Gl.uniform1i ctx fill_u.u_cover 0;
   Gl.uniform1i ctx fill_u.u_seeds 1;
   Gl.uniform1i ctx fill_u.u_coarse 2;
-  (* Where a hole has no land in reach, the water stays *)
-  Gl.uniform1ui ctx fill_u.u_default (Clc_palette.get_index 512);
+  (* A hole with no land in reach is out at sea *)
+  Gl.uniform1ui ctx fill_u.u_default (Clc_palette.get_index 523);
 
   (* Attach to FBO *)
   Gl.bind_framebuffer ctx Gl.framebuffer (Some clc_fbo);

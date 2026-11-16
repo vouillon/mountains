@@ -427,6 +427,51 @@ module Coarse = struct
       end
     done
 
+  (* The area of a triangulated polygon, in samples *)
+  let area verts indices tri_count =
+    let sum = ref 0. in
+    for t = 0 to tri_count - 1 do
+      let x v = verts.(2 * indices.((3 * t) + v))
+      and y v = verts.((2 * indices.((3 * t) + v)) + 1) in
+      sum :=
+        !sum
+        +. Float.abs
+             (((x 1 -. x 0) *. (y 2 -. y 0)) -. ((y 1 -. y 0) *. (x 2 -. x 0)))
+    done;
+    !sum /. 2. *. float (size * size)
+
+  (* The samples nothing has take the class of the nearest land, by a
+     breadth-first walk from the land outwards: with the water taken from OSM
+     these are where CORINE had water and OSM has none, as the client fills
+     them on the base grid (cover_fill.frag). The walk goes over the water,
+     which keeps its class: a hole may have nothing but water around it. *)
+  let fill_holes grid ~is_land =
+    let nearest = Bytes.make (size * size) '\255' in
+    let queue = Queue.create () in
+    Bytes.iteri
+      (fun i c ->
+        if c <> '\255' && is_land (Char.code c) then begin
+          Bytes.set nearest i c;
+          Queue.add i queue
+        end)
+      grid;
+    while not (Queue.is_empty queue) do
+      let i = Queue.take queue in
+      let visit j =
+        if Bytes.get nearest j = '\255' then begin
+          Bytes.set nearest j (Bytes.get nearest i);
+          if Bytes.get grid j = '\255' then
+            Bytes.set grid j (Bytes.get nearest i);
+          Queue.add j queue
+        end
+      in
+      let row = i / size and col = i mod size in
+      if row > 0 then visit (i - size);
+      if row < size - 1 then visit (i + size);
+      if col > 0 then visit (i - 1);
+      if col < size - 1 then visit (i + 1)
+    done
+
   let zigzag n =
     let n = n land 0xFFFF in
     let n = if n >= 0x8000 then n - 0x10000 else n in
@@ -478,7 +523,10 @@ module Coarse = struct
     String.length high + String.length low
 end
 
-let process_tile ?(coarse = false) db_path output_dir tile_name =
+(* The water classes of CORINE, which the water of OSM stands in for *)
+let is_water_code code = code = 511 || code = 512 || (code >= 521 && code <= 523)
+
+let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
   let lat, lon = parse_tile_string tile_name in
   Printf.printf "Processing Tile: %s (Lat: %.2f, Lon: %.2f)\n%!" tile_name lat
     lon;
@@ -852,78 +900,21 @@ let process_tile ?(coarse = false) db_path output_dir tile_name =
       all_features
   in
 
-  if coarse then begin
-    let grid = Coarse.create () in
-    List.iter
-      (fun (_area, code, _, tri_count, _, verts, indices) ->
-        Coarse.fill grid ~lon ~lat
-          ~index:(Clc_palette.get_index code)
-          verts indices tri_count)
-      sorted_features;
-    ignore (Sqlite3.db_close db);
-    (* A cell CORINE has nothing for gets no tiles: the client takes a missing
-       one for open sea. *)
-    if sorted_features = [] then begin
-      Printf.printf "No features: nothing written.\n%!";
-      exit 0
-    end;
-    (* What CORINE does not cover is open sea. *)
-    let default = Clc_palette.get_index 523 in
-    let bytes = ref 0 in
-    for row = 0 to 2 do
-      for col = 0 to 2 do
-        (* Row 0 is the southern one, as for the elevation. *)
-        bytes :=
-          !bytes
-          + Coarse.write grid ~default ~row:(2 - row) ~col
-              (Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" output_dir
-                 (if lat >= 0. then 'N' else 'S')
-                 (int_of_float (Float.abs lat))
-                 (if lon >= 0. then 'E' else 'W')
-                 (int_of_float (Float.abs lon))
-                 row col)
-      done
-    done;
-    Printf.printf "Done. %d features over 9 tiles, %d bytes.\n%!"
-      (List.length sorted_features)
-      !bytes;
-    exit 0
-  end;
-
-  (* Encode Sorted Features *)
-  List.iter
-    (fun ( _area,
-           code,
-           v_count,
-           tri_count,
-           valid_i_count,
-           final_verts,
-           final_indices ) ->
-      Encoder.encode_meta encoder code v_count tri_count;
-
-      let _ =
-        Encoder.encode_vertices encoder final_verts v_count (min_lon, min_lat)
-          (scale_x, scale_y)
-      in
-      let _ = Encoder.encode_indices encoder final_indices valid_i_count in
-      ())
-    sorted_features;
-
   (* === WATER LAYER PROCESSING === *)
-  Printf.printf "Fetching water polygons from OSM...\n%!";
-
-  (* Water scale: ~220000 values for 1.1° gives ~40cm precision *)
-  let water_scale_x = 220000.0 /. range_x in
-  let water_scale_y = 220000.0 /. range_y in
-
-  let water_encoder = Water_encoder.create () in
-  let water_entry_count = ref 0 in
-  let water_total_vertices = ref 0 in
-  let water_total_indices = ref 0 in
-
+  (* The water areas, triangulated: from a file of Overture's if there is one
+     (the sea with them), from the Overpass API otherwise. The far field's
+     cover has them only from a file. *)
   let water_features =
-    Osm_fetch.fetch_water_polygons ~min_lat ~min_lon ~max_lat ~max_lon
+    match overture with
+    | Some dir ->
+        Overture.load_water
+          (Filename.concat dir (tile_name ^ ".water.geojsonl"))
+    | None when coarse -> []
+    | None ->
+        Printf.printf "Fetching water polygons from OSM...\n%!";
+        Osm_fetch.fetch_water_polygons ~min_lat ~min_lon ~max_lat ~max_lon
   in
+  let water_pieces = ref [] in
 
   (* Process each water feature *)
   List.iter
@@ -1015,31 +1006,122 @@ let process_tile ?(coarse = false) db_path output_dir tile_name =
                   let tri_count_val = i_count / 3 in
                   let valid_i_count = tri_count_val * 3 in
 
-                  if v_count > 0 && tri_count_val > 0 then begin
-                    incr water_entry_count;
-                    water_total_vertices := !water_total_vertices + v_count;
-                    water_total_indices := !water_total_indices + valid_i_count;
-
-                    Water_encoder.encode_meta water_encoder clc_code v_count
-                      tri_count_val;
-                    Water_encoder.encode_vertices water_encoder final_verts
-                      v_count (min_lon, min_lat)
-                      (water_scale_x, water_scale_y);
-                    Water_encoder.encode_indices water_encoder final_indices
-                      valid_i_count
-                  end
+                  if v_count > 0 && tri_count_val > 0 then
+                    water_pieces :=
+                      ( clc_code,
+                        final_verts,
+                        v_count,
+                        final_indices,
+                        tri_count_val,
+                        valid_i_count )
+                      :: !water_pieces
                 end)
               clipped_pieces
           end)
         flat_arrays)
     water_features;
+  let water_pieces = List.rev !water_pieces in
+
+  if coarse then begin
+    let grid = Coarse.create () in
+    (* The water of OSM first, which then has its samples, and in place of
+       CORINE's: what that leaves empty is filled with the land around. But
+       for the water courses, which stay CORINE's, and the smaller ponds: at
+       a sample every 4 arcseconds (some 120 m by 85) a river is a dotted
+       line, where its centres happen to fall, and each pond that has one a
+       sample of water, when CORINE draws neither under 100 m across. *)
+    List.iter
+      (fun (code, verts, _, indices, tri_count, _) ->
+        if code <> 511 && Coarse.area verts indices tri_count >= 4. then
+          Coarse.fill grid ~lon ~lat
+            ~index:(Clc_palette.get_index code)
+            verts indices tri_count)
+      water_pieces;
+    List.iter
+      (fun (_area, code, _, tri_count, _, verts, indices) ->
+        if overture = None || code = 511 || not (is_water_code code) then
+          Coarse.fill grid ~lon ~lat
+            ~index:(Clc_palette.get_index code)
+            verts indices tri_count)
+      sorted_features;
+    if overture <> None then
+      Coarse.fill_holes grid ~is_land:(fun index ->
+          index < Clc_palette.get_index 511);
+    ignore (Sqlite3.db_close db);
+    (* A cell CORINE has nothing for gets no tiles: the client takes a missing
+       one for open sea. *)
+    if sorted_features = [] then begin
+      Printf.printf "No features: nothing written.\n%!";
+      exit 0
+    end;
+    (* What CORINE does not cover is open sea. *)
+    let default = Clc_palette.get_index 523 in
+    let bytes = ref 0 in
+    for row = 0 to 2 do
+      for col = 0 to 2 do
+        (* Row 0 is the southern one, as for the elevation. *)
+        bytes :=
+          !bytes
+          + Coarse.write grid ~default ~row:(2 - row) ~col
+              (Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" output_dir
+                 (if lat >= 0. then 'N' else 'S')
+                 (int_of_float (Float.abs lat))
+                 (if lon >= 0. then 'E' else 'W')
+                 (int_of_float (Float.abs lon))
+                 row col)
+      done
+    done;
+    Printf.printf "Done. %d features over 9 tiles, %d bytes.\n%!"
+      (List.length sorted_features)
+      !bytes;
+    exit 0
+  end;
+
+  (* Encode Sorted Features *)
+  List.iter
+    (fun ( _area,
+           code,
+           v_count,
+           tri_count,
+           valid_i_count,
+           final_verts,
+           final_indices ) ->
+      Encoder.encode_meta encoder code v_count tri_count;
+
+      let _ =
+        Encoder.encode_vertices encoder final_verts v_count (min_lon, min_lat)
+          (scale_x, scale_y)
+      in
+      let _ = Encoder.encode_indices encoder final_indices valid_i_count in
+      ())
+    sorted_features;
+
+  (* === WATER LAYER ENCODING === *)
+  (* Water scale: ~220000 values for 1.1° gives ~40cm precision *)
+  let water_scale_x = 220000.0 /. range_x in
+  let water_scale_y = 220000.0 /. range_y in
+
+  let water_encoder = Water_encoder.create () in
+  let water_entry_count = ref 0 in
+  let water_total_vertices = ref 0 in
+  let water_total_indices = ref 0 in
+
+  List.iter
+    (fun (clc_code, final_verts, v_count, final_indices, tri_count, i_count) ->
+      incr water_entry_count;
+      water_total_vertices := !water_total_vertices + v_count;
+      water_total_indices := !water_total_indices + i_count;
+      Water_encoder.encode_meta water_encoder clc_code v_count tri_count;
+      Water_encoder.encode_vertices water_encoder final_verts v_count
+        (min_lon, min_lat)
+        (water_scale_x, water_scale_y);
+      Water_encoder.encode_indices water_encoder final_indices i_count)
+    water_pieces;
 
   Printf.printf "Processed %d water features (%d verts, %d indices)\n%!"
     !water_entry_count !water_total_vertices !water_total_indices;
 
   (* === POI LAYER PROCESSING === *)
-  Printf.printf "Fetching POIs from OSM...\n%!";
-
   let poi_encoder = Poi_encoder.create () in
   let poi_count = ref 0 in
 
@@ -1047,7 +1129,18 @@ let process_tile ?(coarse = false) db_path output_dir tile_name =
   let poi_scale_x = water_scale_x in
   let poi_scale_y = water_scale_y in
 
-  let pois = Poi_fetch.fetch_pois ~min_lat ~min_lon ~max_lat ~max_lon in
+  let pois =
+    match overture with
+    | Some dir ->
+        (* The file reaches past the tile, which is all the encoding spans *)
+        List.filter
+          (fun (poi : Poi_fetch.poi) ->
+            poi.lat >= min_lat && poi.lat <= max_lat && poi.lon >= min_lon
+            && poi.lon <= max_lon)
+          (Overture.load_pois
+             (Filename.concat dir (tile_name ^ ".pois.geojsonl")))
+    | None -> Poi_fetch.fetch_pois ~min_lat ~min_lon ~max_lat ~max_lon
+  in
   List.iter
     (fun poi ->
       Poi_encoder.encode_poi poi_encoder poi (min_lon, min_lat)
@@ -1169,16 +1262,23 @@ let extract_pois input output =
   Sys.rename (output ^ ".tmp") output
 
 let () =
-  match Array.to_list Sys.argv with
-  | [ _; "--pois"; input; output ] -> extract_pois input output
-  | [ _; "--coarse"; db; output_dir; tile ] ->
-      process_tile ~coarse:true db output_dir tile
-  | [ _; db; output_dir; tile ] -> process_tile db output_dir tile
-  | _ ->
-      Printf.printf
-        "Usage: %s [--coarse] <DB> <Output Dir> <TileCode> (e.g. N45E006)\n\
-        \  --coarse: the far field's land cover instead, nine tiles of palette \
-         indices at 4 arcseconds\n\
-        \       %s --pois <tile.clc> <output.clc>\n\
-        \  the tile's POIs alone\n"
-        Sys.argv.(0) Sys.argv.(0)
+  let rec options ?(coarse = false) ?overture = function
+    | "--coarse" :: rest -> options ~coarse:true ?overture rest
+    | "--overture" :: dir :: rest -> options ~coarse ~overture:dir rest
+    | [ db; output_dir; tile ] ->
+        process_tile ~coarse ?overture db output_dir tile
+    | _ ->
+        Printf.printf
+          "Usage: %s [--coarse] [--overture <dir>] <DB> <Output Dir> \
+           <TileCode> (e.g. N45E006)\n\
+          \  --coarse: the far field's land cover instead, nine tiles of \
+           palette indices at 4 arcseconds\n\
+          \  --overture: the water, the sea included, and the POIs from the \
+           files of <dir> (fetch_overture.sh) and not from the Overpass API\n\
+          \       %s --pois <tile.clc> <output.clc>\n\
+          \  the tile's POIs alone\n"
+          Sys.argv.(0) Sys.argv.(0)
+  in
+  match List.tl (Array.to_list Sys.argv) with
+  | [ "--pois"; input; output ] -> extract_pois input output
+  | args -> options args

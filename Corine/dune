@@ -21,6 +21,7 @@
   earcut
   wkb_decode
   osm_fetch
+  overture
   poi_fetch
   proj_3035
   proj_2975)

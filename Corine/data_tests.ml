@@ -1,4 +1,4 @@
-(* Regression tests for WKB decoding and Overpass response parsing.
+(* Regression tests for WKB decoding and Overpass and Overture parsing.
    Run via `dune runtest`. Silent on success; fails loudly otherwise. *)
 
 let fail fmt =
@@ -356,3 +356,61 @@ let () =
         fail "poi: integer coordinates misread";
       if c.Poi_fetch.poi_type <> Poi_fetch.Saddle then fail "poi: wrong type"
   | l -> fail "poi: expected 3 POIs, got %d" (List.length l)
+
+(* --- Overture: water areas --- *)
+
+let () =
+  let lines =
+    [
+      (* A lake with an island: rings closed, as GeoJSON has them *)
+      {|{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[4,0],[4,4],[0,4],[0,0]],[[1,1],[1,2],[2,2],[1,1]]]},"properties":{"subtype":"lake","class":"lake"}}|};
+      (* The sea, behind the record separator of a GeoJSON sequence *)
+      "\x1e"
+      ^ {|{"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[[[[5,5],[6,5],[6,6],[5,5]]],[[[7,7],[8,7],[8,8],[7,7]]]]},"properties":{"subtype":"ocean","class":"ocean"}}|};
+      {|{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]},"properties":{"subtype":"river","class":"river"}}|};
+      (* Not drawn: a pool, a stream as a line, a bay's name *)
+      {|{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]},"properties":{"subtype":"human_made","class":"swimming_pool"}}|};
+      {|{"type":"Feature","geometry":{"type":"LineString","coordinates":[[0,0],[1,0]]},"properties":{"subtype":"stream","class":"stream"}}|};
+      {|{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"subtype":"physical","class":"bay"}}|};
+      "";
+    ]
+  in
+  match Overture.water_of_lines lines with
+  | [ lake; sea; river ] ->
+      if lake.clc_code <> 512 || sea.clc_code <> 523 || river.clc_code <> 511
+      then fail "Overture water: wrong CLC codes";
+      (match lake.polygons with
+      | [ [ outer; hole ] ] ->
+          if List.length outer <> 4 || List.length hole <> 3 then
+            fail "Overture water: closing points kept"
+      | _ -> fail "Overture water: lake should be one polygon with a hole");
+      if List.length sea.polygons <> 2 then
+        fail "Overture water: sea should be two polygons"
+  | l -> fail "Overture water: expected 3 features, got %d" (List.length l)
+
+(* --- Overture: peaks and saddles --- *)
+
+let () =
+  let lines =
+    [
+      {|{"type":"Feature","geometry":{"type":"Point","coordinates":[6.95,44.62]},"properties":{"subtype":"physical","class":"peak","names":{"primary":"Bric de Rubren / Cima Mongioia","common":[["fr","Bric de Rubren"],["it","Cima Mongioia"]],"rules":null},"elevation":3340}}|};
+      {|{"type":"Feature","geometry":{"type":"Point","coordinates":[6.4,45.03]},"properties":{"subtype":"physical","class":"saddle","names":{"primary":"Col du Lautaret","common":null,"rules":null}}}|};
+      (* Without a name, and not a summit *)
+      {|{"type":"Feature","geometry":{"type":"Point","coordinates":[6,44]},"properties":{"subtype":"physical","class":"peak","elevation":2000}}|};
+      {|{"type":"Feature","geometry":{"type":"Point","coordinates":[6,44]},"properties":{"subtype":"tree","class":"tree","names":{"primary":"Le Chêne"}}}|};
+    ]
+  in
+  match Overture.pois_of_lines lines with
+  | [ peak; saddle ] ->
+      if
+        peak.name <> "Bric de Rubren"
+        || peak.elevation <> Some 3340
+        || peak.poi_type <> Poi_fetch.Peak
+        || peak.lon <> 6.95 || peak.lat <> 44.62
+      then fail "Overture POIs: wrong peak";
+      if
+        saddle.name <> "Col du Lautaret"
+        || saddle.elevation <> None
+        || saddle.poi_type <> Poi_fetch.Saddle
+      then fail "Overture POIs: wrong saddle"
+  | l -> fail "Overture POIs: expected 2, got %d" (List.length l)
