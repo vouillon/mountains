@@ -118,13 +118,14 @@ let decode_dataset ~inst msg =
      [Dem_loader.get_height], the sea-fill value and the terrain shaders, so
      a tile encoded with a different range must fail loudly here rather than
      silently decode to wrong heights. *)
-  if
-    Bigarray.Array1.dim data_ba < header_size
-    || Bigarray.Array1.get data_ba 0 <> Char.code 'D'
-    || Bigarray.Array1.get data_ba 1 <> Char.code 'E'
-    || Bigarray.Array1.get data_ba 2 <> Char.code 'M'
-    || Bigarray.Array1.get data_ba 3 <> Char.code '1'
-  then failwith "DEM tile: bad magic";
+  let magic =
+    if Bigarray.Array1.dim data_ba < header_size then ""
+    else String.init 4 (fun i -> Char.chr (Bigarray.Array1.get data_ba i))
+  in
+  (* HDT1, our own high-resolution tiles (Hd_dem.Own_tiles), shares the layout
+     but carries a scale of its own in place of the range, which the page
+     applies: only the residuals are undone here. *)
+  if magic <> "DEM1" && magic <> "HDT1" then failwith "DEM tile: bad magic";
   let get_f32_le offset =
     let b i = Int32.of_int (Bigarray.Array1.get data_ba (offset + i)) in
     Int32.float_of_bits
@@ -137,7 +138,7 @@ let decode_dataset ~inst msg =
   in
   let min_elev = get_f32_le 12 in
   let max_elev = get_f32_le 16 in
-  if min_elev <> -500.0 || max_elev <> 9000.0 then
+  if magic = "DEM1" && (min_elev <> -500.0 || max_elev <> 9000.0) then
     failwith
       (Printf.sprintf
          "DEM tile: elevation range %g..%g does not match the expected \
