@@ -10,11 +10,11 @@ open Fut.Result_syntax
    (see [watchForUpdate] in index.html).
 
    The tiles are immutable and expensive to fetch, so they live in a separate,
-   persistent cache which survives deploys. Its name is also hard-coded in the
-   main thread ([Dem_loader.prefetch], [Clc_loader.prefetch_tile],
-   [Reader.prefetch], [Tree_cover]) and must be kept in sync. *)
+   persistent cache which survives deploys, [Data_cache.name], which the main
+   thread looks into as well ([Dem_loader.prefetch], [Clc_loader.prefetch_tile],
+   [Reader.prefetch], [Tree_cover]). *)
 let app_cache_name = Jstr.v ("mountains-" ^ Sw_version.version)
-let data_cache_name = Jstr.v "v1"
+let data_cache_name = Jstr.v Data_cache.name
 
 (* Files handed over by the Web Share Target below. Neither shell nor tiles,
    hence a third cache; entries live only until the page has read them. *)

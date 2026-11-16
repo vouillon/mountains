@@ -894,7 +894,8 @@ and prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon =
   let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
   let* cache =
     to_lwt
-      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) (Jstr.v "v1"))
+      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
+         (Jstr.v Data_cache.name))
   in
   match cache with
   | Error _ -> Lwt.return_unit

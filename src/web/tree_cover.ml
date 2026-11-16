@@ -132,7 +132,7 @@ let parse ~width (b : Brr.Tarray.uint8) =
    once [parse] accepts them: the service answers some bad requests with a
    200 and a TIFF of a few bytes. Its [Vary: Origin] is moot -- every
    request comes from this page -- and ignored in the lookups. *)
-let cache_name = Jstr.v "v1"
+let cache_name = Jstr.v Data_cache.name
 let query_opts = Brr_io.Fetch.Cache.query_opts ~ignore_vary:true ()
 
 let fetch_layer ~service ~interpolation box =

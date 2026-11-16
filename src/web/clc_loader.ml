@@ -164,7 +164,8 @@ let prefetch_tile ?pois ~lat ~lon () =
   let request = Brr_io.Fetch.Request.v (Jstr.v f) in
   let* cache =
     to_lwt
-      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) (Jstr.v "v1"))
+      (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
+         (Jstr.v Data_cache.name))
   in
   let* response = to_lwt (Brr_io.Fetch.Cache.match' cache request) in
   match response with

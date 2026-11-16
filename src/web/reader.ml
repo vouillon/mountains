@@ -85,7 +85,8 @@ let prefetch ~lat ~lon =
   let f = path ~lat ~lon in
   let request = Brr_io.Fetch.Request.v (Jstr.v f) in
   let* cache =
-    Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ()) (Jstr.v "v1")
+    Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
+      (Jstr.v Data_cache.name)
   in
   let* response = Brr_io.Fetch.Cache.match' cache request in
   match response with

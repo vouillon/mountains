@@ -338,7 +338,7 @@ let prefetch ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
               let request = Brr_io.Fetch.Request.v (Jstr.v p) in
               let* cache =
                 Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
-                  (Jstr.v "v1")
+                  (Jstr.v Data_cache.name)
               in
               let* response = Brr_io.Fetch.Cache.match' cache request in
               match response with
