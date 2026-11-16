@@ -208,7 +208,7 @@ let lidar_5m =
    water is unrectified, which does not matter because terrain.frag replaces the
    DEM normal with the procedural water normal wherever the cover map says
    water. *)
-let lidar_2m =
+let lidar_1m =
   wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
     ~metres:1.0 ~split:2 ~size:2048 ~fade_metres:300.
 

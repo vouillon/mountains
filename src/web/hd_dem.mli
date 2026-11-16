@@ -29,10 +29,10 @@ val l13 : layer
 val lidar_5m : layer
 (** LIDAR HD bare earth, in the CRS the product is stored in: 4 m square, 1024
     samples, 4096 m per side. 2 x 2 GetMaps of 512^2, 4.0 MB in total. Nests
-    inside {!l13}; {!lidar_2m} nests inside it, exactly box-consistent with it.
+    inside {!l13}; {!lidar_1m} nests inside it, exactly box-consistent with it.
 *)
 
-val lidar_2m : layer
+val lidar_1m : layer
 (** LIDAR HD bare earth at the product's own 1 m, so nothing resamples it: 2048
     samples, 2048 m per side. 2 x 2 GetMaps of 1024^2, 16.0 MB (this endpoint
     does not compress). Exactly box-consistent with {!lidar_5m}, both being
@@ -43,7 +43,7 @@ val lidar_2m : layer
 
 val canopy : layer
 (** LIDAR HD canopy height (surface minus ground, buildings included) at 2 m,
-    1024 samples: the same 2048 m block as {!lidar_2m} at any location, so it is
+    1024 samples: the same 2048 m block as {!lidar_1m} at any location, so it is
     read through that ring's normalised coordinate. 2 x 2 GetMaps of 512^2, 4.0
     MB. Not a refinement: never blended, only fetched. *)
 

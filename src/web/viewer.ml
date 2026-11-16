@@ -2463,7 +2463,7 @@ let canopy_kinds = 3
 let canopy_layers = [| Hd_dem.canopy; Hd_dem.canopy_far; Hd_dem.canopy_mid |]
 
 let canopy_ring_layers =
-  [| Hd_dem.lidar_2m; Hd_dem.lidar_5m; Hd_dem.canopy_mid |]
+  [| Hd_dem.lidar_1m; Hd_dem.lidar_5m; Hd_dem.canopy_mid |]
 
 let canopy_steps = [| 2.; 5.; 20. |]
 
@@ -4364,7 +4364,7 @@ let eye_clearance_m = 4.
 
 (* Coarsest first: each ring is blended onto its predecessor, so this is the
    nesting order, and the order the slots of a location are listed in. *)
-let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_2m ]
+let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_1m ]
 
 (* The canopy atlas: [Hd_dem.canopy], [Hd_dem.canopy_far] and the EEA tree
    cover's two levels ([Tree_cover]) side by side, each 1024 samples square, RGBA8 (see
@@ -5492,7 +5492,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          in
          match (block, slot) with Some b, Some i -> Some (b, i) | _ -> None
        in
-       let near_ring = ring_of Hd_dem.lidar_2m in
+       let near_ring = ring_of Hd_dem.lidar_1m in
        let on_late layers =
          time_gpu ctx "draw_shadows" (fun () ->
              draw_shadows ~layers ~shadow_pid ~shadow_fbo ~shadow_map
