@@ -8,7 +8,10 @@
    missing or faded out. Everything downstream (relief bake, vertex LOD,
    fragment normals, POI anchoring) can therefore switch to it on a plain
    extent test and still degrade exactly to today's rendering at the edges, on
-   a fetch failure, or outside France. *)
+   a fetch failure, or outside France.
+
+   The LIDAR HD rings, and level 13's in their place, can instead come from our
+   own tiles of the same data ([Own_tiles], see [own_tiles_url]). *)
 
 open Bigarray
 
@@ -48,6 +51,14 @@ type kind =
           in the CRS's own metres, so nearby locations share URLs exactly as
           they share a WMTS tile. Square by construction, and 1 m needs no
           reprojection at all. *)
+  | Own_tiles of { base_url : string; product : string; metres : float }
+      (** Our own tiles of IGN's LIDAR HD, built by Corine/own_tiles.py in the
+          CRS each territory's layers are stored in: 256 x 256 samples at
+          [metres], tile (c, r) covering x from c to c + 1 times 256 * metres
+          and y likewise, as HDT1 files at
+          [base_url/crs/product/metres/c_r.hdt], [crs] the {!Projection}'s name
+          in lower case. The block is the one [Wms_projected] would ask for,
+          which is always a whole number of tiles; a missing tile is nodata. *)
 
 type layer = {
   kind : kind;
@@ -161,6 +172,36 @@ let wms_projected_layer ~stem ~metres ~split ~size ~fade_metres =
   assert (size mod split = 0);
   { kind = Wms_projected { stem; metres; split }; size; fade_metres }
 
+(* Where our own tiles are hosted, [None] until they are: every ring then comes
+   from IGN, as it always has. [?own=<base url>] overrides it, to try a tile
+   set, and [?ign] keeps IGN's rings whatever it says, to compare the two. *)
+let own_tiles_url : string option = None
+
+(* Every ring is swapped for its own-tile counterpart, keeping its name, so the
+   renderer is unchanged. Not in a worker, which has no location. *)
+let own_base =
+  try
+    let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
+    if Brr.Uri.Params.mem (Jstr.v "ign") params then None
+    else
+      match Brr.Uri.Params.find (Jstr.v "own") params with
+      | Some url -> Some (Jstr.to_string url)
+      | None -> own_tiles_url
+  with _ -> None
+
+let own_or layer ~product ~metres ~size ~fade_metres =
+  match own_base with
+  | None -> layer
+  | Some base_url ->
+      assert (size mod tile_px = 0);
+      { kind = Own_tiles { base_url; product; metres }; size; fade_metres }
+
+(* Tile [c, r] of an own product: [c] counts eastwards, [r] northwards. *)
+let own_url ~base_url ~crs ~product ~metres c r =
+  Printf.sprintf "%s/%s/%s/%g/%d_%d.hdt" base_url
+    (String.lowercase_ascii (Projection.name crs))
+    product metres c r
+
 (* Level 13, 8 x 8 tiles: 0.309 arcseconds per sample (9.5 m north-south, a bit
    over three times the base grid), 2048 samples per side -- a power of two, so
    the relief pyramid keeps its usual shape -- spanning 633 arcseconds, i.e.
@@ -169,7 +210,10 @@ let wms_projected_layer ~stem ~metres ~split ~size ~fade_metres =
    Measured: 214 kB on the wire per tile (the service deflates the payload),
    64 tiles in ~4 s with browser-level parallelism over one HTTP/2
    connection. *)
-let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
+let l13 =
+  own_or
+    (wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.)
+    ~product:"ground" ~metres:8. ~size:2048 ~fade_metres:1500.
 
 (* The two LIDAR HD rings, fetched in the CRS the product is stored in --
    Lambert-93 over metropolitan France, RGR92 / UTM 40S over La Reunion -- rather
@@ -198,8 +242,11 @@ let l13 = wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.
    the 1832 m worst case of the +-2.44 x 1.70 km ring it replaces, and what lies
    beyond it falls through to l13 at 9.5 m. 2 x 2 GetMaps of 512^2, 4.0 MB. *)
 let lidar_5m =
-  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
-    ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:600.
+  own_or
+    (wms_projected_layer
+       ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE" ~metres:5.0
+       ~split:2 ~size:1024 ~fade_metres:600.)
+    ~product:"ground" ~metres:4. ~size:1024 ~fade_metres:600.
 
 (* The innermost ring: 1 m -- the product's own resolution, so no resampling of it
    happens anywhere -- 2048 samples, 2048 m per side against the +-1.22 x 0.87 km
@@ -218,8 +265,11 @@ let lidar_5m =
    DEM normal with the procedural water normal wherever the cover map says
    water. *)
 let lidar_1m =
-  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
-    ~metres:1.0 ~split:2 ~size:2048 ~fade_metres:300.
+  own_or
+    (wms_projected_layer
+       ~stem:"IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE" ~metres:1.0
+       ~split:2 ~size:2048 ~fade_metres:300.)
+    ~product:"ground" ~metres:1. ~size:2048 ~fade_metres:300.
 
 (* LIDAR HD canopy height (MNH: surface minus ground, so buildings too), over
    the 1 m ring's own footprint: the same 2048 m span and the same alignment
@@ -227,16 +277,22 @@ let lidar_1m =
    through the ring's normalised coordinate with no frame of its own. At 2 m
    rather than 1: 4 MB on the wire instead of 16, still finer than a crown. *)
 let canopy =
-  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
-    ~metres:2.0 ~split:2 ~size:1024 ~fade_metres:0.
+  own_or
+    (wms_projected_layer
+       ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE" ~metres:2.0
+       ~split:2 ~size:1024 ~fade_metres:0.)
+    ~product:"canopy" ~metres:2. ~size:1024 ~fade_metres:0.
 
 (* The same canopy at 5 m over the 5 m ring's block (5120 m, reaching at least
    1920 m every way), read through that ring's coordinate: where forest stands
    beyond [canopy]'s block, in place of land cover drawn to 25 ha. Too coarse
    for crowns. *)
 let canopy_far =
-  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
-    ~metres:5.0 ~split:2 ~size:1024 ~fade_metres:0.
+  own_or
+    (wms_projected_layer
+       ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE" ~metres:5.0
+       ~split:2 ~size:1024 ~fade_metres:0.)
+    ~product:"canopy" ~metres:4. ~size:1024 ~fade_metres:0.
 
 (* And at 20 m over 20 km, with a frame of its own (no ring shares its
    block): where forest stands out to ~10 km. The service serves the coarser
@@ -245,8 +301,11 @@ let canopy_far =
    forest still reads as a low mean height -- what the EEA's tree cover
    misses. *)
 let canopy_mid =
-  wms_projected_layer ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
-    ~metres:20.0 ~split:2 ~size:1024 ~fade_metres:0.
+  own_or
+    (wms_projected_layer
+       ~stem:"IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE" ~metres:20.0
+       ~split:2 ~size:1024 ~fade_metres:0.)
+    ~product:"canopy" ~metres:16. ~size:1024 ~fade_metres:0.
 
 (* The spacing actually requested for a projected ring. Over La Reunion the
    service resamples from overviews at powers of two (1, 2, 4 m...), and at a
@@ -332,7 +391,88 @@ let anchor_corner ~tiles_per_axis ~lat ~lon =
 (* One fetch feeding a [px] x [px] square of the block at [dst_row]/[dst_col].
    Both kinds reduce to a list of these, so the request loop, the deadline and
    the partial-block handling below are written once. *)
-type request = { url : string; px : int; dst_row : int; dst_col : int }
+type request = {
+  url : string;
+  px : int;
+  dst_row : int;
+  dst_col : int;
+  hdt : bool; (* one of our own tiles, not raw float32 *)
+}
+
+(* The block of a ring served on a projected grid -- its frame, and the
+   projected corner and span it covers -- shared by the WMS and our own
+   tiles. *)
+let projected_block layer crs ~metres ~lat ~lon =
+  let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
+  let anchor_lat = float alat /. 3600. and anchor_lon = float alon /. 3600. in
+  let xa, ya = Projection.forward crs ~lat:anchor_lat ~lon:anchor_lon in
+  let span = float layer.size *. metres in
+  (* A quarter of the span, so the anchor lands within an eighth of it
+     of the centre and the block reaches at least three eighths of a span
+     in every direction. Measured the hard way: at half a span the anchor
+     can sit a quarter off centre, and the ring then reached 1292 m north
+     of a camera looking north -- against the 1832 m worst case of the
+     layer it replaces -- so the mid field fell through to l13 at 9.5 m
+     and visibly lost its detail. Still one bbox per quarter-span, so
+     nearby locations share URLs. *)
+  let align = span /. 4. in
+  let corner v = Float.round (v /. align) *. align in
+  let x0 = corner xa -. (span /. 2.) and y0 = corner ya -. (span /. 2.) in
+  (* The frame is fitted to the projection itself: a 9 x 9 lattice of
+     offsets over the block, each projected exactly, fits a [Warp] each
+     way. Only where the lattice goes is taken from the local derivative
+     at the anchor -- a rotation and a scale, which places the corners to
+     within a couple of metres, plenty for choosing where to sample but
+     not for the frame: measured, the quadratic fit is good to 0.27 mm
+     over the 5 m ring and 0.02 mm over the 1 m one, where the best
+     affine map is out by 1.1 m and 0.18 m at the corners. *)
+  let j11, j12, j21, j22 =
+    Projection.jacobian crs ~lat:anchor_lat ~lon:anchor_lon
+  in
+  let per_arcsec =
+    {
+      Affine.a = j11 /. 3600.;
+      b = j12 /. 3600.;
+      c = 0.;
+      d = j21 /. 3600.;
+      e = j22 /. 3600.;
+      f = 0.;
+    }
+  in
+  let gx0 = x0 +. (0.5 *. metres) and gy0 = y0 +. (0.5 *. metres) in
+  let estimate =
+    Affine.compose
+      (Affine.inverse per_arcsec)
+      (Affine.diagonal ~sx:metres ~sy:metres ~tx:(gx0 -. xa) ~ty:(gy0 -. ya))
+  in
+  let samples =
+    let last = float (layer.size - 1) in
+    let lattice = List.init 9 (fun k -> (float k /. 8. *. 1.1) -. 0.05) in
+    Array.of_list
+      (List.concat_map
+         (fun s ->
+           List.map
+             (fun t ->
+               let u, v = Affine.apply estimate (s *. last) (t *. last) in
+               let x, y =
+                 Projection.forward crs
+                   ~lat:(anchor_lat +. (v /. 3600.))
+                   ~lon:(anchor_lon +. (u /. 3600.))
+               in
+               (u, v, (x -. gx0) /. metres, (y -. gy0) /. metres))
+             lattice)
+         lattice)
+  in
+  let to_index = Warp.fit samples in
+  let of_index =
+    Warp.fit (Array.map (fun (u, v, i, j) -> (i, j, u, v)) samples)
+  in
+  ( make_frame ~to_index ~of_index
+      ~grid:(Some { epsg = Projection.epsg crs; gx0; gy0; metres })
+      ~size:layer.size ~lat,
+    x0,
+    y0,
+    span )
 
 (* Where the block sits, as a {!frame}, and what to fetch for it. Sample centres
    sit half a sample inside the block's edge on both axes, on every kind.
@@ -367,6 +507,7 @@ let plan layer ~lat ~lon =
                   px = tile_px;
                   dst_row = br * tile_px;
                   dst_col = bc * tile_px;
+                  hdt = false;
                 })
               (List.init block_tiles Fun.id))
           (List.init block_tiles Fun.id)
@@ -379,77 +520,8 @@ let plan layer ~lat ~lon =
       | None -> None
       | Some crs ->
           let metres = served_metres crs metres in
-          let alat = Web_utils.arcsec_floor lat
-          and alon = Web_utils.arcsec_floor lon in
-          let anchor_lat = float alat /. 3600.
-          and anchor_lon = float alon /. 3600. in
-          let xa, ya = Projection.forward crs ~lat:anchor_lat ~lon:anchor_lon in
-          let span = float layer.size *. metres in
-          (* A quarter of the span, so the anchor lands within an eighth of it
-             of the centre and the block reaches at least three eighths of a span
-             in every direction. Measured the hard way: at half a span the anchor
-             can sit a quarter off centre, and the ring then reached 1292 m north
-             of a camera looking north -- against the 1832 m worst case of the
-             layer it replaces -- so the mid field fell through to l13 at 9.5 m
-             and visibly lost its detail. Still one bbox per quarter-span, so
-             nearby locations share URLs. *)
-          let align = span /. 4. in
-          let corner v = Float.round (v /. align) *. align in
-          let x0 = corner xa -. (span /. 2.)
-          and y0 = corner ya -. (span /. 2.) in
-          (* The frame is fitted to the projection itself: a 9 x 9 lattice of
-             offsets over the block, each projected exactly, fits a [Warp] each
-             way. Only where the lattice goes is taken from the local derivative
-             at the anchor -- a rotation and a scale, which places the corners to
-             within a couple of metres, plenty for choosing where to sample but
-             not for the frame: measured, the quadratic fit is good to 0.27 mm
-             over the 5 m ring and 0.02 mm over the 1 m one, where the best
-             affine map is out by 1.1 m and 0.18 m at the corners. *)
-          let j11, j12, j21, j22 =
-            Projection.jacobian crs ~lat:anchor_lat ~lon:anchor_lon
-          in
-          let per_arcsec =
-            {
-              Affine.a = j11 /. 3600.;
-              b = j12 /. 3600.;
-              c = 0.;
-              d = j21 /. 3600.;
-              e = j22 /. 3600.;
-              f = 0.;
-            }
-          in
-          let gx0 = x0 +. (0.5 *. metres) and gy0 = y0 +. (0.5 *. metres) in
-          let estimate =
-            Affine.compose
-              (Affine.inverse per_arcsec)
-              (Affine.diagonal ~sx:metres ~sy:metres ~tx:(gx0 -. xa)
-                 ~ty:(gy0 -. ya))
-          in
-          let samples =
-            let last = float (layer.size - 1) in
-            let lattice =
-              List.init 9 (fun k -> (float k /. 8. *. 1.1) -. 0.05)
-            in
-            Array.of_list
-              (List.concat_map
-                 (fun s ->
-                   List.map
-                     (fun t ->
-                       let u, v =
-                         Affine.apply estimate (s *. last) (t *. last)
-                       in
-                       let x, y =
-                         Projection.forward crs
-                           ~lat:(anchor_lat +. (v /. 3600.))
-                           ~lon:(anchor_lon +. (u /. 3600.))
-                       in
-                       (u, v, (x -. gx0) /. metres, (y -. gy0) /. metres))
-                     lattice)
-                 lattice)
-          in
-          let to_index = Warp.fit samples in
-          let of_index =
-            Warp.fit (Array.map (fun (u, v, i, j) -> (i, j, u, v)) samples)
+          let frame, x0, y0, span =
+            projected_block layer crs ~metres ~lat ~lon
           in
           let px = layer.size / split in
           let piece = span /. float split in
@@ -470,15 +542,41 @@ let plan layer ~lat ~lon =
                       px;
                       dst_row = qr * px;
                       dst_col = qc * px;
+                      hdt = false;
                     })
                   (List.init split Fun.id))
               (List.init split Fun.id)
           in
-          Some
-            ( make_frame ~to_index ~of_index
-                ~grid:(Some { epsg = Projection.epsg crs; gx0; gy0; metres })
-                ~size:layer.size ~lat,
-              reqs ))
+          Some (frame, reqs))
+  | Own_tiles { base_url; product; metres } -> (
+      match Projection.of_location ~lat ~lon with
+      | Some crs ->
+          let frame, x0, y0, _ = projected_block layer crs ~metres ~lat ~lon in
+          let n = layer.size / tile_px in
+          let tile_m = float tile_px *. metres in
+          let c0 = int_of_float (Float.round (x0 /. tile_m))
+          and r0 = int_of_float (Float.round (y0 /. tile_m)) in
+          let reqs =
+            List.concat_map
+              (fun tr ->
+                List.map
+                  (fun tc ->
+                    (* Raster row 0 is the northernmost, so the top band is
+                       the highest tile row. *)
+                    {
+                      url =
+                        own_url ~base_url ~crs ~product ~metres (c0 + tc)
+                          (r0 + n - 1 - tr);
+                      px = tile_px;
+                      dst_row = tr * tile_px;
+                      dst_col = tc * tile_px;
+                      hdt = true;
+                    })
+                  (List.init n Fun.id))
+              (List.init n Fun.id)
+          in
+          Some (frame, reqs)
+      | _ -> None)
 
 (* What [fetch] would ask for, as one string. Blocks are anchored on a tile or on
    a grid corner rather than on the location, so two nearby places usually plan
@@ -513,6 +611,52 @@ let raw_rest (r : raw) = r.rest
    exception report; that -- like any other per-tile failure -- just leaves its
    region at nodata, which the blend turns back into the base. *)
 exception Outside_coverage
+
+(* One of our own tiles (HDT1: the .dem layout with a scale of its own, see
+   [Own_tiles]) to float32 heights, nodata as -99999. The residuals are undone
+   by a worker, as for a base tile; the scale is read here first, the buffer
+   being transferred to the worker. *)
+let decode_hdt buf px =
+  let dv = Brr.Tarray.Data_view.of_buffer buf in
+  let u8 i = Brr.Tarray.Data_view.get_uint8 dv i in
+  if
+    Brr.Tarray.Buffer.byte_length buf < 28
+    || u8 0 <> Char.code 'H'
+    || u8 1 <> Char.code 'D'
+    || u8 2 <> Char.code 'T'
+    || u8 3 <> Char.code '1'
+    || Int32.to_int (Brr.Tarray.Data_view.get_uint32_le dv 4) <> px
+    || Int32.to_int (Brr.Tarray.Data_view.get_uint32_le dv 8) <> px
+  then Lwt.fail (Failure "not an HDT1 tile of the expected size")
+  else
+    let base = Brr.Tarray.Data_view.get_float32_le dv 12
+    and step = Brr.Tarray.Data_view.get_float32_le dv 16 in
+    let* w = Worker_pool.acquire () in
+    let* res =
+      Lwt.finalize
+        (fun () ->
+          Worker_pool.post w
+            (Worker_pool.Decode (Worker_pool.DEM (Brr.Tarray.Buffer.to_jv buf))))
+        (fun () ->
+          Worker_pool.release w;
+          Lwt.return_unit)
+    in
+    match res with
+    | Worker_pool.ResultDEM { heights } ->
+        let out = Brr.Tarray.create Brr.Tarray.Float32 (px * px) in
+        let o = Brr.Tarray.to_bigarray1 out in
+        for i = 0 to (px * px) - 1 do
+          let u =
+            Array1.unsafe_get heights (2 * i)
+            lor (Array1.unsafe_get heights ((2 * i) + 1) lsl 8)
+          in
+          Array1.unsafe_set o i
+            (if u = 65535 then -99999. else base +. (step *. float u))
+        done;
+        Lwt.return out
+    | Worker_pool.ResultCLC _ ->
+        Lwt.fail (Failure "HDT1 tile: unexpected reply")
+    | Worker_pool.Error e -> Lwt.fail (Failure e)
 
 let rec fetch_one ?(retries = [ 3.; 6. ]) req =
   let open Brr_io.Fetch in
@@ -551,6 +695,7 @@ let rec fetch_one ?(retries = [ 3.; 6. ]) req =
       let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
       match buf with
       | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))
+      | Ok buf when req.hdt -> decode_hdt buf req.px
       | Ok buf ->
           let expected = req.px * req.px * 4 in
           if Brr.Tarray.Buffer.byte_length buf <> expected then
@@ -569,6 +714,8 @@ let describe layer =
         (if String.starts_with ~prefix:"IGNF_LIDAR-HD_MNH" stem then "canopy"
          else "ground")
         metres
+  | Own_tiles { product; metres; _ } ->
+      Printf.sprintf "Own %s at %g m" product metres
 
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone". *)
@@ -903,7 +1050,7 @@ let rec prefetch layer ~lat ~lon =
      roaming against the ~40 MB that buys ~10 km for [l13], which is the wrong
      trade. Their absence offline is invisible -- the blend falls back to the
      coarser surface. *)
-  | Wms_projected _ -> Lwt.return_unit
+  | Wms_projected _ | Own_tiles _ -> Lwt.return_unit
   | Wmts { matrix_level; tiles_per_axis; block_tiles; _ } ->
       prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon
 
