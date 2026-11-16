@@ -26,7 +26,9 @@ let fs_src =
    in vec2 v_uv;\n\
    uniform bool u_use_lighting;\n\
    uniform bool u_use_color;\n\
+   uniform bool u_use_cover;\n\
    uniform sampler2D u_heightmap;\n\
+   uniform sampler2D u_cover;\n\
    uniform vec2 u_res;\n\n\
    out vec4 out_color;\n\n\
    vec3 hypsometric_tint(float h) {\n\
@@ -44,13 +46,17 @@ let fs_src =
    }\n\n\
    void main() {\n\
    vec3 color;\n\
-   if (u_use_color) {\n\
+   if (u_use_cover) {\n\
+   // The sample's own colour: classes do not blend\n\
+   color = texelFetch(u_cover, ivec2(vec2(v_uv.x, 1.0 - v_uv.y) * (u_res - \
+   1.0) + 0.5), 0).rgb;\n\
+   } else if (u_use_color) {\n\
    color = hypsometric_tint(v_height);\n\
    } else {\n\
    float h = (v_height + 500.0) / 9500.0;\n\
    color = vec3(h);\n\
    }\n\n\
-   if (u_use_lighting) {\n\
+   if (u_use_lighting && !u_use_cover) {\n\
    vec2 tex_coord = vec2(v_uv.x, 1.0 - v_uv.y);\n\
    float h_c = texture(u_heightmap, tex_coord).r;\n\
    float h_r = texture(u_heightmap, tex_coord + vec2(1.0/u_res.x, 0.0)).r;\n\
@@ -87,7 +93,8 @@ let uncompress_string str =
   Zlib.uncompress input_cb output_cb;
   Buffer.contents out_buf
 
-let load_dem file =
+(* [raw]: the values as they are stored, not as elevations *)
+let load_dem ?(raw = false) file =
   Printf.printf "Loading %s...\n%!" file;
   let ic = open_in_bin file in
   let magic = really_input_string ic 4 in
@@ -149,9 +156,73 @@ let load_dem file =
   let scale = (max_elev -. min_elev) /. 65535.0 in
   let heights = Array1.create float32 c_layout n in
   for i = 0 to n - 1 do
-    heights.{i} <- (float u16_data.(i) *. scale) +. min_elev
+    heights.{i} <-
+      (if raw then float u16_data.(i)
+       else (float u16_data.(i) *. scale) +. min_elev)
   done;
   (width, height, heights)
+
+(* The far field's land cover (extract_tiles --coarse): tiles in the framing
+   of the elevation, of indices in the palette. A degree cell is nine of them,
+   <cell>_<row>_<col>.dem with row 0 the southern one, shown together; one
+   that is missing is open sea, as the client has it. A file of another name
+   is shown alone. *)
+let load_cover file =
+  let dir = Filename.dirname file in
+  match
+    Scanf.sscanf_opt (Filename.basename file)
+      "%8[NSEW0-9_]_%1[0-2]_%1[0-2].dem%!" (fun cell _ _ -> cell)
+  with
+  | None -> load_dem ~raw:true file
+  | Some cell ->
+      let sea = float (Clc_palette.get_index 523) in
+      let tiles =
+        Array.init 9 (fun i ->
+            let f =
+              Filename.concat dir
+                (Printf.sprintf "%s_%d_%d.dem" cell (2 - (i / 3)) (i mod 3))
+            in
+            if Sys.file_exists f then Some (load_dem ~raw:true f) else None)
+      in
+      let w, h =
+        match List.find_map Fun.id (Array.to_list tiles) with
+        | Some (w, h, _) -> (w, h)
+        | None -> failwith "No tile"
+      in
+      let grid = Array1.create float32 c_layout (9 * w * h) in
+      Array1.fill grid sea;
+      Array.iteri
+        (fun i tile ->
+          match tile with
+          | Some (w', h', data) when w' = w && h' = h ->
+              for row = 0 to h - 1 do
+                for col = 0 to w - 1 do
+                  grid.{(((i / 3 * h) + row) * 3 * w) + (i mod 3 * w) + col} <-
+                    data.{(row * w) + col}
+                done
+              done
+          | Some _ -> failwith "Tiles of several sizes"
+          | None -> ())
+        tiles;
+      (3 * w, 3 * h, grid)
+
+(* The colours of the classes, a texel a sample; magenta for what is not a
+   class. *)
+let cover_colours indices =
+  let n = Array1.dim indices in
+  let colours = Array1.create int8_unsigned c_layout (3 * n) in
+  for i = 0 to n - 1 do
+    let r, g, b =
+      let index = int_of_float indices.{i} in
+      if index < Clc_palette.n_materials then
+        Clc_palette.materials.(index).albedo
+      else (255, 0, 255)
+    in
+    colours.{3 * i} <- r;
+    colours.{(3 * i) + 1} <- g;
+    colours.{(3 * i) + 2} <- b
+  done;
+  colours
 
 (* --- 3. GL Helpers --- *)
 
@@ -197,6 +268,7 @@ let () =
   let file_ref = ref "" in
   let use_lighting = ref false in
   let use_color = ref false in
+  let use_cover = ref false in
 
   let rec parse_args i =
     if i >= Array.length Sys.argv then ()
@@ -208,6 +280,9 @@ let () =
       | "-color" ->
           use_color := true;
           parse_args (i + 1)
+      | "-cover" ->
+          use_cover := true;
+          parse_args (i + 1)
       | f ->
           file_ref := f;
           parse_args (i + 1)
@@ -215,11 +290,18 @@ let () =
   parse_args 1;
 
   if !file_ref = "" then (
-    Printf.printf "Usage: %s [-light] [-color] <file.dem>\n" Sys.argv.(0);
+    Printf.printf
+      "Usage: %s [-light] [-color] <file.dem>\n\
+      \       %s -cover <file.dem>\n\
+      \  the far field's land cover (extract_tiles --coarse) in the palette's \
+       colours, with the other tiles of its cell\n"
+      Sys.argv.(0) Sys.argv.(0);
     exit 1);
 
   let file = !file_ref in
-  let width, height, heights = load_dem file in
+  let width, height, heights =
+    if !use_cover then load_cover file else load_dem file
+  in
 
   (* Simple latitude parsing from filename Nxx_Exxx_... *)
   let lat =
@@ -264,6 +346,8 @@ let () =
           let u_view_offset = Gl.get_uniform_location prog "u_view_offset" in
           let u_use_lighting = Gl.get_uniform_location prog "u_use_lighting" in
           let u_use_color = Gl.get_uniform_location prog "u_use_color" in
+          let u_use_cover = Gl.get_uniform_location prog "u_use_cover" in
+          let u_cover = Gl.get_uniform_location prog "u_cover" in
           let u_heightmap = Gl.get_uniform_location prog "u_heightmap" in
           let u_res = Gl.get_uniform_location prog "u_res" in
 
@@ -281,6 +365,20 @@ let () =
           Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.linear;
           Gl.tex_parameteri Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
           Gl.tex_parameteri Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+
+          if !use_cover then begin
+            let buf = Array1.create int32 c_layout 1 in
+            Gl.gen_textures 1 buf;
+            Gl.active_texture Gl.texture1;
+            Gl.bind_texture Gl.texture_2d (Int32.to_int buf.{0});
+            Gl.pixel_storei Gl.unpack_alignment 1;
+            Gl.tex_image2d Gl.texture_2d 0 Gl.rgb8 width height 0 Gl.rgb
+              Gl.unsigned_byte
+              (`Data (cover_colours heights));
+            Gl.tex_parameteri Gl.texture_2d Gl.texture_min_filter Gl.nearest;
+            Gl.tex_parameteri Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
+            Gl.active_texture Gl.texture0
+          end;
 
           (* Create grid geometry *)
           let n_verts = width * height in
@@ -383,7 +481,9 @@ let () =
             Gl.uniform2f u_view_offset !view_x !view_y;
             Gl.uniform1i u_use_lighting (if !use_lighting then 1 else 0);
             Gl.uniform1i u_use_color (if !use_color then 1 else 0);
+            Gl.uniform1i u_use_cover (if !use_cover then 1 else 0);
             Gl.uniform1i u_heightmap 0;
+            Gl.uniform1i u_cover 1;
             Gl.uniform2f u_res (float width) (float height);
 
             Gl.bind_vertex_array vao;
