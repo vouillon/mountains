@@ -220,6 +220,8 @@ let decode_dataset ~inst msg =
          ());
   Lwt.return ()
 
+(* A CLC6 tile (see Corine/clc_file.ml): the land cover and the water decoded
+   by decode_clc.wasm, the POI streams inflated for the page to read. *)
 let decode_clc_dataset ~inst msg =
   let open Lwt.Syntax in
   let data_jv = Jv.get msg "data" in
@@ -228,43 +230,42 @@ let decode_clc_dataset ~inst msg =
   in
   let data_ba = Brr.Tarray.to_bigarray1 data_ta in
 
-  let read_i32_be ba i =
-    let b0 = Bigarray.Array1.get ba i in
-    let b1 = Bigarray.Array1.get ba (i + 1) in
-    let b2 = Bigarray.Array1.get ba (i + 2) in
-    let b3 = Bigarray.Array1.get ba (i + 3) in
+  let read_i32_be i =
+    let b0 = Bigarray.Array1.get data_ba i in
+    let b1 = Bigarray.Array1.get data_ba (i + 1) in
+    let b2 = Bigarray.Array1.get data_ba (i + 2) in
+    let b3 = Bigarray.Array1.get data_ba (i + 3) in
     (b0 lsl 24) lor (b1 lsl 16) lor (b2 lsl 8) lor b3
   in
 
   let magic =
     String.init 4 (fun i -> Char.chr (Bigarray.Array1.get data_ba i))
   in
-  let is_clc4 = magic = "CLC4" in
-  let is_clc5 = magic = "CLC5" in
+  if Bigarray.Array1.dim data_ba < 112 || magic <> "CLC6" then
+    failwith "CLC tile: bad magic";
+  let count = read_i32_be 4 in
+  let total_verts = read_i32_be 8 in
+  let total_indices = read_i32_be 12 in
+  let water_count = read_i32_be 16 in
+  let water_verts = read_i32_be 20 in
+  let water_indices = read_i32_be 24 in
+  let poi_count = read_i32_be 28 in
+  let arcs = read_i32_be 96 in
+  let walk = read_i32_be 100 in
+  let water_arcs = read_i32_be 104 in
+  let water_walk = read_i32_be 108 in
 
-  let count = read_i32_be data_ba 4 in
-  let total_verts = read_i32_be data_ba 8 in
-  let total_indices = read_i32_be data_ba 12 in
-  let water_count, water_verts, water_indices, poi_count, header_end =
-    if is_clc5 then
-      ( read_i32_be data_ba 16,
-        read_i32_be data_ba 20,
-        read_i32_be data_ba 24,
-        read_i32_be data_ba 28,
-        32 )
-    else if is_clc4 then
-      ( read_i32_be data_ba 16,
-        read_i32_be data_ba 20,
-        read_i32_be data_ba 24,
-        0,
-        28 )
-    else (0, 0, 0, 0, 16)
+  (* The 22 streams: offset of the compressed data, its length, the length
+     inflated *)
+  let streams =
+    let offset = ref 112 in
+    Array.init 22 (fun _ ->
+        let len = get_uint32_le_ba data_ba !offset in
+        let raw = get_uint32_le_ba data_ba (!offset + 4) in
+        let s = (!offset + 8, len, raw) in
+        offset := !offset + 8 + len;
+        s)
   in
-
-  let offset = ref (header_end + 32) in
-  (* min_lon, lat (16) + scale_x, y (16) *)
-  if is_clc4 || is_clc5 then offset := !offset + 16;
-  if is_clc5 then offset := !offset + 16;
 
   let stream_ptr = ref 0 in
   let alloc size =
@@ -272,77 +273,100 @@ let decode_clc_dataset ~inst msg =
     stream_ptr := !stream_ptr + ((size + 15) land lnot 15);
     p
   in
-
-  (* Allocate buffers large enough for either CLC or Water decoders *)
-  let max_count = max count water_count in
-  let max_verts = max total_verts water_verts in
-  let max_indices = max total_indices water_indices in
-
-  let m_meta = alloc (max_count * 6) in
-  let m_hi_x = alloc max_verts in
-  let m_lo_x = alloc max_verts in
-  let m_hi_y = alloc max_verts in
-  let m_lo_y = alloc max_verts in
-  let m_hi_i = alloc max_indices in
-  let m_lo_i = alloc max_indices in
-  let m_out_pos = alloc (total_verts * 4) in
-
-  let m_out_col = alloc max_verts in
-  let m_out_ebo = alloc (max_indices * 4) in
-  let m_palette = alloc 1024 in
-
-  let m_mid_x, m_mid_y, m_out_wpos =
-    if water_verts > 0 then
-      (alloc water_verts, alloc water_verts, alloc (water_verts * 8))
-    else (0, 0, 0)
+  (* The land cover's eight streams and the water's ten, inflated *)
+  let inputs =
+    Array.init 18 (fun i ->
+        let _, _, raw = streams.(i) in
+        alloc raw)
   in
+  let m_out_pos = alloc (total_verts * 4) in
+  let m_out_col = alloc total_verts in
+  let m_out_ebo = alloc (total_indices * 4) in
+  let m_out_wpos = alloc (water_verts * 8) in
+  let m_out_wcol = alloc water_verts in
+  let m_out_webo = alloc (water_indices * 4) in
+  let m_palette = alloc 1024 in
+  let walk = max walk water_walk in
+  let m_arcs = alloc (max arcs water_arcs * 12) in
+  let m_rings = alloc (walk * 8) in
+  let m_walk = alloc (walk * 4) in
+  let m_stack = alloc (walk * 4) in
 
   Wasm.ensure_memory_bytes (!stream_ptr + 1024);
   Wasm.init_palette m_palette;
   let mem_ta = Wasm.get_ta () in
 
-  let read_stream data_ta off dest_ptr =
-    let len = get_uint32_le_ba (Brr.Tarray.to_bigarray1 data_ta) !off in
-    let compressed =
-      Brr.Tarray.sub data_ta ~start:(!off + 4) ~stop:(!off + 4 + len)
-    in
-    let* _ =
-      to_lwt
-        (Fut.of_promise
-           ~ok:(fun x -> x)
-           (inflate_into compressed mem_ta dest_ptr))
-    in
-    off := !off + 4 + len;
-    Lwt.return ()
+  let* () =
+    Lwt.join
+      (List.init 18 (fun i ->
+           let off, len, _ = streams.(i) in
+           if len = 0 then Lwt.return ()
+           else
+             let* _ =
+               to_lwt
+                 (Fut.of_promise
+                    ~ok:(fun x -> x)
+                    (inflate_into
+                       (Brr.Tarray.sub data_ta ~start:off ~stop:(off + len))
+                       mem_ta inputs.(i)))
+             in
+             Lwt.return ()))
   in
 
-  let* () = read_stream data_ta offset m_meta in
-  let* () = read_stream data_ta offset m_hi_x in
-  let* () = read_stream data_ta offset m_lo_x in
-  let* () = read_stream data_ta offset m_hi_y in
-  let* () = read_stream data_ta offset m_lo_y in
-  let* () = read_stream data_ta offset m_hi_i in
-  let* () = read_stream data_ta offset m_lo_i in
-
-  let func_main = Jv.get (Jv.get inst "exports") "decode_clc" in
-  ignore
-    (Jv.apply func_main
-       [|
-         Jv.of_int count;
-         Jv.of_int total_verts;
-         Jv.of_int total_indices;
-         Jv.of_int m_meta;
-         Jv.of_int m_hi_x;
-         Jv.of_int m_lo_x;
-         Jv.of_int m_hi_y;
-         Jv.of_int m_lo_y;
-         Jv.of_int m_hi_i;
-         Jv.of_int m_lo_i;
-         Jv.of_int m_out_pos;
-         Jv.of_int m_out_col;
-         Jv.of_int m_out_ebo;
-         Jv.of_int m_palette;
-       |]);
+  let exports = Jv.get inst "exports" in
+  let decode ~count ~wide ~first ~pos ~col ~ebo ~verts ~indices =
+    let s i = Jv.of_int inputs.(first + i) in
+    let coords =
+      if wide then [| s 3; s 4; s 5; s 6; s 7; s 8 |]
+      else [| s 3; Jv.of_int 0; s 4; s 5; Jv.of_int 0; s 6 |]
+    in
+    ignore
+      (Jv.apply
+         (Jv.get exports "start_layer")
+         (Array.concat
+            [
+              [|
+                Jv.of_int count;
+                Jv.of_int (if wide then 1 else 0);
+                s 0;
+                s 1;
+                s 2;
+              |];
+              coords;
+              [|
+                s (if wide then 9 else 7);
+                Jv.of_int pos;
+                Jv.of_int col;
+                Jv.of_int ebo;
+                Jv.of_int m_palette;
+                Jv.of_int m_arcs;
+                Jv.of_int m_rings;
+                Jv.of_int m_walk;
+                Jv.of_int m_stack;
+              |];
+            ]));
+    (* In calls of 256 features: the engine runs the first ones on code
+       compiled in haste, and only a call to come can have better *)
+    while
+      Jv.to_int
+        (Jv.apply (Jv.get exports "decode_features") [| Jv.of_int 256 |])
+      > 0
+    do
+      ()
+    done;
+    let written = Jv.to_int (Jv.apply (Jv.get exports "indices") [||]) in
+    let vertices = Jv.to_int (Jv.apply (Jv.get exports "vertices") [||]) in
+    if written <> indices || vertices <> verts then
+      failwith
+        (Printf.sprintf
+           "CLC tile: decoded %d vertices and %d indices for %d and %d" vertices
+           written verts indices)
+  in
+  decode ~count ~wide:false ~first:0 ~pos:m_out_pos ~col:m_out_col
+    ~ebo:m_out_ebo ~verts:total_verts ~indices:total_indices;
+  if water_count > 0 then
+    decode ~count:water_count ~wide:true ~first:8 ~pos:m_out_wpos
+      ~col:m_out_wcol ~ebo:m_out_webo ~verts:water_verts ~indices:water_indices;
 
   let copy_mem ptr size =
     let ba = Wasm.get_ba () in
@@ -356,76 +380,32 @@ let decode_clc_dataset ~inst msg =
   let pos_buf = copy_mem m_out_pos (total_verts * 4) in
   let col_buf = copy_mem m_out_col total_verts in
   let idx_buf = copy_mem m_out_ebo (total_indices * 4) in
-
-  let* water_pos_buf, water_col_buf, water_idx_buf =
-    if water_count > 0 then (
-      let* () = read_stream data_ta offset m_meta in
-      let* () = read_stream data_ta offset m_hi_x in
-      let* () = read_stream data_ta offset m_mid_x in
-      let* () = read_stream data_ta offset m_lo_x in
-      let* () = read_stream data_ta offset m_hi_y in
-      let* () = read_stream data_ta offset m_mid_y in
-      let* () = read_stream data_ta offset m_lo_y in
-      let* () = read_stream data_ta offset m_hi_i in
-      let* () = read_stream data_ta offset m_lo_i in
-      let func_w = Jv.get (Jv.get inst "exports") "decode_water" in
-      ignore
-        (Jv.apply func_w
-           [|
-             Jv.of_int water_count;
-             Jv.of_int water_verts;
-             Jv.of_int water_indices;
-             Jv.of_int m_meta;
-             Jv.of_int m_hi_x;
-             Jv.of_int m_mid_x;
-             Jv.of_int m_lo_x;
-             Jv.of_int m_hi_y;
-             Jv.of_int m_mid_y;
-             Jv.of_int m_lo_y;
-             Jv.of_int m_hi_i;
-             Jv.of_int m_lo_i;
-             Jv.of_int m_out_wpos;
-             Jv.of_int m_out_col;
-             Jv.of_int m_out_ebo;
-             Jv.of_int m_palette;
-           |]);
-      let wp = copy_mem m_out_wpos (water_verts * 8) in
-      let wc = copy_mem m_out_col water_verts in
-      let wi = copy_mem m_out_ebo (water_indices * 4) in
-      Lwt.return (wp, wc, wi))
-    else begin
-      (* The nine streams are there all the same, empty: step over them, or
-         the POIs are read from the first of them (a tile of POIs alone,
-         extract_tiles --pois, or one with no water). *)
-      if is_clc4 || is_clc5 then
-        for _ = 1 to 9 do
-          offset :=
-            !offset + 4
-            + get_uint32_le_ba (Brr.Tarray.to_bigarray1 data_ta) !offset
-        done;
-      Lwt.return (Jv.null, Jv.null, Jv.null)
-    end
+  let water_pos_buf, water_col_buf, water_idx_buf =
+    if water_count > 0 then
+      ( copy_mem m_out_wpos (water_verts * 8),
+        copy_mem m_out_wcol water_verts,
+        copy_mem m_out_webo (water_indices * 4) )
+    else (Jv.null, Jv.null, Jv.null)
   in
 
-  let read_and_inflate data_ta off =
-    let len = get_uint32_le_ba (Brr.Tarray.to_bigarray1 data_ta) !off in
-    let compressed =
-      Brr.Tarray.sub data_ta ~start:(!off + 4) ~stop:(!off + 4 + len)
-    in
+  let read_and_inflate i =
+    let off, len, _ = streams.(i) in
     let* inflated =
-      to_lwt (Fut.of_promise ~ok:(fun x -> x) (inflate compressed))
+      to_lwt
+        (Fut.of_promise
+           ~ok:(fun x -> x)
+           (inflate (Brr.Tarray.sub data_ta ~start:off ~stop:(off + len))))
     in
     let inflated_ta = Brr.Tarray.of_jv inflated in
-    off := !off + 4 + len;
     Lwt.return (Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer inflated_ta))
   in
 
   let* poi_names, poi_coords, poi_elevs, poi_types =
-    if is_clc5 && poi_count > 0 then
-      let* n = read_and_inflate data_ta offset in
-      let* c = read_and_inflate data_ta offset in
-      let* e = read_and_inflate data_ta offset in
-      let* t = read_and_inflate data_ta offset in
+    if poi_count > 0 then
+      let* n = read_and_inflate 18 in
+      let* c = read_and_inflate 19 in
+      let* e = read_and_inflate 20 in
+      let* t = read_and_inflate 21 in
       Lwt.return (n, c, e, t)
     else Lwt.return (Jv.null, Jv.null, Jv.null, Jv.null)
   in

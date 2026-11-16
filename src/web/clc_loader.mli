@@ -2,20 +2,18 @@ type clc_header = {
   count : int;  (** Number of polygons *)
   total_verts : int;  (** Total number of vertices *)
   total_indices : int;  (** Total number of indices *)
-  water_count : int;  (** Number of water polygons (CLC4+ only) *)
-  water_verts : int;  (** Total water vertices (CLC4+ only) *)
-  water_indices : int;  (** Total water indices (CLC4+ only) *)
-  poi_count : int;  (** Number of POIs (CLC5 only) *)
+  water_count : int;  (** Number of water polygons *)
+  water_verts : int;  (** Total water vertices *)
+  water_indices : int;  (** Total water indices *)
+  poi_count : int;  (** Number of POIs *)
   min_lon : float;  (** Tile bounding box min longitude *)
   min_lat : float;  (** Tile bounding box min latitude *)
   scale_x : float;  (** Longitude scale factor *)
   scale_y : float;  (** Latitude scale factor *)
-  water_scale_x : float;  (** Water longitude scale factor (CLC4+ only) *)
-  water_scale_y : float;  (** Water latitude scale factor (CLC4+ only) *)
-  poi_scale_x : float;  (** POI longitude scale factor (CLC5 only) *)
-  poi_scale_y : float;  (** POI latitude scale factor (CLC5 only) *)
-  is_clc4 : bool;  (** Whether the tile contains water data *)
-  is_clc5 : bool;  (** Whether the tile contains POI data *)
+  water_scale_x : float;  (** Water longitude scale factor *)
+  water_scale_y : float;  (** Water latitude scale factor *)
+  poi_scale_x : float;  (** POI longitude scale factor *)
+  poi_scale_y : float;  (** POI latitude scale factor *)
 }
 (** CLC tile metadata *)
 
@@ -37,11 +35,11 @@ type clc_tile = {
   positions : (int, int16_unsigned_elt, c_layout) Array1.t; (* x,y pairs U16 *)
   colors : (int, int8_unsigned_elt, c_layout) Array1.t; (* palette indices *)
   indices : (int32, int32_elt, c_layout) Array1.t;
-  (* Water layer (CLC4+ only) *)
+  (* Water layer *)
   water_positions : (int32, int32_elt, c_layout) Array1.t;
   water_colors : (int, int8_unsigned_elt, c_layout) Array1.t;
   water_indices : (int32, int32_elt, c_layout) Array1.t;
-  (* POI data (CLC5 only) *)
+  (* POI data *)
   pois : poi list;
 }
 (** Decoded CLC tile data *)

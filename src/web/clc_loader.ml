@@ -18,20 +18,18 @@ type clc_header = {
   count : int;
   total_verts : int;
   total_indices : int;
-  water_count : int; (* CLC4+ only *)
-  water_verts : int; (* CLC4+ only *)
-  water_indices : int; (* CLC4+ only *)
-  poi_count : int; (* CLC5 only *)
+  water_count : int;
+  water_verts : int;
+  water_indices : int;
+  poi_count : int;
   min_lon : float;
   min_lat : float;
   scale_x : float;
   scale_y : float;
-  water_scale_x : float; (* CLC4+ only *)
-  water_scale_y : float; (* CLC4+ only *)
-  poi_scale_x : float; (* CLC5 only *)
-  poi_scale_y : float; (* CLC5 only *)
-  is_clc4 : bool;
-  is_clc5 : bool;
+  water_scale_x : float;
+  water_scale_y : float;
+  poi_scale_x : float;
+  poi_scale_y : float;
 }
 
 (* POI data *)
@@ -51,22 +49,22 @@ type clc_tile = {
   positions : (int, int16_unsigned_elt, c_layout) Array1.t; (* x,y pairs U16 *)
   colors : (int, int8_unsigned_elt, c_layout) Array1.t; (* palette indices *)
   indices : (int32, int32_elt, c_layout) Array1.t;
-  (* Water layer (CLC4+ only) - stored as int32 for full 24-bit precision *)
+  (* Water layer - stored as int32 for full 24-bit precision *)
   water_positions : (int32, int32_elt, c_layout) Array1.t;
   water_colors : (int, int8_unsigned_elt, c_layout) Array1.t;
   water_indices : (int32, int32_elt, c_layout) Array1.t;
-  (* POI data (CLC5 only) *)
+  (* POI data *)
   pois : poi list;
 }
 
-(* Helper to parse header from bigarray *)
+(* Helper to parse header from bigarray: CLC6 (Corine/clc_file.ml), whose
+   counts and scales are where CLC5 had them *)
 let parse_header_ba ba =
   let get_s i len =
     String.init len (fun j -> Char.chr (Array1.get ba (i + j)))
   in
-  let magic = get_s 0 4 in
-  let is_clc4 = magic = "CLC4" in
-  let is_clc5 = magic = "CLC5" in
+  if Array1.dim ba < 112 || get_s 0 4 <> "CLC6" then
+    failwith "CLC tile: bad magic";
 
   let read_i32_be i =
     let b0 = Array1.get ba i in
@@ -91,31 +89,19 @@ let parse_header_ba ba =
   let total_verts = read_i32_be 8 in
   let total_indices = read_i32_be 12 in
 
-  let water_count, water_verts, water_indices, poi_count, float_offset =
-    if is_clc5 then
-      (read_i32_be 16, read_i32_be 20, read_i32_be 24, read_i32_be 28, 32)
-    else if is_clc4 then (read_i32_be 16, read_i32_be 20, read_i32_be 24, 0, 28)
-    else (0, 0, 0, 0, 16)
-  in
+  let water_count = read_i32_be 16 in
+  let water_verts = read_i32_be 20 in
+  let water_indices = read_i32_be 24 in
+  let poi_count = read_i32_be 28 in
 
-  let min_lon = read_f64_le float_offset in
-  let min_lat = read_f64_le (float_offset + 8) in
-  let scale_x = read_f64_le (float_offset + 16) in
-  let scale_y = read_f64_le (float_offset + 24) in
-
-  let water_scale_x, water_scale_y, poi_scale_x, poi_scale_y =
-    if is_clc5 then
-      ( read_f64_le (float_offset + 32),
-        read_f64_le (float_offset + 40),
-        read_f64_le (float_offset + 48),
-        read_f64_le (float_offset + 56) )
-    else if is_clc4 then
-      ( read_f64_le (float_offset + 32),
-        read_f64_le (float_offset + 40),
-        0.0,
-        0.0 )
-    else (0.0, 0.0, 0.0, 0.0)
-  in
+  let min_lon = read_f64_le 32 in
+  let min_lat = read_f64_le 40 in
+  let scale_x = read_f64_le 48 in
+  let scale_y = read_f64_le 56 in
+  let water_scale_x = read_f64_le 64 in
+  let water_scale_y = read_f64_le 72 in
+  let poi_scale_x = read_f64_le 80 in
+  let poi_scale_y = read_f64_le 88 in
 
   {
     count;
@@ -133,8 +119,6 @@ let parse_header_ba ba =
     water_scale_y;
     poi_scale_x;
     poi_scale_y;
-    is_clc4;
-    is_clc5;
   }
 
 (* Get CLC tile name from lat/lon *)
