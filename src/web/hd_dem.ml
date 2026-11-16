@@ -300,15 +300,24 @@ let to_lwt f =
   (Fut.await f @@ fun v -> Lwt.wakeup u v);
   t
 
-(* The tile of a matrix level holding the location, on which a WMTS block is
-   centred. Anchoring on the *tile* rather than on the location makes every
-   location within one tile share the same URLs, which is what makes the service
-   worker's cache-first rule worth having. *)
-let anchor_tile ~tiles_per_axis ~lat ~lon =
+(* The tile corner of a matrix level nearest the location, on which a WMTS block
+   is centred, as the row and column of the tile south-east of it. Anchoring on a
+   *corner* rather than on the location makes every location within one tile's
+   width of it share the same URLs, which is what makes the service worker's
+   cache-first rule worth having. The nearest corner rather than the tile holding
+   the location keeps the location within half a tile of the block's centre:
+   centred on the tile's north-west corner instead, a block of 8 reached only 3
+   tiles south and east in the worst case (5.1 km east-west at level 13), short
+   of where the mesh stops resolving finer than the base grid. *)
+let anchor_corner ~tiles_per_axis ~lat ~lon =
   let alat = Web_utils.arcsec_floor lat and alon = Web_utils.arcsec_floor lon in
   let span = 360. /. float tiles_per_axis in
-  let row = int_of_float (floor ((90. -. (float alat /. 3600.)) /. span)) in
-  let col = int_of_float (floor (((float alon /. 3600.) +. 180.) /. span)) in
+  let row =
+    int_of_float (Float.round ((90. -. (float alat /. 3600.)) /. span))
+  in
+  let col =
+    int_of_float (Float.round (((float alon /. 3600.) +. 180.) /. span))
+  in
   (alat, alon, row, col)
 
 (* One fetch feeding a [px] x [px] square of the block at [dst_row]/[dst_col].
@@ -327,7 +336,7 @@ let plan layer ~lat ~lon =
   match layer.kind with
   | Wmts { matrix_level; tiles_per_axis; block_tiles; px_arcsec } ->
       let alat, alon, anchor_row, anchor_col =
-        anchor_tile ~tiles_per_axis ~lat ~lon
+        anchor_corner ~tiles_per_axis ~lat ~lon
       in
       let row0 = anchor_row - (block_tiles / 2) in
       let col0 = anchor_col - (block_tiles / 2) in
@@ -890,7 +899,7 @@ let rec prefetch layer ~lat ~lon =
       prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon
 
 and prefetch_wmts ~matrix_level ~tiles_per_axis ~block_tiles ~lat ~lon =
-  let _, _, anchor_row, anchor_col = anchor_tile ~tiles_per_axis ~lat ~lon in
+  let _, _, anchor_row, anchor_col = anchor_corner ~tiles_per_axis ~lat ~lon in
   let n = 2 * block_tiles in
   let row0 = anchor_row - (n / 2) and col0 = anchor_col - (n / 2) in
   let* cache =
