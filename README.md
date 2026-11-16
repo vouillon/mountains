@@ -62,7 +62,7 @@ cd src/web && dune build
 3.  **Canopy height**: IGN LiDAR HD (France), fetched at runtime from the Géoplateforme. Source: IGN, licence Etalab 2.0 (geoservices.ign.fr).
 4.  **Land Cover**: CORINE dataset processed into triangulated optimized tiles. Generated using European Union's Copernicus Land Monitoring Service information.
 5.  **Tree cover**: tree cover density and dominant leaf type (2018), fetched at runtime from the EEA and resampled. Generated using European Union's Copernicus Land Monitoring Service information.
-6.  **Water**: OSM water polygons fetched and merged for higher precision coastlines and lakes.
+6.  **Water, sea and summits**: OpenStreetMap data, read from Overture Maps' base theme (`Corine/fetch_overture.sh`). © OpenStreetMap contributors, Overture Maps Foundation (Open Database License).
 
 ## License
 
