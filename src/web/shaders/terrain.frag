@@ -705,15 +705,22 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // rock fractures and tree crowns on every meadow: the bump takes the
   // weights cubed, so the dominant material owns it and only a genuinely
   // mixed class (or the rock that steep slopes add) blends.
+  // No floor under the sums: at fp16 one small enough to stand for nothing
+  // (1e-6) is subnormal, which a Mali flushes to zero, and water, which has
+  // no detail weights at all, came out as 0/0 -- a NaN that went through to
+  // the normal, and through the blend with the water's own whatever its
+  // weight, so that the lake mirrored the sky from every angle.
   vec4 bw = detailWeights * detailWeights * detailWeights;
-  bw /= max(dot(bw, vec4(1.0)), 1e-6);
+  float bwSum = dot(bw, vec4(1.0));
+  bw = bwSum > 1e-4 ? bw / bwSum : vec4(0.0);
   // Rock's fine and mid amplitudes are several times grass's, so even a third
   // of rock (sparse-vegetation slopes, plus what steepness adds) owned their
   // bump, and its creases read as combed hair there. Rock takes its share
   // only where it is the majority: outcrops, where the height blend lifts it,
   // and cliffs.
   bw.r *= smoothstep(0.4, 0.6, bw.r);
-  bw /= max(dot(bw, vec4(1.0)), 1e-6);
+  bwSum = dot(bw, vec4(1.0));
+  bw = bwSum > 1e-4 ? bw / bwSum : vec4(0.0);
 
   // Each band is weighed by the share of its octaves the relief data cannot
   // hold (see [bandShare]), so the texture does not bury the relief: in the
