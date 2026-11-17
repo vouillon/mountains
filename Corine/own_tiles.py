@@ -2,7 +2,7 @@
 """Our own elevation tiles, from IGN's LIDAR HD (src/web/hd_dem.ml, [Own_tiles]).
 
     own_tiles.py <state dir> <region> [--out DIR | --bucket B --endpoint URL]
-                 [--prefix v1] [--jobs N] [bx by ...]
+                 [--prefix v1] [--jobs N] [--swiss] [bx by ...]
 
 <region> is lamb93 (metropolitan France, EPSG:2154) or rgr92utm40s (La Reunion,
 EPSG:2975), the CRS each territory's layers are stored in, so the service never
@@ -14,8 +14,8 @@ dir keeps the block list and done.jsonl, the blocks finished: a run picks up
 where the last one stopped. With block coordinates (bx by, in units of 4096 m),
 only those blocks are built.
 
-Needs numpy, GDAL's Python bindings (osgeo.osr, for the area) and, to upload,
-boto3.
+Needs numpy, GDAL's Python bindings (osgeo, for the area and swisstopo's tiles)
+and, to upload, boto3.
 
 The area is where the client lets the eye go (Viewer.in_range: the dataset
 boxes shrunk by the base grid's half extent) plus 10 km, so that every ring of
@@ -34,6 +34,22 @@ spacing s covers x in [c 256 s, (c + 1) 256 s), y in [r 256 s, (r + 1) 256 s).
 File <prefix>/<region>/<product>/<s>/<c>_<r>.hdt, absent where the tile is all
 nodata -- which the client caches as such, so a tile set that grows must move to
 a new prefix.
+
+Switzerland (--swiss, lamb93 only, with a state dir of its own): the blocks
+swisstopo's swissALTI3D (ground) and swissSURFACE3D Raster (surface) touch within
+the area, rebuilt from both countries and written over the same tile names (a
+browser that read the old ones, or their absence, keeps them until its site data
+is cleared, and Cloudflare's cache until it is purged). Their
+0.5 m tiles are read at 1 m from the files' first overview, which is every other
+sample (not a mean) and so lies a quarter metre north-west of where the file puts
+it: shifted back, it is within 2.3 cm RMS of the mean of the 0.5 m samples, for a
+quarter of the download. Canopy is surface minus the ground of the surface's
+year (see swiss_index: not the latest, over glaciers). Swiss heights (LN02) are
+0.25-0.5 m below IGN's (NGF-IGN69) along the border, and the two datasets overlap
+by hundreds of metres there: where only one has data, it is used; across the
+overlap, IGN fades to swisstopo over the 200 m next to the Swiss-only ground, so
+the difference becomes a slope of at most 0.25% rather than a step. Blocks are
+fetched with 256 m around them, so that the fade sees across their edges.
 
 HDT1 (the .dem layout of compress_dem.ml with a per-tile scale):
   0 "HDT1"  4 width u32  8 height u32  12 base f32  16 step f32
@@ -59,6 +75,9 @@ MNT = "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE"
 MNH = "IGNF_LIDAR-HD_MNH_ELEVATION.ELEVATIONGRIDCOVERAGE"
 WRITE = {"ground": (1, 4, 8), "canopy": (2, 4, 16)}
 MARGIN_M = 10_000
+SWISS = {"ground": "ch.swisstopo.swissalti3d", "surface": "ch.swisstopo.swisssurface3d-raster"}
+PAD = 256  # m fetched around a Swiss block
+FEATHER = 200  # m over which IGN fades to swisstopo
 
 # Viewer.in_range's boxes and the half extent it requires (0.57 degrees at
 # size 4096), with each territory's layer suffix and EPSG code.
@@ -201,15 +220,12 @@ def build_block(region, bx, by, root, pool):
     return files
 
 
-def plan_blocks(region, state):
-    """The blocks to build, computed once and kept in the state dir."""
-    path = os.path.join(state, "blocks.json")
-    if os.path.exists(path):
-        return [tuple(b) for b in json.load(open(path))]
+def area(region):
+    """The area's bounding box in blocks, its test of a block, its lat/lon box
+    and the projections to and from WGS 84 (lon, lat)."""
     from osgeo import osr
 
     osr.UseExceptions()
-
     info = REGIONS[region]
     lat0, lat1, lon0, lon1 = info["box"]
     lat0, lat1 = lat0 + HALF_EXTENT_DEG, lat1 - HALF_EXTENT_DEG
@@ -229,6 +245,26 @@ def plan_blocks(region, state):
     bx1 = int((max(p[0] for p in pts) + MARGIN_M) // B)
     by0 = int((min(p[1] for p in pts) - MARGIN_M) // B)
     by1 = int((max(p[1] for p in pts) + MARGIN_M) // B)
+    # Within the margin of the box: a block's centre within it, widened by half a
+    # block's diagonal (in degrees, generously: 1 degree >= 78 km of longitude here).
+    pad_lat = (MARGIN_M + 2900) / 111_000
+
+    def inside(bx, by):
+        lon, lat = inv.TransformPoint((bx + 0.5) * B, (by + 0.5) * B)[:2]
+        pad_lon = pad_lat / np.cos(np.radians(lat))
+        return lat0 - pad_lat <= lat <= lat1 + pad_lat and lon0 - pad_lon <= lon <= lon1 + pad_lon
+
+    box = (lat0 - pad_lat, lat1 + pad_lat, lon0 - 2 * pad_lat, lon1 + 2 * pad_lat)
+    return (bx0, bx1, by0, by1), inside, box, fwd, inv
+
+
+def plan_blocks(region, state):
+    """The blocks to build, computed once and kept in the state dir."""
+    path = os.path.join(state, "blocks.json")
+    if os.path.exists(path):
+        return [tuple(b) for b in json.load(open(path))]
+    info = REGIONS[region]
+    (bx0, bx1, by0, by1), inside, _, _, _ = area(region)
     # Where the service has data: one GetMap of the area at 16 samples per block.
     nx, ny = bx1 - bx0 + 1, by1 - by0 + 1
     assert nx * 16 <= 5000 and ny * 16 <= 5000, "area too large for one coverage GetMap"
@@ -240,22 +276,199 @@ def plan_blocks(region, state):
     grown[:-1] |= has[1:]
     grown[:, 1:] |= grown[:, :-1].copy()
     grown[:, :-1] |= grown[:, 1:].copy()
-    # Within the margin of the box: a block's centre within it, widened by half a
-    # block's diagonal (in degrees, generously: 1 degree >= 78 km of longitude here).
-    pad_lat = (MARGIN_M + 2900) / 111_000
-    blocks = []
-    for j in range(ny):
-        for i in range(nx):
-            if not grown[j, i]:
-                continue
-            bx, by = bx0 + i, by0 + j
-            lon, lat = inv.TransformPoint((bx + 0.5) * B, (by + 0.5) * B)[:2]
-            pad_lon = pad_lat / np.cos(np.radians(lat))
-            if lat0 - pad_lat <= lat <= lat1 + pad_lat and lon0 - pad_lon <= lon <= lon1 + pad_lon:
-                blocks.append((bx, by))
+    blocks = [(bx0 + i, by0 + j) for j in range(ny) for i in range(nx) if grown[j, i] and inside(bx0 + i, by0 + j)]
     json.dump(blocks, open(path, "w"))
     print("%s: %d blocks of %d in the area's bounding box have data" % (region, len(blocks), nx * ny), flush=True)
     return blocks
+
+
+def get_json(url):
+    for attempt in range(8):
+        try:
+            return json.load(urllib.request.urlopen(url, timeout=120))
+        except Exception as e:
+            print("  retry", attempt, repr(e), url, flush=True)
+            time.sleep(3 * (attempt + 1))
+    raise RuntimeError("gave up on %s" % url)
+
+
+def swiss_index(state, box):
+    """The 0.5 m GeoTIFFs swisstopo has of each 1 km tile, by tile name ("<east
+    km>-<north km>", its south-west corner in LV95), from its STAC API: {"ground":
+    latest swissALTI3D, "surface": latest swissSURFACE3D, "under": the
+    swissALTI3D the surface is measured from}, each a URL; kept in the state dir.
+
+    "under" is the ground of the surface's year or, failing it, of the latest
+    year before (else the earliest after): the latest ground can be younger than
+    the surface, and a glacier that thinned in between then rises above it as
+    metres of canopy (2615-1091: ground 2024, surface 2022). From an older
+    ground it sinks below, which the canopy encoding clamps to 0."""
+    path = os.path.join(state, "swiss_tiles.json")
+    if os.path.exists(path):
+        return json.load(open(path))
+    lat0, lat1, lon0, lon1 = box
+    index = {}
+    for kind, coll in SWISS.items():
+        url = "https://data.geo.admin.ch/api/stac/v0.9/collections/%s/items?bbox=%f,%f,%f,%f&limit=100" % (
+            coll, lon0, lat0, lon1, lat1)
+        years = {}
+        while url:
+            j = get_json(url)
+            for f in j["features"]:
+                year, name = f["id"].rsplit("_", 2)[-2:]
+                hrefs = [a["href"] for a in f["assets"].values() if a["href"].endswith("_0.5_2056_5728.tif")]
+                if hrefs:
+                    years.setdefault(name, {})[int(year)] = hrefs[0]
+            url = next((l["href"] for l in j["links"] if l["rel"] == "next"), None)
+        index[kind] = years
+        print("%s: %d tiles" % (coll, len(years)), flush=True)
+    ground, surface = index["ground"], index["surface"]
+    under = {}
+    for name, ys in surface.items():
+        gs = ground.get(name)
+        if gs:
+            y = max(ys)
+            before = [g for g in gs if g <= y]
+            under[name] = gs[max(before) if before else min(gs)]
+    index = {"ground": {n: ys[max(ys)] for n, ys in ground.items()},
+             "surface": {n: ys[max(ys)] for n, ys in surface.items()}, "under": under}
+    json.dump(index, open(path, "w"))
+    return index
+
+
+def lv95():
+    from osgeo import osr
+
+    osr.UseExceptions()
+    ch, l93 = osr.SpatialReference(), osr.SpatialReference()
+    ch.ImportFromEPSG(2056)
+    l93.ImportFromEPSG(2154)
+    for s in (ch, l93):
+        s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return osr.CoordinateTransformation(ch, l93), osr.CoordinateTransformation(l93, ch)
+
+
+def plan_swiss(state):
+    """The lamb93 blocks within the area that a swisstopo ground tile touches."""
+    path = os.path.join(state, "blocks.json")
+    if os.path.exists(path):
+        return [tuple(b) for b in json.load(open(path))]
+    _, inside, box, _, _ = area("lamb93")
+    index = swiss_index(state, box)
+    to_l93, _ = lv95()
+    blocks = set()
+    for name in index["ground"]:
+        e, n = (int(v) * 1000 for v in name.split("-"))
+        pts = [to_l93.TransformPoint(e + dx, n + dy)[:2] for dx in (0, 1000) for dy in (0, 1000)]
+        for bx in range(int(min(p[0] for p in pts) // B), int(max(p[0] for p in pts) // B) + 1):
+            for by in range(int(min(p[1] for p in pts) // B), int(max(p[1] for p in pts) // B) + 1):
+                if inside(bx, by):
+                    blocks.add((bx, by))
+    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
+    json.dump(blocks, open(path, "w"))
+    print("swiss: %d blocks" % len(blocks), flush=True)
+    return blocks
+
+
+def swiss_layer(urls, to_ch, x0, y0, side):
+    """swisstopo's tiles at 1 m over the Lambert-93 square [x0, x0 + side) x [y0,
+    y0 + side), rows from the north; NaN where they have no data."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    corners = [to_ch.TransformPoint(x, y)[:2] for x in (x0, x0 + side) for y in (y0, y0 + side)]
+    e0, e1 = int(min(c[0] for c in corners) // 1000), int(max(c[0] for c in corners) // 1000)
+    n0, n1 = int(min(c[1] for c in corners) // 1000), int(max(c[1] for c in corners) // 1000)
+    srcs = []
+    for e in range(e0, e1 + 1):
+        for n in range(n0, n1 + 1):
+            url = urls.get("%d-%d" % (e, n))
+            if url is None:
+                continue
+            # The first overview: every other sample, from the north-west one of
+            # each 2 x 2, so its centres are a quarter metre north-west of where
+            # the file says. A tile cut short at the border (2000 x 1731) has no
+            # exact half: it is read whole.
+            full = gdal.Open("/vsicurl/" + url)
+            gt = list(full.GetGeoTransform())
+            assert gt[1] == 0.5 and gt[5] == -0.5, (url, gt)
+            ov = gdal.OpenEx("/vsicurl/" + url, open_options=["OVERVIEW_LEVEL=0"])
+            if (2 * ov.RasterXSize, 2 * ov.RasterYSize) != (full.RasterXSize, full.RasterYSize):
+                srcs.append((full, full))
+                continue
+            vrt = gdal.Translate("", ov, format="VRT")
+            vrt.SetGeoTransform([gt[0] - 0.25, 1, 0, gt[3] + 0.25, 0, -1])
+            srcs.append((ov, vrt))
+    if not srcs:
+        return np.full((side, side), np.nan, np.float32)
+    out = gdal.Warp("", [v for _, v in srcs], format="MEM", dstSRS="EPSG:2154",
+                    outputBounds=(x0, y0, x0 + side, y0 + side), xRes=1, yRes=1, resampleAlg="bilinear",
+                    srcNodata=-9999, dstNodata=-9999, outputType=gdal.GDT_Float32, overviewLevel="NONE")
+    a = out.ReadAsArray().astype(np.float32)
+    a[a < -1000] = np.nan
+    return a
+
+
+def wms_square(layer, x0, y0, side, s, pieces, pool):
+    """GetMaps of the Lambert-93 square at s m, pieces x pieces of them."""
+    n = side // s // pieces
+    m = side // pieces
+    futs = {(qr, qc): pool.submit(wms, layer, 2154, x0 + qc * m, y0 + (pieces - 1 - qr) * m, m, m, n, n)
+            for qr in range(pieces) for qc in range(pieces)}
+    a = np.empty((n * pieces, n * pieces), np.float32)
+    for (qr, qc), f in futs.items():
+        a[qr * n:(qr + 1) * n, qc * n:(qc + 1) * n] = f.result()
+    return a
+
+
+def proximity(mask, limit):
+    """Distance in samples to the nearest true sample, capped at limit."""
+    from osgeo import gdal
+
+    h, w = mask.shape
+    mem = gdal.GetDriverByName("MEM")
+    src = mem.Create("", w, h, 1, gdal.GDT_Byte)
+    src.GetRasterBand(1).WriteArray(mask.astype(np.uint8))
+    dst = mem.Create("", w, h, 1, gdal.GDT_Float32)
+    gdal.ComputeProximity(src.GetRasterBand(1), dst.GetRasterBand(1),
+                          ["VALUES=1", "DISTUNITS=PIXEL", "MAXDIST=%d" % limit, "NODATA=%d" % limit])
+    return dst.GetRasterBand(1).ReadAsArray()
+
+
+def blend(ign, ch, feather):
+    """IGN's heights, fading to swisstopo's over the feather samples of their
+    overlap next to the ground only swisstopo covers."""
+    iv, sv = ~np.isnan(ign), ~np.isnan(ch)
+    out = np.where(iv, ign, ch)
+    only = sv & ~iv
+    both = iv & sv
+    if only.any() and both.any():
+        w = np.clip(proximity(only, feather) / np.float32(feather), 0, 1)
+        out[both] = (w * ign + (1 - w) * ch)[both]
+    return out
+
+
+def build_block_swiss(bx, by, root, pool, index, to_ch):
+    """build_block for a block swisstopo touches: both countries, blended."""
+    x0, y0, side = bx * B - PAD, by * B - PAD, B + 2 * PAD
+    fg = pool.submit(wms_square, MNT + ".LAMB93", x0, y0, side, 1, 3, pool)
+    fc = pool.submit(wms_square, MNH + ".LAMB93", x0, y0, side, 2, 2, pool)
+    ground = swiss_layer(index["ground"], to_ch, x0, y0, side)
+    canopy = halve(swiss_layer(index["surface"], to_ch, x0, y0, side) - swiss_layer(index["under"], to_ch, x0, y0, side))
+    g = blend(fg.result(), ground, FEATHER)[PAD:-PAD, PAD:-PAD]
+    c = blend(fc.result(), canopy, FEATHER // 2)[PAD // 2:-PAD // 2, PAD // 2:-PAD // 2]
+    files = []
+    for s in (1, 2, 4, 8):
+        if s in WRITE["ground"]:
+            write_level(root, "ground", s, g, bx, by, files)
+        if s < 8:
+            g = halve(g)
+    for s in (2, 4, 8, 16):
+        if s in WRITE["canopy"]:
+            write_level(root, "canopy", s, c, bx, by, files)
+        if s < 16:
+            c = halve(c)
+    return files
 
 
 class Uploader:
@@ -291,11 +504,27 @@ def main():
     ap.add_argument("--endpoint", help="the bucket's S3 endpoint")
     ap.add_argument("--prefix", default="v1")
     ap.add_argument("--jobs", type=int, default=2, help="blocks at a time (5 GetMaps each)")
+    ap.add_argument("--swiss", action="store_true", help="the blocks swisstopo covers, from both countries")
     args = ap.parse_args()
     if bool(args.out) == bool(args.bucket):
         ap.error("give exactly one of --out and --bucket")
+    if args.swiss and args.region != "lamb93":
+        ap.error("--swiss goes with lamb93")
     os.makedirs(args.state, exist_ok=True)
-    todo = list(zip(args.blocks[::2], args.blocks[1::2])) or plan_blocks(args.region, args.state)
+    if args.swiss:
+        # GDAL reads swisstopo's GeoTIFFs over HTTP, a few ranges of each.
+        os.environ.update(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_MAX_RETRY="8",
+                          GDAL_HTTP_RETRY_DELAY="3", GDAL_HTTP_TIMEOUT="120")
+        index = swiss_index(args.state, area("lamb93")[2])
+        to_ch = lv95()[1]
+        planned = plan_swiss(args.state)
+
+        def build(region, bx, by, root, pool):
+            return build_block_swiss(bx, by, root, pool, index, to_ch)
+    else:
+        planned = None
+        build = build_block
+    todo = list(zip(args.blocks[::2], args.blocks[1::2])) or planned or plan_blocks(args.region, args.state)
     done_path = os.path.join(args.state, "done.jsonl")
     done = set()
     if os.path.exists(done_path):
@@ -315,12 +544,12 @@ def main():
         if uploader:
             staging = os.path.join(args.state, "staging", "%d_%d" % b)
             root = os.path.join(staging, args.region)
-            files = build_block(args.region, bx, by, root, fetch_pool)
+            files = build(args.region, bx, by, root, fetch_pool)
             uploader.upload(files, staging, args.prefix)
             shutil.rmtree(staging)
         else:
             root = os.path.join(args.out, args.prefix, args.region)
-            files = build_block(args.region, bx, by, root, fetch_pool)
+            files = build(args.region, bx, by, root, fetch_pool)
         size = sum(os.path.getsize(f) for f in files) if not uploader else None
         with lock:
             with open(done_path, "a") as f:
