@@ -2,7 +2,7 @@
 """Our own elevation tiles, from IGN's LIDAR HD (src/web/hd_dem.ml, [Own_tiles]).
 
     own_tiles.py <state dir> <region> [--out DIR | --bucket B --endpoint URL]
-                 [--prefix v1] [--jobs N] [--swiss] [bx by ...]
+                 [--prefix v1] [--jobs N] [--swiss | --italy] [bx by ...]
 
 <region> is lamb93 (metropolitan France, EPSG:2154) or rgr92utm40s (La Reunion,
 EPSG:2975), the CRS each territory's layers are stored in, so the service never
@@ -51,6 +51,30 @@ overlap, IGN fades to swisstopo over the 200 m next to the Swiss-only ground, so
 the difference becomes a slope of at most 0.25% rather than a step. Blocks are
 fetched with 256 m around them, so that the fade sees across their edges.
 
+Italy (--italy, lamb93 only, a state dir of its own, after --swiss): the blocks
+TINITALY covers within the area, plus their neighbours, from IGN, swisstopo and
+two Italian models: Regione Piemonte's 5 m LIDAR DTM (ICE 2009-2011, its WCS),
+and where it has none, INGV's TINITALY 1.1 at 10 m (both CC BY 4.0). Piemonte
+is within 0.2 m of IGN on flat ground at the border (Col de Larche, Col de
+Tende); TINITALY within 0.6 m but noisy, and 12 m RMS off on the glaciers by the
+Mont Blanc tunnel, older than IGN's: IGN and swisstopo fade to them over 500 m,
+Piemonte to TINITALY over 200 m. Neither resolves a 1 m sample, so the 1 m
+ground stays where IGN or swisstopo has data, taken from the blend (so that it
+meets the 4 m ring where it ends) and the canopy is IGN's and swisstopo's alone.
+
+The runs that built tiles.vouillon.org/v1, each with its state dir under
+~/mountains-tiles (where the TINITALY download also stays), in this order: a
+later one rewrites the blocks it shares with an earlier one.
+
+    own_tiles.py state-lamb93 lamb93 --bucket B --endpoint E          IGN
+    own_tiles.py state-reunion rgr92utm40s --bucket B --endpoint E    IGN
+    own_tiles.py state-swiss lamb93 --swiss --bucket B --endpoint E   + swisstopo
+    own_tiles.py state-lamb93-edges lamb93 ...      the IGN blocks with an edge,
+    own_tiles.py state-reunion-edges rgr92utm40s ...  from own_tiles_edges.py,
+    own_tiles.py state-swiss-edges lamb93 --swiss ...  once wms dropped IGN's
+                                                       mixtures at its nodata
+    own_tiles.py state-italy lamb93 --italy --bucket B --endpoint E   + Italy
+
 HDT1 (the .dem layout of compress_dem.ml with a per-tile scale):
   0 "HDT1"  4 width u32  8 height u32  12 base f32  16 step f32
   20 high_size u32  24 low_size u32  28 zlib(high bytes)  zlib(low bytes)
@@ -65,7 +89,7 @@ heights sample for sample. Rounded to 10 cm first, 16% of the baked samples
 moved by a step and the tree finder's local maxima with them (+47 broadleaves
 of 2536 at 44.3811, 6.6311); as it is, the trees are IGN's exactly.
 """
-import argparse, json, os, shutil, struct, sys, threading, time, urllib.error, urllib.request, zlib
+import argparse, json, os, re, shutil, struct, sys, threading, time, urllib.error, urllib.request, zlib
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
@@ -78,6 +102,10 @@ MARGIN_M = 10_000
 SWISS = {"ground": "ch.swisstopo.swissalti3d", "surface": "ch.swisstopo.swisssurface3d-raster"}
 PAD = 256  # m fetched around a Swiss block
 FEATHER = 200  # m over which IGN fades to swisstopo
+ITALY_PAD = 512  # m fetched around an Italian block
+ITALY_FEATHER = 500  # m over which IGN and swisstopo fade to the Italian models
+TINITALY = "https://tinitaly.pi.ingv.it/"
+PIEMONTE = "https://geomap.reteunitaria.piemonte.it/ws/taims/rp-01/taimsdtmwcs/wcs_ice_2009_2011_dtm"
 
 # Viewer.in_range's boxes and the half extent it requires (0.57 degrees at
 # size 4096), with each territory's layer suffix and EPSG code.
@@ -88,8 +116,25 @@ REGIONS = {
 HALF_EXTENT_DEG = 2048 / 3600
 
 
-def wms(layer, epsg, x, y, w_m, h_m, w_px, h_px):
-    """GetMap as float32 heights, rows from the north; nodata as NaN."""
+def wms(layer, epsg, x, y, w_m, h_m, w_px, h_px, clean=True):
+    """GetMap as float32 heights, rows from the north; nodata as NaN.
+
+    The service resamples its data with its nodata, -9999, as a height, so the
+    samples next to it are mixtures: 1948, 766 and -16 m in a row on a 2540 m
+    slope at the Italian border (Argentera), trenches in every ring along every
+    edge of the data. They go out to one sample, diagonals included, the same
+    whatever the request: with clean, the request is two samples wider on each
+    side, and every sample within two of nodata is dropped."""
+    if clean:
+        sx, sy = w_m / w_px, h_m / h_px
+        a = wms(layer, epsg, x - 2 * sx, y - 2 * sy, w_m + 4 * sx, h_m + 4 * sy, w_px + 4, h_px + 4, clean=False)
+        bad = np.isnan(a)
+        for _ in range(2):
+            p = np.pad(bad, 1, mode="edge")
+            bad = (p[1:-1, 1:-1] | p[:-2, 1:-1] | p[2:, 1:-1] | p[1:-1, :-2] | p[1:-1, 2:]
+                   | p[:-2, :-2] | p[:-2, 2:] | p[2:, :-2] | p[2:, 2:])
+        a[bad] = np.nan
+        return a[2:-2, 2:-2].copy()
     url = (
         "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap"
         "&LAYERS=%s&STYLES=&CRS=EPSG:%d&FORMAT=image/x-bil;bits=32"
@@ -268,7 +313,7 @@ def plan_blocks(region, state):
     # Where the service has data: one GetMap of the area at 16 samples per block.
     nx, ny = bx1 - bx0 + 1, by1 - by0 + 1
     assert nx * 16 <= 5000 and ny * 16 <= 5000, "area too large for one coverage GetMap"
-    cov = wms(MNT + "." + info["suffix"], info["epsg"], bx0 * B, by0 * B, nx * B, ny * B, nx * 16, ny * 16)
+    cov = wms(MNT + "." + info["suffix"], info["epsg"], bx0 * B, by0 * B, nx * B, ny * B, nx * 16, ny * 16, clean=False)
     has = ~np.isnan(cov).reshape(ny, 16, nx, 16).all(axis=(1, 3))[::-1]  # [j][i], j from the south
     # Neighbours too: data that a 256 m sampling missed.
     grown = has.copy()
@@ -409,8 +454,9 @@ def swiss_layer(urls, to_ch, x0, y0, side):
     return a
 
 
-def wms_square(layer, x0, y0, side, s, pieces, pool):
-    """GetMaps of the Lambert-93 square at s m, pieces x pieces of them."""
+def wms_square(layer, x0, y0, side, s, pool):
+    """GetMaps of the Lambert-93 square at s m, in pieces of at most 2048^2."""
+    pieces = next(p for p in range(1, 64) if side % (s * p) == 0 and side // s // p <= 2048)
     n = side // s // pieces
     m = side // pieces
     futs = {(qr, qc): pool.submit(wms, layer, 2154, x0 + qc * m, y0 + (pieces - 1 - qr) * m, m, m, n, n)
@@ -448,21 +494,185 @@ def blend(ign, ch, feather):
     return out
 
 
-def build_block_swiss(bx, by, root, pool, index, to_ch):
-    """build_block for a block swisstopo touches: both countries, blended."""
-    x0, y0, side = bx * B - PAD, by * B - PAD, B + 2 * PAD
-    fg = pool.submit(wms_square, MNT + ".LAMB93", x0, y0, side, 1, 3, pool)
-    fc = pool.submit(wms_square, MNH + ".LAMB93", x0, y0, side, 2, 2, pool)
-    ground = swiss_layer(index["ground"], to_ch, x0, y0, side)
-    canopy = halve(swiss_layer(index["surface"], to_ch, x0, y0, side) - swiss_layer(index["under"], to_ch, x0, y0, side))
-    g = blend(fg.result(), ground, FEATHER)[PAD:-PAD, PAD:-PAD]
-    c = blend(fc.result(), canopy, FEATHER // 2)[PAD // 2:-PAD // 2, PAD // 2:-PAD // 2]
+def utm32():
+    from osgeo import osr
+
+    osr.UseExceptions()
+    u, l93 = osr.SpatialReference(), osr.SpatialReference()
+    u.ImportFromEPSG(32632)
+    l93.ImportFromEPSG(2154)
+    for s in (u, l93):
+        s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return osr.CoordinateTransformation(l93, u)
+
+
+def utm_box(to_utm, x0, y0, side, margin):
+    cs = [to_utm.TransformPoint(x, y)[:2] for x in (x0, x0 + side) for y in (y0, y0 + side)]
+    return (min(c[0] for c in cs) - margin, min(c[1] for c in cs) - margin,
+            max(c[0] for c in cs) + margin, max(c[1] for c in cs) + margin)
+
+
+def to_l93(src, x0, y0, side, nodata):
+    """A GDAL dataset (or path) at 1 m over the Lambert-93 square, rows from the
+    north; NaN where it has no data."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    out = gdal.Warp("", src, format="MEM", dstSRS="EPSG:2154", outputBounds=(x0, y0, x0 + side, y0 + side),
+                    xRes=1, yRes=1, resampleAlg="bilinear", srcNodata=nodata, dstNodata=-9999,
+                    outputType=gdal.GDT_Float32, overviewLevel="NONE")
+    a = out.ReadAsArray().astype(np.float32)
+    a[a < -1000] = np.nan
+    return a
+
+
+def tinitaly(state, box):
+    """TINITALY 1.1's 50 km tiles (10 m, UTM 32N) over the area, downloaded once
+    into the state dir; the path of a VRT of them."""
+    from osgeo import gdal
+    import zipfile
+
+    gdal.UseExceptions()
+    d = os.path.join(state, "tinitaly")
+    vrt = os.path.join(d, "tinitaly.vrt")
+    if os.path.exists(vrt):
+        return vrt
+    os.makedirs(d, exist_ok=True)
+    page = urllib.request.urlopen(TINITALY + "Download_Area1_1.html", timeout=120).read().decode("utf-8", "replace")
+    # w<NNN><EE>: the 50 km square of UTM 32N from northing NNN x 10 km and
+    # easting EE x 10 km (w50530's data starts at 327500, 5087500 from the top).
+    lat0, lat1, lon0, lon1 = box
+    from osgeo import osr
+
+    wgs, u = osr.SpatialReference(), osr.SpatialReference()
+    wgs.ImportFromEPSG(4326)
+    u.ImportFromEPSG(32632)
+    for sr in (wgs, u):
+        sr.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    t = osr.CoordinateTransformation(wgs, u)
+    pts = [t.TransformPoint(lon0 + (lon1 - lon0) * i / 20, lat)[:2] for i in range(21) for lat in (lat0, lat1)] + [
+        t.TransformPoint(lon, lat0 + (lat1 - lat0) * i / 20)[:2] for i in range(21) for lon in (lon0, lon1)]
+    e0, e1 = min(p[0] for p in pts), max(p[0] for p in pts)
+    n0, n1 = min(p[1] for p in pts), max(p[1] for p in pts)
+    tifs = []
+    for name in sorted(set(re.findall(r"data_1\.1/(w\d{5})_s10/", page))):
+        n, e = int(name[1:4]) * 10_000, int(name[4:6]) * 10_000
+        if e + 50_000 <= e0 or e >= e1 or n + 50_000 <= n0 or n >= n1:
+            continue
+        tif = os.path.join(d, name + "_s10.tif")
+        if not os.path.exists(tif):
+            z = os.path.join(d, name + ".zip")
+            for attempt in range(8):
+                try:
+                    with open(z, "wb") as f:
+                        f.write(urllib.request.urlopen(TINITALY + "data_1.1/%s_s10/%s_s10.zip" % (name, name),
+                                                       timeout=600).read())
+                    break
+                except Exception as ex:
+                    print("  retry", attempt, repr(ex), name, flush=True)
+                    time.sleep(3 * (attempt + 1))
+            with zipfile.ZipFile(z) as zf:
+                member = next(m for m in zf.namelist() if m.endswith(".tif"))
+                with zf.open(member) as src, open(tif + ".part", "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            os.replace(tif + ".part", tif)
+            os.remove(z)
+        tifs.append(tif)
+    print("tinitaly: %d tiles" % len(tifs), flush=True)
+    gdal.BuildVRT(vrt, tifs, srcNodata=-9999, VRTNodata=-9999)
+    return vrt
+
+
+def piemonte(to_utm, x0, y0, side):
+    """Regione Piemonte's 5 m DTM over the Lambert-93 square at 1 m, from its WCS."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    e0, n0, e1, n1 = utm_box(to_utm, x0, y0, side, 20)
+    e0, n0, e1, n1 = int(e0 // 5 * 5), int(n0 // 5 * 5), int(e1 // 5 * 5 + 5), int(n1 // 5 * 5 + 5)
+    url = (PIEMONTE + "?service=WCS&version=1.0.0&request=GetCoverage&coverage=DTM&crs=EPSG:32632"
+           "&bbox=%d,%d,%d,%d&resx=5&resy=5&format=image/tiff" % (e0, n0, e1, n1))
+    for attempt in range(8):
+        try:
+            d = urllib.request.urlopen(url, timeout=300).read()
+            if d[:4] in (b"II*\0", b"MM\0*"):
+                break
+            if b"does not intersect" in d:  # beyond the coverage's bounding box
+                return np.full((side, side), np.nan, np.float32)
+            err = d[:200]
+        except Exception as ex:
+            err = repr(ex)
+        print("  retry", attempt, err, "piemonte", x0, y0, flush=True)
+        time.sleep(3 * (attempt + 1))
+    else:
+        raise RuntimeError("gave up on %s" % url)
+    mem = "/vsimem/piemonte_%d_%d_%d.tif" % (x0, y0, threading.get_ident())
+    gdal.FileFromMemBuffer(mem, d)
+    try:
+        return to_l93(mem, x0, y0, side, -99)
+    finally:
+        gdal.Unlink(mem)
+
+
+def plan_italy(state, vrt):
+    """The lamb93 blocks within the area that TINITALY covers, plus neighbours."""
+    path = os.path.join(state, "blocks.json")
+    if os.path.exists(path):
+        return [tuple(b) for b in json.load(open(path))]
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    (bx0, bx1, by0, by1), inside, _, _, _ = area("lamb93")
+    nx, ny = bx1 - bx0 + 1, by1 - by0 + 1
+    cov = gdal.Warp("", vrt, format="MEM", dstSRS="EPSG:2154", outputBounds=(bx0 * B, by0 * B, (bx1 + 1) * B, (by1 + 1) * B),
+                    xRes=256, yRes=256, resampleAlg="average", srcNodata=-9999, dstNodata=-9999).ReadAsArray()
+    has = (cov > -1000).reshape(ny, 16, nx, 16).any(axis=(1, 3))[::-1]
+    grown = has.copy()
+    grown[1:] |= has[:-1]
+    grown[:-1] |= has[1:]
+    grown[:, 1:] |= grown[:, :-1].copy()
+    grown[:, :-1] |= grown[:, 1:].copy()
+    blocks = [(bx0 + i, by0 + j) for j in range(ny) for i in range(nx) if grown[j, i] and inside(bx0 + i, by0 + j)]
+    json.dump(blocks, open(path, "w"))
+    print("italy: %d blocks" % len(blocks), flush=True)
+    return blocks
+
+
+def build_block_abroad(bx, by, root, pool, swiss, italy, pad, ign=None):
+    """build_block for a block another country's data touches: IGN's, then
+    swisstopo's ((index, to_ch) or None), then the Italian models ((TINITALY's
+    VRT, to_utm) or None), each blended into the one before. IGN's are fetched
+    only for the blocks in ign, if given: plan_blocks's, which includes their
+    neighbours (21 of an Italian block's 30 s went to IGN's empty GetMaps)."""
+    x0, y0, side = bx * B - pad, by * B - pad, B + 2 * pad
+    fp = pool.submit(piemonte, italy[1], x0, y0, side) if italy else None
+    if ign is None or (bx, by) in ign:
+        fg = pool.submit(wms_square, MNT + ".LAMB93", x0, y0, side, 1, pool)
+        fc = pool.submit(wms_square, MNH + ".LAMB93", x0, y0, side, 2, pool)
+        g, c = fg.result(), fc.result()
+    else:
+        g = np.full((side, side), np.nan, np.float32)
+        c = np.full((side // 2, side // 2), np.nan, np.float32)
+    if swiss:
+        index, to_ch = swiss
+        ground = swiss_layer(index["ground"], to_ch, x0, y0, side)
+        canopy = halve(swiss_layer(index["surface"], to_ch, x0, y0, side)
+                       - swiss_layer(index["under"], to_ch, x0, y0, side))
+        g = blend(g, ground, FEATHER)
+        c = blend(c, canopy, FEATHER // 2)
+    fine = g
+    if italy:
+        it = blend(fp.result(), to_l93(italy[0], x0, y0, side, -9999), FEATHER)
+        g = blend(g, it, ITALY_FEATHER)
+        fine = np.where(np.isnan(fine), np.float32(np.nan), g)
+    fine, g = fine[pad:-pad, pad:-pad], g[pad:-pad, pad:-pad]
+    c = c[pad // 2:-pad // 2, pad // 2:-pad // 2]
     files = []
-    for s in (1, 2, 4, 8):
+    write_level(root, "ground", 1, fine, bx, by, files)
+    for s in (2, 4, 8):
+        g = halve(g)
         if s in WRITE["ground"]:
             write_level(root, "ground", s, g, bx, by, files)
-        if s < 8:
-            g = halve(g)
     for s in (2, 4, 8, 16):
         if s in WRITE["canopy"]:
             write_level(root, "canopy", s, c, bx, by, files)
@@ -505,22 +715,33 @@ def main():
     ap.add_argument("--prefix", default="v1")
     ap.add_argument("--jobs", type=int, default=2, help="blocks at a time (5 GetMaps each)")
     ap.add_argument("--swiss", action="store_true", help="the blocks swisstopo covers, from both countries")
+    ap.add_argument("--italy", action="store_true", help="the blocks TINITALY covers, from all three")
     args = ap.parse_args()
     if bool(args.out) == bool(args.bucket):
         ap.error("give exactly one of --out and --bucket")
-    if args.swiss and args.region != "lamb93":
-        ap.error("--swiss goes with lamb93")
+    if (args.swiss or args.italy) and args.region != "lamb93":
+        ap.error("--swiss and --italy go with lamb93")
+    if args.swiss and args.italy:
+        ap.error("give one of --swiss and --italy")
     os.makedirs(args.state, exist_ok=True)
-    if args.swiss:
+    if args.swiss or args.italy:
         # GDAL reads swisstopo's GeoTIFFs over HTTP, a few ranges of each.
         os.environ.update(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_MAX_RETRY="8",
                           GDAL_HTTP_RETRY_DELAY="3", GDAL_HTTP_TIMEOUT="120")
-        index = swiss_index(args.state, area("lamb93")[2])
-        to_ch = lv95()[1]
-        planned = plan_swiss(args.state)
+        box = area("lamb93")[2]
+        swiss = (swiss_index(args.state, box), lv95()[1])
+        if args.italy:
+            italy = (tinitaly(args.state, box), utm32())
+            planned, pad = plan_italy(args.state, italy[0]), ITALY_PAD
+            # IGN's blocks, planned as for the run that built them.
+            os.makedirs(os.path.join(args.state, "ign"), exist_ok=True)
+            ign = set(plan_blocks("lamb93", os.path.join(args.state, "ign")))
+        else:
+            italy, ign = None, None
+            planned, pad = plan_swiss(args.state), PAD
 
         def build(region, bx, by, root, pool):
-            return build_block_swiss(bx, by, root, pool, index, to_ch)
+            return build_block_abroad(bx, by, root, pool, swiss, italy, pad, ign)
     else:
         planned = None
         build = build_block
