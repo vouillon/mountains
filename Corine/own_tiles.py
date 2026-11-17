@@ -433,10 +433,14 @@ def swiss_layer(urls, to_ch, x0, y0, side):
             # The first overview: every other sample, from the north-west one of
             # each 2 x 2, so its centres are a quarter metre north-west of where
             # the file says. A tile cut short at the border (2000 x 1731) has no
-            # exact half: it is read whole.
+            # exact half, and a smaller scrap (464 x 377) no overview: they are
+            # read whole.
             full = gdal.Open("/vsicurl/" + url)
             gt = list(full.GetGeoTransform())
             assert gt[1] == 0.5 and gt[5] == -0.5, (url, gt)
+            if full.GetRasterBand(1).GetOverviewCount() == 0:
+                srcs.append((full, full))
+                continue
             ov = gdal.OpenEx("/vsicurl/" + url, open_options=["OVERVIEW_LEVEL=0"])
             if (2 * ov.RasterXSize, 2 * ov.RasterYSize) != (full.RasterXSize, full.RasterYSize):
                 srcs.append((full, full))
