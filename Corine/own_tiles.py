@@ -415,42 +415,54 @@ def plan_swiss(state):
     return blocks
 
 
+SWISS_READS = ThreadPoolExecutor(24)
+
+
+def swiss_tile(url):
+    """A swisstopo tile at 1 m, in memory: the first overview, its origin moved
+    (see swiss_layer), or the whole tile when it has no exact half."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    # The first overview: every other sample, from the north-west one of each 2
+    # x 2, so its centres are a quarter metre north-west of where the file
+    # says. A tile cut short at the border (2000 x 1731) has no exact half, and
+    # a smaller scrap (464 x 377) no overview: they are read whole.
+    full = gdal.Open("/vsicurl/" + url)
+    gt = list(full.GetGeoTransform())
+    assert gt[1] == 0.5 and gt[5] == -0.5, (url, gt)
+    src = full
+    if full.GetRasterBand(1).GetOverviewCount() > 0:
+        ov = gdal.OpenEx("/vsicurl/" + url, open_options=["OVERVIEW_LEVEL=0"])
+        if (2 * ov.RasterXSize, 2 * ov.RasterYSize) == (full.RasterXSize, full.RasterYSize):
+            src, gt = ov, [gt[0] - 0.25, 1, 0, gt[3] + 0.25, 0, -1]
+    band = src.GetRasterBand(1)
+    mem = gdal.GetDriverByName("MEM").Create("", src.RasterXSize, src.RasterYSize, 1, band.DataType)
+    mem.SetGeoTransform(gt)
+    mem.SetProjection(full.GetProjection())
+    out = mem.GetRasterBand(1)
+    if band.GetNoDataValue() is not None:
+        out.SetNoDataValue(band.GetNoDataValue())
+    out.WriteArray(band.ReadAsArray())
+    return mem
+
+
 def swiss_layer(urls, to_ch, x0, y0, side):
     """swisstopo's tiles at 1 m over the Lambert-93 square [x0, x0 + side) x [y0,
-    y0 + side), rows from the north; NaN where they have no data."""
+    y0 + side), rows from the north; NaN where they have no data. The tiles are
+    read in parallel (one at a time, a block waited on the network)."""
     from osgeo import gdal
 
     gdal.UseExceptions()
     corners = [to_ch.TransformPoint(x, y)[:2] for x in (x0, x0 + side) for y in (y0, y0 + side)]
     e0, e1 = int(min(c[0] for c in corners) // 1000), int(max(c[0] for c in corners) // 1000)
     n0, n1 = int(min(c[1] for c in corners) // 1000), int(max(c[1] for c in corners) // 1000)
-    srcs = []
-    for e in range(e0, e1 + 1):
-        for n in range(n0, n1 + 1):
-            url = urls.get("%d-%d" % (e, n))
-            if url is None:
-                continue
-            # The first overview: every other sample, from the north-west one of
-            # each 2 x 2, so its centres are a quarter metre north-west of where
-            # the file says. A tile cut short at the border (2000 x 1731) has no
-            # exact half, and a smaller scrap (464 x 377) no overview: they are
-            # read whole.
-            full = gdal.Open("/vsicurl/" + url)
-            gt = list(full.GetGeoTransform())
-            assert gt[1] == 0.5 and gt[5] == -0.5, (url, gt)
-            if full.GetRasterBand(1).GetOverviewCount() == 0:
-                srcs.append((full, full))
-                continue
-            ov = gdal.OpenEx("/vsicurl/" + url, open_options=["OVERVIEW_LEVEL=0"])
-            if (2 * ov.RasterXSize, 2 * ov.RasterYSize) != (full.RasterXSize, full.RasterYSize):
-                srcs.append((full, full))
-                continue
-            vrt = gdal.Translate("", ov, format="VRT")
-            vrt.SetGeoTransform([gt[0] - 0.25, 1, 0, gt[3] + 0.25, 0, -1])
-            srcs.append((ov, vrt))
-    if not srcs:
+    tiles = [urls["%d-%d" % (e, n)] for e in range(e0, e1 + 1) for n in range(n0, n1 + 1)
+             if "%d-%d" % (e, n) in urls]
+    if not tiles:
         return np.full((side, side), np.nan, np.float32)
-    out = gdal.Warp("", [v for _, v in srcs], format="MEM", dstSRS="EPSG:2154",
+    srcs = list(SWISS_READS.map(swiss_tile, tiles))
+    out = gdal.Warp("", srcs, format="MEM", dstSRS="EPSG:2154",
                     outputBounds=(x0, y0, x0 + side, y0 + side), xRes=1, yRes=1, resampleAlg="bilinear",
                     srcNodata=-9999, dstNodata=-9999, outputType=gdal.GDT_Float32, overviewLevel="NONE")
     a = out.ReadAsArray().astype(np.float32)
