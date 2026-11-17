@@ -172,10 +172,11 @@ let wms_projected_layer ~stem ~metres ~split ~size ~fade_metres =
   assert (size mod split = 0);
   { kind = Wms_projected { stem; metres; split }; size; fade_metres }
 
-(* Where our own tiles are hosted, [None] until they are: every ring then comes
-   from IGN, as it always has. [?own=<base url>] overrides it, to try a tile
-   set, and [?ign] keeps IGN's rings whatever it says, to compare the two. *)
-let own_tiles_url : string option = None
+(* Where our own tiles are hosted (an R2 bucket behind Cloudflare's cache), built
+   by Corine/own_tiles.py; [None] would take every ring from IGN again.
+   [?own=<base url>] overrides it, to try a tile set, and [?ign] keeps IGN's
+   rings, to compare the two. *)
+let own_tiles_url = Some "https://tiles.vouillon.org/v1"
 
 (* Every ring is swapped for its own-tile counterpart, keeping its name, so the
    renderer is unchanged. Not in a worker, which has no location. *)
