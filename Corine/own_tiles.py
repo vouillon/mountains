@@ -106,6 +106,9 @@ ITALY_PAD = 512  # m fetched around an Italian block
 ITALY_FEATHER = 500  # m over which IGN and swisstopo fade to the Italian models
 TINITALY = "https://tinitaly.pi.ingv.it/"
 PIEMONTE = "https://geomap.reteunitaria.piemonte.it/ws/taims/rp-01/taimsdtmwcs/wcs_ice_2009_2011_dtm"
+# Its coverage's bounding box in UTM 32N, as the service states it: a request
+# outside it gets an exception report, not an empty image.
+PIEMONTE_BOX = (290748, 4861375, 536649, 5165171)
 
 # Viewer.in_range's boxes and the half extent it requires (0.57 degrees at
 # size 4096), with each territory's layer suffix and EPSG code.
@@ -606,6 +609,9 @@ def piemonte(to_utm, x0, y0, side):
     gdal.UseExceptions()
     e0, n0, e1, n1 = utm_box(to_utm, x0, y0, side, 20)
     e0, n0, e1, n1 = int(e0 // 5 * 5), int(n0 // 5 * 5), int(e1 // 5 * 5 + 5), int(n1 // 5 * 5 + 5)
+    pe0, pn0, pe1, pn1 = PIEMONTE_BOX
+    if e1 <= pe0 or e0 >= pe1 or n1 <= pn0 or n0 >= pn1:
+        return np.full((side, side), np.nan, np.float32)
     url = (PIEMONTE + "?service=WCS&version=1.0.0&request=GetCoverage&coverage=DTM&crs=EPSG:32632"
            "&bbox=%d,%d,%d,%d&resx=5&resy=5&format=image/tiff" % (e0, n0, e1, n1))
     for attempt in range(8):
@@ -613,7 +619,7 @@ def piemonte(to_utm, x0, y0, side):
             d = urllib.request.urlopen(url, timeout=300).read()
             if d[:4] in (b"II*\0", b"MM\0*"):
                 break
-            if b"does not intersect" in d:  # beyond the coverage's bounding box
+            if b"does not intersect" in d or b"outside requested coverage" in d:  # beyond its bounding box
                 return np.full((side, side), np.nan, np.float32)
             err = d[:200]
         except Exception as ex:
