@@ -74,6 +74,8 @@ later one rewrites the blocks it shares with an earlier one.
     own_tiles.py state-swiss-edges lamb93 --swiss ...  once wms dropped IGN's
                                                        mixtures at its nodata
     own_tiles.py state-italy lamb93 --italy --bucket B --endpoint E   + Italy
+    own_tiles_stale.py --bucket B --endpoint E --delete   the tiles a rebuild
+                                                       emptied (no run deletes)
 
 HDT1 (the .dem layout of compress_dem.ml with a per-tile scale):
   0 "HDT1"  4 width u32  8 height u32  12 base f32  16 step f32
