@@ -184,12 +184,18 @@ let hide_startup_overlay () =
              Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el)))
     overlay
 
+(* How many overlays are fading in. No frame is drawn meanwhile ([event_loop]):
+   a load now runs under the fade rather than after it, and one that publishes
+   first must not show through an overlay still half transparent. *)
+let overlays_rising = ref 0
+
 let show_startup_overlay msg loading =
   let doc = Brr.G.document in
   update_startup_status msg loading;
   let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
   match overlay with
   | Some el ->
+      incr overlays_rising;
       Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "flex") el;
       (* We need to wait for the browser to process the 'display' change
          before we can trigger the 'opacity' transition. *)
@@ -197,7 +203,9 @@ let show_startup_overlay msg loading =
       let* () = request_animation_frame () in
       Brr.El.set_class (Jstr.v "hidden") false el;
       (* Wait for the fade-in transition to complete *)
-      sleep 0.5
+      let* () = sleep 0.5 in
+      decr overlays_rising;
+      Lwt.return_unit
   | None -> Lwt.return_unit
 
 let navigate_to uri =
@@ -3841,7 +3849,7 @@ let event_loop ~generation ctx draw =
     let should_draw =
       (angle_diff > angle_threshold
       || zoom_diff > 0.00001 || !force_redraw || Lazy.force show_fps)
-      && not hold
+      && (not hold) && !overlays_rising = 0
     in
 
     (* Drawing into a lost context is a sequence of silent no-ops, and the
@@ -6071,11 +6079,17 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
   (switch_location :=
      fun ~push ~camera ~own_position ~lat ~lon ->
        Lwt.async (fun () ->
+           let t_switch = now_ms () in
+           (* The load runs under the overlay's fade-in, not after it: waiting
+              for the fade first put half a second on every switch. The fade is
+              awaited before the overlay is taken down -- hiding one still fading
+              in misbehaves -- and no frame is drawn until it is opaque
+              ([overlays_rising]). *)
+           let shown = show_startup_overlay "Loading Terrain..." true in
            Lwt.catch
              (fun () ->
-               let t_switch = now_ms () in
-               let* () = show_startup_overlay "Loading Terrain..." true in
                let* applied = load ~lat ~lon in
+               let* () = shown in
                if applied then begin
                  Web_utils.measure ~track:"Location" "Switch" t_switch;
                  current_lat := lat;
@@ -6099,6 +6113,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                Lwt.return_unit)
              (fun e ->
                (match e with Jv.Error e -> Brr.Console.error [ e ] | _ -> ());
+               let* () = shown in
                hide_startup_overlay ();
                display_temporary_message
                  (Printf.sprintf "Could not load location: %s"
