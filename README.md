@@ -57,9 +57,11 @@ cd src/web && dune build
 
 ## Data Sources
 
+How each was obtained and imported, and the traps met: [DATA_SOURCES.md](DATA_SOURCES.md).
+
 1.  **DEM**: 30m resolution Copernicus Digital Elevation Models.
-2.  **High-resolution DEM**: IGN RGE ALTI and LiDAR HD (France), fetched at runtime from the Géoplateforme. Source: IGN, licence Etalab 2.0 (geoservices.ign.fr).
-3.  **Canopy height**: IGN LiDAR HD (France), fetched at runtime from the Géoplateforme. Source: IGN, licence Etalab 2.0 (geoservices.ign.fr).
+2.  **High-resolution DEM**: IGN LiDAR HD (France; licence Etalab 2.0, geoservices.ign.fr), swisstopo swissALTI3D (Switzerland), Regione Piemonte, Regione Valle d'Aosta and INGV TINITALY (Italy; CC BY 4.0), built into our own tiles (`Corine/own_tiles.py`) and served from tiles.vouillon.org.
+3.  **Canopy height**: IGN LiDAR HD (France) and swisstopo swissSURFACE3D Raster (Switzerland), in the same tiles.
 4.  **Land Cover**: CORINE dataset processed into triangulated optimized tiles. Generated using European Union's Copernicus Land Monitoring Service information.
 5.  **Tree cover**: tree cover density and dominant leaf type (2018), fetched at runtime from the EEA and resampled. Generated using European Union's Copernicus Land Monitoring Service information.
 6.  **Water, sea and summits**: OpenStreetMap data, read from Overture Maps' base theme (`Corine/fetch_overture.sh`). © OpenStreetMap contributors, Overture Maps Foundation (Open Database License).
