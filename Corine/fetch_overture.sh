@@ -10,14 +10,23 @@
 #
 # Needs the overturemaps command (pip install overturemaps), or its path in
 # OVERTUREMAPS.
+#
+# The release is pinned, OVERTURE_RELEASE overriding it: the tiles in data/clc,
+# data/clc4 and data/poi were all made from 2026-10-21.0, and a cell rebuilt from
+# another release would not meet its neighbours (a lake cut at the edge, a summit
+# moved or renamed). Overture keeps only its last two monthly releases (about 60
+# days, for the GDPR): once this one is gone, the download fails rather than
+# mixing releases, and rebuilding means archived downloads or every cell again
+# from a new release (then change the pin and the note in DATA_SOURCES.md).
 
 set -eu
+release="${OVERTURE_RELEASE:-2026-10-21.0}"
 out="$1"
 shift
 mkdir -p "$out"
 fetch() { # type, tile, bbox
-    "${OVERTUREMAPS:-overturemaps}" download --bbox="$3" -f geojsonseq \
-        -t "$1" -o "$out/$2.all"
+    "${OVERTUREMAPS:-overturemaps}" download --release="$release" \
+        --bbox="$3" -f geojsonseq -t "$1" -o "$out/$2.all"
 }
 for tile in "$@"; do
     lat=$((10#${tile:1:2}))

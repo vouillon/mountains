@@ -82,8 +82,13 @@ then CORINE, holes filled with the nearest land, the rest sea. 53 cells.
 ## Water, sea and summits: OpenStreetMap via Overture
 
 - **Source**: Overture Maps' base theme, which carries OpenStreetMap's water
-  and land features. Release 2026-10-21.0 for the current tiles (the script does
-  not pin one).
+  and land features. Release 2026-10-21.0 for every current tile, pinned in
+  `fetch_overture.sh` (`OVERTURE_RELEASE` overrides it): rebuilt from it,
+  N45E006 comes out byte for byte as in `data/clc`; from 2026-11-18.0 it has 15
+  more summits, so a cell rebuilt from another release would not match its
+  neighbours. Overture keeps only its last two monthly releases (about 60 days):
+  once 2026-10-21.0 is gone, rebuilding needs archived downloads (7.5 MB a cell)
+  or every cell again from a newer release, with the pin moved.
 - **Credit**: "© OpenStreetMap contributors, Overture Maps Foundation (Open
   Database License)."
 - **Import**: `Corine/fetch_overture.sh <dir> <tile>...` (needs `pip install
