@@ -2,7 +2,7 @@
 """Our own elevation tiles, from IGN's LIDAR HD (src/web/hd_dem.ml, [Own_tiles]).
 
     own_tiles.py <state dir> <region> [--out DIR | --bucket B --endpoint URL]
-                 [--prefix v1] [--jobs N] [--swiss | --italy] [bx by ...]
+                 [--prefix v1] [--jobs N] [--swiss | --italy [--aosta]] [bx by ...]
 
 <region> is lamb93 (metropolitan France, EPSG:2154) or rgr92utm40s (La Reunion,
 EPSG:2975), the CRS each territory's layers are stored in, so the service never
@@ -62,6 +62,16 @@ Piemonte to TINITALY over 200 m. Neither resolves a 1 m sample, so the 1 m
 ground stays where IGN or swisstopo has data, taken from the blend (so that it
 meets the 4 m ring where it ends) and the canopy is IGN's and swisstopo's alone.
 
+The Aosta Valley (since 2026-11-20): the region's 2 m LIDAR DTM (flights of
+2005 and 2008, CC BY 4.0, "Dati estratti dal Modello Digitale del Terreno (DTM)
+della Regione Autonoma Valle d'Aosta") comes between swisstopo and Piemonte,
+fading in over 500 m too (its glaciers are 15 years older: 3-6 m above IGN's
+and swisstopo's), and gives 1 m ground (bilinear between its samples) where it
+has data. It is one zip (see aosta), in ED50: moved by AOSTA_SHIFT, measured
+against both neighbours. --italy --aosta rebuilds only the 248 blocks it touches
+(plan_aosta), with a state dir of its own whose tinitaly/, swiss_tiles.json and
+ign/blocks.json may be symlinks to state-italy's.
+
 The runs that built tiles.vouillon.org/v1, each with its state dir under
 ~/mountains-tiles (where the TINITALY download also stays), in this order: a
 later one rewrites the blocks it shares with an earlier one.
@@ -74,6 +84,7 @@ later one rewrites the blocks it shares with an earlier one.
     own_tiles.py state-swiss-edges lamb93 --swiss ...  once wms dropped IGN's
                                                        mixtures at its nodata
     own_tiles.py state-italy lamb93 --italy --bucket B --endpoint E   + Italy
+    own_tiles.py state-aosta lamb93 --italy --aosta ...      + the Aosta Valley
     own_tiles_stale.py lamb93=state-... --bucket B ...      the tiles a rebuild
                                                        emptied (no run deletes)
 
@@ -111,6 +122,13 @@ PIEMONTE = "https://geomap.reteunitaria.piemonte.it/ws/taims/rp-01/taimsdtmwcs/w
 # Its coverage's bounding box in UTM 32N, as the service states it: a request
 # outside it gets an exception report, not an empty image.
 PIEMONTE_BOX = (290748, 4861375, 536649, 5165171)
+AOSTA = "https://geoprodotti.regione.vda.it/download/DTM0508_002/DTM0508_002_UNICO.zip"
+AOSTA_NODATA = -2147483648
+# Measured against IGN (Little St Bernard) and swisstopo (Grand St Bernard),
+# the same at both to 0.25 m: ED50's datum, as GDAL turns it into Lambert-93,
+# leaves the Aosta grid 0.5 m west and 2 m north of where it is, and its heights
+# 0.25 m above NGF-IGN69 (0.21 m RMS left once moved; 0.7 and 1.4 before).
+AOSTA_SHIFT = (0.5, -2.0, -0.25)  # m east, north, up
 
 # Viewer.in_range's boxes and the half extent it requires (0.57 degrees at
 # size 4096), with each territory's layer suffix and EPSG code.
@@ -638,6 +656,101 @@ def piemonte(to_utm, x0, y0, side):
         gdal.Unlink(mem)
 
 
+def aosta(state):
+    """The Aosta Valley's 2 m LIDAR DTM (2005/2008 flights, orthometric heights,
+    ED50 / UTM 32N, CC BY 4.0) as a GeoTIFF of centimetres in <state>/aosta,
+    made once from the region's single zip: a 9.9 GB ASCII grid with decimal
+    commas, in Deflate64 (Info-ZIP's unzip reads it, Python's zipfile does not),
+    streamed so the grid never lands on disk; the zip is deleted after."""
+    from osgeo import gdal, osr
+    import subprocess
+
+    gdal.UseExceptions()
+    d = os.path.join(state, "aosta")
+    tif = os.path.join(d, "aosta.tif")
+    if os.path.exists(tif):
+        return tif
+    os.makedirs(d, exist_ok=True)
+    z = os.path.join(d, "DTM0508_002_UNICO.zip")
+    if not os.path.exists(z):
+        with urllib.request.urlopen(AOSTA, timeout=600) as r, open(z + ".part", "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        os.replace(z + ".part", z)
+    p = subprocess.Popen(["unzip", "-p", z, "DTM0508_002_UNICO.ASC"], stdout=subprocess.PIPE, bufsize=1 << 24)
+    head = {}
+    while len(head) < 6:
+        k, v = p.stdout.readline().split()
+        head[k.decode().lower()] = float(v.replace(b",", b"."))
+    w, h, cell = int(head["ncols"]), int(head["nrows"]), head["cellsize"]
+    assert cell == 2 and head["nodata_value"] == -9999, head
+    sr = osr.SpatialReference()
+    sr.ImportFromEPSG(23032)
+    out = gdal.GetDriverByName("GTiff").Create(
+        tif + ".part", w, h, 1, gdal.GDT_Int32,
+        ["TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "ZLEVEL=6", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"])
+    # The corner is 329116.000024, 5036774.999974: the grid's nodes are on
+    # whole metres, the rest is the export's rounding.
+    out.SetGeoTransform([round(head["xllcorner"]), cell, 0, round(head["yllcorner"]) + h * cell, 0, -cell])
+    out.SetProjection(sr.ExportToWkt())
+    band = out.GetRasterBand(1)
+    band.SetNoDataValue(AOSTA_NODATA)
+    rows = 256
+    for y in range(0, h, rows):
+        n = min(rows, h - y)
+        text = b"".join(p.stdout.readline() for _ in range(n)).replace(b",", b".")
+        a = np.fromstring(text, dtype=np.float64, sep=" ")
+        assert a.size == n * w, (y, a.size)
+        a = a.reshape(n, w)
+        band.WriteArray(np.where(a == -9999, AOSTA_NODATA, np.round(a * 100)).astype(np.int32), 0, y)
+    assert p.wait() == 0
+    out = None
+    os.replace(tif + ".part", tif)
+    os.remove(z)
+    return tif
+
+
+def aosta_l93(tif, x0, y0, side):
+    """The Aosta DTM at 1 m over the Lambert-93 square (bilinear between its 2 m
+    samples), moved by AOSTA_SHIFT; NaN outside it."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    v = gdal.Translate("", tif, format="VRT")
+    g = list(v.GetGeoTransform())
+    g[0] += AOSTA_SHIFT[0]
+    g[3] += AOSTA_SHIFT[1]
+    v.SetGeoTransform(g)
+    return to_l93(v, x0, y0, side, AOSTA_NODATA) / 100 + AOSTA_SHIFT[2]
+
+
+def plan_aosta(state, tif):
+    """The lamb93 blocks within the area whose square, padded, has Aosta data."""
+    path = os.path.join(state, "blocks.json")
+    if os.path.exists(path):
+        return [tuple(b) for b in json.load(open(path))]
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    (bx0, bx1, by0, by1), inside, _, _, _ = area("lamb93")
+    nx, ny = bx1 - bx0 + 1, by1 - by0 + 1
+    cov = gdal.Warp("", tif, format="MEM", dstSRS="EPSG:2154", outputBounds=(bx0 * B, by0 * B, (bx1 + 1) * B, (by1 + 1) * B),
+                    xRes=256, yRes=256, resampleAlg="max", srcNodata=AOSTA_NODATA, dstNodata=AOSTA_NODATA).ReadAsArray()
+    has = (cov != AOSTA_NODATA)[::-1]  # rows from the south
+    # A block reads ITALY_PAD (512 m, 2 cells) around it.
+    grown = has.copy()
+    for d in (1, 2):
+        grown[d:] |= has[:-d]
+        grown[:-d] |= has[d:]
+    g2 = grown.copy()
+    for d in (1, 2):
+        g2[:, d:] |= grown[:, :-d]
+        g2[:, :-d] |= grown[:, d:]
+    blk = g2.reshape(ny, 16, nx, 16).any(axis=(1, 3))
+    blocks = [(bx0 + i, by0 + j) for j in range(ny) for i in range(nx) if blk[j, i] and inside(bx0 + i, by0 + j)]
+    json.dump(blocks, open(path, "w"))
+    return blocks
+
+
 def plan_italy(state, vrt):
     """The lamb93 blocks within the area that TINITALY covers, plus neighbours."""
     path = os.path.join(state, "blocks.json")
@@ -687,8 +800,12 @@ def build_block_abroad(bx, by, root, pool, swiss, italy, pad, ign=None):
     fine = g
     if italy:
         it = blend(fp.result(), to_l93(italy[0], x0, y0, side, -9999), FEATHER)
+        ao = aosta_l93(italy[2], x0, y0, side)
+        # Aosta's LIDAR is of 2005/2008: on glaciers it stands metres above IGN's
+        # and swisstopo's, so it fades in over as long as the other models.
+        g = blend(g, ao, ITALY_FEATHER)
         g = blend(g, it, ITALY_FEATHER)
-        fine = np.where(np.isnan(fine), np.float32(np.nan), g)
+        fine = np.where(np.isnan(fine) & np.isnan(ao), np.float32(np.nan), g)
     fine, g = fine[pad:-pad, pad:-pad], g[pad:-pad, pad:-pad]
     c = c[pad // 2:-pad // 2, pad // 2:-pad // 2]
     files = []
@@ -740,6 +857,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=2, help="blocks at a time (5 GetMaps each)")
     ap.add_argument("--swiss", action="store_true", help="the blocks swisstopo covers, from both countries")
     ap.add_argument("--italy", action="store_true", help="the blocks TINITALY covers, from all three")
+    ap.add_argument("--aosta", action="store_true", help="with --italy, only the blocks the Aosta DTM touches")
     args = ap.parse_args()
     if bool(args.out) == bool(args.bucket):
         ap.error("give exactly one of --out and --bucket")
@@ -747,6 +865,8 @@ def main():
         ap.error("--swiss and --italy go with lamb93")
     if args.swiss and args.italy:
         ap.error("give one of --swiss and --italy")
+    if args.aosta and not args.italy:
+        ap.error("--aosta goes with --italy")
     os.makedirs(args.state, exist_ok=True)
     if args.swiss or args.italy:
         # GDAL reads swisstopo's GeoTIFFs over HTTP, a few ranges of each.
@@ -755,8 +875,9 @@ def main():
         box = area("lamb93")[2]
         swiss = (swiss_index(args.state, box), lv95()[1])
         if args.italy:
-            italy = (tinitaly(args.state, box), utm32())
-            planned, pad = plan_italy(args.state, italy[0]), ITALY_PAD
+            italy = (tinitaly(args.state, box), utm32(), aosta(args.state))
+            planned = plan_aosta(args.state, italy[2]) if args.aosta else plan_italy(args.state, italy[0])
+            pad = ITALY_PAD
             # IGN's blocks, planned as for the run that built them.
             os.makedirs(os.path.join(args.state, "ign"), exist_ok=True)
             ign = set(plan_blocks("lamb93", os.path.join(args.state, "ign")))
