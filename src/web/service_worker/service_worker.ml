@@ -403,7 +403,10 @@ let () =
             ()))
        Brr.G.target)
 
-(* Precaching goes to the network, not through the browser's own HTTP cache,
+(* Not [viewer.bc.js], the JavaScript build, which index.html never loads:
+   precached, every install downloaded it for nothing.
+
+   Precaching goes to the network, not through the browser's own HTTP cache,
    which is how a new worker can otherwise fill its cache with the build it is
    replacing. A document served with any freshness at all -- GitHub Pages sends
    [max-age=600] for HTML -- is reused from there rather than fetched, and
@@ -431,7 +434,6 @@ let () =
                  ([
                     ".";
                     "viewer.bc.wasm.js";
-                    "viewer.bc.js";
                     "worker.bc.js";
                     "decompress_tile.wasm";
                     "decode_clc.wasm";
