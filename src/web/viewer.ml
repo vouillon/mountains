@@ -6189,6 +6189,30 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     Lwt.return (!location_epoch = epoch)
   end
 
+(* Offline support is a bonus: [navigator.serviceWorker] is undefined on
+   insecure origins (plain http, e.g. LAN testing) and registration fails in
+   Firefox private browsing or when the script is missing. Registering must
+   thus not raise at initialization time.
+
+   Called once the first location is on screen, not at startup: installing
+   precaches the application shell (~10 MB), fetched again from the network --
+   see [precache_request] in service_worker.ml -- which on a first visit ran
+   alongside the page's own tile downloads and slowed them. Until it is in
+   charge, [Web_utils.fetch_tile] caches the tiles itself. *)
+let register_service_worker () =
+  let open Brr_webworkers.Service_worker in
+  let container = Container.of_navigator Brr.G.navigator in
+  if Jv.is_none (Container.to_jv container) then
+    Brr.Console.(
+      warn [ Jstr.v "Service workers unavailable: running without cache" ])
+  else
+    match Container.register container (Jstr.v "service_worker.bc.js") with
+    | registration ->
+        Fut.await registration (function
+          | Ok _ -> ()
+          | Error e -> Brr.Console.error [ e ])
+    | exception Jv.Error _ -> ()
+
 (* One-time renderer setup: the first location load, then the render loop,
    which returns only when the context it was drawing into is lost. *)
 let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
@@ -6323,6 +6347,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
   let* applied = load ~lat ~lon in
   (* From the navigation: everything before the first location is on screen. *)
   Web_utils.measure ~track:"Startup" "First view" 0.;
+  register_service_worker ();
   start ();
   (* Not if a restore superseded this load: it raised the overlay and will take
      it down itself once its own bake lands. *)
@@ -7981,64 +8006,6 @@ let setup_events canvas =
        surface an explicit button to request it. *)
     if !input_mode = Sensor then maybe_show_compass_button ()
 
-(* Offline support is a bonus: [navigator.serviceWorker] is undefined on
-   insecure origins (plain http, e.g. LAN testing) and registration fails in
-   Firefox private browsing or when the script is missing. Registering must
-   thus not raise at initialization time. *)
-let service_worker_registration =
-  let open Brr_webworkers.Service_worker in
-  let container = Container.of_navigator Brr.G.navigator in
-  if Jv.is_none (Container.to_jv container) then None
-  else
-    match Container.register container (Jstr.v "service_worker.bc.js") with
-    | registration -> Some (container, registration)
-    | exception Jv.Error _ -> None
-
-(* Wait for the service worker to control the page, so that the tiles loaded at
-   startup do get cached. Never fails and never waits for ever: a missing or
-   broken service worker must not keep the app on the loading screen. *)
-let wait_for_service_worker =
-  let open Brr_webworkers.Service_worker in
-  let fut, set = Fut.create () in
-  let settled = ref false in
-  let proceed () =
-    if not !settled then begin
-      settled := true;
-      set (Ok ())
-    end
-  in
-  (match service_worker_registration with
-  | None ->
-      Brr.Console.(
-        warn [ Jstr.v "Service workers unavailable: running without cache" ]);
-      proceed ()
-  | Some (container, registration) ->
-      Fut.await
-        (let open Fut.Result_syntax in
-         let* _ = registration in
-         Container.ready container)
-        (function
-          | Error e ->
-              Brr.Console.error [ e ];
-              proceed ()
-          | Ok r -> (
-              match Registration.active r with
-              | None -> proceed ()
-              | Some w ->
-                  if state w = State.activated then proceed ()
-                  else
-                    ignore
-                      (Brr.Ev.listen Brr.Ev.statechange
-                         (fun _ -> if state w = State.activated then proceed ())
-                         (as_target w))));
-      (* Backstop: [Container.ready] never resolves if activation stalls. *)
-      Fut.await (Fut.tick ~ms:10_000) (fun () ->
-          (if not !settled then
-             Brr.Console.(
-               warn [ Jstr.v "Service worker not ready: proceeding without it" ]));
-          proceed ()));
-  fut
-
 (* Main *)
 
 let main () =
@@ -8114,11 +8081,13 @@ let main () =
      fall back to the device position. *)
   update_startup_status "Loading Terrain..." true;
   let t_position = now_ms () in
-  let* () = to_lwt wait_for_service_worker in
+  (* Not waiting for the service worker to install, as a first visit did --
+     0.6-0.9 s on a Pixel 8a: [Web_utils.fetch_tile] caches the tiles itself until
+     it is in charge. *)
   let* source, (lat, lon, angle, pitch, z) =
     to_lwt (get_position ~size:tile_width)
   in
-  Web_utils.measure ~track:"Startup" "Service worker and position" t_position;
+  Web_utils.measure ~track:"Startup" "Position" t_position;
   current_lat := lat;
   current_lon := lon;
   zoom := z;

@@ -46,8 +46,10 @@ val fetch_tile :
     cost of a cached read (on a Pixel 8a, a location's 345 tiles: 180-230 ms
     from the cache directly, 370-400 ms through the worker). Otherwise it is
     fetched as [Brr_io.Fetch.url] would, through the service worker, which
-    stores it. A hit is what the service worker would serve: a successful
-    response, or with [serve_not_found] (default [false]) a cached 404. *)
+    stores it -- or, while no service worker controls the page, as on a first
+    visit, the page stores it itself. A hit is what the service worker would
+    serve: a successful response, or with [serve_not_found] (default [false]) a
+    cached 404. *)
 
 val on_gpu_finished : Gl.t -> unit Lwt.t
 (** [on_gpu_finished ctx] returns a promise that resolves when all currently

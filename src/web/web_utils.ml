@@ -94,7 +94,33 @@ let fetch_tile ?(serve_not_found = false) url =
     when Brr_io.Fetch.Response.ok r
          || (serve_not_found && Brr_io.Fetch.Response.status r = 404) ->
       Fut.return (Ok r)
-  | Some _ | None -> Brr_io.Fetch.url url
+  | Some _ | None ->
+      let* r = Brr_io.Fetch.url url in
+      (* No service worker in charge -- a first visit, before it has installed
+         and claimed the page, which is no longer waited for: the tile is
+         stored here as it would have stored it, so that it is there next
+         time. A 404 too, which it serves back for the tiles that ask. *)
+      let controlled =
+        let c = Jv.get (Jv.get Jv.global "navigator") "serviceWorker" in
+        Jv.is_some c && Jv.is_some (Jv.get c "controller")
+      in
+      (if not controlled then
+         match r with
+         | Ok resp
+           when Brr_io.Fetch.Response.ok resp
+                || Brr_io.Fetch.Response.status resp = 404 ->
+             (* Cloned now, before the caller reads the body. *)
+             let copy = Brr_io.Fetch.Response.of_response resp in
+             Fut.await (Lazy.force data_cache) (function
+               | Some cache ->
+                   Fut.await
+                     (Brr_io.Fetch.Cache.put cache
+                        (Brr_io.Fetch.Request.v url)
+                        copy)
+                     ignore
+               | None -> ())
+         | Ok _ | Error _ -> ());
+      Fut.return r
 
 let on_gpu_finished ctx =
   let t, u = Lwt.task () in
