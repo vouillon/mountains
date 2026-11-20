@@ -2407,10 +2407,10 @@ type base = {
       (** arcseconds: where [cover_map_texture] is centred, the anchor until a
           move holding it bakes the cover map again around the eye *)
   cover_lon : int;
-  clc_tiles : (Clc_loader.clc_tile * float * float) list;
-      (** the land cover's tiles, and *)
   far_cover : Dem_loader.t option;
-      (** the far field's, to bake the cover map again around another centre *)
+      (** the far field's land cover, to bake the cover map again around another
+          centre -- with the land cover's tiles, read again then rather than
+          kept: decoded, they held 50 MB *)
 }
 (** What a location bakes around its anchor arcsecond. Every one of these but
     the cover map is a function of that arcsecond alone -- the base grid and the
@@ -5177,6 +5177,20 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       | Some p -> Lwt.choose [ Lwt.map ignore !p; sleep 30. ]
       | None -> Lwt.return_unit);
   start_tree_cover ~lat:elat ~lon:elon;
+  (* The land cover's tiles again, for a held base whose cover map is baked
+     again around the eye below: from the cache, alongside the rings. *)
+  let recover =
+    match reused_base with
+    | Some b when not (near_cover b ~lat ~lon) ->
+        Some
+          (Web_utils.timed_lwt ~track:"Location" "Fetch land cover" (fun () ->
+               Lwt.map
+                 (fun (_, _, _, _, tiles) -> tiles)
+                 (Clc_loader.load_tiles ~lat:alat ~lon:alon
+                    ~size:(w + (2 * cover_margin))
+                    ())))
+    | Some _ | None -> None
+  in
   let* fetched =
     match reused_base with
     | Some _ -> Lwt.return None
@@ -5226,6 +5240,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          Lwt.return_unit);
         sleep hd_grace_s;
       ]
+  in
+  let* recovered =
+    match recover with
+    | Some p -> Lwt.map Option.some p
+    | None -> Lwt.return_none
   in
   if !location_epoch <> epoch then begin
     Web_utils.measure ~track:"Location" "Load, superseded" t_load;
@@ -5356,9 +5375,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               time_gpu ctx "rasterize_clc_tiles" (fun () ->
                   rasterize_clc_tiles ?far_cover:b.far_cover
                     ~far_anchor:(anchor_lat, anchor_lon) ctx ~lat:elat ~lon:elon
-                    ~w ~clc_tiles:b.clc_tiles ~clc_raster_pid ~cover_fill_pid
-                    ~water_raster_pid clc_raster_uniforms cover_fill_uniforms
-                    water_raster_uniforms)
+                    ~w ~clc_tiles:(Option.get recovered) ~clc_raster_pid
+                    ~cover_fill_pid ~water_raster_pid clc_raster_uniforms
+                    cover_fill_uniforms water_raster_uniforms)
             in
             (* Only [base] has it: the previous location's record went above,
                this held base aside. *)
@@ -5459,7 +5478,6 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             cover_map_texture;
             cover_lat = anchor_lat;
             cover_lon = anchor_lon;
-            clc_tiles;
             far_cover;
           }
     in
