@@ -345,10 +345,11 @@ mediump float ringFade(bool valid, highp vec2 c) {
 // The base grid's weight at this fragment, as radial_common.vert's
 // [baseWeight] has it for the heights: 1 well inside it, fading to 0 at its
 // edge, beyond which the far field has the ground.
+uniform highp vec4 base_valid;
 mediump float baseFade() {
   highp vec2 c = reliefCoord;
-  highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
-  return smoothstep(0.0, 0.03, d);
+  highp vec2 d2 = min(c - base_valid.xy, base_valid.zw - c);
+  return smoothstep(0.0, 0.03, min(d2.x, d2.y));
 }
 
 // The encoded normal beneath every ring: the base grid's, the far field's

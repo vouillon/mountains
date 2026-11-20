@@ -78,6 +78,18 @@ let data_cache =
          (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
             (Jstr.v Data_cache.name)))
 
+let is_cached url =
+  let open Fut.Syntax in
+  let* cache = Lazy.force data_cache in
+  match cache with
+  | None -> Fut.return false
+  | Some cache -> (
+      let+ r = Brr_io.Fetch.Cache.match' cache (Brr_io.Fetch.Request.v url) in
+      match r with
+      | Ok (Some r) ->
+          Brr_io.Fetch.Response.ok r || Brr_io.Fetch.Response.status r = 404
+      | Ok None | Error _ -> false)
+
 let fetch_tile ?(serve_not_found = false) url =
   let open Fut.Syntax in
   let* cached =

@@ -112,14 +112,20 @@ highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
   return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
 }
 
+// The part of the base grid that holds its data, in normalised coordinates
+// (x0, y0, x1, y1): all of it, (0, 0, 1, 1), but for a load that went to screen
+// before its outer tiles came (Dem_loader.load_progressive), when the far field
+// stands in beyond.
+uniform highp vec4 base_valid;
+
 // The base grid's share of the surface at its normalised coordinate [c]: all
 // of it well inside, none from its edge outwards, where the far field has the
 // ground. The two grids are not aligned -- the far one is absolute, the base
 // one stands on its anchor -- so they are faded into each other, heights here
 // and normals in terrain.frag, which must use the same band.
 highp float baseWeight(highp vec2 c) {
-  highp float d = min(min(c.x, 1.0 - c.x), min(c.y, 1.0 - c.y));
-  return smoothstep(0.0, 0.03, d);
+  highp vec2 d2 = min(c - base_valid.xy, base_valid.zw - c);
+  return smoothstep(0.0, 0.03, min(d2.x, d2.y));
 }
 
 // Ring [i]'s normalized coordinate of a base-grid coordinate [c], in arcseconds

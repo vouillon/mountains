@@ -39,6 +39,11 @@ val timed_lwt : track:string -> string -> (unit -> 'a Lwt.t) -> 'a Lwt.t
 (** [timed_lwt ~track name f] records a span from now until [f ()] resolves.
     Nothing is recorded if it fails. *)
 
+val is_cached : Jstr.t -> bool Fut.t
+(** [is_cached url] is whether the data cache holds an answer for [url]: a
+    successful response, or a 404 -- a tile that does not exist, at sea or past
+    the edge of the data, which is as settled as one that does. *)
+
 val fetch_tile :
   ?serve_not_found:bool -> Jstr.t -> Brr_io.Fetch.Response.t Fut.or_error
 (** [fetch_tile url] is a tile from the data cache ([Data_cache.name]) when it

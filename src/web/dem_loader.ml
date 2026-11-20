@@ -60,10 +60,39 @@ let path ?(step = 1) ?(cover = false) ~lat ~lon ~row ~col () =
    --coarse), on the same samples and in the same framing: the "heights" are
    palette indices, to be read raw, low byte first, and not through
    [get_height]. *)
-let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
+(* Sub-tiles being downloaded, and how many loads wait for each: a load that
+   starts while another is still fetching the same sub-tile -- a move made
+   before a partial base was completed -- shares the download rather than
+   starting it again. The buffer goes to a decode worker, transferred, so all
+   but the last to take it get a copy. *)
+let in_flight : (string, Jv.t Lwt.t * int ref) Hashtbl.t = Hashtbl.create 16
+
+let shared_fetch p fetch =
+  let t, users =
+    match Hashtbl.find_opt in_flight p with
+    | Some e -> e
+    | None ->
+        let t = fetch () in
+        let e = (t, ref 0) in
+        if Lwt.state t = Lwt.Sleep then begin
+          Hashtbl.replace in_flight p e;
+          Lwt.on_termination t (fun () -> Hashtbl.remove in_flight p)
+        end;
+        e
+  in
+  incr users;
+  let* buf = t in
+  decr users;
+  Lwt.return (if !users > 0 then Jv.call buf "slice" [||] else buf)
+
+(* The heightmap of [load], filled with sea level, and its sub-tiles: for each,
+   the rectangle of the heightmap it fills -- first row, first column, last row,
+   last column -- its path, and the task that fetches and decodes it into
+   place, when it is run. A task never fails: a sub-tile that cannot be had is left at sea
+   level, and counted in [failed] unless it is an absent far tile. *)
+let sub_tiles ~step ~cover ~lat ~lon ~size ~loaded ~failed =
   let sub_tile_size = sub_tile_size / step in
   let degree = 3600 / step in
-  Worker_pool.init ();
 
   (* Allocate full tile buffer (size * size * 2 bytes) *)
   let full_ba : (int, int8_unsigned_elt, c_layout) Array1.t =
@@ -102,8 +131,6 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
   let max_deg_lon = max_lon_arcsec // degree in
 
   let tasks = ref [] in
-  let loaded = ref 0 in
-  let failed = ref 0 in
   for deg_lat = min_deg_lat to max_deg_lat do
     let tile_base_lat_arcsec = (deg_lat * degree) + 1 in
     for deg_lon = min_deg_lon to max_deg_lon do
@@ -152,6 +179,7 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
             let task () =
               (* Fetch data on main thread *)
               let* data_jv =
+                shared_fetch p @@ fun () ->
                 let open Brr_io.Fetch in
                 let* res = to_lwt (Web_utils.fetch_tile (Jstr.v p)) in
                 match res with
@@ -222,7 +250,7 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
             in
             (* A missing or broken sub-tile must not abort the whole heightmap:
                its region is simply left at the zero-initialized value. *)
-            let task =
+            let task () =
               Lwt.catch
                 (fun () ->
                   let* () = task () in
@@ -244,24 +272,75 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
                         ]);
                   Lwt.return ())
             in
-            tasks := task :: !tasks
+            let rect =
+              ( overlap_min_lat - min_lat_arcsec,
+                overlap_min_lon - min_lon_arcsec,
+                overlap_max_lat - min_lat_arcsec,
+                overlap_max_lon - min_lon_arcsec )
+            in
+            tasks := (rect, p, task) :: !tasks
           end
         done
       done
     done
   done;
 
-  (* Run all tasks in parallel *)
-  let* () = Lwt.join !tasks in
-  let* () =
-    if !loaded = 0 && !failed > 0 then
-      Lwt.fail (Failure "Could not load any DEM sub-tile")
-    else Lwt.return ()
-  in
-
-  (* Reshape to 2D *)
   let heights = reshape_2 (genarray_of_array1 full_ba) size (size * 2) in
-  Lwt.return { data = heights; size }
+  ({ data = heights; size }, List.rev !tasks)
+
+let run tasks = Lwt.join (List.map (fun (_, _, task) -> task ()) tasks)
+
+let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
+  Worker_pool.init ();
+  let loaded = ref 0 and failed = ref 0 in
+  let t, tasks = sub_tiles ~step ~cover ~lat ~lon ~size ~loaded ~failed in
+  let* () = run tasks in
+  if !loaded = 0 && !failed > 0 then
+    Lwt.fail (Failure "Could not load any DEM sub-tile")
+  else Lwt.return t
+
+(* The sub-tiles under the [half_rows] x [half_cols] rectangle about the centre
+   first, the others only if they are all in the cache already: a first visit,
+   where they are not, can then go to screen on the near ground alone, the far
+   field standing in beyond it, and fetch the rest in its own time. *)
+let load_progressive ~lat ~lon ~size ~half_rows ~half_cols =
+  Worker_pool.init ();
+  let loaded = ref 0 and failed = ref 0 in
+  let t, tasks =
+    sub_tiles ~step:1 ~cover:false ~lat ~lon ~size ~loaded ~failed
+  in
+  let r0 = (size / 2) - half_rows and r1 = (size / 2) + half_rows in
+  let c0 = (size / 2) - half_cols and c1 = (size / 2) + half_cols in
+  let inner, outer =
+    List.partition
+      (fun ((tr0, tc0, tr1, tc1), _, _) ->
+        tr0 <= r1 && tr1 >= r0 && tc0 <= c1 && tc1 >= c0)
+      tasks
+  in
+  (* The inner sub-tiles are wanted either way: fetched while the cache is
+     looked into for the others. *)
+  let inner_done = run inner in
+  let* cached =
+    Lwt.all
+      (List.map
+         (fun (_, p, _) -> to_lwt (Web_utils.is_cached (Jstr.v p)))
+         outer)
+  in
+  let complete = List.for_all Fun.id cached in
+  let* () = Lwt.join (inner_done :: (if complete then [ run outer ] else [])) in
+  if !loaded = 0 && !failed > 0 then
+    Lwt.fail (Failure "Could not load any DEM sub-tile")
+  else if complete then Lwt.return (t, None)
+  else
+    (* What the inner sub-tiles filled, a rectangle: they are a block of the
+       sub-tile grid. *)
+    let valid =
+      List.fold_left
+        (fun (a, b, c, d) ((tr0, tc0, tr1, tc1), _, _) ->
+          (min a tr0, min b tc0, max c tr1, max d tc1))
+        (size, size, -1, -1) inner
+    in
+    Lwt.return (t, Some (valid, fun () -> run outer))
 
 (* The tiles [load] would fetch, with the same [step] and [cover] and the same
    meaning of [size]. *)

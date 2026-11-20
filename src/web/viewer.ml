@@ -516,16 +516,65 @@ let build_indices w w' h =
     total_size;
   is
 
-let make_tile_texture ctx tile =
+(* A rectangle of texels, inclusive: (x0, y0, x1, y1). *)
+let shrink n (x0, y0, x1, y1) = (x0 + n, y0 + n, x1 - n, y1 - n)
+
+(* The rectangles -- x, y, width, height -- covering a [w] x [h] grid outside
+   [rect]: the whole grid when [rect] is empty. *)
+let outside ~w ~h rect =
+  let x0, y0, x1, y1 = rect in
+  let x0 = max 0 x0 and y0 = max 0 y0 in
+  let x1 = min (w - 1) x1 and y1 = min (h - 1) y1 in
+  if x0 > x1 || y0 > y1 then [ (0, 0, w, h) ]
+  else
+    List.filter
+      (fun (_, _, w, h) -> w > 0 && h > 0)
+      [
+        (0, 0, w, y0);
+        (0, y1 + 1, w, h - y1 - 1);
+        (0, y0, x0, y1 - y0 + 1);
+        (x1 + 1, y0, w - x1 - 1, y1 - y0 + 1);
+      ]
+
+(* Runs [draw] once per rectangle of [rects], under that scissor; once,
+   unscissored, for [None]. *)
+let scissored ctx rects draw =
+  match rects with
+  | None -> draw ()
+  | Some rects ->
+      Gl.enable ctx Gl.scissor_test;
+      List.iter
+        (fun (x, y, w, h) ->
+          Gl.scissor ctx x y w h;
+          draw ())
+        rects;
+      Gl.disable ctx Gl.scissor_test
+
+(* [skip]: a rectangle whose texels are not uploaded (left at zero), for a
+   pass that will not read them. *)
+let make_tile_texture ?skip ctx tile =
   let tid = Gl.create_texture ctx in
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
   (* Input is RG8 format: 2 bytes per pixel (high, low) *)
   let height = Bigarray.Array2.dim1 tile.Dem_loader.data in
   let width = Bigarray.Array2.dim2 tile.Dem_loader.data / 2 in
-  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 width height 0 Gl.rg
-    Gl.unsigned_byte
-    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data))
-    0;
+  let data =
+    Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 tile.Dem_loader.data)
+  in
+  (match skip with
+  | None ->
+      Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 width height 0 Gl.rg
+        Gl.unsigned_byte data 0
+  | Some rect ->
+      Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rg8 width height;
+      Gl.pixel_storei ctx Gl.unpack_row_length width;
+      List.iter
+        (fun (x, y, w, h) ->
+          Gl.tex_sub_image2d ctx Gl.texture_2d 0 x y w h Gl.rg Gl.unsigned_byte
+            data
+            (((y * width) + x) * 2))
+        (outside ~w:width ~h:height rect);
+      Gl.pixel_storei ctx Gl.unpack_row_length 0);
   Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
@@ -1204,7 +1253,10 @@ let make_gpu_state ?(submitted = false) ctx =
 
 (* Rendering Passes *)
 
-let compute_ao ?radius_width ctx width height scale relief_texture
+(* [update]: an occlusion texture baked over a relief of which only the
+   texels inside a rectangle (base grid texels) are still the same. Only what
+   depends on the others is baked again, into it. *)
+let compute_ao ?radius_width ?update ctx width height scale relief_texture
     nearest_sampler ao_bake_pid ao_blur_pid
     (bake_u : Render_state.ao_bake_uniforms)
     (blur_u : Render_state.ao_blur_uniforms) =
@@ -1231,7 +1283,25 @@ let compute_ao ?radius_width ctx width height scale relief_texture
   let ao_height = height / 2 in
 
   let ao_bake_tex = create_r8_target ao_width ao_height in
-  let ao_final_tex = create_r8_target ~mipmap:true ao_width ao_height in
+  let ao_final_tex =
+    match update with
+    | Some (tex, _) -> tex
+    | None -> create_r8_target ~mipmap:true ao_width ao_height
+  in
+  (* The occlusion texels that read nothing but unchanged relief: the bake
+     gathers 50 base texels around 2k + 1 (2 of margin), the blur one occlusion
+     texel around. The bake must cover what the blur reads. *)
+  let unchanged =
+    Option.map
+      (fun (_, (x0, y0, x1, y1)) ->
+        ((x0 + 55) asr 1, (y0 + 55) asr 1, (x1 - 55) asr 1, (y1 - 55) asr 1))
+      update
+  in
+  let outside_of n =
+    Option.map
+      (fun r -> outside ~w:ao_width ~h:ao_height (shrink n r))
+      unchanged
+  in
 
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
@@ -1258,7 +1328,8 @@ let compute_ao ?radius_width ctx width height scale relief_texture
   (* Use nearest sampler for AO - overrides texture's mipmap filter *)
   Gl.bind_sampler ctx 0 (Some nearest_sampler);
 
-  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  scissored ctx (outside_of 2) (fun () ->
+      Gl.draw_arrays ctx Gl.triangle_strip 0 4);
 
   (* PASS 2: Blur AO with bilateral filter *)
   Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
@@ -1283,7 +1354,8 @@ let compute_ao ?radius_width ctx width height scale relief_texture
   Gl.bind_texture ctx Gl.texture_2d (Some relief_texture);
   Gl.bind_sampler ctx 1 (Some nearest_sampler);
 
-  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  scissored ctx (outside_of 1) (fun () ->
+      Gl.draw_arrays ctx Gl.triangle_strip 0 4);
 
   (* Cleanup *)
   Gl.delete_framebuffer ctx fbo;
@@ -1328,11 +1400,23 @@ let downsample_k _level = 0.25
    it the same way -- a refinement's grid spans a few hundred metres of height,
    and baking it through the base scale put 14.5 cm steps into normals that are
    divided by a spacing several times finer. *)
+(* [update]: the pyramids of a grid of which only the texels inside a rectangle
+   are still the same, [tile_texture] holding at least the others and a margin
+   of 2 inside it. Only what depends on the others is computed again, into
+   them, level by level: a texel's height is the same where the four it is
+   downsampled from are, and its normal where its eight neighbours' heights
+   are. Not with [border]. *)
 let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
-    ?(height_offset = -500.) ctx width height lat triangle_geo tile_texture
-    normal_pid downsample_pid (u : Render_state.relief_uniforms)
+    ?(height_offset = -500.) ?update ctx width height lat triangle_geo
+    tile_texture normal_pid downsample_pid (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
+  assert (not (border && update <> None));
+  (* The texels of the current level whose height is unchanged. *)
+  let same = ref (Option.map (fun (_, _, rect) -> rect) update) in
+  let outside_of n ~w ~h =
+    Option.map (fun r -> outside ~w ~h (shrink n r)) !same
+  in
 
   (* Not used in shader explicitly yet, using pow directly *)
   let max_level = Web_utils.log2 (max width height) in
@@ -1373,8 +1457,12 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
     Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rg8 width height;
     id
   in
-  let tid = create_rg8_pyramid ~filtered:false in
-  let nid = create_rg8_pyramid ~filtered:true in
+  let tid, nid =
+    match update with
+    | Some (tid, nid, _) -> (tid, nid)
+    | None ->
+        (create_rg8_pyramid ~filtered:false, create_rg8_pyramid ~filtered:true)
+  in
 
   (* normal.frag writes heights to attachment 0 and the encoded normal to
      attachment 1, so both pyramids are filled by the same passes as before. *)
@@ -1391,8 +1479,10 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
   Gl.viewport ctx 0 0 width height;
 
   (* Clear both relief textures to zero first *)
-  Gl.clear_color ctx 0. 0. 0. 0.;
-  Gl.clear ctx Gl.color_buffer_bit;
+  if update = None then begin
+    Gl.clear_color ctx 0. 0. 0. 0.;
+    Gl.clear ctx Gl.color_buffer_bit
+  end;
 
   (* Use Scissor to leave 1-pixel border zero *)
   if border then begin
@@ -1429,7 +1519,10 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
     ~col:(ax /. deltax, ay /. deltax)
     ~row:(bx /. deltay, by /. deltay);
 
-  Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+  if update = None then Gl.draw_arrays ctx Gl.triangle_strip 0 4
+  else
+    scissored ctx (outside_of 1 ~w:width ~h:height) (fun () ->
+        Gl.draw_arrays ctx Gl.triangle_strip 0 4);
 
   Gl.disable ctx Gl.scissor_test;
 
@@ -1460,6 +1553,11 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
   let rec loop level w h =
     if level > max_level || w < 1 || h < 1 then ()
     else (
+      same :=
+        Option.map
+          (fun (x0, y0, x1, y1) ->
+            ((x0 + 1) asr 1, (y0 + 1) asr 1, (x1 - 1) asr 1, (y1 - 1) asr 1))
+          !same;
       (* 1. Downsample Height: tid(Level N-1) -> temp_tid *)
       Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
 
@@ -1478,8 +1576,9 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
 
       Gl.viewport ctx 0 0 w h;
 
-      (* Draw Quad *)
-      Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+      (* Draw Quad: under an update, wherever the normal pass below reads. *)
+      scissored ctx (outside_of 2 ~w ~h) (fun () ->
+          Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0);
 
       (* 2. Compute Normals: temp_tid -> tid/nid(Level N) *)
 
@@ -1504,10 +1603,14 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
       Gl.viewport ctx 0 0 w h;
 
       (* Clear Mip Level to Zero *)
-      Gl.clear_color ctx 0. 0. 0. 0.;
-      Gl.clear ctx Gl.color_buffer_bit;
+      if update = None then begin
+        Gl.clear_color ctx 0. 0. 0. 0.;
+        Gl.clear ctx Gl.color_buffer_bit
+      end;
 
-      if not border then Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0
+      if not border then
+        scissored ctx (outside_of 1 ~w ~h) (fun () ->
+            Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0)
       else if w > 2 && h > 2 then (
         (* Enable scissor to render only inner area, leaving 1-pixel border *)
         Gl.enable ctx Gl.scissor_test;
@@ -2445,6 +2548,11 @@ type base = {
       (** the far field's land cover, to bake the cover map again around another
           centre -- with the land cover's tiles, read again then rather than
           kept: decoded, they held 50 MB *)
+  valid : (int * int * int * int) option;
+      (** while the outer tiles of [tile] are still coming
+          ([Dem_loader.load_progressive]): the samples it holds, first row,
+          first column, last row, last column -- the far field stands in beyond,
+          and such a base is never held *)
 }
 (** What a location bakes around its anchor arcsecond. Every one of these but
     the cover map is a function of that arcsecond alone -- the base grid and the
@@ -5017,7 +5125,7 @@ let far_height far_tile ~w ~anchor_lat ~anchor_lon =
    these, so they stay bound from here on -- and tell [pids], the terrain,
    shadow and path programs, where it lies about the anchor of the base grid
    of [w] samples ([far_origin]). *)
-let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
+let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon ~valid far =
   let heights, normals, ao =
     match far with
     | Some f -> f
@@ -5037,6 +5145,8 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
       Gl.use_program ctx pid;
       let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
       Gl.uniform1i ctx (u "far_valid") (if far = None then 0 else 1);
+      (let x0, y0, x1, y1 = valid in
+       Gl.uniform4f ctx (u "base_valid") x0 y0 x1 y1);
       Gl.uniform1i ctx (u "far_relief") 16;
       Gl.uniform1i ctx (u "far_relief_normal") 17;
       Gl.uniform1i ctx (u "far_ao") 18;
@@ -5060,10 +5170,57 @@ let within ~radius ~lat ~lon (alat, alon) =
   (dx *. dx) +. (dy *. dy) <= radius *. radius
 
 let near_anchor b ~lat ~lon =
-  within ~radius:base_radius_m ~lat ~lon (b.anchor_lat, b.anchor_lon)
+  b.valid = None
+  && within ~radius:base_radius_m ~lat ~lon (b.anchor_lat, b.anchor_lon)
 
 let near_cover b ~lat ~lon =
   within ~radius:cover_radius_m ~lat ~lon (b.cover_lat, b.cover_lon)
+
+(* A location whose base tiles are not all in the cache goes to screen on those
+   within this of its anchor, square on the ground
+   ([Dem_loader.load_progressive]), the far field standing in beyond until the
+   others come: on a first visit at 10 Mbit/s, the base was 28 of the 43 MB
+   waited for. Every ring's block -- l13's reaches 11 km, our own tiles' 10 km
+   -- lies well within, clear of the band where the base fades out. *)
+let near_ground_m = 20000.
+
+(* Samples inside a partial base's edge before it starts fading into the far
+   field: its pyramid's coarser levels and its ambient occlusion (50 samples)
+   mix in the sea level beyond. *)
+let partial_margin = 64
+
+(* [base_valid] (radial_common.vert) for a base of [w] samples holding
+   [valid]. *)
+let base_valid_rect ~w = function
+  | None -> (0., 0., 1., 1.)
+  | Some (r0, c0, r1, c1) ->
+      let m = float partial_margin and w = float w in
+      ( (float c0 +. m) /. w,
+        (float r0 +. m) /. w,
+        (float (c1 + 1) -. m) /. w,
+        (float (r1 + 1) -. m) /. w )
+
+(* Whether the surface drawn at a position of the base grid, in its samples, is
+   the base's rather than the far field's: anywhere on the grid for a whole
+   base, past the middle of the fade band for a partial one. *)
+let base_holds ~w valid =
+  match valid with
+  | None ->
+      fun gx gy ->
+        gx >= 0. && gy >= 0. && gx <= float (w - 1) && gy <= float (w - 1)
+  | Some _ ->
+      let x0, y0, x1, y1 = base_valid_rect ~w valid in
+      fun gx gy ->
+        let cx = gx /. float w and cy = gy /. float w in
+        Float.min
+          (Float.min (cx -. x0) (x1 -. cx))
+          (Float.min (cy -. y0) (y1 -. cy))
+        >= 0.015
+
+(* Resolved once the location being loaded has its whole base: at once, but
+   for a partial one, until its outer tiles are in and baked, or it is
+   abandoned. *)
+let base_settled = ref Lwt.return_unit
 
 let load_location ctx ~gpu ~w ~h ~lat ~lon =
   incr location_epoch;
@@ -5207,13 +5364,19 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                    ~lon:alon ()))
             (fun _ -> Lwt.return_none)
         in
-        let* ( (tile, (far_tile, far_cover)),
+        let half_rows, half_cols =
+          let deltax, deltay, _ = Render_state.compute_deltas ~lat:alat in
+          ( int_of_float (near_ground_m /. deltay),
+            int_of_float (near_ground_m /. deltax) )
+        in
+        let* ( ((tile, progress), (far_tile, far_cover)),
                ((_, _, _, _, clc_tiles), (_, _, _, _, poi_tiles)) ) =
           Web_utils.timed_lwt ~track:"Location" "Fetch DEM and land cover"
           @@ fun () ->
           Lwt.both
             (Lwt.both
-               (Dem_loader.load ~size:w ~lat:alat ~lon:alon ())
+               (Dem_loader.load_progressive ~size:w ~lat:alat ~lon:alon
+                  ~half_rows ~half_cols)
                (Lwt.both (far_grid false) (far_grid true)))
             (Lwt.both
                (Clc_loader.load_tiles ~lat:alat ~lon:alon
@@ -5222,7 +5385,16 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                (Clc_loader.load_tiles ~pois:true ~lat:alat ~lon:alon
                   ~size:(2 * w) ()))
         in
-        Lwt.return (Some (tile, far_tile, far_cover, clc_tiles, poi_tiles))
+        (* Without the far field nothing stands in for the outer tiles. *)
+        let* progress =
+          match progress with
+          | Some (_, rest) when far_tile = None ->
+              let* () = rest () in
+              Lwt.return_none
+          | progress -> Lwt.return progress
+        in
+        Lwt.return
+          (Some (tile, far_tile, far_cover, clc_tiles, poi_tiles, progress))
   in
   (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
      not free -- the eye is anchored on the surface that is drawn, so folding a
@@ -5324,7 +5496,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     let blend_rings ~keep =
       let tile =
         match fetched with
-        | Some (tile, _, _, _, _) -> tile
+        | Some (tile, _, _, _, _, _) -> tile
         | None -> (Option.get reused_base).tile
       in
       let source =
@@ -5398,6 +5570,36 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
        that are baked, and holding an anchor must hold the bakes exactly. *)
     let deltax, deltay, _ = Render_state.compute_deltas ~lat:alat in
 
+    (* The base grid's relief pyramids and ambient occlusion, baked again when
+       the outer tiles of a partial one come. *)
+    let bake_base_relief tile =
+      let relief_texture, relief_normal_texture =
+        let tile_texture = make_tile_texture ctx tile in
+        let pyramids =
+          time_gpu ctx "compute_relief" (fun () ->
+              (* No sunken border: the far field has the ground beyond the
+                 edge, and the shaders fade into it -- or down to the same
+                 depth without it. *)
+              compute_relief ~border:false ctx w h alat triangle_geo
+                tile_texture normal_pid downsample_pid relief_uniforms
+                downsample_uniforms)
+        in
+        (* Nothing reads the source grid on the GPU after the bake: it is not
+           among the textures [bind_terrain_textures] binds, and every
+           consumer goes through the pyramids. Freeing it here rather than
+           with the location keeps 32 MiB (RG8 4096^2) out of the
+           per-location footprint, as the high-resolution bake below already
+           does with its own source. *)
+        Gl.delete_texture ctx tile_texture;
+        pyramids
+      in
+      let ao_texture =
+        time_gpu ctx "compute_ao" (fun () ->
+            compute_ao ctx w h (deltax, deltay) relief_texture nearest_sampler
+              ao_bake_pid ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
+      in
+      (relief_texture, relief_normal_texture, ao_texture)
+    in
     (* CPU time: the GPU runs the bakes later ("GPU drain" below). *)
     let t_base = now_ms () in
     let base =
@@ -5428,26 +5630,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
               cover_lon = snd plan_arcsec;
             }
           end
-      | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles) ->
-          let relief_texture, relief_normal_texture =
-            let tile_texture = make_tile_texture ctx tile in
-            let pyramids =
-              time_gpu ctx "compute_relief" (fun () ->
-                  (* No sunken border: the far field has the ground beyond the
-                     edge, and the shaders fade into it -- or down to the same
-                     depth without it. *)
-                  compute_relief ~border:false ctx w h alat triangle_geo
-                    tile_texture normal_pid downsample_pid relief_uniforms
-                    downsample_uniforms)
-            in
-            (* Nothing reads the source grid on the GPU after the bake: it is not
-               among the textures [bind_terrain_textures] binds, and every
-               consumer goes through the pyramids. Freeing it here rather than
-               with the location keeps 32 MiB (RG8 4096^2) out of the
-               per-location footprint, as the high-resolution bake below already
-               does with its own source. *)
-            Gl.delete_texture ctx tile_texture;
-            pyramids
+      | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles, progress) ->
+          let relief_texture, relief_normal_texture, ao_texture =
+            bake_base_relief tile
           in
           let far =
             Option.map
@@ -5489,12 +5674,6 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                     && x <= float (w - 1)
                     && y <= float (h - 1)))
           in
-          let ao_texture =
-            time_gpu ctx "compute_ao" (fun () ->
-                compute_ao ctx w h (deltax, deltay) relief_texture
-                  nearest_sampler ao_bake_pid ao_blur_pid ao_bake_uniforms
-                  ao_blur_uniforms)
-          in
           (* GPU rasterize CLC tiles to FBO *)
           let cover_map_texture =
             time_gpu ctx "rasterize_clc_tiles" (fun () ->
@@ -5517,23 +5696,13 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
             cover_lat = anchor_lat;
             cover_lon = anchor_lon;
             far_cover;
+            valid = Option.map fst progress;
           }
     in
     if Option.is_some fetched then
       Web_utils.measure ~track:"Location" "Bake base" t_base;
-    let {
-      tile;
-      poi;
-      relief_texture;
-      relief_normal_texture;
-      ao_texture;
-      cover_map_texture;
-      far_poi;
-      far_tile;
-      _;
-    } =
-      base
-    in
+    (* What [publish] stands on: [base], until a partial one is completed. *)
+    let current_base = ref base in
 
     (* The blended rings' relief pyramids, made on the GPU. *)
     let bake_rings ~keep blended =
@@ -5627,6 +5796,21 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
        publishes, each of which ends the pass before it. *)
     let visible = ref None and sight_pass = ref 0 in
     let publish ~keep ~slots =
+      let base = !current_base in
+      let {
+        tile;
+        poi;
+        relief_texture;
+        relief_normal_texture;
+        ao_texture;
+        cover_map_texture;
+        far_poi;
+        far_tile;
+        _;
+      } =
+        base
+      in
+      let holds = base_holds ~w base.valid in
       (* Innermost first, which is the order the shader tests the rings in and
          the order [upload_hd_params] assigns texture slots. *)
       let rings =
@@ -5752,7 +5936,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           path_pid;
           (get_sight_gl ctx ~radial_params).sight_pid;
         ]
-        ~placeholder:hd_placeholder ~w ~anchor_lat ~anchor_lon base.far;
+        ~placeholder:hd_placeholder ~w ~anchor_lat ~anchor_lon
+        ~valid:(base_valid_rect ~w base.valid)
+        base.far;
       Gl.use_program ctx terrain_pid;
       Gl.uniform_matrix4fv ctx
         (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowMatrix"))
@@ -5920,9 +6106,11 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
         List.rev_append
           (List.rev_map
              (target (fun gx gy ->
-                  ground_at
-                    (int_of_float (Float.round gy))
-                    (int_of_float (Float.round gx))))
+                  if holds gx gy then
+                    ground_at
+                      (int_of_float (Float.round gy))
+                      (int_of_float (Float.round gx))
+                  else far_at gx gy))
              poi)
           (List.map (target far_at) far_poi)
       in
@@ -5984,11 +6172,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
               in
               match (List.find_map from_ring hd_grids, far_tile) with
               | Some z, _ -> z
-              | None, Some far
-                when not
-                       (x' >= 0. && y' >= 0.
-                       && x' <= float (w - 1)
-                       && y' <= float (h - 1)) ->
+              | None, Some far when not (holds x' y') ->
                   (* Beyond the base grid the mesh reads the far field's
                      pyramid, a far sample being [far_step] base ones. *)
                   let ox, oy = far_origin ~w ~anchor_lat ~anchor_lon in
@@ -6072,6 +6256,74 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     in
     Web_utils.timed ~track:"Location" "Publish" (fun () ->
         publish ~keep:reused_slots ~slots:in_time);
+    (* A partial base: its outer tiles now, then the base baked again whole and
+       the location published on it, as it stands -- its rings untouched, all
+       within the part that was there. *)
+    (match fetched with
+    | Some (_, _, _, _, _, Some (_, rest)) ->
+        let settled, settle = Lwt.wait () in
+        base_settled := settled;
+        Lwt.async (fun () ->
+            Lwt.finalize
+              (fun () ->
+                let* () =
+                  Web_utils.timed_lwt ~track:"Location" "Fetch outer DEM" rest
+                in
+                (* In steps a frame apart: as one task, the last tile's copy, the
+                   bake and the publish were an 83 ms stall on a Pixel 8a. *)
+                let current () =
+                  !location_epoch = epoch && !context_generation = generation
+                in
+                let* () = request_animation_frame () in
+                if not (current ()) then Lwt.return_unit
+                else begin
+                  let t0 = now_ms () in
+                  let old = !current_base in
+                  (* Baked again in place, outside what the partial base held:
+                     the base grid shows only within it until the publish
+                     below. *)
+                  (match old.valid with
+                  | Some (r0, c0, r1, c1) ->
+                      let held = (c0, r0, c1, r1) in
+                      let tile_texture =
+                        make_tile_texture ~skip:(shrink 2 held) ctx old.tile
+                      in
+                      time_gpu ctx "compute_relief" (fun () ->
+                          ignore
+                            (compute_relief
+                               ~update:
+                                 ( old.relief_texture,
+                                   old.relief_normal_texture,
+                                   held )
+                               ~border:false ctx w h alat triangle_geo
+                               tile_texture normal_pid downsample_pid
+                               relief_uniforms downsample_uniforms));
+                      Gl.delete_texture ctx tile_texture;
+                      time_gpu ctx "compute_ao" (fun () ->
+                          ignore
+                            (compute_ao ~update:(old.ao_texture, held) ctx w h
+                               (deltax, deltay) old.relief_texture
+                               nearest_sampler ao_bake_pid ao_blur_pid
+                               ao_bake_uniforms ao_blur_uniforms))
+                  | None -> ());
+                  Web_utils.measure ~track:"Location" "Complete base" t0;
+                  let* () = request_animation_frame () in
+                  if not (current ()) then Lwt.return_unit
+                  else begin
+                    current_base := { old with valid = None };
+                    Web_utils.timed ~track:"Location" "Publish" (fun () ->
+                        match !session with
+                        | Some { slots; _ } -> publish ~keep:slots ~slots
+                        | None -> ());
+                    let* () = Web_utils.on_gpu_finished ctx in
+                    force_redraw := true;
+                    Lwt.return_unit
+                  end
+                end)
+              (fun () ->
+                Lwt.wakeup_later settle ();
+                Lwt.return_unit))
+    | Some _ | None -> ());
     if refine_later then begin
       (* Wait for the next ring to land, let a burst of them coalesce, publish
          what is in hand, and go round again. Waiting for *all* of them instead
@@ -6194,11 +6446,11 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
    Firefox private browsing or when the script is missing. Registering must
    thus not raise at initialization time.
 
-   Called once the first location is on screen, not at startup: installing
-   precaches the application shell (~10 MB), fetched again from the network --
-   see [precache_request] in service_worker.ml -- which on a first visit ran
-   alongside the page's own tile downloads and slowed them. Until it is in
-   charge, [Web_utils.fetch_tile] caches the tiles itself. *)
+   Called once the first location is on screen with its whole base, not at
+   startup: installing precaches the application shell (1.6 MB as deployed), fetched again
+   from the network -- see [precache_request] in service_worker.ml -- which on
+   a first visit ran alongside the page's own tile downloads and slowed them.
+   Until it is in charge, [Web_utils.fetch_tile] caches the tiles itself. *)
 let register_service_worker () =
   let open Brr_webworkers.Service_worker in
   let container = Container.of_navigator Brr.G.navigator in
@@ -6347,7 +6599,10 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
   let* applied = load ~lat ~lon in
   (* From the navigation: everything before the first location is on screen. *)
   Web_utils.measure ~track:"Startup" "First view" 0.;
-  register_service_worker ();
+  Lwt.async (fun () ->
+      let* () = !base_settled in
+      register_service_worker ();
+      Lwt.return_unit);
   start ();
   (* Not if a restore superseded this load: it raised the overlay and will take
      it down itself once its own bake lands. *)
