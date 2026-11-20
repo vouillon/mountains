@@ -4922,6 +4922,7 @@ let near_anchor b ~lat ~lon =
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
+  let t_load = now_ms () in
   let {
     terrain_geo;
     indices;
@@ -5060,6 +5061,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         in
         let* ( (tile, (far_tile, far_cover)),
                ((_, _, _, _, clc_tiles), (_, _, _, _, poi_tiles)) ) =
+          Web_utils.timed_lwt ~track:"Location" "Fetch DEM and land cover"
+          @@ fun () ->
           Lwt.both
             (Lwt.both
                (Dem_loader.load ~size:w ~lat:alat ~lon:alon ())
@@ -5079,6 +5082,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
      that waiting for it is itself the problem gets published around. A load that
      kept every ring waits for nothing here. *)
   let* () =
+    Web_utils.timed_lwt ~track:"Location" "Wait for rings" @@ fun () ->
     Lwt.choose
       [
         (let* _ = Lwt.all (List.map (fun (_, p) -> !p) hd_fetches) in
@@ -5086,7 +5090,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         sleep hd_grace_s;
       ]
   in
-  if !location_epoch <> epoch then Lwt.return false
+  if !location_epoch <> epoch then begin
+    Web_utils.measure ~track:"Location" "Load, superseded" t_load;
+    Lwt.return false
+  end
   else begin
     (* The eye in whole samples of the base grid, and the fraction over: the
        tests below walk that grid, and [x]/[y] index it. *)
@@ -5132,6 +5139,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
        that are baked, and holding an anchor must hold the bakes exactly. *)
     let deltax, deltay, _ = Render_state.compute_deltas ~lat:alat in
 
+    (* CPU time: the GPU runs the bakes later ("GPU drain" below). *)
+    let t_base = now_ms () in
     let base =
       match fetched with
       (* Nothing was fetched exactly when the anchor was held, which is exactly
@@ -5225,6 +5234,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             cover_map_texture;
           }
     in
+    if Option.is_some fetched then
+      Web_utils.measure ~track:"Location" "Bake base" t_base;
     let {
       tile;
       poi;
@@ -5299,7 +5310,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       keep @ List.rev slots
     in
-    let in_time = build ~keep:reused_slots in
+    let in_time =
+      Web_utils.timed ~track:"Location" "Blend and bake rings" (fun () ->
+          build ~keep:reused_slots)
+    in
     let refine_later =
       List.exists
         (function
@@ -5656,6 +5670,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             let t_vis = now_ms () in
             let seen = read_sight ctx sight_job in
             let kept = seen_of seen in
+            Web_utils.measure ~track:"Location" "Sight lines" t_vis;
             Format.eprintf "visibility: %d/%d POIs in %.0f ms@."
               (List.length kept) (List.length all_poi)
               (now_ms () -. t_vis);
@@ -5788,7 +5803,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               seen;
             Lwt.return_unit)
     in
-    publish ~keep:reused_slots ~slots:in_time;
+    Web_utils.timed ~track:"Location" "Publish" (fun () ->
+        publish ~keep:reused_slots ~slots:in_time);
     if refine_later then begin
       (* Wait for the next ring to land, let a burst of them coalesce, publish
          what is in hand, and go round again. Waiting for *all* of them instead
@@ -5847,8 +5863,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
           stale := None;
           (* [Hd_dem.blend] is synchronous, so the epoch test that guarded
              entry still holds: no [draw] has run since. *)
-          publish ~keep ~slots:(build ~keep);
-          let* () = Web_utils.on_gpu_finished ctx in
+          let slots =
+            Web_utils.timed ~track:"Location" "Blend and bake rings" (fun () ->
+                build ~keep)
+          in
+          Web_utils.timed ~track:"Location" "Publish" (fun () ->
+              publish ~keep ~slots);
+          let* () =
+            Web_utils.timed_lwt ~track:"Location" "GPU drain" (fun () ->
+                Web_utils.on_gpu_finished ctx)
+          in
           force_redraw := true;
           (* Back through the settled check, not the wait: this publish spanned
              seconds of GPU work, and a ring that settled under it is pending no
@@ -5883,7 +5907,11 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       Lwt.async refine
     end;
-    let* () = Web_utils.on_gpu_finished ctx in
+    let* () =
+      Web_utils.timed_lwt ~track:"Location" "GPU drain" (fun () ->
+          Web_utils.on_gpu_finished ctx)
+    in
+    Web_utils.measure ~track:"Location" "Load" t_load;
     force_redraw := true;
     (* A switch started while the GPU was draining owns the screen now. *)
     Lwt.return (!location_epoch = epoch)
@@ -6014,6 +6042,8 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                  Lwt.return_unit)))
        (Brr.El.as_target canvas));
   let* applied = load ~lat ~lon in
+  (* From the navigation: everything before the first location is on screen. *)
+  Web_utils.measure ~track:"Startup" "First view" 0.;
   start ();
   (* Not if a restore superseded this load: it raised the overlay and will take
      it down itself once its own bake lands. *)
@@ -6027,9 +6057,11 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
        Lwt.async (fun () ->
            Lwt.catch
              (fun () ->
+               let t_switch = now_ms () in
                let* () = show_startup_overlay "Loading Terrain..." true in
                let* applied = load ~lat ~lon in
                if applied then begin
+                 Web_utils.measure ~track:"Location" "Switch" t_switch;
                  current_lat := lat;
                  current_lon := lon;
                  (* Whether the view now stands where its user does, which
@@ -7725,7 +7757,11 @@ let main () =
   Worker_pool.init ();
   (* Rebuilt wholesale by [run_renderer] when the context is lost and restored;
      this is only the first of possibly several. *)
-  let gpu = ref (make_gpu_state ctx) in
+  let gpu =
+    ref
+      (Web_utils.timed ~track:"Startup" "GPU setup" (fun () ->
+           make_gpu_state ctx))
+  in
   (* Use ResizeObserver to detect canvas size changes *)
   let observer_cb =
     Jv.callback ~arity:1 (fun entries ->
@@ -7752,10 +7788,12 @@ let main () =
   (* [get_position] switches to "Getting current location..." only if it has to
      fall back to the device position. *)
   update_startup_status "Loading Terrain..." true;
+  let t_position = now_ms () in
   let* () = to_lwt wait_for_service_worker in
   let* source, (lat, lon, angle, pitch, z) =
     to_lwt (get_position ~size:tile_width)
   in
+  Web_utils.measure ~track:"Startup" "Service worker and position" t_position;
   current_lat := lat;
   current_lon := lon;
   zoom := z;

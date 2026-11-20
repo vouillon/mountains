@@ -796,6 +796,7 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
       in
       let publish () =
         published := true;
+        Web_utils.measure ~track:"Rings" (describe layer ^ " fetch") t0;
         if !arrived = 0 then None
         else
           Some
@@ -814,6 +815,9 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
           (match !late with
           | None -> Lwt.wakeup_later set_rest None
           | Some copy ->
+              Web_utils.measure ~track:"Rings"
+                (describe layer ^ " fetch, past the timeout")
+                t0;
               Format.eprintf "%s: %d/%d tiles in %.0f ms, past the timeout@."
                 (describe layer) !arrived total
                 (Brr.(Performance.now_ms G.performance) -. t0);
@@ -1013,6 +1017,7 @@ let blend ~lat:_ ~(source : source) (raw : raw) =
   match Blend_wasm.run p ~samples:raw.samples ~win with
   | None -> None
   | Some { data; height_scale; height_offset; range } ->
+      Web_utils.measure ~track:"Rings" (describe raw.layer ^ " blend") t0;
       Format.eprintf
         "%s blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
          steps)@."

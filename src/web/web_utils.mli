@@ -27,6 +27,18 @@ val linearize2 : (float, 'a, Bigarray.c_layout) Bigarray.Array2.t -> buffer
 val linearize3 : (float, 'a, Bigarray.c_layout) Bigarray.Array3.t -> buffer
 (** Linearize 2D/3D Bigarrays into a [buffer]. *)
 
+val measure : track:string -> string -> float -> unit
+(** [measure ~track name start] records a User Timing span from [start] (a
+    [Performance.now_ms] reading) to now. Chrome's Performance panel shows it on
+    track [track] of the "Mountains" group. *)
+
+val timed : track:string -> string -> (unit -> 'a) -> 'a
+(** [timed ~track name f] runs [f] and records it as a span. *)
+
+val timed_lwt : track:string -> string -> (unit -> 'a Lwt.t) -> 'a Lwt.t
+(** [timed_lwt ~track name f] records a span from now until [f ()] resolves.
+    Nothing is recorded if it fails. *)
+
 val on_gpu_finished : Gl.t -> unit Lwt.t
 (** [on_gpu_finished ctx] returns a promise that resolves when all currently
     submitted GPU commands have completed. *)

@@ -27,6 +27,47 @@ let linearize3 a =
       reshape_1 (genarray_of_array3 a)
         (Array3.dim1 a * Array3.dim2 a * Array3.dim3 a))
 
+(* Not [Brr.Performance.measure], which never passes the measure's name to
+   JavaScript (brr 0.0.9, and master as of 2026-11): its start mark becomes the
+   name instead. The options form takes the [now_ms] readings the code already
+   has, where marks would need a unique name per span. [detail.devtools] is
+   Chrome's extension that puts the span on a track of its own. *)
+let measure ~track name start =
+  let perf = Brr.Performance.to_jv Brr.G.performance in
+  let devtools =
+    Jv.obj
+      [|
+        ("dataType", Jv.of_string "track-entry");
+        ("track", Jv.of_string track);
+        ("trackGroup", Jv.of_string "Mountains");
+      |]
+  in
+  ignore
+    (Jv.call perf "measure"
+       [|
+         Jv.of_string name;
+         Jv.obj
+           [|
+             ("start", Jv.of_float start);
+             ("end", Jv.of_float (Brr.Performance.now_ms Brr.G.performance));
+             ("detail", Jv.obj [| ("devtools", devtools) |]);
+           |];
+       |])
+
+let timed ~track name f =
+  let start = Brr.Performance.now_ms Brr.G.performance in
+  let r = f () in
+  measure ~track name start;
+  r
+
+let timed_lwt ~track name f =
+  let start = Brr.Performance.now_ms Brr.G.performance in
+  Lwt.map
+    (fun r ->
+      measure ~track name start;
+      r)
+    (f ())
+
 let on_gpu_finished ctx =
   let t, u = Lwt.task () in
   let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
