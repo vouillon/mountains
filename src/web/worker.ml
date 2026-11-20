@@ -197,27 +197,51 @@ let decode_dataset ~inst msg =
          Jv.of_int height;
        |]);
 
-  let result_ta = Brr.Tarray.create Brr.Tarray.Uint8 (decomp_size * 2) in
-  let result_ba = Brr.Tarray.to_bigarray1 result_ta in
-  let target_ba = Wasm.get_ba () in
-  Bigarray.Array1.blit
-    (Bigarray.Array1.sub target_ba target_ptr (decomp_size * 2))
-    result_ba;
-
+  let kind, result =
+    if magic = "HDT1" then begin
+      (* An HDT1 tile's heights, scaled here rather than on the page: there,
+         under wasm_of_ocaml, every bigarray element access is a call (about 1
+         s of main-thread time per location on a desktop), while this worker is
+         js_of_ocaml, where [Jv.Jarray] access is plain typed-array indexing.
+         The range fields hold the tile's base and step. Same arithmetic as
+         the page did, so the same float32 heights. *)
+      let base = min_elev and step = max_elev in
+      let samples =
+        Brr.Tarray.to_jv
+          (Brr.Tarray.of_buffer Brr.Tarray.Uint16 ~byte_offset:target_ptr
+             ~length:decomp_size
+             (Brr.Tarray.Buffer.of_jv (Jv.get Wasm.memory "buffer")))
+      in
+      let heights = Brr.Tarray.create Brr.Tarray.Float32 decomp_size in
+      let out = Brr.Tarray.to_jv heights in
+      for i = 0 to decomp_size - 1 do
+        let u = Jv.to_int (Jv.Jarray.get samples i) in
+        Jv.Jarray.set out i
+          (Jv.of_float
+             (if u = 65535 then -99999. else base +. (step *. float u)))
+      done;
+      ("result_hdt", Brr.Tarray.buffer heights)
+    end
+    else begin
+      let result_ta = Brr.Tarray.create Brr.Tarray.Uint8 (decomp_size * 2) in
+      let result_ba = Brr.Tarray.to_bigarray1 result_ta in
+      let target_ba = Wasm.get_ba () in
+      Bigarray.Array1.blit
+        (Bigarray.Array1.sub target_ba target_ptr (decomp_size * 2))
+        result_ba;
+      ("result_dem", Brr.Tarray.buffer result_ta)
+    end
+  in
   let msg =
     Jv.obj
       [|
-        ("type", Jv.of_string "result_dem");
-        ("data", Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer result_ta));
+        ("type", Jv.of_string kind); ("data", Brr.Tarray.Buffer.to_jv result);
       |]
   in
   Brr_webworkers.Worker.G.post msg
     ~opts:
       (Brr_io.Message.opts
-         ~transfer:
-           [
-             Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer result_ta) |> Obj.magic;
-           ]
+         ~transfer:[ Brr.Tarray.Buffer.to_jv result |> Obj.magic ]
          ());
   Lwt.return ()
 

@@ -614,9 +614,8 @@ let raw_rest (r : raw) = r.rest
 exception Outside_coverage
 
 (* One of our own tiles (HDT1: the .dem layout with a scale of its own, see
-   [Own_tiles]) to float32 heights, nodata as -99999. The residuals are undone
-   by a worker, as for a base tile; the scale is read here first, the buffer
-   being transferred to the worker. *)
+   [Own_tiles]) to float32 heights, nodata as -99999. A worker undoes the
+   residuals, as for a base tile, and applies the scale. *)
 let decode_hdt buf px =
   let dv = Brr.Tarray.Data_view.of_buffer buf in
   let u8 i = Brr.Tarray.Data_view.get_uint8 dv i in
@@ -630,8 +629,6 @@ let decode_hdt buf px =
     || Int32.to_int (Brr.Tarray.Data_view.get_uint32_le dv 8) <> px
   then Lwt.fail (Failure "not an HDT1 tile of the expected size")
   else
-    let base = Brr.Tarray.Data_view.get_float32_le dv 12
-    and step = Brr.Tarray.Data_view.get_float32_le dv 16 in
     let* w = Worker_pool.acquire () in
     let* res =
       Lwt.finalize
@@ -643,19 +640,8 @@ let decode_hdt buf px =
           Lwt.return_unit)
     in
     match res with
-    | Worker_pool.ResultDEM { heights } ->
-        let out = Brr.Tarray.create Brr.Tarray.Float32 (px * px) in
-        let o = Brr.Tarray.to_bigarray1 out in
-        for i = 0 to (px * px) - 1 do
-          let u =
-            Array1.unsafe_get heights (2 * i)
-            lor (Array1.unsafe_get heights ((2 * i) + 1) lsl 8)
-          in
-          Array1.unsafe_set o i
-            (if u = 65535 then -99999. else base +. (step *. float u))
-        done;
-        Lwt.return out
-    | Worker_pool.ResultCLC _ ->
+    | Worker_pool.ResultHDT heights -> Lwt.return heights
+    | Worker_pool.ResultDEM _ | Worker_pool.ResultCLC _ ->
         Lwt.fail (Failure "HDT1 tile: unexpected reply")
     | Worker_pool.Error e -> Lwt.fail (Failure e)
 

@@ -13,6 +13,7 @@ type clc_result = Clc_data of Jv.t (* The result buffer/object from worker *)
 
 type response =
   | ResultDEM of dem_result
+  | ResultHDT of Brr.Tarray.float32
   | ResultCLC of clc_result
   | Error of string
 
@@ -46,6 +47,12 @@ let create_worker () =
           in
           let ba = Brr.Tarray.to_bigarray1 ta in
           Lwt.wakeup resolver (ResultDEM { heights = ba })
+      | "result_hdt" ->
+          let buffer_jv = Jv.get data "data" in
+          Lwt.wakeup resolver
+            (ResultHDT
+               (Brr.Tarray.of_buffer Brr.Tarray.Float32
+                  (Brr.Tarray.Buffer.of_jv buffer_jv)))
       | "result_clc" -> Lwt.wakeup resolver (ResultCLC (Clc_data data))
       | "error" ->
           let msg = Jv.get data "message" |> Jv.to_string in

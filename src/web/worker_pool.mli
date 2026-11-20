@@ -13,6 +13,8 @@ type clc_result = Clc_data of Jv.t  (** Decoded CLC data *)
 
 type response =
   | ResultDEM of dem_result
+  | ResultHDT of Brr.Tarray.float32
+      (** An HDT1 tile's heights in metres, nodata as -99999 *)
   | ResultCLC of clc_result
   | Error of string  (** Worker response type *)
 
