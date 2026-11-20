@@ -166,7 +166,7 @@ Uploads use the bucket owner's R2 keys, set in the environment.
 | 5 | `state-reunion-edges rgr92utm40s` | same, La Réunion | 112 | 30,179 |
 | 6 | `state-swiss-edges lamb93 --swiss` | same, Swiss blocks | 130 | 46,370 |
 | 7 | `state-italy lamb93 --italy` | + Piemonte, TINITALY | 3123 | 198,184 |
-| 8 | `state-aosta lamb93 --italy --aosta` | + the Aosta Valley | 248 | — |
+| 8 | `state-aosta lamb93 --italy --aosta` | + the Aosta Valley | 248 | 66,661 |
 
 Every run takes `--bucket <bucket> --endpoint <R2 endpoint>` (or `--out <dir>`
 to build locally) and `--jobs N`. After a run that rebuilds blocks:
@@ -213,7 +213,11 @@ neighbours.
   15 hours apart, which is why `own_tiles_stale.py` only looks at blocks
   several runs built.
 - **The public URL needs a User-Agent**: Cloudflare answers 403 to Python's
-  default one. A query string (`?v=x`) bypasses the CDN cache, for checks.
+  default one. A query string (`?v=x`) bypasses the CDN cache, for checks, but
+  only once: that URL is then cached in turn.
+- **Cloudflare caches the 404s too**: a tile asked for before its upload stays
+  missing for whoever asks the same URL, until the cache is purged. Purge after
+  every run that adds tiles, not only after rebuilds.
 
 ## IGN services at run time
 
