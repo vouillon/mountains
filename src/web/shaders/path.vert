@@ -16,6 +16,13 @@ uniform int last_ring;      // index of the outermost ring
 
 const float PI = 3.14159265359;
 
+// Never set, so always 0, but the compiler cannot know it: added to a loop's
+// count, it keeps the loop a loop. Unrolled, the three points of a trace
+// segment, each on the four corners of its mesh cell, inlined the whole height
+// lookup (rings, canopy) twelve times, and the program took 2.2 s to link on a
+// first visit; the shadow program, which has it once, took 0.1.
+uniform int u_zero;
+
 struct TerrainSurface {
   vec3 position;
   vec3 normal;
@@ -72,10 +79,17 @@ TerrainSurface terrainSurface(vec2 pos_plane) {
   float radius0 = radialDistance(ring);
   float radius1 = radialDistance(ring + 1);
 
-  vec3 a0 = radialVertex(radius0, angle0);
-  vec3 b0 = radialVertex(radius1, angle0);
-  vec3 a1 = radialVertex(radius0, angle1);
-  vec3 b1 = radialVertex(radius1, angle1);
+  // a0, b0, a1, b1: the inner and outer corner at [angle0], then at [angle1].
+  vec3 corner[4];
+  for (int i = 0; i < 4 + u_zero; i++) {
+    int k = min(i, 3);
+    corner[k] =
+        radialVertex(k % 2 == 0 ? radius0 : radius1, k < 2 ? angle0 : angle1);
+  }
+  vec3 a0 = corner[0];
+  vec3 b0 = corner[1];
+  vec3 a1 = corner[2];
+  vec3 b1 = corner[3];
   // Matches the terrain strip's A0, B0, A1, B1 ordering and diagonal.
   vec3 weights;
   vec3 p0;
@@ -118,9 +132,15 @@ vec3 raisedTerrainPosition(vec2 pos_plane) {
 void main() {
   v_color = u_color;
 
-  vec4 viewA = transform * vec4(raisedTerrainPosition(position.xy), 1.0);
-  vec4 viewP = transform * vec4(raisedTerrainPosition(prev_pos.xy), 1.0);
-  vec4 viewN = transform * vec4(raisedTerrainPosition(next_pos.xy), 1.0);
+  vec2 pts[3] = vec2[3](position.xy, prev_pos.xy, next_pos.xy);
+  vec4 views[3];
+  for (int i = 0; i < 3 + u_zero; i++) {
+    int k = min(i, 2);
+    views[k] = transform * vec4(raisedTerrainPosition(pts[k]), 1.0);
+  }
+  vec4 viewA = views[0];
+  vec4 viewP = views[1];
+  vec4 viewN = views[2];
 
   const float NEAR = 0.5;
 

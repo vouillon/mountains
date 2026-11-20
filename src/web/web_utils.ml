@@ -161,22 +161,92 @@ type program_spec = {
   attributes : string list;
 }
 
-let create_program ctx p =
-  let vid = compile_shader ctx p.vertex_shader Gl.vertex_shader in
-  let fid = compile_shader ctx p.fragment_shader Gl.fragment_shader in
+(* Compile and link, asking nothing: every status query waits for the GPU
+   process to be done with the program, so asked one program at a time, the
+   programs compile one after the other. The shaders are kept for [check]'s
+   logs. *)
+let submit ctx p =
+  let shader src typ =
+    let sid = Gl.create_shader ctx typ in
+    Gl.shader_source ctx sid (Jstr.v src);
+    Gl.compile_shader ctx sid;
+    sid
+  in
+  let vid = shader p.vertex_shader Gl.vertex_shader in
+  let fid = shader p.fragment_shader Gl.fragment_shader in
   let pid = Gl.create_program ctx in
   Gl.attach_shader ctx pid vid;
-  Gl.delete_shader ctx vid;
   Gl.attach_shader ctx pid fid;
-  Gl.delete_shader ctx fid;
   List.iteri
     (fun i attr -> Gl.bind_attrib_location ctx pid i (Jstr.v attr))
     p.attributes;
   Gl.link_program ctx pid;
-  if not (Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status)) then
+  (pid, vid, fid)
+
+(* Waits for the program, says why it failed if it did, and lets its shaders
+   go. *)
+let check ctx (pid, vid, fid) =
+  if not (Jv.to_bool (Gl.get_program_parameter ctx pid Gl.link_status)) then begin
+    List.iter
+      (fun sid ->
+        if not (Jv.to_bool (Gl.get_shader_parameter ctx sid Gl.compile_status))
+        then
+          Brr.Console.error
+            [
+              Jstr.v "Shader compilation failed:";
+              Gl.get_shader_info_log ctx sid;
+            ])
+      [ vid; fid ];
     Brr.Console.error
-      [ Jstr.v "Shader program link failed:"; Gl.get_program_info_log ctx pid ];
+      [ Jstr.v "Shader program link failed:"; Gl.get_program_info_log ctx pid ]
+  end;
+  Gl.detach_shader ctx pid vid;
+  Gl.detach_shader ctx pid fid;
+  Gl.delete_shader ctx vid;
+  Gl.delete_shader ctx fid;
   pid
+
+(* Programs submitted ahead of their first use, by spec. *)
+let prepared = ref []
+
+let prepare_programs ctx specs =
+  (* Where the driver can, it links them side by side. *)
+  ignore (Gl.get_extension ctx (Jstr.v "KHR_parallel_shader_compile"));
+  (* Any left are from a context lost since. *)
+  prepared := List.map (fun p -> (p, submit ctx p)) specs;
+  (* On their way to the GPU process, which links them while the page goes
+     on: on a desktop's first visit, 17 programs took it 5.6 s. *)
+  Gl.flush ctx
+
+let programs_ready ctx =
+  (* A fence after them, polled without waiting, as [on_gpu_finished] does.
+     Not COMPLETION_STATUS_KHR: where the GPU process links them one after
+     the other, any query waits behind every link queued before it -- 6 s on a
+     desktop's first visit, which the first poll spent blocked. *)
+  let t, u = Lwt.wait () in
+  let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
+  Gl.flush ctx;
+  let rec poll () =
+    let status = Gl.client_wait_sync ctx sync 0 0 in
+    if
+      status = Gl.already_signaled
+      || status = Gl.condition_satisfied
+      || status = Gl.wait_failed || Gl.is_context_lost ctx
+    then begin
+      Gl.delete_sync ctx sync;
+      Lwt.wakeup u ()
+    end
+    else ignore (Brr.G.set_timeout ~ms:16 poll)
+  in
+  poll ();
+  t
+
+let create_program ctx p =
+  match List.assq_opt p !prepared with
+  | Some submitted ->
+      prepared := List.filter (fun (q, _) -> q != p) !prepared;
+      check ctx submitted
+  | None -> check ctx (submit ctx p)
 
 let intersects (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
     (v_min_lon, v_min_lat, _, _, v_max_lon, v_max_lat) =

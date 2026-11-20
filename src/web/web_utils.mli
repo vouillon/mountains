@@ -75,9 +75,20 @@ type program_spec = {
 }
 (** Specification for a GL program. *)
 
+val prepare_programs : Gl.t -> program_spec list -> unit
+(** [prepare_programs ctx specs] submits the compilation and linking of every
+    one of [specs] at once, without waiting for any, so that the driver can work
+    on them side by side ([KHR_parallel_shader_compile]); {!create_program} then
+    takes them. Forgets any prepared earlier, from a context since lost. *)
+
+val programs_ready : Gl.t -> unit Lwt.t
+(** [programs_ready ctx] resolves once the GPU process is done with every
+    program {!prepare_programs} submitted, the page free meanwhile. *)
+
 val create_program : Gl.t -> program_spec -> Gl.program
 (** [create_program ctx spec] creates, links, and returns a GL program from a
-    spec. *)
+    spec -- the one {!prepare_programs} submitted, if it did, waiting for it
+    then. *)
 
 val intersects :
   float * float * float * float ->

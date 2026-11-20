@@ -27,6 +27,11 @@
 precision highp int;
 
 uniform int u_layer;
+// Never set, so always 0, but the compiler cannot know it: added to a loop's
+// count, it keeps the loop a loop. Unrolled, the octaves of five calls of
+// [fbm] and the 3 x 3 cells of four crown populations were inlined dozens of
+// times, and the program took 2.2 s to link on a first visit.
+uniform int u_zero;
 // Per layer, the factors that bring A's and B's gradient RMS to one (measured
 // on the baked chain), and the encoding range in those RMS units.
 uniform vec2 u_norm;
@@ -110,7 +115,7 @@ vec2 fbm(vec2 p, float f0, int octaves, uint seed, float sharp, float stretch) {
   vec2 g = vec2(0.0);
   float amp = 1.0;
   float f = f0;
-  for (int o = 0; o < octaves; o++) {
+  for (int o = 0; o < octaves + u_zero; o++) {
     float th = 0.6 + 1.3 * float(o) + 0.37 * float(seed % 7u);
     vec2 dir = vec2(cos(th), sin(th));
     // Columns of M: the step in x for a whole tile along u, and along v.
@@ -158,8 +163,8 @@ void crownPop(vec2 p, int n, uint seed, float keep, float rmin, float rmax,
               float hs, float shape, inout float best, inout vec2 g) {
   vec2 x = p * float(n);
   ivec2 c = ivec2(floor(x));
-  for (int dy = -1; dy <= 1; dy++)
-    for (int dx = -1; dx <= 1; dx++) {
+  for (int dy = -1; dy <= 1 + u_zero; dy++)
+    for (int dx = -1; dx <= 1 + u_zero; dx++) {
       ivec2 cell = c + ivec2(dx, dy);
       ivec2 w = cell - n * ivec2(floorDiv(cell.x, n), floorDiv(cell.y, n));
       uint h = hash(uvec2(w) + uvec2(seed * 7919u, seed * 104729u));
@@ -233,23 +238,17 @@ void main() {
   // 2:1 -- at 4:1 moderately steep slopes read as brushed metal.
   float stretch = side ? 2.0 : 1.0;
   uint seed = uint(scale) * 101u;
-  vec2 a, b;
-  if (scale == 0) {
-    // Macro, 500 m tile. A: 31 m to 4 m, uniform (calm and broken patches
-    // baked in made the tile recognisable, and forest showed it repeating; a
-    // sinusoid mask in the terrain shader looked worse and repeated too). No
-    // B: nothing uses it at this scale.
-    a = fbm(p, 16.0, 4, seed, 2.0, stretch);
-    b = vec2(0.0);
-  } else if (scale == 1) {
-    // Mid, 71 m tile, 9 m to 0.55 m: fractured rock; soft ground.
-    a = fbm(p, 8.0, 5, seed, 2.0, stretch);
-    b = fbm(p, 8.0, 5, seed + 50u, 0.0, 1.0);
-  } else {
-    // Fine, 10 m tile, 1.25 m to 8 cm: fractured rock; soft tussocky ground.
-    a = fbm(p, 8.0, 5, seed, 2.0, stretch);
-    b = fbm(p, 8.0, 5, seed + 50u, 0.0, 1.0);
-  }
+  // Macro, 500 m tile. A: 31 m to 4 m, uniform (calm and broken patches
+  // baked in made the tile recognisable, and forest showed it repeating; a
+  // sinusoid mask in the terrain shader looked worse and repeated too). No
+  // B: nothing uses it at this scale.
+  // Mid, 71 m tile, 9 m to 0.55 m: fractured rock; soft ground.
+  // Fine, 10 m tile, 1.25 m to 8 cm: fractured rock; soft tussocky ground.
+  // The parameters chosen first, so that [fbm] is called from two places
+  // rather than five.
+  bool macro = scale == 0;
+  vec2 a = fbm(p, macro ? 16.0 : 8.0, macro ? 4 : 5, seed, 2.0, stretch);
+  vec2 b = macro ? vec2(0.0) : fbm(p, 8.0, 5, seed + 50u, 0.0, 1.0);
   vec4 g = vec4(a * u_norm.x, b * u_norm.y);
   color = clamp(g / (2.0 * u_enc) + 0.5, 0.0, 1.0);
 }

@@ -1162,7 +1162,39 @@ let make_bump_gradients ctx =
 
 (* The extensions are context state too, so they are re-fetched here rather
    than once at startup. *)
-let make_gpu_state ctx =
+(* Every program a context makes, submitted before any is used, the slowest
+   first: the bump bake's (the first used, in [make_gpu_state]), the trace's
+   (path.vert walks the mesh's height twelve times over) and the terrain's
+   took 2.2 s, 2.2 s and 0.5 s to link on a desktop's first visit, and the
+   rest 0.6 s together. Those used later -- the trees', the canopy and tree
+   cover preparations -- are ready by then. The GPU process links them while
+   the page goes on: the first location's tiles are fetched and decoded
+   meanwhile ([main], [Web_utils.programs_ready]). *)
+let prepare_programs ctx =
+  Web_utils.prepare_programs ctx
+    [
+      bump_gen_program;
+      path_program;
+      terrain_program;
+      shadow_program;
+      triangle_program;
+      text_program;
+      sky_program;
+      normal_program;
+      downsample_program;
+      ao_bake_program;
+      ao_blur_program;
+      clc_raster_program;
+      cover_fill_program;
+      water_raster_program;
+      tree_program;
+      canopy_prep_program;
+      tree_cover_prep_program;
+    ]
+
+(* [submitted]: the programs were prepared for [ctx] already. *)
+let make_gpu_state ?(submitted = false) ctx =
+  if not submitted then prepare_programs ctx;
   init_anisotropic_filtering ctx;
   let detail_map = make_detail_map ctx in
   make_bump_gradients ctx;
@@ -5033,46 +5065,11 @@ let near_anchor b ~lat ~lon =
 let near_cover b ~lat ~lon =
   within ~radius:cover_radius_m ~lat ~lon (b.cover_lat, b.cover_lon)
 
-let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
+let load_location ctx ~gpu ~w ~h ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
   let generation = !context_generation in
   let t_load = now_ms () in
-  let {
-    terrain_geo;
-    indices;
-    triangle_geo;
-    terrain_pid;
-    shadow_pid;
-    sky_pid;
-    sky_uniforms;
-    terrain_uniforms;
-    shadow_map;
-    shadow_fbo;
-    shadow_uniforms;
-    normal_pid;
-    downsample_pid;
-    relief_uniforms;
-    downsample_uniforms;
-    ao_bake_pid;
-    ao_blur_pid;
-    ao_bake_uniforms;
-    ao_blur_uniforms;
-    clc_raster_pid;
-    cover_fill_pid;
-    water_raster_pid;
-    clc_raster_uniforms;
-    cover_fill_uniforms;
-    water_raster_uniforms;
-    radial_params;
-    nearest_sampler;
-    hd_placeholder;
-    path_pid;
-    path_uniforms;
-    _;
-  } =
-    graphics
-  in
   (* Where this load stands: on the previous location's anchor arcsecond if it is
      near enough (see [base_radius_m]), on its own otherwise. Holding it is what
      lets everything below be kept rather than baked again. *)
@@ -5247,6 +5244,45 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     match recover with
     | Some p -> Lwt.map Option.some p
     | None -> Lwt.return_none
+  in
+  (* The programs, which the first load of a page has fetched and decoded its
+     tiles while they were linked ([Web_utils.programs_ready]): nothing above
+     touches the GPU. *)
+  let* { detail_map; graphics; palette_texture } = gpu in
+  let {
+    terrain_geo;
+    indices;
+    triangle_geo;
+    terrain_pid;
+    shadow_pid;
+    sky_pid;
+    sky_uniforms;
+    terrain_uniforms;
+    shadow_map;
+    shadow_fbo;
+    shadow_uniforms;
+    normal_pid;
+    downsample_pid;
+    relief_uniforms;
+    downsample_uniforms;
+    ao_bake_pid;
+    ao_blur_pid;
+    ao_bake_uniforms;
+    ao_blur_uniforms;
+    clc_raster_pid;
+    cover_fill_pid;
+    water_raster_pid;
+    clc_raster_uniforms;
+    cover_fill_uniforms;
+    water_raster_uniforms;
+    radial_params;
+    nearest_sampler;
+    hd_placeholder;
+    path_pid;
+    path_uniforms;
+    _;
+  } =
+    graphics
   in
   if !location_epoch <> epoch then begin
     Web_utils.measure ~track:"Location" "Load, superseded" t_load;
@@ -6155,12 +6191,16 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
 
 (* One-time renderer setup: the first location load, then the render loop,
    which returns only when the context it was drawing into is lost. *)
-let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
+let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
+    ~start =
+  (* [None] until the first context's programs are linked: the first load has
+     its tiles to fetch meanwhile, and waits for them only to bake. *)
+  let gpu = ref None in
+  Lwt.on_success gpu_ready (fun g -> if Option.is_none !gpu then gpu := Some g);
   let load ~lat ~lon =
-    let { detail_map; graphics; palette_texture } = !gpu in
+    let gpu = match !gpu with Some g -> Lwt.return g | None -> gpu_ready in
     Lwt.catch
-      (fun () ->
-        load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon)
+      (fun () -> load_location ctx ~gpu ~w ~h ~lat ~lon)
       (function Superseded -> Lwt.return false | e -> Lwt.fail e)
   in
   (* At most one loop per context generation. A restore that runs to completion
@@ -6210,7 +6250,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                 path_uniforms;
                 _;
               } =
-                !gpu.graphics
+                (Option.get !gpu).graphics
               in
               draw terrain_pid terrain_geo triangle_pid text_pid text_geo
                 path_pid ~terrain_uniforms ~triangle_uniforms ~text_uniforms
@@ -6234,7 +6274,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
     session := None;
     incr location_epoch;
     Gpu_timer.reset ();
-    gpu := make_gpu_state ctx;
+    gpu := Some (make_gpu_state ctx);
     set_drawing_buffer_color_space canvas;
     context_lost := false;
     (* The camera, the zoom, the location and the GPX trace are all plain
@@ -6359,7 +6399,11 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
              if String.length s = 0 then None else Some s
          in
          current_gpx_str := str;
-         update_gpx_path ctx ~radial_params:!gpu.graphics.radial_params));
+         (* Before the first location, its publish draws the trace. *)
+         Option.iter
+           (fun g ->
+             update_gpx_path ctx ~radial_params:g.graphics.radial_params)
+           !gpu));
 
   (* Installed alongside [setGpxContent], once a location is loaded and the
      camera means something: the share button reads the view from here. *)
@@ -8017,11 +8061,28 @@ let main () =
   set_drawing_buffer_color_space canvas;
   Worker_pool.init ();
   (* Rebuilt wholesale by [run_renderer] when the context is lost and restored;
-     this is only the first of possibly several. *)
-  let gpu =
-    ref
-      (Web_utils.timed ~track:"Startup" "GPU setup" (fun () ->
-           make_gpu_state ctx))
+     this is only the first of possibly several. Its programs are linked in
+     the GPU process while the page goes on to the first location, whose tiles
+     are fetched and decoded meanwhile: built in a row, they held the first
+     view of a first visit back by 6 s on a desktop, 11 on a Pixel 8a. *)
+  (* Sized before, and held while they are linked: resizing a WebGL canvas
+     waits for the GPU process, which then had 6 s of links to get through
+     before it -- the observer's first call, at once, blocked the page as long.
+     A size asked for meanwhile is applied once they are done. *)
+  resize_canvas canvas;
+  let linked = ref false and held_size = ref None in
+  let gpu_ready =
+    let t0 = now_ms () in
+    prepare_programs ctx;
+    let* () = Web_utils.programs_ready ctx in
+    linked := true;
+    Option.iter
+      (fun (device_width, device_height) ->
+        resize_canvas ?device_width ?device_height canvas)
+      !held_size;
+    let gpu = make_gpu_state ~submitted:true ctx in
+    Web_utils.measure ~track:"Startup" "GPU setup" t0;
+    Lwt.return gpu
   in
   (* Use ResizeObserver to detect canvas size changes *)
   let observer_cb =
@@ -8037,8 +8098,11 @@ let main () =
               ( Some (Jv.to_int (Jv.get box "inlineSize")),
                 Some (Jv.to_int (Jv.get box "blockSize")) )
           in
-          resize_canvas ?device_width ?device_height canvas;
-          force_redraw := true
+          if !linked then begin
+            resize_canvas ?device_width ?device_height canvas;
+            force_redraw := true
+          end
+          else held_size := Some (device_width, device_height)
         end)
   in
   let observer =
@@ -8139,7 +8203,8 @@ let main () =
   update_startup_status "Loading Terrain..." true;
 
   let* () =
-    run_renderer ~w:tile_width ~h:tile_height ~lat ~lon canvas ctx ~gpu ~start
+    run_renderer ~w:tile_width ~h:tile_height ~lat ~lon canvas ctx ~gpu_ready
+      ~start
   in
   Lwt.return_unit
 
