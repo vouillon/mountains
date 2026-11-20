@@ -173,15 +173,29 @@ let update_startup_status msg loading =
       Brr.El.set_class (Jstr.v "loading") loading el)
     status
 
-let hide_startup_overlay () =
+(* The timer that takes the faded overlay out of the layout, if one is pending:
+   an overlay raised again before it fires must not be taken out under the load
+   it covers. *)
+let overlay_removal = ref None
+
+(* [quick]: a short fade-out (the [quick] class in index.html), for a move that
+   kept its surroundings -- done in a fraction of a second, which the usual
+   second of fade-out would only hide. *)
+let hide_startup_overlay ?(quick = false) () =
   let doc = Brr.G.document in
   let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
   Option.iter
     (fun el ->
+      Brr.El.set_class (Jstr.v "quick") quick el;
       Brr.El.set_class (Jstr.v "hidden") true el;
-      ignore
-        (Brr.G.set_timeout ~ms:1100 (fun () ->
-             Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el)))
+      Option.iter Brr.G.stop_timer !overlay_removal;
+      overlay_removal :=
+        Some
+          (Brr.G.set_timeout
+             ~ms:(if quick then 300 else 1100)
+             (fun () ->
+               overlay_removal := None;
+               Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "none") el)))
     overlay
 
 (* How many overlays are fading in. No frame is drawn meanwhile ([event_loop]):
@@ -196,6 +210,9 @@ let show_startup_overlay msg loading =
   match overlay with
   | Some el ->
       incr overlays_rising;
+      Option.iter Brr.G.stop_timer !overlay_removal;
+      overlay_removal := None;
+      Brr.El.set_class (Jstr.v "quick") false el;
       Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "flex") el;
       (* We need to wait for the browser to process the 'display' change
          before we can trigger the 'opacity' transition. *)
@@ -6144,6 +6161,13 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
      fun ~push ~camera ~own_position ~lat ~lon ->
        Lwt.async (fun () ->
            let t_switch = now_ms () in
+           (* A move short enough to keep the anchor is done almost as soon as
+              the overlay is up, and does not need a long fade-out after. *)
+           let hop =
+             match !session with
+             | Some { base; _ } -> near_anchor base ~lat ~lon
+             | None -> false
+           in
            (* The load runs under the overlay's fade-in, not after it: waiting
               for the fade first put half a second on every switch. The fade is
               awaited before the overlay is taken down -- hiding one still fading
@@ -6172,7 +6196,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                  | None -> ());
                  (* Reload and sharing must land on the new location. *)
                  update_url_params ~push ();
-                 hide_startup_overlay ()
+                 hide_startup_overlay ~quick:hop ()
                end;
                Lwt.return_unit)
              (fun e ->
