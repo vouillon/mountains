@@ -157,7 +157,10 @@ let put_in_cache request response =
   let+ _ = store_in_cache request response in
   Ok ()
 
-let match_opts = Brr_io.Fetch.Cache.query_opts ~ignore_search:true ()
+(* Exact, and in the one cache tiles are stored in: tile URLs carry no query,
+   and [ignore_search] makes Cache Storage scan every entry (2.9 s for 64
+   lookups in a 629-entry cache on a Pixel 8a, against 38 ms exact). *)
+let match_opts = Brr_io.Fetch.Cache.query_opts ~cache_name:data_cache_name ()
 
 (* Shell lookups are pinned to this build's cache instead of searching every
    one of them. A new worker fills its cache while installing, under a page this
@@ -174,7 +177,7 @@ let shell_match_opts =
    again on every visit to a location at the edge of coverage is at best
    wasted requests and at worst -- on a weak connection -- tiles that hang
    until [Hd_dem]'s timeout instead of resolving instantly. *)
-let use_cache_first ?(serve_not_found = false) ?query_opts request =
+let use_cache_first ?(serve_not_found = false) ?query_opts ~ev request =
   (* A failed *lookup* is a miss, not an error. Binding it with the error-
      propagating [let*] meant any hiccup in the Cache API short-circuited to
      [Error], which the fetch handler turns into [Response.error ()] -- a hard
@@ -201,7 +204,12 @@ let use_cache_first ?(serve_not_found = false) ?query_opts request =
   | _ ->
       let open Fut.Result_syntax in
       let* response = Brr_io.Fetch.request request in
-      let* () = put_in_cache request response in
+      (* Answered at once, the cache written behind it. Cloned now: the page
+         may be reading the body before the cache is open. *)
+      let copy = Brr_io.Fetch.Response.of_response response in
+      Brr.Ev.Extendable.wait_until
+        (Brr.Ev.as_type (Brr_io.Fetch.Ev.as_extendable ev))
+        (put_in_cache request copy);
       Fut.return (Ok response)
 
 (* Web Share Target ([share_target] in manifest.json): a share arrives as a
@@ -311,14 +319,14 @@ let () =
                 let url = Jstr.to_string url in
                 if is_map_basemap url then Brr_io.Fetch.request request
                 else if is_hd_dem url then
-                  use_cache_first ~serve_not_found:true request
+                  use_cache_first ~serve_not_found:true ~ev request
                 else if is_own_hd_tile url then
                   use_cache_first ~serve_not_found:true ~query_opts:match_opts
-                    request
+                    ~ev request
                 else if is_tile url then
-                  use_cache_first ~query_opts:match_opts request
+                  use_cache_first ~query_opts:match_opts ~ev request
                 else if is_shell url then
-                  use_cache_first ~query_opts:shell_match_opts request
+                  use_cache_first ~query_opts:shell_match_opts ~ev request
                 else Brr_io.Fetch.request request
             in
             match response with
