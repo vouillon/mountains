@@ -39,6 +39,16 @@ val timed_lwt : track:string -> string -> (unit -> 'a Lwt.t) -> 'a Lwt.t
 (** [timed_lwt ~track name f] records a span from now until [f ()] resolves.
     Nothing is recorded if it fails. *)
 
+val fetch_tile :
+  ?serve_not_found:bool -> Jstr.t -> Brr_io.Fetch.Response.t Fut.or_error
+(** [fetch_tile url] is a tile from the data cache ([Data_cache.name]) when it
+    is there, read without going through the service worker, which doubled the
+    cost of a cached read (on a Pixel 8a, a location's 345 tiles: 180-230 ms
+    from the cache directly, 370-400 ms through the worker). Otherwise it is
+    fetched as [Brr_io.Fetch.url] would, through the service worker, which
+    stores it. A hit is what the service worker would serve: a successful
+    response, or with [serve_not_found] (default [false]) a cached 404. *)
+
 val on_gpu_finished : Gl.t -> unit Lwt.t
 (** [on_gpu_finished ctx] returns a promise that resolves when all currently
     submitted GPU commands have completed. *)

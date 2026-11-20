@@ -68,6 +68,34 @@ let timed_lwt ~track name f =
       r)
     (f ())
 
+(* The data cache, opened once: [None] where there is no Cache Storage. *)
+let data_cache =
+  lazy
+    (if Jv.is_none (Jv.get Jv.global "caches") then Fut.return None
+     else
+       Fut.map
+         (function Ok c -> Some c | Error _ -> None)
+         (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
+            (Jstr.v Data_cache.name)))
+
+let fetch_tile ?(serve_not_found = false) url =
+  let open Fut.Syntax in
+  let* cached =
+    let* cache = Lazy.force data_cache in
+    match cache with
+    | None -> Fut.return None
+    | Some cache ->
+        let+ r = Brr_io.Fetch.Cache.match' cache (Brr_io.Fetch.Request.v url) in
+        (* A failed lookup is a miss, as it is for the service worker. *)
+        Result.value ~default:None r
+  in
+  match cached with
+  | Some r
+    when Brr_io.Fetch.Response.ok r
+         || (serve_not_found && Brr_io.Fetch.Response.status r = 404) ->
+      Fut.return (Ok r)
+  | Some _ | None -> Brr_io.Fetch.url url
+
 let on_gpu_finished ctx =
   let t, u = Lwt.task () in
   let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in

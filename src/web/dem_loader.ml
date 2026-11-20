@@ -153,7 +153,7 @@ let load ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
               (* Fetch data on main thread *)
               let* data_jv =
                 let open Brr_io.Fetch in
-                let* res = to_lwt (url (Jstr.v p)) in
+                let* res = to_lwt (Web_utils.fetch_tile (Jstr.v p)) in
                 match res with
                 | Error e ->
                     Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e)))

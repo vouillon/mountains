@@ -250,7 +250,7 @@ let parse_pois header names_jv coords_jv elevs_jv types_jv =
 (* Full CLC tile loading: offload to worker *)
 let load_full_clc_tile path_str =
   let open Lwt.Syntax in
-  let* resp = to_lwt (Brr_io.Fetch.url (Jstr.v path_str)) in
+  let* resp = to_lwt (Web_utils.fetch_tile (Jstr.v path_str)) in
   let* () =
     if Brr_io.Fetch.Response.ok resp then Lwt.return ()
     else

@@ -668,7 +668,10 @@ let rec fetch_one ?(retries = [ 3.; 6. ]) req =
         let* () = t in
         fetch_one ~retries req
   in
-  let* res = to_lwt (url (Jstr.v req.url)) in
+  (* A 404 is kept by the service worker, and served back as one. *)
+  let* res =
+    to_lwt (Web_utils.fetch_tile ~serve_not_found:true (Jstr.v req.url))
+  in
   match res with
   | Error e -> again (Failure (Jstr.to_string (Jv.Error.message e)))
   | Ok resp when Response.status resp = 404 -> Lwt.fail Outside_coverage
