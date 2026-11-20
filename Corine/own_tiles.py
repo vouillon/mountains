@@ -70,7 +70,9 @@ and swisstopo's), and gives 1 m ground (bilinear between its samples) where it
 has data. It is one zip (see aosta), in ED50: moved by AOSTA_SHIFT, measured
 against both neighbours. --italy --aosta rebuilds only the 248 blocks it touches
 (plan_aosta), with a state dir of its own whose tinitaly/, swiss_tiles.json and
-ign/blocks.json may be symlinks to state-italy's.
+ign/blocks.json may be symlinks to state-italy's. Its canopy (since the same
+day) is the region's 2 m surface model of the same flights minus the DTM, read
+from 914 sheets (aosta_dsm), fading into IGN's and swisstopo's over 200 m.
 
 The runs that built tiles.vouillon.org/v1, each with its state dir under
 ~/mountains-tiles (where the TINITALY download also stays), in this order: a
@@ -85,6 +87,7 @@ later one rewrites the blocks it shares with an earlier one.
                                                        mixtures at its nodata
     own_tiles.py state-italy lamb93 --italy --bucket B --endpoint E   + Italy
     own_tiles.py state-aosta lamb93 --italy --aosta ...      + the Aosta Valley
+    own_tiles.py state-aosta-canopy lamb93 --italy --aosta ...      + its canopy
     own_tiles_stale.py lamb93=state-... --bucket B ...      the tiles a rebuild
                                                        emptied (no run deletes)
 
@@ -124,6 +127,13 @@ PIEMONTE = "https://geomap.reteunitaria.piemonte.it/ws/taims/rp-01/taimsdtmwcs/w
 PIEMONTE_BOX = (290748, 4861375, 536649, 5165171)
 AOSTA = "https://geoprodotti.regione.vda.it/download/DTM0508_002/DTM0508_002_UNICO.zip"
 AOSTA_NODATA = -2147483648
+# The surface model of the same flights comes as 914 sheets of 2 km
+# (DSM0508_002_<sezione>.zip, an ASCII grid then the same as XYZ), listed only
+# by the sheet index of the region's download application, whose map service
+# wants a token: the application reads it through its own proxy, and so do we.
+AOSTA_DSM = "https://geoprodotti.regione.vda.it/download/DSM0508_002/DSM0508_002_%s.zip"
+AOSTA_SHEETS = ("https://mappe.regione.vda.it/INVA/config/config.ashx?https://mappe.regione.vda.it/domini1/rest/"
+                "services/Public/QDU/MapServer/8/query?where=1%3D1&outFields=sezione&returnGeometry=false&f=json")
 # Measured against IGN (Little St Bernard) and swisstopo (Grand St Bernard),
 # the same at both to 0.25 m: ED50's datum, as GDAL turns it into Lambert-93,
 # leaves the Aosta grid 0.5 m west and 2 m north of where it is, and its heights
@@ -709,6 +719,133 @@ def aosta(state):
     return tif
 
 
+class _Ranges(__import__("io").RawIOBase):
+    """A remote file read by HTTP ranges, for zipfile to take only the members
+    it needs."""
+
+    def __init__(self, url):
+        self.url, self.pos = url, 0
+        self.size = int(self._get(url, None).headers["Content-Length"])
+
+    def _get(self, url, rng):
+        """The response to a HEAD (rng None), or the body of a range, retried
+        whole: a body can stall too (after a laptop's sleep)."""
+        h = {"User-Agent": "own_tiles"}
+        if rng:
+            h["Range"] = rng
+        for attempt in range(8):
+            try:
+                r = urllib.request.urlopen(urllib.request.Request(url, headers=h, method="GET" if rng else "HEAD"),
+                                           timeout=120)
+                return r.read() if rng else r
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    raise
+                err = e
+                time.sleep(2 * (attempt + 1))
+            except OSError as e:
+                err = e
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError("gave up on %s: %r" % (url, err))
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, o, whence=0):
+        self.pos = o if whence == 0 else self.pos + o if whence == 1 else self.size + o
+        return self.pos
+
+    def readinto(self, b):
+        n = min(len(b), self.size - self.pos)
+        if n <= 0:
+            return 0
+        d = self._get(self.url, "bytes=%d-%d" % (self.pos, self.pos + n - 1))
+        b[:len(d)] = d
+        self.pos += len(d)
+        return len(d)
+
+
+def aosta_dsm(state, dtm):
+    """The Aosta Valley's 2 m surface model (same flights, datum and licence as
+    the DTM, "Dati estratti dal Modello Digitale delle Superfici (DSM) della
+    Regione Autonoma Valle d'Aosta") as a GeoTIFF of centimetres on the DTM's
+    grid, in <state>/aosta, made once from its 914 sheets. Only each zip's ASCII
+    grid is read (by ranges, half of the zip); each sheet is kept as a GeoTIFF
+    of its own in <state>/aosta/dsm (so that an interrupted run resumes), then
+    all are joined in one pass and deleted. (Writing each sheet straight into
+    the one compressed GeoTIFF read back and recompressed its neighbours' blocks:
+    a sheet every few seconds.)"""
+    from osgeo import gdal
+    import io, zipfile
+
+    gdal.UseExceptions()
+    tif = os.path.join(state, "aosta", "aosta_dsm.tif")
+    if os.path.exists(tif):
+        return tif
+    d = os.path.join(state, "aosta", "dsm")
+    os.makedirs(d, exist_ok=True)
+    req = urllib.request.Request(AOSTA_SHEETS, headers={
+        "User-Agent": "Mozilla/5.0", "Referer": "https://mappe.regione.vda.it/pub/geonavitg/GeoDownload.htm?carta=DSM0508"})
+    sheets = sorted(f["attributes"]["sezione"] for f in json.load(urllib.request.urlopen(req, timeout=120))["features"])
+    src = gdal.Open(dtm)
+    gt, wkt = src.GetGeoTransform(), src.GetProjection()
+    parsing = threading.Lock()
+
+    def fetch(sheet):
+        path = os.path.join(d, sheet + ".tif")
+        if os.path.exists(path) or os.path.exists(path + ".none"):
+            return
+        try:
+            r = _Ranges(AOSTA_DSM % sheet)
+        except urllib.error.HTTPError:
+            open(path + ".none", "w").close()  # a sheet of the index without a file
+            return
+        with zipfile.ZipFile(io.BufferedReader(r, 4 << 20)) as z:
+            name = next(n for n in z.namelist() if n.upper().endswith(".ASC"))
+            text = z.read(name)
+        lines = text.split(b"\n", 6)
+        head = {k.decode().lower(): float(v.replace(b",", b".")) for k, v in (l.split() for l in lines[:6])}
+        assert head["cellsize"] == 2 and head["nodata_value"] == -9999, (sheet, head)
+        w, h = int(head["ncols"]), int(head["nrows"])
+        with parsing:  # 0.4 s alone; 32 s each, eight at a time (a lock in strtod?)
+            a = np.fromstring(lines[6].replace(b",", b"."), dtype=np.float64, sep=" ")
+        assert a.size == w * h, (sheet, a.size)
+        x0, y1 = round(head["xllcorner"]), round(head["yllcorner"]) + h * 2
+        # On the DTM's grid, which the join below relies on.
+        assert (x0 - gt[0]) % 2 == 0 and (gt[3] - y1) % 2 == 0, (sheet, head)
+        out = gdal.GetDriverByName("GTiff").Create(path + ".part", w, h, 1, gdal.GDT_Int32,
+                                                   ["COMPRESS=DEFLATE", "PREDICTOR=2"])
+        out.SetGeoTransform([x0, 2, 0, y1, 0, -2])
+        out.SetProjection(wkt)
+        band = out.GetRasterBand(1)
+        band.SetNoDataValue(AOSTA_NODATA)
+        band.WriteArray(np.where(a == -9999, AOSTA_NODATA, np.round(a * 100)).astype(np.int32).reshape(h, w))
+        out = None
+        os.replace(path + ".part", path)
+
+    with ThreadPoolExecutor(8) as ex:
+        for i, _ in enumerate(ex.map(fetch, sheets)):
+            if i % 100 == 0:
+                print("  aosta dsm: %d/%d sheets" % (i, len(sheets)), flush=True)
+    tifs = sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".tif"))
+    print("  aosta dsm: %d sheets, %d without a file; joining" % (len(tifs), len(sheets) - len(tifs)), flush=True)
+    # Sheets share their edge samples; with their nodata transparent, one
+    # sheet's nodata does not erase its neighbour's data there.
+    vrt = gdal.BuildVRT("", tifs, srcNodata=AOSTA_NODATA, VRTNodata=AOSTA_NODATA, resolution="user", xRes=2, yRes=2,
+                        outputBounds=(gt[0], gt[3] - 2 * src.RasterYSize, gt[0] + 2 * src.RasterXSize, gt[3]))
+    gdal.Translate(tif + ".part", vrt, format="GTiff", creationOptions=[
+        "TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "ZLEVEL=6", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"])
+    os.replace(tif + ".part", tif)
+    shutil.rmtree(d)
+    return tif
+
+
 def aosta_l93(tif, x0, y0, side):
     """The Aosta DTM at 1 m over the Lambert-93 square (bilinear between its 2 m
     samples), moved by AOSTA_SHIFT; NaN outside it."""
@@ -806,6 +943,10 @@ def build_block_abroad(bx, by, root, pool, swiss, italy, pad, ign=None):
         g = blend(g, ao, ITALY_FEATHER)
         g = blend(g, it, ITALY_FEATHER)
         fine = np.where(np.isnan(fine) & np.isnan(ao), np.float32(np.nan), g)
+        # Its canopy: surface minus ground of the same flights, at 1 m like
+        # swisstopo's, then 2 m. Trees 15 years shorter than IGN's and
+        # swisstopo's, which fade into it as into swisstopo's.
+        c = blend(c, halve(aosta_l93(italy[3], x0, y0, side) - ao), FEATHER // 2)
     fine, g = fine[pad:-pad, pad:-pad], g[pad:-pad, pad:-pad]
     c = c[pad // 2:-pad // 2, pad // 2:-pad // 2]
     files = []
@@ -875,7 +1016,8 @@ def main():
         box = area("lamb93")[2]
         swiss = (swiss_index(args.state, box), lv95()[1])
         if args.italy:
-            italy = (tinitaly(args.state, box), utm32(), aosta(args.state))
+            dtm = aosta(args.state)
+            italy = (tinitaly(args.state, box), utm32(), dtm, aosta_dsm(args.state, dtm))
             planned = plan_aosta(args.state, italy[2]) if args.aosta else plan_italy(args.state, italy[0])
             pad = ITALY_PAD
             # IGN's blocks, planned as for the run that built them.

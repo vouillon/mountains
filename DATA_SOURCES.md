@@ -130,7 +130,7 @@ client then fades to the base elevation.
 | Switzerland | swisstopo swissALTI3D (ground) and swissSURFACE3D Raster (surface) | 0.5 m, read at 1 m | LN02 | STAC API `data.geo.admin.ch/api/stac/v0.9`, 1 km COGs | © swisstopo |
 | Piedmont | Regione Piemonte DTM ICE 2009-2011 | 5 m | — | WCS 1.0.0 (`geomap.reteunitaria.piemonte.it/…/wcs_ice_2009_2011_dtm`) | Regione Piemonte, CC BY 4.0 |
 | Italy elsewhere | INGV TINITALY 1.1 | 10 m | — | 50 km zips from `tinitaly.pi.ingv.it` | Tarquini S. et al. (2023), doi:10.13127/tinitaly/1.1, CC BY 4.0 |
-| Aosta Valley | Regione Valle d'Aosta DTM 2005/2008 | 2 m LIDAR, 2005 and 2008 | orthometric | one zip, `geoprodotti.regione.vda.it/download/DTM0508_002/DTM0508_002_UNICO.zip` | "Dati estratti dal Modello Digitale del Terreno (DTM) della Regione Autonoma Valle d'Aosta", CC BY 4.0 |
+| Aosta Valley | Regione Valle d'Aosta DTM and DSM 2005/2008 | 2 m LIDAR, 2005 and 2008 | orthometric | DTM: one zip, `geoprodotti.regione.vda.it/download/DTM0508_002/DTM0508_002_UNICO.zip`; DSM: 914 sheets, `…/DSM0508_002/DSM0508_002_<sezione>.zip` | "Dati estratti dal Modello Digitale del Terreno (DTM) e dal Modello Digitale delle Superfici (DSM) della Regione Autonoma Valle d'Aosta", CC BY 4.0 |
 
 ### How they are combined
 
@@ -147,8 +147,10 @@ IGN, then swisstopo, then the Aosta Valley, then Piemonte, then TINITALY.
 | Piemonte → TINITALY | — | 200 m |
 
 Ground at 1 m is written where IGN, swisstopo or the Aosta DTM has data. The
-coarser Italian models only give the 4 m and 8 m levels, and canopy comes from
-IGN and swisstopo alone (elsewhere the client uses the EEA tree cover).
+coarser Italian models only give the 4 m and 8 m levels. Canopy comes from IGN,
+swisstopo and the Aosta Valley (its surface minus its ground, both of the same
+flights, so trees as they were in 2005/2008); elsewhere the client uses the EEA
+tree cover.
 
 ### The runs
 
@@ -167,6 +169,7 @@ Uploads use the bucket owner's R2 keys, set in the environment.
 | 6 | `state-swiss-edges lamb93 --swiss` | same, Swiss blocks | 130 | 46,370 |
 | 7 | `state-italy lamb93 --italy` | + Piemonte, TINITALY | 3123 | 198,184 |
 | 8 | `state-aosta lamb93 --italy --aosta` | + the Aosta Valley | 248 | 66,661 |
+| 9 | `state-aosta-canopy lamb93 --italy --aosta` | + the Aosta Valley's canopy | 248 | — |
 
 Every run takes `--bucket <bucket> --endpoint <R2 endpoint>` (or `--out <dir>`
 to build locally) and `--jobs N`. After a run that rebuilds blocks:
@@ -208,7 +211,13 @@ neighbours.
   server fails range requests beyond 2 GB. `own_tiles.aosta` streams it into a
   1.1 GB GeoTIFF of centimetres. Its ED50 coordinates, as GDAL transforms them,
   are 0.5 m west and 2 m north of IGN's and swisstopo's (measured at both
-  Saint-Bernard passes, 0.21 m RMS once moved): `AOSTA_SHIFT`.
+  Saint-Bernard passes, 0.21 m RMS once moved): `AOSTA_SHIFT`. The region
+  converted them with IGM's official grids; GDAL, which has no Italian ED50
+  transformation, uses France's (EPSG:1650), hence the shift.
+- **The Aosta surface model comes in 914 sheets** named by the 2 km squares of
+  the download application's sheet index, whose map service wants a token: the
+  application, and `own_tiles.aosta_dsm`, read it through the region's proxy
+  (`INVA/config/config.ashx?<service URL>`).
 - **Uploads can stall for hours** (a laptop asleep): one block's tiles went up
   15 hours apart, which is why `own_tiles_stale.py` only looks at blocks
   several runs built.
