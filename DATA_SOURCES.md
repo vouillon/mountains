@@ -169,7 +169,7 @@ Uploads use the bucket owner's R2 keys, set in the environment.
 | 6 | `state-swiss-edges lamb93 --swiss` | same, Swiss blocks | 130 | 46,370 |
 | 7 | `state-italy lamb93 --italy` | + Piemonte, TINITALY | 3123 | 198,184 |
 | 8 | `state-aosta lamb93 --italy --aosta` | + the Aosta Valley | 248 | 66,661 |
-| 9 | `state-aosta-canopy lamb93 --italy --aosta` | + the Aosta Valley's canopy | 248 | — |
+| 9 | `state-aosta-canopy lamb93 --italy --aosta` | + the Aosta Valley's canopy | 248 | 81,897 |
 
 Every run takes `--bucket <bucket> --endpoint <R2 endpoint>` (or `--out <dir>`
 to build locally) and `--jobs N`. After a run that rebuilds blocks:
