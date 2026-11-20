@@ -35,7 +35,7 @@ let meridian_convergence ~lat = tan (lat *. Float.pi /. 180.) /. 6_371_000.
    arcsecond at the centre of the base tile: [radial_common.vert] derives
    [norm_coord] and every [hd_bias] from a coordinate this offset alone shifts.
    So the eye is not tied to the anchor -- the tile can stay put across a short
-   move (see [reuse_radius_m] in viewer.ml), which is the whole point of taking
+   move (see [base_radius_m] in viewer.ml), which is the whole point of taking
    the offset rather than the fractional part of a longitude. *)
 let compute_center_offset ~lat ~eye_x ~eye_y =
   let deltax, deltay, _ = compute_deltas ~lat in

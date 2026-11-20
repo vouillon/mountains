@@ -260,12 +260,14 @@ float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 // it has on open water is noise, neither of which may raise the water.
 uniform mediump usampler2DArray u_coverMap;
 uniform mediump sampler2D u_paletteTex;
+// Where the cover map is centred, from the anchor (terrain.frag's).
+uniform highp vec2 u_coverShift;
 
 // Whether the land cover is water at the base grid's normalised coordinate
 // [c]: the nearest texel of the level terrain.frag's [sampleCLCBilinear]
 // reads there.
 bool overWater(highp vec2 c) {
-  highp vec2 uv = (c + 0.5 * inv_w - 0.5) * 0.5 + 0.5;
+  highp vec2 uv = (c - u_coverShift + 0.5 * inv_w - 0.5) * 0.5 + 0.5;
   highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
   int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
   highp vec2 luv = (uv - 0.5) * exp2(float(7 - level)) + 0.5;

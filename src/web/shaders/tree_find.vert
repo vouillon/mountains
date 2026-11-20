@@ -32,6 +32,8 @@ uniform highp float u_radius;      // metres
 uniform mediump usampler2DArray u_coverMap;
 uniform mediump sampler2D u_paletteTex;
 uniform highp float u_invW; // 1 / the base grid's size
+// Where the cover map is centred, from the anchor (terrain.frag's).
+uniform highp vec2 u_coverShift;
 // The EEA tree cover in the atlas's third region (terrain.frag's
 // [u_treeCoverMap]), here from arcseconds from the anchor: its leaf type,
 // where it has one, decides the species.
@@ -99,7 +101,7 @@ highp float groundAt(highp vec2 norm) {
 vec4 coverAt(highp vec2 arc) {
   // Over the cover map, whose outermost level (7) is twice the base grid's
   // side.
-  highp vec2 uv = (arc * u_invW + 0.5 * u_invW) * 0.5 + 0.5;
+  highp vec2 uv = (arc * u_invW - u_coverShift + 0.5 * u_invW) * 0.5 + 0.5;
   highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
   int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
   highp vec2 luv = (uv - 0.5) * exp2(float(7 - level)) + 0.5;

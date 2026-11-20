@@ -84,7 +84,11 @@ uniform highp sampler2DArrayShadow shadow_map; // Hardware shadow comparison
 uniform mediump usampler2DArray u_coverMap; // CLC ID clipmap (layers)
 uniform mediump sampler2D u_paletteTex;     // 256x1 RGBA palette
 uniform int u_numLevels;                    // Number of clipmap levels
-uniform highp mat4 shadow_matrices[3];      // Must be highp for projection
+// Where the cover map is centred, from the anchor, in base-grid normalised
+// units: it is baked around the eye, and the anchor is held across moves
+// that it is not (Viewer.cover_shift).
+uniform highp vec2 u_coverShift;
+uniform highp mat4 shadow_matrices[3]; // Must be highp for projection
 uniform mediump float shadow_splits[3];
 // Per cascade: world metres per shadow texel, and the depth range its [0,1]
 // spans, both from the ortho box [calculate_shadow_matrices] builds.
@@ -986,7 +990,8 @@ void main() {
   // === CLC-Based Material ===
   // The cover map's outermost level spans the far field, twice the base
   // grid's side about the same centre.
-  Surface surface = sampleCLCBilinear((reliefCoord - 0.5) * 0.5 + 0.5);
+  Surface surface =
+      sampleCLCBilinear((reliefCoord - u_coverShift - 0.5) * 0.5 + 0.5);
 
   // === Canopy (LIDAR HD) ===
   // Inside the 1 m ring's block, the canopy height says where the trees are:

@@ -1502,8 +1502,9 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
    a square twice the base grid's side, so of half as many samples a side. *)
 let far_step = 4
 
-let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
-    ~cover_fill_pid ~water_raster_pid (clc_u : Render_state.clc_raster_uniforms)
+let rasterize_clc_tiles ?far_cover ?far_anchor ctx ~lat ~lon ~w ~clc_tiles
+    ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
+    (clc_u : Render_state.clc_raster_uniforms)
     (fill_u : Render_state.cover_fill_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
   (* CLC GPU Rasterization setup.
@@ -1882,24 +1883,36 @@ let rasterize_clc_tiles ?far_cover ctx ~lat ~lon ~w ~clc_tiles ~clc_raster_pid
      but copied from the far field's own land cover, a grid of palette indices
      on the far elevation's samples ([Dem_loader.load ~cover]): megabytes less
      to fetch for ground 45 km away and more. Those samples are a texel wide and
-     stand where [far_origin] has it, which leaves them a texel off, or none,
-     as the anchor is past a multiple of [far_step]. Without it the level keeps
-     what the polygons of the base grid's tiles drew, and sea around them. *)
+     stand where [far_origin] has it about [far_anchor], the anchor the far
+     field was fetched around (by default the cover map's own centre), which
+     leaves them a texel off, or none, as that anchor is past a multiple of
+     [far_step] -- and as many more as the cover map's centre is far samples
+     from it. Without it the level keeps what the polygons of the base grid's
+     tiles drew, and sea around them. *)
   Option.iter
     (fun (cover : Dem_loader.t) ->
       let n = cover_map_size in
       if cover.size = n then begin
-        let shift a =
-          ((((a mod far_step) + far_step) mod far_step) + (far_step / 2))
-          / far_step
+        let centre_lat = Web_utils.arcsec_floor lat
+        and centre_lon = Web_utils.arcsec_floor lon in
+        let far_lat, far_lon =
+          Option.value far_anchor ~default:(centre_lat, centre_lon)
         in
-        let dx = shift (Web_utils.arcsec_floor lon)
-        and dy = shift (Web_utils.arcsec_floor lat - 1) in
+        let past a = ((a mod far_step) + far_step) mod far_step in
+        (* Rounding down, either side of zero. *)
+        let fdiv a =
+          if a >= 0 then a / far_step else -((far_step - 1 - a) / far_step)
+        in
+        let dx = fdiv (centre_lon - far_lon + past far_lon + (far_step / 2))
+        and dy =
+          fdiv (centre_lat - far_lat + past (far_lat - 1) + (far_step / 2))
+        in
+        let clamp k = max 0 (min (n - 1) k) in
         let ids = Bigarray.(Array1.create int8_unsigned c_layout (n * n)) in
         for i = 0 to n - 1 do
-          let row = min (n - 1) (i + dy) in
+          let row = clamp (i + dy) in
           for j = 0 to n - 1 do
-            ids.{(i * n) + j} <- cover.data.{row, 2 * min (n - 1) (j + dx)}
+            ids.{(i * n) + j} <- cover.data.{row, 2 * clamp (j + dx)}
           done
         done;
         Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
@@ -2390,11 +2403,20 @@ type base = {
           came *)
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
+  cover_lat : int;
+      (** arcseconds: where [cover_map_texture] is centred, the anchor until a
+          move holding it bakes the cover map again around the eye *)
+  cover_lon : int;
+  clc_tiles : (Clc_loader.clc_tile * float * float) list;
+      (** the land cover's tiles, and *)
+  far_cover : Dem_loader.t option;
+      (** the far field's, to bake the cover map again around another centre *)
 }
-(** What a location bakes around its anchor arcsecond. Every one of these is a
-    function of that arcsecond alone -- the base grid, the cover map and the
-    ambient occlusion are all centred on it, never on the observer -- so it
-    outlives a move that stays near it (see [reuse_radius_m]). *)
+(** What a location bakes around its anchor arcsecond. Every one of these but
+    the cover map is a function of that arcsecond alone -- the base grid and the
+    ambient occlusion are centred on it, never on the observer -- so it outlives
+    a move that stays near it (see [base_radius_m]), the cover map baked again
+    around the eye on the way ([cover_radius_m]). *)
 
 let show_labels = ref true
 
@@ -2718,6 +2740,18 @@ let get_trees_gl ctx =
    height pyramid [ground]), for a load at [lat] with the eye at [eye_x],
    [eye_y] arcseconds from the anchor over a base grid of [w] samples; the
    search runs at the next shadow pass. *)
+(* Where the cover map of the location on screen is centred, from its anchor,
+   in base-grid normalised units: [u_coverShift] in the programs that read it,
+   set by [publish] and read by those made later (the sight lines, the trees'
+   search). *)
+let cover_shift = ref (0., 0.)
+
+let upload_cover_shift ctx pid =
+  let sx, sy = !cover_shift in
+  Gl.uniform2f ctx
+    (Gl.get_uniform_location ctx pid (Jstr.v "u_coverShift"))
+    sx sy
+
 let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
     ~w ~lat ~eye_x ~eye_y ~eye_height ~light_dir ~sun_tint ~fog_color
     ~zenith_color ~shadow_matrix ~shadow_cascade:(texel, depth)
@@ -2745,6 +2779,7 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform1i ctx (u "u_coverMap") 7;
   Gl.uniform1i ctx (u "u_paletteTex") 8;
   Gl.uniform1f ctx (u "u_invW") (1. /. float w);
+  upload_cover_shift ctx t.find_pid;
   Gl.use_program ctx t.draw_pid;
   let u name = Gl.get_uniform_location ctx t.draw_pid (Jstr.v name) in
   Gl.uniform1f ctx (u "u_eyeHeight") eye_height;
@@ -4901,19 +4936,26 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
   ready ~late:false
 
 (* How far the eye may stand from the arcsecond its surroundings were baked on
-   before they are baked again. Nothing in a bake depends on where one stands
-   inside the tile -- the base grid, the ambient occlusion, the cover map and
-   every refinement ring are anchored on that arcsecond, and the mesh reaches
-   them through [center_offset] alone -- so holding it across a short move is
-   exact rather than approximate, and a move that holds it costs a shadow map, a
-   run of the sight lines and nothing else.
+   before they are baked again. Nothing in the base depends on where one stands
+   inside the tile -- the base grid, the ambient occlusion and the far field
+   are anchored on that arcsecond, and the mesh reaches them through
+   [center_offset] alone -- so holding it across a move is exact rather than
+   approximate. What follows the eye instead is planned around it on every
+   load: the refinement rings, the canopy and the tree cover, each a block of
+   its own, kept while the eye stays in it ([Hd_dem.block_id]).
 
-   What it does cost is peripheral, and both terms are why this is a couple of
-   hundred metres rather than a kilometre: the base tile reaches [w/2]
-   arcseconds (63 km) from the anchor rather than from the eye, so that much of
-   the rim is lost on one side; and the finest cover-map clipmap level, ~1 km
-   across, is centred there too, so ground beyond it reads its land cover one
-   level coarser. At 250 m of a 63 km horizon both are noise. *)
+   What holding the base does cost is peripheral: it reaches [w/2] arcseconds
+   (63 km) from the anchor rather than from the eye, so that much of its rim
+   is lost on one side, to the far field beyond. At 3 km of a 63 km horizon
+   that is noise, and a move that holds it costs a shadow map, a run of the
+   sight lines and the rings whose block changed -- against the second of
+   fetching and baking a base again. *)
+let base_radius_m = 3000.
+
+(* The cover map's finest clipmap level is ~1 km across and centred where it
+   was baked, so ground beyond it reads its land cover a level coarser: it is
+   baked again around the eye ([cover_lat]/[cover_lon]) once the eye has moved
+   this far from where it was, the base held all the same. *)
 (* Where the far field's first sample stands, in arcseconds west and south of
    the anchor of a base grid of [w] samples: [w] and what the anchor is past a
    multiple of [far_step], less the 1.5 arcseconds that centre a sample in its
@@ -4969,13 +5011,25 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon far =
       Gl.uniform1i ctx (u "far_max_lod") (Web_utils.log2 size))
     pids
 
-let reuse_radius_m = 250.
+let cover_radius_m = 250.
+
+(* Arcseconds past the base grid on every side that the land cover's tiles are
+   fetched for: as far as [base_radius_m] can take the cover map's centre from
+   the anchor, whose outer level spans the base grid about that centre --
+   3 km being under 140 arcseconds of longitude at 45 degrees, 200 at 60. *)
+let cover_margin = 256
+
+let within ~radius ~lat ~lon (alat, alon) =
+  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
+  let dx = deltax *. ((lon *. 3600.) -. float alon)
+  and dy = deltay *. ((lat *. 3600.) -. float alat) in
+  (dx *. dx) +. (dy *. dy) <= radius *. radius
 
 let near_anchor b ~lat ~lon =
-  let deltax, deltay, _ = Render_state.compute_deltas ~lat in
-  let dx = deltax *. ((lon *. 3600.) -. float b.anchor_lon)
-  and dy = deltay *. ((lat *. 3600.) -. float b.anchor_lat) in
-  (dx *. dx) +. (dy *. dy) <= reuse_radius_m *. reuse_radius_m
+  within ~radius:base_radius_m ~lat ~lon (b.anchor_lat, b.anchor_lon)
+
+let near_cover b ~lat ~lon =
+  within ~radius:cover_radius_m ~lat ~lon (b.cover_lat, b.cover_lon)
 
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
@@ -5018,7 +5072,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
     graphics
   in
   (* Where this load stands: on the previous location's anchor arcsecond if it is
-     near enough (see [reuse_radius_m]), on its own otherwise. Holding it is what
+     near enough (see [base_radius_m]), on its own otherwise. Holding it is what
      lets everything below be kept rather than baked again. *)
   let previous = !session in
   let reused_base =
@@ -5037,10 +5091,26 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let alat = (float anchor_lat +. 0.5) /. 3600.
   and alon = (float anchor_lon +. 0.5) /. 3600. in
   (* The eye in base-grid samples east and north of the anchor: under one
-     arcsecond on a fresh load, up to [reuse_radius_m] when the anchor was
+     arcsecond on a fresh load, up to [base_radius_m] when the anchor was
      held. *)
   let eye_x = (lon *. 3600.) -. float anchor_lon
   and eye_y = (lat *. 3600.) -. float anchor_lat in
+  (* Where what follows the observer is planned around, rather than baked
+     around the anchor: the rings, the canopy, the tree cover and the cover map.
+     Where the held base's cover map was centred while the eye stays within
+     [cover_radius_m] of it, so that a short move keeps them all as it keeps the
+     base; the eye's own arcsecond otherwise. Each is stated against the anchor
+     all the same ([Hd_dem.reanchor_raw]; the canopy and the tree cover as they
+     are applied). Planned around the eye on every load instead, a 140 m move
+     crossed a 1 m ring's block and fetched it again. Mid-arcsecond, as
+     [alat]/[alon]. *)
+  let plan_arcsec =
+    match reused_base with
+    | Some b when near_cover b ~lat ~lon -> (b.cover_lat, b.cover_lon)
+    | Some _ | None -> (Web_utils.arcsec_floor lat, Web_utils.arcsec_floor lon)
+  in
+  let elat = (float (fst plan_arcsec) +. 0.5) /. 3600.
+  and elon = (float (snd plan_arcsec) +. 0.5) /. 3600. in
   (* Rings the previous location blended for the very blocks this one needs. A
      block is a piece of absolute ground, so such a ring is exact here, down to
      the bake -- only its origins are restated against this anchor.
@@ -5061,7 +5131,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         let rec take layers slots =
           match (layers, slots) with
           | layer :: layers, slot :: slots -> (
-              let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
+              let block = Hd_dem.block_id layer ~lat:elat ~lon:elon in
               match slot with
               | Blank b when b = block -> Blank b :: take layers slots
               (* Not one blended short of tiles that may still come, or have:
@@ -5091,16 +5161,22 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
     |> List.map (fun layer ->
-        (layer, ref (Hd_dem.fetch layer ~lat:alat ~lon:alon)))
+        ( layer,
+          ref
+            (Lwt.map
+               (Option.map
+                  (Hd_dem.reanchor_raw ~old_anchor:plan_arcsec
+                     ~anchor:(anchor_lat, anchor_lon)))
+               (Hd_dem.fetch layer ~lat:elat ~lon:elon)) ))
   in
-  start_canopy ~lat:alat ~lon:alon
+  start_canopy ~lat:elat ~lon:elon
     ~after:
       (* The 5 m ring's fetch, if there is one, for half a minute at most:
          it waits for as long as it has no tile. *)
       (match List.assq_opt Hd_dem.lidar_5m hd_fetches with
       | Some p -> Lwt.choose [ Lwt.map ignore !p; sleep 30. ]
       | None -> Lwt.return_unit);
-  start_tree_cover ~lat:alat ~lon:alon;
+  start_tree_cover ~lat:elat ~lon:elon;
   let* fetched =
     match reused_base with
     | Some _ -> Lwt.return None
@@ -5127,7 +5203,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                (Dem_loader.load ~size:w ~lat:alat ~lon:alon ())
                (Lwt.both (far_grid false) (far_grid true)))
             (Lwt.both
-               (Clc_loader.load_tiles ~lat:alat ~lon:alon ~size:w ())
+               (Clc_loader.load_tiles ~lat:alat ~lon:alon
+                  ~size:(w + (2 * cover_margin))
+                  ())
                (Clc_loader.load_tiles ~pois:true ~lat:alat ~lon:alon
                   ~size:(2 * w) ()))
         in
@@ -5219,7 +5297,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         match states with
         | [] -> []
         | (layer, state) :: states -> (
-            let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
+            let block = Hd_dem.block_id layer ~lat:elat ~lon:elon in
             match (state, blended) with
             | Lwt.Sleep, _ -> `Pending :: back states blended
             | (Lwt.Fail _ | Lwt.Return None), _ ->
@@ -5269,7 +5347,30 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       match fetched with
       (* Nothing was fetched exactly when the anchor was held, which is exactly
          when there is a base to stand on. *)
-      | None -> Option.get reused_base
+      | None ->
+          let b = Option.get reused_base in
+          if near_cover b ~lat ~lon then b
+          else begin
+            let t_cover = now_ms () in
+            let cover_map_texture =
+              time_gpu ctx "rasterize_clc_tiles" (fun () ->
+                  rasterize_clc_tiles ?far_cover:b.far_cover
+                    ~far_anchor:(anchor_lat, anchor_lon) ctx ~lat:elat ~lon:elon
+                    ~w ~clc_tiles:b.clc_tiles ~clc_raster_pid ~cover_fill_pid
+                    ~water_raster_pid clc_raster_uniforms cover_fill_uniforms
+                    water_raster_uniforms)
+            in
+            (* Only [base] has it: the previous location's record went above,
+               this held base aside. *)
+            Gl.delete_texture ctx b.cover_map_texture;
+            Web_utils.measure ~track:"Location" "Bake cover map" t_cover;
+            {
+              b with
+              cover_map_texture;
+              cover_lat = fst plan_arcsec;
+              cover_lon = snd plan_arcsec;
+            }
+          end
       | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles) ->
           let relief_texture, relief_normal_texture =
             let tile_texture = make_tile_texture ctx tile in
@@ -5356,6 +5457,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             far;
             ao_texture;
             cover_map_texture;
+            cover_lat = anchor_lat;
+            cover_lon = anchor_lon;
+            clc_tiles;
+            far_cover;
           }
     in
     if Option.is_some fetched then
@@ -5576,6 +5681,14 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         ~light_dir ~shadow_matrices ~shadow_splits:splits_dist
         ~shadow_cascades:(shadow_cascade_extents ())
         ~sun_tint ~fog_color ~zenith_color;
+      cover_shift :=
+        ( float (base.cover_lon - anchor_lon) /. float w,
+          float (base.cover_lat - anchor_lat) /. float w );
+      List.iter
+        (fun pid ->
+          Gl.use_program ctx pid;
+          upload_cover_shift ctx pid)
+        [ terrain_pid; shadow_pid; path_pid ];
       apply_far ctx
         [
           terrain_pid;
@@ -5649,9 +5762,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
          [|
            near_ring;
            ring_of Hd_dem.lidar_5m;
-           Some (Hd_dem.block_id Hd_dem.canopy_mid ~lat:alat ~lon:alon, -1);
+           Some (Hd_dem.block_id Hd_dem.canopy_mid ~lat:elat ~lon:elon, -1);
          |];
-       update_tree_cover ctx ~terrain_pid ~on_late ~lat:alat ~lon:alon
+       update_tree_cover ctx ~terrain_pid ~on_late ~lat:elat ~lon:elon
          ~frame:(anchor_lat, anchor_lon, w);
        match near_ring with
        | Some (block, i) when Lazy.force trees_enabled ->
@@ -5769,6 +5882,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       Gl.use_program ctx sight.sight_pid;
       Render_state.upload_path_session ctx sight.sight_uniforms ~w ~lat:alat
         ~eye_x ~eye_y;
+      upload_cover_shift ctx sight.sight_pid;
       Render_state.upload_path_hd_params ctx sight.sight_uniforms hd_params;
       Gl.uniform1f ctx sight.sight_eye (height +. 2.);
       let sight_job = start_sight ctx sight sight_targets in

@@ -891,20 +891,28 @@ let get_height (t : t) row col =
    blended for one location is exact for any other holding the same block. Both
    anchors are in arcseconds, latitude first, as [Web_utils.arcsec_floor] gives
    them. *)
-let reanchor (t : t) ~old_anchor:(old_lat, old_lon) ~anchor:(alat, alon) =
+let reanchor_frame frame ~old_anchor:(old_lat, old_lon) ~anchor:(alat, alon) =
   (* A point [p] arcseconds from the new anchor is [p + d] from the old one, and
      both translations are exact: a projected block's frame is fitted to the
      projection itself, so stated from either anchor it is the same map. *)
   let dx = float (alon - old_lon) and dy = float (alat - old_lat) in
   {
-    t with
-    frame =
-      {
-        t.frame with
-        to_index = Warp.translate_input t.frame.to_index ~du:dx ~dv:dy;
-        of_index = Warp.translate_output t.frame.of_index ~dx:(-.dx) ~dy:(-.dy);
-      };
+    frame with
+    to_index = Warp.translate_input frame.to_index ~du:dx ~dv:dy;
+    of_index = Warp.translate_output frame.of_index ~dx:(-.dx) ~dy:(-.dy);
   }
+
+let reanchor (t : t) ~old_anchor ~anchor =
+  { t with frame = reanchor_frame t.frame ~old_anchor ~anchor }
+
+let rec reanchor_raw (r : raw) ~old_anchor ~anchor =
+  if old_anchor = anchor then r
+  else
+    {
+      r with
+      frame = reanchor_frame r.frame ~old_anchor ~anchor;
+      rest = Lwt.map (Option.map (reanchor_raw ~old_anchor ~anchor)) r.rest;
+    }
 
 (* The surface a refinement is mixed into: any u16 grid with a known origin and
    spacing, so the layers can be chained (base -> L13 -> finer). The fields are

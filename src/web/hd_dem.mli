@@ -157,6 +157,12 @@ val reanchor : t -> old_anchor:int * int -> anchor:int * int -> t
     this is exact for any location holding the same {!block_id}; it is not a
     resampling and touches nothing but the frame's translation. *)
 
+val reanchor_raw : raw -> old_anchor:int * int -> anchor:int * int -> raw
+(** A fetched block, its frame stated against another anchor arcsecond, as
+    {!reanchor} does a blended one -- and so is its {!raw_rest} when it comes.
+    For a block planned around another point than the anchor it is blended
+    against ({!fetch} states it against the arcsecond it was planned around). *)
+
 val prefetch : layer -> lat:float -> lon:float -> unit Lwt.t
 (** Warm the persistent tile cache for offline use with a block twice the
     extent's width around [lat]/[lon] (~40 MB for {!l13}), so every location
