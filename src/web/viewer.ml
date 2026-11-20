@@ -2827,7 +2827,8 @@ let tree_readback =
    it says of one). The search runs in the middle of a shadow pass: fenced
    there, it was read back while the rest of the pass was still being drawn
    -- a frame frozen for as long, 50 ms on a phone. So the fence is made
-   here, after the frame that asked for the search. *)
+   here, after the frame that asked for the search, and no frame is drawn
+   until it signals ([readback_waiting]). *)
 let collect_trees ctx =
   match (!trees_search, !trees_gl) with
   | Some (b, g, None), Some t when g = !context_generation && t.gen = g ->
@@ -3191,6 +3192,21 @@ let collect_sight ctx =
         !sight_pending;
     List.iter (fun (u, r) -> Lwt.wakeup u r) !ready
   end
+
+(* Whether a readback is waiting for its fence. Reading a buffer back waits for
+   everything submitted before the read, not just for the work that wrote it:
+   frames drawn after the fence still have to be done first, and on the Pixel
+   that made the read wait 10-130 ms where the copy itself takes 1-18 ms. So no
+   frame is drawn while a fence is pending ([event_loop]): once it signals, the
+   GPU has nothing left to do and the read is the copy alone. *)
+let readback_waiting () =
+  (match !trees_search with Some (_, _, Some _) -> true | _ -> false)
+  || List.exists (fun (_, _, sync, _, _) -> Option.is_some !sync) !sight_pending
+
+(* Since when frames have been held for a readback, and for how long at most:
+   past that, frames are drawn again and the read waits for them. *)
+let readback_hold_since = ref None
+let max_readback_hold_ms = 500.
 
 let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
     ~(terrain_uniforms : Render_state.terrain_uniforms)
@@ -3798,6 +3814,17 @@ let event_loop ~generation ctx draw =
       collect_trees ctx;
       collect_sight ctx
     end;
+    let hold =
+      if readback_waiting () then begin
+        if Option.is_none !readback_hold_since then
+          readback_hold_since := Some t;
+        t -. Option.get !readback_hold_since < max_readback_hold_ms
+      end
+      else begin
+        readback_hold_since := None;
+        false
+      end
+    in
 
     (* Optimization: Only draw if change is visible (> ~half a pixel).
        One pixel spans ~2 / (scale * zoom * max_dim) radians whatever the
@@ -3812,8 +3839,9 @@ let event_loop ~generation ctx draw =
     let angle_diff = Quaternion.angle_between orientation prev_orientation in
     let zoom_diff = abs_float (z -. prev_zoom) in
     let should_draw =
-      angle_diff > angle_threshold
-      || zoom_diff > 0.00001 || !force_redraw || Lazy.force show_fps
+      (angle_diff > angle_threshold
+      || zoom_diff > 0.00001 || !force_redraw || Lazy.force show_fps)
+      && not hold
     in
 
     (* Drawing into a lost context is a sequence of silent no-ops, and the
@@ -5650,10 +5678,12 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       in
       (* The sight lines, to the POIs of the base grid and then to those of
          the far field, marched on the GPU ([start_sight]) over the surface
-         this publish draws. The first publish of a load waits for the
-         answer: its labels go to screen with it. A refinement keeps the POIs
-         seen so far and takes the answer when the GPU has it, a few frames
-         on, rather than freeze one at each ring to move a label or two. *)
+         this publish draws. The answer is taken when the GPU has it, a few
+         frames on: reading it at once waited for every bake queued ahead of
+         it, 45-104 ms of a blocked main thread on the Pixel. Until then a
+         refinement keeps the POIs seen so far, and the first publish of a
+         load shows none: the terrain goes to screen whole, its labels
+         follow. *)
       let sight = get_sight_gl ctx ~radial_params in
       Gl.use_program ctx sight.sight_pid;
       Render_state.upload_path_session ctx sight.sight_uniforms ~w ~lat:alat
@@ -5662,21 +5692,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       Gl.uniform1f ctx sight.sight_eye (height +. 2.);
       let sight_job = start_sight ctx sight sight_targets in
       let seen_of seen = List.filteri (fun i _ -> seen.(i)) all_poi in
-      let provisional = !visible in
-      let kept =
-        match provisional with
-        | Some kept -> kept
-        | None ->
-            let t_vis = now_ms () in
-            let seen = read_sight ctx sight_job in
-            let kept = seen_of seen in
-            Web_utils.measure ~track:"Location" "Sight lines" t_vis;
-            Format.eprintf "visibility: %d/%d POIs in %.0f ms@."
-              (List.length kept) (List.length all_poi)
-              (now_ms () -. t_vis);
-            visible := Some kept;
-            kept
-      in
+      let kept = Option.value ~default:[] !visible in
       let label points =
         let inv_avg_delta = 2. /. (deltax +. deltay) in
         List.map
@@ -5788,20 +5804,20 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
               force_redraw := true
             end
       in
-      if Option.is_some provisional then
-        Lwt.async (fun () ->
-            let t0 = now_ms () in
-            let* seen = await_sight ~stale sight_job in
-            Option.iter
-              (fun seen ->
-                let now = seen_of seen in
-                Format.eprintf
-                  "visibility: %d/%d POIs, %.0f ms after the publish@."
-                  (List.length now) (List.length all_poi)
-                  (now_ms () -. t0);
-                settle now)
-              seen;
-            Lwt.return_unit)
+      Lwt.async (fun () ->
+          let t0 = now_ms () in
+          let* seen = await_sight ~stale sight_job in
+          Option.iter
+            (fun seen ->
+              let now = seen_of seen in
+              Web_utils.measure ~track:"Location" "Sight lines" t0;
+              Format.eprintf
+                "visibility: %d/%d POIs, %.0f ms after the publish@."
+                (List.length now) (List.length all_poi)
+                (now_ms () -. t0);
+              settle now)
+            seen;
+          Lwt.return_unit)
     in
     Web_utils.timed ~track:"Location" "Publish" (fun () ->
         publish ~keep:reused_slots ~slots:in_time);
