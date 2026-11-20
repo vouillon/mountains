@@ -1088,7 +1088,11 @@
       pointer-events: none;
     }
 
-    /* After a short move, which keeps its surroundings and is done at once. */
+    /* Around a move that holds the base, done in a few hundred ms. */
+    .startup-overlay.quick {
+      transition: opacity 0.15s ease-out;
+    }
+
     .startup-overlay.hidden.quick {
       transition: opacity 0.25s ease-out;
     }

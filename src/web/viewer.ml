@@ -203,7 +203,9 @@ let hide_startup_overlay ?(quick = false) () =
    first must not show through an overlay still half transparent. *)
 let overlays_rising = ref 0
 
-let show_startup_overlay msg loading =
+(* [quick]: a short fade-in (the [quick] class in index.html) for a move that
+   holds the base, which is done in a few hundred milliseconds. *)
+let show_startup_overlay ?(quick = false) msg loading =
   let doc = Brr.G.document in
   update_startup_status msg loading;
   let overlay = Brr.Document.find_el_by_id doc (Jstr.v "startup-overlay") in
@@ -212,7 +214,7 @@ let show_startup_overlay msg loading =
       incr overlays_rising;
       Option.iter Brr.G.stop_timer !overlay_removal;
       overlay_removal := None;
-      Brr.El.set_class (Jstr.v "quick") false el;
+      Brr.El.set_class (Jstr.v "quick") quick el;
       Brr.El.set_inline_style (Jstr.v "display") (Jstr.v "flex") el;
       (* We need to wait for the browser to process the 'display' change
          before we can trigger the 'opacity' transition. *)
@@ -220,7 +222,7 @@ let show_startup_overlay msg loading =
       let* () = request_animation_frame () in
       Brr.El.set_class (Jstr.v "hidden") false el;
       (* Wait for the fade-in transition to complete *)
-      let* () = sleep 0.5 in
+      let* () = sleep (if quick then 0.15 else 0.5) in
       decr overlays_rising;
       Lwt.return_unit
   | None -> Lwt.return_unit
@@ -6293,19 +6295,27 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
      fun ~push ~camera ~own_position ~lat ~lon ->
        Lwt.async (fun () ->
            let t_switch = now_ms () in
-           (* A move short enough to keep the anchor is done almost as soon as
-              the overlay is up, and does not need a long fade-out after. *)
-           let hop =
+           (* A move that holds the base is done in a few hundred
+              milliseconds: it gets quick fades rather than a second and a half
+              of them. One that also stays where its rings and cover map were
+              planned re-plans nothing and is done in ~150 ms, which an overlay
+              would only hide: the view just moves. *)
+           let hop, small =
              match !session with
-             | Some { base; _ } -> near_anchor base ~lat ~lon
-             | None -> false
+             | Some { base; _ } ->
+                 let hop = near_anchor base ~lat ~lon in
+                 (hop, hop && near_cover base ~lat ~lon)
+             | None -> (false, false)
            in
            (* The load runs under the overlay's fade-in, not after it: waiting
               for the fade first put half a second on every switch. The fade is
               awaited before the overlay is taken down -- hiding one still fading
               in misbehaves -- and no frame is drawn until it is opaque
               ([overlays_rising]). *)
-           let shown = show_startup_overlay "Loading Terrain..." true in
+           let shown =
+             if small then Lwt.return_unit
+             else show_startup_overlay ~quick:hop "Loading Terrain..." true
+           in
            Lwt.catch
              (fun () ->
                let* applied = load ~lat ~lon in
@@ -6328,7 +6338,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
                  | None -> ());
                  (* Reload and sharing must land on the new location. *)
                  update_url_params ~push ();
-                 hide_startup_overlay ~quick:hop ()
+                 if not small then hide_startup_overlay ~quick:hop ()
                end;
                Lwt.return_unit)
              (fun e ->
