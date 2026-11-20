@@ -16,6 +16,7 @@
 open Bigarray
 
 let ( let* ) = Lwt.bind
+let ( let+ ) t f = Lwt.map f t
 
 (* WGS84G tiles are always 256 x 256 samples, at every matrix level. *)
 let tile_px = 256
@@ -641,7 +642,8 @@ let decode_hdt buf px =
     in
     match res with
     | Worker_pool.ResultHDT heights -> Lwt.return heights
-    | Worker_pool.ResultDEM _ | Worker_pool.ResultCLC _ ->
+    | Worker_pool.ResultDEM _ | Worker_pool.ResultCLC _
+    | Worker_pool.ResultBlend _ | Worker_pool.BlendUnavailable ->
         Lwt.fail (Failure "HDT1 tile: unexpected reply")
     | Worker_pool.Error e -> Lwt.fail (Failure e)
 
@@ -988,44 +990,105 @@ let refinement_to_source (source : source) (raw : raw) =
            ~ty:((r.gy0 -. s.gy0) /. s.metres))
   | _ -> Warp.compose source.src_to_index raw.frame.of_index
 
-let blend ~lat:_ ~(source : source) (raw : raw) =
+(* The parameters of a blend of [raw] onto [source]. *)
+let params (source : source) (raw : raw) =
   let { size; fade_metres; _ } = raw.layer in
-  let t0 = Brr.(Performance.now_ms G.performance) in
-  let p =
-    {
-      Blend_core.size;
-      to_src = refinement_to_source source raw;
-      src_size = source.src_grid.Dem_loader.size;
-      src_height_scale = source.src_height_scale;
-      src_height_offset = source.src_height_offset;
-      fade_x = fade_metres /. raw.frame.step_x_m;
-      fade_y = fade_metres /. raw.frame.step_y_m;
-    }
+  {
+    Blend_core.size;
+    to_src = refinement_to_source source raw;
+    src_size = source.src_grid.Dem_loader.size;
+    src_height_scale = source.src_height_scale;
+    src_height_offset = source.src_height_offset;
+    fade_x = fade_metres /. raw.frame.step_x_m;
+    fade_y = fade_metres /. raw.frame.step_y_m;
+  }
+
+(* [raw], before its blend, as the surface it will be for the ring above:
+   everything a plan reads but its samples and their quantisation, which only
+   the blend tells, and which the worker fills in. *)
+let empty_grid = lazy (Array2.create int8_unsigned c_layout 0 0)
+
+let to_come (raw : raw) =
+  {
+    src_grid =
+      { Dem_loader.data = Lazy.force empty_grid; size = raw.layer.size };
+    src_to_index = raw.frame.to_index;
+    src_proj = raw.frame.grid;
+    src_height_scale = Float.nan;
+    src_height_offset = Float.nan;
+  }
+
+let blended (raw : raw)
+    ({ data; height_scale; height_offset; range } : Blend_core.result) ms =
+  let size = raw.layer.size in
+  Format.eprintf
+    "%s blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm steps)@."
+    (describe raw.layer) ms raw.missing range (height_scale *. 100.);
+  {
+    layer = raw.layer;
+    grid =
+      {
+        Dem_loader.data = reshape_2 (genarray_of_array1 data) size (size * 2);
+        size;
+      };
+    frame = raw.frame;
+    height_scale;
+    height_offset;
+  }
+
+(* Here, one at a time, where no worker can. *)
+let blend_here ~source raws =
+  let rec go source acc = function
+    | [] -> List.rev acc
+    | raw :: raws -> (
+        let t0 = Brr.(Performance.now_ms G.performance) in
+        let p = params source raw in
+        let win = source_window source (Blend_core.geometry p) in
+        match Blend_wasm.run p ~samples:raw.samples ~win with
+        | None -> go source (None :: acc) raws
+        | Some r ->
+            let t =
+              blended raw r (Brr.(Performance.now_ms G.performance) -. t0)
+            in
+            go (as_source t) (Some t :: acc) raws)
   in
-  let win = source_window source (Blend_core.geometry p) in
-  match Blend_wasm.run p ~samples:raw.samples ~win with
-  | None -> None
-  | Some { data; height_scale; height_offset; range } ->
-      Web_utils.measure ~track:"Rings" (describe raw.layer ^ " blend") t0;
-      Format.eprintf
-        "%s blended in %.0f ms (missing tiles: %d, %.0f m range, %.2f cm \
-         steps)@."
-        (describe raw.layer)
-        (Brr.(Performance.now_ms G.performance) -. t0)
-        raw.missing range (height_scale *. 100.);
-      Some
-        {
-          layer = raw.layer;
-          grid =
-            {
-              Dem_loader.data =
-                reshape_2 (genarray_of_array1 data) size (size * 2);
-              size;
-            };
-          frame = raw.frame;
-          height_scale;
-          height_offset;
-        }
+  go source [] raws
+
+let rec blend_chain ~lat ~source raws =
+  match raws with
+  | [] -> Lwt.return []
+  | _ :: _ -> (
+      (* Planned as if every ring blends: each on the one before. *)
+      let rings, _ =
+        List.fold_left
+          (fun (rings, source) raw ->
+            ((params source raw, raw.samples) :: rings, to_come raw))
+          ([], source) raws
+      in
+      let rings = List.rev rings in
+      let win =
+        source_window source (Blend_core.geometry (fst (List.hd rings)))
+      in
+      let* answers = Blend_wasm.run_chain_in_worker rings ~win in
+      match answers with
+      | None -> Lwt.return (blend_here ~source raws)
+      | Some answers ->
+          let rec take source acc raws answers =
+            match (raws, answers) with
+            | [], _ -> Lwt.return (List.rev acc)
+            | raw :: raws, Some (r, ms) :: answers ->
+                let t = blended raw r ms in
+                take (as_source t) (Some t :: acc) raws answers
+            (* No valid sample: the rings above stand on [source] instead,
+               which their plans did not foresee. *)
+            | _ :: raws, None :: _ ->
+                let+ rest = blend_chain ~lat ~source raws in
+                List.rev_append (None :: acc) rest
+            | _ :: _, [] ->
+                let+ rest = blend_chain ~lat ~source raws in
+                List.rev_append acc rest
+          in
+          take source [] raws answers)
 
 (* Fetch, [parallel] at a time, every one of [urls] that the persistent data
    cache does not hold yet, and say how many that was.

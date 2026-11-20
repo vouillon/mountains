@@ -3932,6 +3932,11 @@ let set_own_position : (bool -> unit) ref = ref (fun _ -> ())
    the last switch wins. *)
 let location_epoch = ref 0
 
+(* A load overtaken by a later one while its rings were being blended, once it
+   had taken the previous location down: [load_location] fails with it, and its
+   caller takes it for a load that was not applied. *)
+exception Superseded
+
 (* POIs of the loaded CLC tiles, restricted to the DEM tile and [reach] of its
    samples beyond it on every side, and positioned in DEM pixel coordinates. *)
 let poi_positions ?(reach = 0) ~w ~h ~lat ~lon ~tile clc_tiles =
@@ -4958,6 +4963,7 @@ let near_anchor b ~lat ~lon =
 let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
   incr location_epoch;
   let epoch = !location_epoch in
+  let generation = !context_generation in
   let t_load = now_ms () in
   let {
     terrain_geo;
@@ -5150,12 +5156,77 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              match Lwt.state !p with Lwt.Return (Some _) -> true | _ -> false)
            hd_fetches)
     in
+    (* A ring is blended onto the surface beneath it -- the coarsest onto the
+       base tile, each finer one onto its predecessor -- so it equals the surface
+       below wherever its own data is missing or faded, and the renderer can
+       switch between them on a plain extent test. A ring whose fetch came back
+       empty simply drops out, and the next finer one blends onto whatever is
+       left.
+
+       The blends are made in the decode workers ([Hd_dem.blend]), for the
+       rings in by now: started here, they run while the base is baked below,
+       and only their bakes ([bake_rings]) are left for after. [keep] is the
+       head of the layer list that needs neither: the rings this load took from
+       the previous location, and, on a refinement, the ones it has already
+       blended and baked itself. *)
+    let blend_rings ~keep =
+      let tile =
+        match fetched with
+        | Some (tile, _, _, _, _) -> tile
+        | None -> (Option.get reused_base).tile
+      in
+      let source =
+        List.fold_left
+          (fun source -> function
+            | Blended (_, r) -> Hd_dem.as_source r.grid
+            | Pending | Blank _ -> source)
+          (Hd_dem.base_source tile) keep
+      in
+      (* What the fetches hold now decides which rings are in; [hd_fetches]
+         starts at the first layer this load asked for. *)
+      let states =
+        List.map
+          (fun (layer, p) -> (layer, Lwt.state !p))
+          (List.filteri
+             (fun i _ -> i >= List.length keep - kept_rings)
+             hd_fetches)
+      in
+      let raws =
+        List.filter_map
+          (function _, Lwt.Return (Some raw) -> Some raw | _ -> None)
+          states
+      in
+      let* blended = Hd_dem.blend_chain ~lat:alat ~source raws in
+      (* Back onto the layers, one answer per ring that had data. *)
+      let rec back states blended =
+        match states with
+        | [] -> []
+        | (layer, state) :: states -> (
+            let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
+            match (state, blended) with
+            | Lwt.Sleep, _ -> `Pending :: back states blended
+            | (Lwt.Fail _ | Lwt.Return None), _ ->
+                `Blank block :: back states blended
+            | Lwt.Return (Some raw), Some g :: blended ->
+                `Blended (block, g, raw) :: back states blended
+            | Lwt.Return (Some _), None :: blended ->
+                `Blank block :: back states blended
+            | Lwt.Return (Some _), [] -> `Blank block :: back states [])
+      in
+      Lwt.return (back states blended)
+    in
+    let blends =
+      Web_utils.timed_lwt ~track:"Location" "Blend rings" (fun () ->
+          blend_rings ~keep:reused_slots)
+    in
     (* Everything the previous location owned that this one is not standing on is
        dead from here: the bakes below overwrite every unit those textures were
        bound to. Deleting first keeps the peak footprint at one location's worth
        of DEM-sized textures. [session] is cleared with them so that [publish]
-       can tell a record it supersedes from one already taken down; no [draw]
-       observes the gap, everything from here to the publish being synchronous.
+       can tell a record it supersedes from one already taken down. From here
+       to the publish the one wait is for the blends, which a [draw] sees as no
+       location at all, and draws nothing over: under the overlay every load
+       raises.
 
        Nothing has been able to touch [session] since [previous] was read: this
        load bumped the epoch on entry, so every older load and refinement stands
@@ -5286,69 +5357,54 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       base
     in
 
-    (* A ring is blended onto the surface beneath it -- the coarsest onto the
-       base tile, each finer one onto its predecessor -- so it equals the surface
-       below wherever its own data is missing or faded, and the renderer can
-       switch between them on a plain extent test. A ring whose fetch came back
-       empty simply drops out, and the next finer one blends onto whatever is
-       left.
-
-       [keep] is the head of the layer list that needs neither: the rings this
-       load took from the previous location, and, on a refinement, the ones it
-       has already blended and baked itself. *)
-    let build ~keep =
-      let source =
-        List.fold_left
-          (fun source -> function
-            | Blended (_, r) -> Hd_dem.as_source r.grid
-            | Pending | Blank _ -> source)
-          (Hd_dem.base_source tile) keep
-      in
-      let slots, _ =
-        List.fold_left
-          (fun (slots, source) (layer, p) ->
-            let block = Hd_dem.block_id layer ~lat:alat ~lon:alon in
-            match Lwt.state !p with
-            | Lwt.Sleep -> (Pending :: slots, source)
-            | Lwt.Fail _ | Lwt.Return None -> (Blank block :: slots, source)
-            | Lwt.Return (Some raw) -> (
-                match Hd_dem.blend ~lat:alat ~source raw with
-                | None -> (Blank block :: slots, source)
-                | Some g ->
-                    let tex = make_tile_texture ctx g.grid in
-                    let hd_relief_texture, hd_relief_normal_texture =
-                      time_gpu ctx "compute_relief_hd" (fun () ->
-                          compute_relief
-                            ~axes:(g.frame.axis_x, g.frame.axis_y)
-                            ~border:false ~height_scale:g.height_scale
-                            ~height_offset:g.height_offset ctx g.layer.size
-                            g.layer.size alat triangle_geo tex normal_pid
-                            downsample_pid relief_uniforms downsample_uniforms)
-                    in
-                    (* Nothing reads the source grid on the GPU after the
-                       bake. *)
-                    Gl.delete_texture ctx tex;
-                    ( Blended
-                        ( block,
-                          {
-                            grid = g;
-                            hd_relief_texture;
-                            hd_relief_normal_texture;
-                            more = Hd_dem.raw_rest raw;
-                          } )
-                      :: slots,
-                      Hd_dem.as_source g )))
-          ([], source)
-          (* [hd_fetches] starts at the first layer this load asked for. *)
-          (List.filteri
-             (fun i _ -> i >= List.length keep - kept_rings)
-             hd_fetches)
-      in
-      keep @ List.rev slots
+    (* The blended rings' relief pyramids, made on the GPU. *)
+    let bake_rings ~keep blended =
+      keep
+      @ List.map
+          (function
+            | `Pending -> Pending
+            | `Blank block -> Blank block
+            | `Blended (block, (g : Hd_dem.t), raw) ->
+                let tex = make_tile_texture ctx g.grid in
+                let hd_relief_texture, hd_relief_normal_texture =
+                  time_gpu ctx "compute_relief_hd" (fun () ->
+                      compute_relief
+                        ~axes:(g.frame.axis_x, g.frame.axis_y)
+                        ~border:false ~height_scale:g.height_scale
+                        ~height_offset:g.height_offset ctx g.layer.size
+                        g.layer.size alat triangle_geo tex normal_pid
+                        downsample_pid relief_uniforms downsample_uniforms)
+                in
+                (* Nothing reads the source grid on the GPU after the bake. *)
+                Gl.delete_texture ctx tex;
+                Blended
+                  ( block,
+                    {
+                      grid = g;
+                      hd_relief_texture;
+                      hd_relief_normal_texture;
+                      more = Hd_dem.raw_rest raw;
+                    } ))
+          blended
+    in
+    let* blended = blends in
+    let* () =
+      if !location_epoch = epoch then Lwt.return_unit
+      else begin
+        (* Overtaken while the rings were blended, the previous location gone:
+           what this load baked or took over goes with it -- unless the context
+           it was made in went first, taking it along. *)
+        if !context_generation = generation then begin
+          delete_base ctx base;
+          List.iter (delete_slot ctx) reused_slots
+        end;
+        Web_utils.measure ~track:"Location" "Load, superseded" t_load;
+        Lwt.fail Superseded
+      end
     in
     let in_time =
-      Web_utils.timed ~track:"Location" "Blend and bake rings" (fun () ->
-          build ~keep:reused_slots)
+      Web_utils.timed ~track:"Location" "Bake rings" (fun () ->
+          bake_rings ~keep:reused_slots blended)
     in
     let refine_later =
       List.exists
@@ -5885,20 +5941,25 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             | None -> keep
           in
           stale := None;
-          (* [Hd_dem.blend] is synchronous, so the epoch test that guarded
-             entry still holds: no [draw] has run since. *)
-          let slots =
-            Web_utils.timed ~track:"Location" "Blend and bake rings" (fun () ->
-                build ~keep)
+          let* blended =
+            Web_utils.timed_lwt ~track:"Location" "Blend rings" (fun () ->
+                blend_rings ~keep)
           in
-          Web_utils.timed ~track:"Location" "Publish" (fun () ->
-              publish ~keep ~slots);
-          let* () =
-            Web_utils.timed_lwt ~track:"Location" "GPU drain" (fun () ->
-                Web_utils.on_gpu_finished ctx)
-          in
-          force_redraw := true;
-          (* Back through the settled check, not the wait: this publish spanned
+          (* A switch that ran while the workers blended owns the screen now. *)
+          if !location_epoch <> epoch then Lwt.return_unit
+          else
+            let slots =
+              Web_utils.timed ~track:"Location" "Bake rings" (fun () ->
+                  bake_rings ~keep blended)
+            in
+            Web_utils.timed ~track:"Location" "Publish" (fun () ->
+                publish ~keep ~slots);
+            let* () =
+              Web_utils.timed_lwt ~track:"Location" "GPU drain" (fun () ->
+                  Web_utils.on_gpu_finished ctx)
+            in
+            force_redraw := true;
+            (* Back through the settled check, not the wait: this publish spanned
              seconds of GPU work, and a ring that settled under it is pending no
              longer -- the window the comment above [refine] describes, one
              publish later. Terminates: [shown] grows strictly on this path and
@@ -5906,7 +5967,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              loop crosses a turn between two publishes, so the epoch is
              re-checked here: a switch that ran during the drain must not
              receive this location's remaining rings. *)
-          if !location_epoch <> epoch then Lwt.return_unit else refine ()
+            if !location_epoch <> epoch then Lwt.return_unit else refine ()
         end
         else wait ()
       and wait () =
@@ -5946,7 +6007,10 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
 let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu : gpu_state ref) ~start =
   let load ~lat ~lon =
     let { detail_map; graphics; palette_texture } = !gpu in
-    load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon
+    Lwt.catch
+      (fun () ->
+        load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon)
+      (function Superseded -> Lwt.return false | e -> Lwt.fail e)
   in
   (* At most one loop per context generation. A restore that runs to completion
      before [run_renderer] reaches its own first call -- a context lost while

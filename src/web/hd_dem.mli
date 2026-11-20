@@ -176,10 +176,13 @@ val base_source : Dem_loader.t -> source
 val as_source : t -> source
 (** A blended grid used in turn as the surface for a finer layer. *)
 
-val blend : lat:float -> source:source -> raw -> t option
-(** [blend ~lat ~source raw] resamples [source] onto [raw]'s grid and mixes the
-    refinement into it, fading it out at the edge of the extent and around
-    nodata. The result equals the source upsample wherever the correction is
-    absent, which is what lets the renderer switch between layers on a plain
-    extent test. [None] when the patch holds no valid sample at all (outside
-    French coverage). *)
+val blend_chain : lat:float -> source:source -> raw list -> t option list Lwt.t
+(** [blend_chain ~lat ~source raws] blends each of [raws] onto the surface
+    beneath it -- the first onto [source], each later one onto the last that
+    blended -- resampling that surface onto the ring's grid and mixing the
+    refinement into it, faded out at the edge of the extent and around nodata.
+    The result equals the source upsample wherever the correction is absent,
+    which is what lets the renderer switch between layers on a plain extent
+    test. One answer per raw, in order: [None] for a patch with no valid sample
+    at all (outside French coverage). Done in a decode worker, the whole chain
+    in one request. *)

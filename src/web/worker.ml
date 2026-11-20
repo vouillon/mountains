@@ -73,6 +73,16 @@ module Wasm = struct
         dem_instance := Some inst;
         Lwt.return inst
 
+  (* The ring blend ([Blend_wasm]), on the same memory: a worker takes one
+     request at a time. Loaded in the worker kept for blends as soon as it
+     starts ([Worker_pool]'s "preload_blend"): on its first blend, the fetch
+     and compile took 1.4-1.8 s off the first ring. *)
+  let blend_instance =
+    lazy
+      (Lwt.catch
+         (fun () -> Lwt.map Option.some (load_wasm "blend.wasm"))
+         (fun _ -> Lwt.return None))
+
   let load_clc () =
     let open Lwt.Syntax in
     match !clc_instance with
@@ -466,6 +476,120 @@ let decode_clc_dataset ~inst msg =
     ~opts:(Brr_io.Message.opts ~transfer:(Obj.magic !transfer_list) ());
   Lwt.return ()
 
+(* A chain of ring blends ([Blend_wasm.run_chain_in_worker]): the plans come
+   made, so this moves the bytes in and out around the calls the page would
+   have made, and stands each ring on the one before. *)
+let blend_dataset msg =
+  let open Lwt.Syntax in
+  let post ?(transfer = []) type_ data =
+    Brr_webworkers.Worker.G.post
+      (Jv.obj [| ("type", Jv.of_string type_); ("data", data) |])
+      ~opts:
+        (Brr_io.Message.opts
+           ~transfer:(List.map Brr_io.Message.transfer transfer)
+           ())
+  in
+  let d = Jv.get msg "data" in
+  let rings = Jv.to_jv_list (Jv.get d "rings") in
+  let* inst = Lazy.force Wasm.blend_instance in
+  match inst with
+  | None -> Lwt.return (post "blend_unavailable" Jv.null)
+  | Some inst
+    when List.exists (fun r -> not (Jv.is_none (Jv.get r "warp"))) rings
+         && Jv.is_none (Jv.get (Jv.get inst "exports") "set_warp") ->
+      (* A module from before it took turned axes, out of a stale cache. *)
+      Lwt.return (post "blend_unavailable" Jv.null)
+  | Some inst ->
+      let exports = Jv.get inst "exports" in
+      let u8 buf ~off ~len =
+        Brr.Tarray.of_buffer Brr.Tarray.Uint8 ~byte_offset:off ~length:len
+          (Brr.Tarray.Buffer.of_jv buf)
+      in
+      (* [prev]: the output of the ring before, and its height scale and
+         offset. [None] for the first ring, whose window comes made. *)
+      let rec chain prev acc = function
+        | [] -> List.rev acc
+        | r :: rest ->
+            let layout = Jv.to_jv_array (Jv.get r "layout") in
+            let at i = Jv.to_int layout.(i) in
+            let n = at 0 and win_len = at 1 and samples_ptr = at 2 in
+            let win_ptr = at 3 and out_ptr = at 4 and result_ptr = at 5 in
+            let args = Jv.to_jv_array (Jv.get r "args") in
+            let arg i = Jv.to_int args.(i) in
+            Wasm.ensure_memory_bytes (at 6);
+            (* After the growth, which detaches the buffer it replaces. *)
+            let buffer = Jv.get Wasm.memory "buffer" in
+            Brr.Tarray.set_tarray
+              (Brr.Tarray.of_buffer Brr.Tarray.Float32 ~byte_offset:samples_ptr
+                 ~length:n
+                 (Brr.Tarray.Buffer.of_jv buffer))
+              ~dst:0
+              (Brr.Tarray.of_jv (Jv.get r "samples"));
+            let win = u8 buffer ~off:win_ptr ~len:win_len in
+            (match prev with
+            | None ->
+                let w = Jv.get d "win" in
+                Brr.Tarray.set_tarray win ~dst:0
+                  (u8 w ~off:0 ~len:(Jv.to_int (Jv.get w "byteLength")))
+            | Some (out, scale, offset) ->
+                (* As [Hd_dem.source_window] cuts it, from the grid below. *)
+                let src_size = arg 7
+                and win_cols = arg 8
+                and win_rows = arg 9 in
+                let col_lo = arg 10 and row_lo = arg 11 in
+                let stride = win_cols * 2 in
+                for row = 0 to win_rows - 1 do
+                  Brr.Tarray.set_tarray win ~dst:(row * stride)
+                    (u8 out
+                       ~off:((((row_lo + row) * src_size) + col_lo) * 2)
+                       ~len:stride)
+                done;
+                args.(18) <- scale;
+                args.(19) <- offset);
+            let warp = Jv.get r "warp" in
+            if not (Jv.is_none warp) then
+              ignore
+                (Jv.apply (Jv.get exports "set_warp") (Jv.to_jv_array warp));
+            let t0 = Brr.Performance.now_ms Brr.G.performance in
+            let ok = Jv.to_int (Jv.apply (Jv.get exports "blend") args) in
+            let ms = Brr.Performance.now_ms Brr.G.performance -. t0 in
+            if ok = 0 then
+              (* No valid sample: the plans after this one stood on it. *)
+              List.rev (Jv.null :: acc)
+            else
+              let out =
+                Jv.call buffer "slice"
+                  [| Jv.of_int out_ptr; Jv.of_int (out_ptr + (n * 2)) |]
+              in
+              let f i =
+                Jv.Jarray.get
+                  (Brr.Tarray.to_jv
+                     (Brr.Tarray.of_buffer Brr.Tarray.Float64
+                        ~byte_offset:result_ptr ~length:3
+                        (Brr.Tarray.Buffer.of_jv buffer)))
+                  i
+              in
+              let res =
+                Jv.obj
+                  [|
+                    ("data", out);
+                    ("height_scale", f 0);
+                    ("height_offset", f 1);
+                    ("range", f 2);
+                    ("ms", Jv.of_float ms);
+                  |]
+              in
+              chain (Some (out, f 0, f 1)) (res :: acc) rest
+      in
+      let results = chain None [] rings in
+      Lwt.return
+        (post
+           ~transfer:
+             (List.filter_map
+                (fun r -> if Jv.is_none r then None else Some (Jv.get r "data"))
+                results)
+           "result_blend" (Jv.of_jv_list results))
+
 let on_message ~dem_inst ~clc_inst e =
   let open Lwt.Syntax in
   let data = Brr.Ev.as_type e |> Brr_io.Message.Ev.data in
@@ -480,6 +604,10 @@ let on_message ~dem_inst ~clc_inst e =
       | "decode_clc" ->
           let* inst = clc_inst in
           let* _ = decode_clc_dataset ~inst data in
+          Lwt.return ()
+      | "blend" -> blend_dataset data
+      | "preload_blend" ->
+          ignore (Lazy.force Wasm.blend_instance);
           Lwt.return ()
       | _ -> Lwt.return ())
     (fun exn ->

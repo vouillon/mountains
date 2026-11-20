@@ -5,7 +5,9 @@ type request_data =
   | DEM of Jv.t (* ArrayBuffer *)
   | CLC of Jv.t (* ArrayBuffer *)
 
-type request = Decode of request_data
+type request =
+  | Decode of request_data
+  | Blend of { msg : Jv.t; transfer : Jv.t list }
 
 (* Result types *)
 type dem_result = { heights : (int, int8_unsigned_elt, c_layout) Array1.t }
@@ -15,6 +17,8 @@ type response =
   | ResultDEM of dem_result
   | ResultHDT of Brr.Tarray.float32
   | ResultCLC of clc_result
+  | ResultBlend of Jv.t
+  | BlendUnavailable
   | Error of string
 
 type worker_handle = {
@@ -26,6 +30,13 @@ type worker_handle = {
 let pool_size = 4
 let pool = ref [||]
 let waiting_queue = Queue.create ()
+
+(* A worker for the ring blends alone, and the blends waiting for it. In the
+   pool they waited for a free worker behind the canopy's tiles, which nothing
+   waits for -- 183 ms of a warm reload on a Pixel 8a, for a chain that takes
+   150. *)
+let blender = ref None
+let blend_queue = Queue.create ()
 
 let create_worker () =
   let worker = Brr_webworkers.Worker.create (Jstr.v "worker.bc.js") in
@@ -54,6 +65,8 @@ let create_worker () =
                (Brr.Tarray.of_buffer Brr.Tarray.Float32
                   (Brr.Tarray.Buffer.of_jv buffer_jv)))
       | "result_clc" -> Lwt.wakeup resolver (ResultCLC (Clc_data data))
+      | "result_blend" -> Lwt.wakeup resolver (ResultBlend (Jv.get data "data"))
+      | "blend_unavailable" -> Lwt.wakeup resolver BlendUnavailable
       | "error" ->
           let msg = Jv.get data "message" |> Jv.to_string in
           Lwt.wakeup resolver (Error msg)
@@ -69,8 +82,14 @@ let create_worker () =
   { worker; pending; in_use = false }
 
 let init () =
-  if Array.length !pool = 0 then
-    pool := Array.init pool_size (fun _ -> create_worker ())
+  if Array.length !pool = 0 then begin
+    pool := Array.init pool_size (fun _ -> create_worker ());
+    let w = create_worker () in
+    (* No reply: nothing is queued for it. *)
+    Brr_webworkers.Worker.post w.worker
+      (Jv.obj [| ("type", Jv.of_string "preload_blend") |]);
+    blender := Some w
+  end
 
 let acquire () =
   let open Lwt.Syntax in
@@ -89,10 +108,26 @@ let acquire () =
       let* w = t in
       Lwt.return w
 
+let acquire_blender () =
+  init ();
+  let w = Option.get !blender in
+  if not w.in_use then begin
+    w.in_use <- true;
+    Lwt.return w
+  end
+  else begin
+    let t, u = Lwt.task () in
+    Queue.push u blend_queue;
+    t
+  end
+
 let release w =
-  if not (Queue.is_empty waiting_queue) then
+  let queue =
+    match !blender with Some b when b == w -> blend_queue | _ -> waiting_queue
+  in
+  if not (Queue.is_empty queue) then
     (* Pass worker directly to next waiter *)
-    let u = Queue.pop waiting_queue in
+    let u = Queue.pop queue in
     Lwt.wakeup u w
   else w.in_use <- false
 
@@ -106,6 +141,9 @@ let post w req =
     | Decode (CLC data) ->
         ( obj [| ("type", of_string "decode_clc"); ("data", data) |],
           [ Obj.magic data ] )
+    | Blend { msg; transfer } ->
+        ( obj [| ("type", of_string "blend"); ("data", msg) |],
+          List.map Obj.magic transfer )
   in
   (* Replies are matched to requests by order, so the resolver is enqueued only
      once the message is on its way: a synchronous post failure (a
