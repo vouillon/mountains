@@ -23,9 +23,10 @@ The base elevation, the land cover and the POIs are hosted on R2 under
 `https://tiles.vouillon.org/v2` (`Web_utils.tiles_url`; `?tiles=<base url>`
 overrides it, to try a tile set), the far-field elevation still in `data/dem4`.
 The data cache keeps a tile, and an absent one, for ever under its URL: a set
-that changes moves to a new version. The `data/dem`, `data/clc`, `data/clc4` and
-`data/poi` tiles of the site are the earlier set (1200" elevation tiles, 1°
-land-cover tiles, Overture 2026-10-21.0), which the service worker prunes.
+that changes moves to a new version. The site's `data/dem`, `data/clc`,
+`data/clc4` and `data/poi` were the earlier set (1200" elevation tiles, 1°
+land-cover tiles, Overture 2026-10-21.0): gone from the repository (its history
+keeps them), and pruned from the data cache by the service worker.
 
 ## Base elevation: `v2/dem`
 
