@@ -644,6 +644,9 @@ let force_redraw = ref true
 let context_generation = ref 0
 let context_lost = ref false
 
+(* The detail texture this device loads, for [register_service_worker]. *)
+let detail_texture_file = ref None
+
 (* Load compressed KTX2 texture asynchronously *)
 let load_compressed_detail_map ctx tid =
   (* [tid] belongs to the context of this moment; a loss before the fetch
@@ -653,6 +656,7 @@ let load_compressed_detail_map ctx tid =
   | None -> Format.eprintf "No compressed texture format supported@."
   | Some fmt ->
       let file = compressed_texture_file fmt in
+      detail_texture_file := Some file;
       let internal_fmt = compressed_internal_format fmt in
       let fetch =
         let open Fut.Result_syntax in
@@ -6497,7 +6501,27 @@ let register_service_worker () =
     | registration ->
         Fut.await registration (function
           | Ok _ -> ()
-          | Error e -> Brr.Console.error [ e ])
+          | Error e -> Brr.Console.error [ e ]);
+        (* The worker precaches no detail texture: only the page knows which
+           of the three it can use, and the others are 1.4 MB each for
+           nothing. Fetched again once the worker is in charge, the one this
+           page loaded goes through its cache-first rule into the
+           application cache, there offline; a page the worker controls from
+           the start gets it cached by loading it. *)
+        if Jv.is_none (Jv.get (Container.to_jv container) "controller") then
+          ignore
+            (Jv.call
+               (Container.to_jv container)
+               "addEventListener"
+               [|
+                 Jv.of_string "controllerchange";
+                 Jv.callback ~arity:1 (fun _ ->
+                     Option.iter
+                       (fun file ->
+                         Fut.await (Brr_io.Fetch.url (Jstr.v file)) ignore)
+                       !detail_texture_file);
+                 Jv.obj [| ("once", Jv.true') |];
+               |])
     | exception Jv.Error _ -> ()
 
 (* One-time renderer setup: the first location load, then the render loop,

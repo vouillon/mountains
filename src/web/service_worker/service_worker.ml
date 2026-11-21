@@ -438,7 +438,8 @@ let () =
                     "decompress_tile.wasm";
                     "decode_clc.wasm";
                     "blend.wasm";
-                    "assets/details_bc7.ktx2";
+                    (* No detail texture: the page has the one it uses cached
+                       (see [register_service_worker] in viewer.ml). *)
                   ]
                  (* Loaded before the service worker claims the page, so the
                     fetch handler never gets to cache it on a first visit. *)
