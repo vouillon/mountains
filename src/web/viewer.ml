@@ -178,6 +178,10 @@ let update_startup_status msg loading =
    it covers. *)
 let overlay_removal = ref None
 
+(* How many times an overlay has been raised: a hide deferred to a later frame
+   must not take down one raised meanwhile. *)
+let overlays_raised = ref 0
+
 (* [quick]: a short fade-out (the [quick] class in index.html), for a move that
    kept its surroundings -- done in a fraction of a second, which the usual
    second of fade-out would only hide. *)
@@ -212,6 +216,7 @@ let show_startup_overlay ?(quick = false) msg loading =
   match overlay with
   | Some el ->
       incr overlays_rising;
+      incr overlays_raised;
       Option.iter Brr.G.stop_timer !overlay_removal;
       overlay_removal := None;
       Brr.El.set_class (Jstr.v "quick") quick el;
@@ -628,6 +633,27 @@ let compressed_texture_file = function
   | ETC2 -> "assets/details_etc2.ktx2"
 
 let force_redraw = ref true
+
+(* Resolved by the next frame drawn ([event_loop]). A location published is
+   not on screen yet: frames are held while a readback is pending, up to
+   [max_readback_hold_ms] at a time, and the canvas keeps the last one drawn,
+   the previous location's. An overlay taken down meanwhile faded out over it
+   (Firefox, whose readbacks outlast a load). *)
+let frame_waiters = ref []
+
+let next_frame () =
+  let t, u = Lwt.wait () in
+  frame_waiters := u :: !frame_waiters;
+  force_redraw := true;
+  Lwt.pick [ t; sleep 1.0 ]
+
+(* The overlay down once the frame now asked for is on screen, unless another
+   was raised meanwhile. *)
+let hide_overlay_after_frame ?quick () =
+  let raised = !overlays_raised in
+  let* () = next_frame () in
+  if !overlays_raised = raised then hide_startup_overlay ?quick ();
+  Lwt.return_unit
 
 (* The GPU can take the context away at any point -- the driver resetting, the
    system reclaiming memory from a backgrounded tab -- and hands back one whose
@@ -4246,6 +4272,8 @@ let event_loop ~generation ctx draw =
     if should_draw && not !context_lost then (
       force_redraw := false;
       draw ~orientation ctx;
+      List.iter (fun u -> Lwt.wakeup_later u ()) !frame_waiters;
+      frame_waiters := [];
       if Lazy.force show_fps then frame_time_readout ());
 
     (* URL Update Logic: Check for stability (using current orientation vs previous frame) *)
@@ -6869,7 +6897,7 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
   start ();
   (* Not if a restore superseded this load: it raised the overlay and will take
      it down itself once its own bake lands. *)
-  if applied then hide_startup_overlay ();
+  if applied then Lwt.async hide_overlay_after_frame;
 
   (* From now on, locations are switched in place: the camera orientation, the
      zoom and every session-wide GPU resource are deliberately kept, so that
@@ -6921,9 +6949,10 @@ let run_renderer ~w ~h ~lat ~lon canvas ctx ~(gpu_ready : gpu_state Lwt.t)
                  | None -> ());
                  (* Reload and sharing must land on the new location. *)
                  update_url_params ~push ();
-                 if not small then hide_startup_overlay ~quick:hop ()
-               end;
-               Lwt.return_unit)
+                 if small then Lwt.return_unit
+                 else hide_overlay_after_frame ~quick:hop ()
+               end
+               else Lwt.return_unit)
              (fun e ->
                (match e with Jv.Error e -> Brr.Console.error [ e ] | _ -> ());
                let* () = shown in
