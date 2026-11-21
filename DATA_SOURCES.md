@@ -12,7 +12,7 @@ details; this is the map to them.
 | Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/far` (bundled) | `extract_tiles.exe --coarse`, `Corine/far_bundles.py` |
 | Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
 | Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/tc0`, `tc1` | `Corine/tree_cover_tiles.py`, `src/web/tree_cover.ml` |
-| High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v1` (HDT1) | `Corine/own_tiles.py` |
+| High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v2/rings` (bundles of `v1`'s HDT1) | `Corine/own_tiles.py`, `Corine/ring_bundles.py` |
 | 2-D map picker | IGN Plan IGN v2, LiDAR HD shading, contours | Etalab 2.0 | fetched at run time | `src/web/map_picker.ml` |
 
 The credits the app shows are in `src/web/index.html` (the startup notice) and
@@ -161,12 +161,21 @@ are, a length of 0 for one that does not exist (open sea). 477 bundles,
 
 ## High-resolution ground and canopy: our own tiles
 
-The near rings (ground at 1, 4 and 8 m; canopy at 2, 4 and 16 m) come from
-`https://tiles.vouillon.org/v1`: HDT1 tiles we built and host on Cloudflare R2
-(`own_tiles_url` in `src/web/hd_dem.ml`; `?ign` switches back to IGN's
-services, `?own=<url>` to another copy). Format, layout and every choice are in
-the docstring of `Corine/own_tiles.py`. A missing tile is all nodata, and the
-client then fades to the base elevation.
+The near rings (ground at 1, 4 and 8 m; canopy at 2, 4 and 16 m) are HDT1
+tiles we built and host on Cloudflare R2 under `https://tiles.vouillon.org/v1`
+(`Corine/own_tiles.py`, whose docstring has the format, layout and every
+choice; `?ign` switches the client back to IGN's services). A missing tile is
+all nodata, and the client then fades to the base elevation.
+
+The client reads them bundled, under `https://tiles.vouillon.org/v2/rings`
+(`Corine/ring_bundles.py`): each ground ring's tiles with the canopy over the
+same ground, a bundle over the step the client snaps that ring's block to --
+the 1 m ring's 2 x 2 tiles with the 2 m canopy tile (512 m), one 4 m ground
+tile with one 4 m canopy tile (1024 m), the 8 m ring's 2 x 2 tiles with the
+16 m canopy tile (4096 m) -- the tiles as they are behind a header (`HDB1`).
+A location asks for 48 of them rather than ~190 tiles. A run of
+`own_tiles.py` that rebuilds blocks must be followed by `ring_bundles.py`
+over the same blocks (`--only`).
 
 ### Sources
 

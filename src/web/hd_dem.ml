@@ -56,10 +56,12 @@ type kind =
       (** Our own tiles of IGN's LIDAR HD, built by Corine/own_tiles.py in the
           CRS each territory's layers are stored in: 256 x 256 samples at
           [metres], tile (c, r) covering x from c to c + 1 times 256 * metres
-          and y likewise, as HDT1 files at
-          [base_url/crs/product/metres/c_r.hdt], [crs] the {!Projection}'s name
-          in lower case. The block is the one [Wms_projected] would ask for,
-          which is always a whole number of tiles; a missing tile is nodata. *)
+          and y likewise, HDT1 files under [base_url] (v1). They are read in
+          bundles (Corine/ring_bundles.py, see [bundle_of]) under
+          [Web_utils.tiles_url]: rings/crs/ring/C_R.hdb, [crs] the
+          {!Projection}'s name in lower case. The block is the one
+          [Wms_projected] would ask for, anchored on the bundles' grid; a
+          missing tile is nodata. *)
 
 type layer = {
   kind : kind;
@@ -174,9 +176,9 @@ let wms_projected_layer ~stem ~metres ~split ~size ~fade_metres =
   { kind = Wms_projected { stem; metres; split }; size; fade_metres }
 
 (* Where our own tiles are hosted (an R2 bucket behind Cloudflare's cache), built
-   by Corine/own_tiles.py; [None] would take every ring from IGN again.
-   [?own=<base url>] overrides it, to try a tile set, and [?ign] keeps IGN's
-   rings, to compare the two. *)
+   by Corine/own_tiles.py; [None] would take every ring from IGN again. The
+   client reads their bundles, under [Web_utils.tiles_url] (?tiles= to try
+   another set); [?ign] keeps IGN's rings, to compare the two. *)
 let own_tiles_url = Some "https://tiles.vouillon.org/v1"
 
 (* Every ring is swapped for its own-tile counterpart, keeping its name, so the
@@ -197,12 +199,6 @@ let own_or layer ~product ~metres ~size ~fade_metres =
   | Some base_url ->
       assert (size mod tile_px = 0);
       { kind = Own_tiles { base_url; product; metres }; size; fade_metres }
-
-(* Tile [c, r] of an own product: [c] counts eastwards, [r] northwards. *)
-let own_url ~base_url ~crs ~product ~metres c r =
-  Printf.sprintf "%s/%s/%s/%g/%d_%d.hdt" base_url
-    (String.lowercase_ascii (Projection.name crs))
-    product metres c r
 
 (* Level 13, 8 x 8 tiles: 0.309 arcseconds per sample (9.5 m north-south, a bit
    over three times the base grid), 2048 samples per side -- a power of two, so
@@ -399,7 +395,33 @@ type request = {
   dst_row : int;
   dst_col : int;
   hdt : bool; (* one of our own tiles, not raw float32 *)
+  part : part option; (* of a bundle of our own tiles *)
 }
+
+(* Our own tiles come in bundles (Corine/ring_bundles.py), each over the step
+   [projected_block] snaps its ring's block to, so that a block is whole
+   bundles: the 1 m ring's 2 x 2 ground tiles and the 2 m canopy tile there
+   (512 m), one 4 m ground tile and one 4 m canopy tile (1024 m), the 8 m
+   ring's 2 x 2 tiles and the 16 m canopy tile (4096 m). A request takes the
+   ground or the canopy, [side] tiles a side. *)
+and part = { canopy : bool; side : int }
+
+(* The ring an own layer's tiles are bundled with, by its ground spacing; the
+   ground tiles a side of its bundles, which set their span; and the tiles a
+   side of this layer's part. *)
+let bundle_of ~product ~metres =
+  match (product, metres) with
+  | "canopy", 2. -> (1., 2, 1)
+  | "canopy", 4. -> (4., 1, 1)
+  | "canopy", 16. -> (8., 2, 1)
+  | _, 4. -> (4., 1, 1)
+  | _ -> (metres, 2, 2)
+
+let bundle_url ~crs ~ring c r =
+  Web_utils.tiles_url
+    (Printf.sprintf "rings/%s/%g/%d_%d.hdb"
+       (String.lowercase_ascii (Projection.name crs))
+       ring c r)
 
 (* The block of a ring served on a projected grid -- its frame, and the
    projected corner and span it covers -- shared by the WMS and our own
@@ -510,6 +532,7 @@ let plan layer ~lat ~lon =
                   dst_row = br * tile_px;
                   dst_col = bc * tile_px;
                   hdt = false;
+                  part = None;
                 })
               (List.init block_tiles Fun.id))
           (List.init block_tiles Fun.id)
@@ -545,34 +568,51 @@ let plan layer ~lat ~lon =
                       dst_row = qr * px;
                       dst_col = qc * px;
                       hdt = false;
+                      part = None;
                     })
                   (List.init split Fun.id))
               (List.init split Fun.id)
           in
           Some (frame, reqs))
-  | Own_tiles { base_url; product; metres } -> (
+  | Own_tiles { product; metres; _ } -> (
       match Projection.of_location ~lat ~lon with
       | Some crs ->
           let frame, x0, y0, _ = projected_block layer crs ~metres ~lat ~lon in
-          let n = layer.size / tile_px in
-          let tile_m = float tile_px *. metres in
-          let c0 = int_of_float (Float.round (x0 /. tile_m))
-          and r0 = int_of_float (Float.round (y0 /. tile_m)) in
+          (* Anchored on the bundles' grid: a ground ring and its canopy on
+             the same bundles. *)
+          let ring, ground_side, side = bundle_of ~product ~metres in
+          let px = side * tile_px in
+          let n = layer.size / px in
+          let bundle_m = float (ground_side * tile_px) *. ring in
+          let c0 = int_of_float (Float.round (x0 /. bundle_m))
+          and r0 = int_of_float (Float.round (y0 /. bundle_m)) in
+          (* The frame is the block's, from [x0, y0]: the bundles must start
+             there, or the ring would be drawn that far off. *)
+          if
+            Float.abs (x0 -. (float c0 *. bundle_m)) > 0.5
+            || Float.abs (y0 -. (float r0 *. bundle_m)) > 0.5
+          then
+            Brr.Console.error
+              [
+                Jstr.v
+                  (Printf.sprintf "%s %g m: block corner off the bundle grid"
+                     product metres);
+              ];
+          let part = Some { canopy = product = "canopy"; side } in
           let reqs =
             List.concat_map
               (fun tr ->
                 List.map
                   (fun tc ->
                     (* Raster row 0 is the northernmost, so the top band is
-                       the highest tile row. *)
+                       the highest bundle row. *)
                     {
-                      url =
-                        own_url ~base_url ~crs ~product ~metres (c0 + tc)
-                          (r0 + n - 1 - tr);
-                      px = tile_px;
-                      dst_row = tr * tile_px;
-                      dst_col = tc * tile_px;
+                      url = bundle_url ~crs ~ring (c0 + tc) (r0 + n - 1 - tr);
+                      px;
+                      dst_row = tr * px;
+                      dst_col = tc * px;
                       hdt = true;
+                      part;
                     })
                   (List.init n Fun.id))
               (List.init n Fun.id)
@@ -647,7 +687,124 @@ let decode_hdt buf px =
         Lwt.fail (Failure "HDT1 tile: unexpected reply")
     | Worker_pool.Error e -> Lwt.fail (Failure e)
 
+let sleep_s s =
+  let t, u = Lwt.task () in
+  ignore
+    (Brr.G.set_timeout ~ms:(truncate (s *. 1000.)) (fun () -> Lwt.wakeup u ()));
+  t
+
+(* Bundles being downloaded: the ground ring and its canopy ask for the same
+   ones, and share the download. *)
+let bundles_in_flight : (string, Brr.Tarray.Buffer.t Lwt.t) Hashtbl.t =
+  Hashtbl.create 16
+
+(* A request's part of its bundle: its tiles, decoded and laid out north row
+   first, nodata where one is absent; [Outside_coverage] when none is there. *)
+let bundle_part (buf : Brr.Tarray.Buffer.t) { canopy; side } =
+  let dv = Brr.Tarray.Data_view.of_buffer buf in
+  let n = Brr.Tarray.Buffer.byte_length buf in
+  let u8 i = Brr.Tarray.Data_view.get_uint8 dv i in
+  if
+    n < 5
+    || u8 0 <> Char.code 'H'
+    || u8 1 <> Char.code 'D'
+    || u8 2 <> Char.code 'B'
+    || u8 3 <> Char.code '1'
+  then Lwt.fail (Failure "not an HDB1 bundle")
+  else
+    let count = u8 4 in
+    let rec entries k off acc =
+      if k = count then List.rev acc
+      else
+        let e = 5 + (6 * k) in
+        let len =
+          Int32.to_int (Brr.Tarray.Data_view.get_uint32_le dv (e + 2))
+        in
+        entries (k + 1) (off + len) ((u8 e, u8 (e + 1), off, len) :: acc)
+    in
+    let parts =
+      List.filter
+        (fun (p, _, _, _) -> p = if canopy then 1 else 0)
+        (entries 0 (5 + (6 * count)) [])
+    in
+    if parts = [] then Lwt.fail Outside_coverage
+    else
+      let px = side * tile_px in
+      let out = Brr.Tarray.create Brr.Tarray.Float32 (px * px) in
+      Brr.Tarray.fill (-99999.) out;
+      let* () =
+        Lwt.join
+          (List.map
+             (fun (_, sub, off, len) ->
+               let* tile =
+                 decode_hdt
+                   (Brr.Tarray.Buffer.slice ~start:off ~stop:(off + len) buf)
+                   tile_px
+               in
+               let dx = sub land 1 and dy = sub lsr 1 in
+               (* dy counts northwards, rows southwards *)
+               let row0 = (side - 1 - dy) * tile_px and col0 = dx * tile_px in
+               for i = 0 to tile_px - 1 do
+                 Brr.Tarray.set_tarray out
+                   ~dst:(((row0 + i) * px) + col0)
+                   (Brr.Tarray.sub tile ~start:(i * tile_px)
+                      ~stop:((i + 1) * tile_px))
+               done;
+               Lwt.return_unit)
+             parts)
+      in
+      Lwt.return out
+
 let rec fetch_one ?(retries = [ 3.; 6. ]) req =
+  match req.part with
+  | Some part ->
+      let shared =
+        match Hashtbl.find_opt bundles_in_flight req.url with
+        | Some t -> t
+        | None ->
+            let t = fetch_buffer ~retries req.url in
+            if Lwt.state t = Lwt.Sleep then begin
+              Hashtbl.replace bundles_in_flight req.url t;
+              Lwt.on_termination t (fun () ->
+                  Hashtbl.remove bundles_in_flight req.url)
+            end;
+            t
+      in
+      let* buf = shared in
+      bundle_part buf part
+  | None -> fetch_tile_req ~retries req
+
+(* A bundle's bytes, with [fetch_tile_req]'s retries and its 404. *)
+and fetch_buffer ~retries bundle =
+  let open Brr_io.Fetch in
+  let* res =
+    to_lwt (Web_utils.fetch_tile ~serve_not_found:true (Jstr.v bundle))
+  in
+  match res with
+  | Ok resp when Response.status resp = 404 -> Lwt.fail Outside_coverage
+  | Ok resp when Response.ok resp -> (
+      let* buf = to_lwt (Body.array_buffer (Response.as_body resp)) in
+      match buf with
+      | Ok buf -> Lwt.return buf
+      | Error e -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e))))
+  | Ok resp -> (
+      match retries with
+      | s :: retries
+        when let st = Response.status resp in
+             st = 400 || st = 429 || st >= 500 ->
+          let* () = sleep_s s in
+          fetch_buffer ~retries bundle
+      | _ ->
+          Lwt.fail (Failure (Printf.sprintf "HTTP %d" (Response.status resp))))
+  | Error e -> (
+      match retries with
+      | s :: retries
+        when Jv.to_bool (Jv.get (Jv.get Jv.global "navigator") "onLine") ->
+          let* () = sleep_s s in
+          fetch_buffer ~retries bundle
+      | _ -> Lwt.fail (Failure (Jstr.to_string (Jv.Error.message e))))
+
+and fetch_tile_req ?(retries = [ 3.; 6. ]) req =
   let open Brr_io.Fetch in
   (* A request that could not be made, or was refused for a reason that is
      not about it, is made again after a few seconds: the service answers a
@@ -668,7 +825,7 @@ let rec fetch_one ?(retries = [ 3.; 6. ]) req =
              ~ms:(truncate (s *. 1000.))
              (fun () -> Lwt.wakeup u ()));
         let* () = t in
-        fetch_one ~retries req
+        fetch_tile_req ~retries req
   in
   (* A 404 is kept by the service worker, and served back as one. *)
   let* res =
@@ -754,8 +911,12 @@ let fetch ?(timeout_s = timeout_s) ?(network = Lwt.return_unit)
      at Mont Blanc's summit, with only the 2 x 2 tiles about the centre). *)
       let at_eye req =
         let c = size / 2 in
+        (* The fade towards nodata is at most 255 samples ([Blend_core]), and
+           the eye within half a request of the centre: blocks are anchored
+           on the corner of the request grid nearest it. *)
         let reach step =
-          int_of_float (Float.ceil (layer.fade_metres /. step)) + (req.px / 2)
+          min 255 (int_of_float (Float.ceil (layer.fade_metres /. step)))
+          + (req.px / 2)
         in
         let rx = reach frame.step_x_m and ry = reach frame.step_y_m in
         eye
@@ -1255,22 +1416,21 @@ let prefetch layer ~lat ~lon =
       if fetched > 0 then
         Format.eprintf "RGE ALTI: prefetched %d tiles@." fetched;
       Lwt.return_unit
-  | Own_tiles { base_url; product; metres } -> (
+  | Own_tiles { product; metres; _ } -> (
       match Projection.of_location ~lat ~lon with
       | Some crs ->
           let x, y = Projection.forward crs ~lat ~lon in
-          let tile_m = float tile_px *. metres in
-          let index v = int_of_float (Float.floor (v /. tile_m)) in
+          (* The bundles, which hold the canopy too *)
+          let ring, ground_side, _ = bundle_of ~product ~metres in
+          let bundle_m = float (ground_side * tile_px) *. ring in
+          let index v = int_of_float (Float.floor (v /. bundle_m)) in
           let range v =
             let lo = index (v -. own_prefetch_reach) in
             List.init (index (v +. own_prefetch_reach) - lo + 1) (( + ) lo)
           in
           let urls =
             List.concat_map
-              (fun r ->
-                List.map
-                  (fun c -> own_url ~base_url ~crs ~product ~metres c r)
-                  (range x))
+              (fun r -> List.map (fun c -> bundle_url ~crs ~ring c r) (range x))
               (range y)
           in
           let* fetched = warm_cache ~parallel:16 urls in

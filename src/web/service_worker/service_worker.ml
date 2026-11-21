@@ -35,7 +35,8 @@ let is_hd_dem url = String.starts_with ~prefix:"https://data.geopf.fr/" url
    absent one is nodata -- sea, abroad -- which for a given tile set is as
    permanent as a WMTS 404, so it is cached and served back the same way. A
    tile set that grows must therefore move to a new URL. *)
-let is_own_hd_tile url = String.ends_with ~suffix:".hdt" url
+let is_own_hd_tile url =
+  String.ends_with ~suffix:".hdt" url || String.ends_with ~suffix:".hdb" url
 
 let is_tile url =
   is_own_hd_tile url
@@ -130,6 +131,8 @@ let is_retired_tile url =
       "/v2/dem4/";
       "/v2/clc4/";
     ]
+  (* And our ring tiles, read in bundles since ([Hd_dem.bundle_of]) *)
+  || String.ends_with ~suffix:".hdt" url
   (* And the EEA's own tree cover responses: ours replaced them (.tc). *)
   || is_tree_cover url
 
