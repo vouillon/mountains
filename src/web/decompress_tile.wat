@@ -187,4 +187,76 @@
       (br_if $loop_y (i32.lt_u (local.get $y) (local.get $limit_y)))
     )
   )
+
+  ;; --------------------------------------------------------------------------
+  ;; Exported Function: scale_hdt
+  ;; --------------------------------------------------------------------------
+  ;; An HDT1 tile's heights (Hd_dem.Own_tiles): the [n] u16 samples at [src],
+  ;; [n] a multiple of 8, written as float32 at [dst], [base + step * u], and
+  ;; -99999 for the nodata sample 65535. Computed in f64 and rounded once to
+  ;; f32, as the JavaScript loop it replaces did: the same heights to the bit.
+  (func $scale_hdt (export "scale_hdt")
+    (param $src i32)
+    (param $dst i32)
+    (param $n i32)
+    (param $base f64)
+    (param $step f64)
+    (local $i i32)
+    (local $v v128)
+    (local $q v128)
+    (local $b2 v128)
+    (local $s2 v128)
+    (local $nodata v128)
+    (local $none v128)
+    (local.set $b2 (f64x2.splat (local.get $base)))
+    (local.set $s2 (f64x2.splat (local.get $step)))
+    (local.set $nodata (i32x4.splat (i32.const 65535)))
+    (local.set $none (f32x4.splat (f32.const -99999)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $v
+          (v128.load (i32.add (local.get $src) (i32.shl (local.get $i) (i32.const 1)))))
+        ;; Samples 0-3, then 4-7.
+        (local.set $q (i32x4.extend_low_i16x8_u (local.get $v)))
+        (v128.store
+          (i32.add (local.get $dst) (i32.shl (local.get $i) (i32.const 2)))
+          (call $scale4 (local.get $q) (local.get $b2) (local.get $s2)
+            (local.get $nodata) (local.get $none)))
+        (local.set $q (i32x4.extend_high_i16x8_u (local.get $v)))
+        (v128.store
+          (i32.add (local.get $dst)
+            (i32.shl (i32.add (local.get $i) (i32.const 4)) (i32.const 2)))
+          (call $scale4 (local.get $q) (local.get $b2) (local.get $s2)
+            (local.get $nodata) (local.get $none)))
+        (local.set $i (i32.add (local.get $i) (i32.const 8)))
+        (br $loop)
+      )
+    )
+  )
+
+  ;; Four u32 samples to four float32 heights (see scale_hdt).
+  (func $scale4
+    (param $q v128) (param $b2 v128) (param $s2 v128)
+    (param $nodata v128) (param $none v128)
+    (result v128)
+    (local $lo v128)
+    (local $hi v128)
+    (local.set $lo
+      (f32x4.demote_f64x2_zero
+        (f64x2.add (local.get $b2)
+          (f64x2.mul (local.get $s2) (f64x2.convert_low_i32x4_u (local.get $q))))))
+    (local.set $hi
+      (f32x4.demote_f64x2_zero
+        (f64x2.add (local.get $b2)
+          (f64x2.mul (local.get $s2)
+            (f64x2.convert_low_i32x4_u
+              (i8x16.shuffle 8 9 10 11 12 13 14 15 8 9 10 11 12 13 14 15
+                (local.get $q) (local.get $q)))))))
+    (v128.bitselect
+      (local.get $none)
+      (i8x16.shuffle 0 1 2 3 4 5 6 7 16 17 18 19 20 21 22 23
+        (local.get $lo) (local.get $hi))
+      (i32x4.eq (local.get $q) (local.get $nodata)))
+  )
 )

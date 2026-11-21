@@ -172,7 +172,13 @@ let decode_dataset ~inst msg =
   let low_ptr = high_ptr + decomp_size in
   let target_ptr = low_ptr + decomp_size in
   let scratch_ptr = target_ptr + (decomp_size * 2) in
-  let total_needed = scratch_ptr + 65536 in
+  (* An HDT1 tile's heights go to float32 after the scratch area, for as many
+     samples as [scale_hdt] writes: a multiple of 8. *)
+  let hdt_ptr = scratch_ptr + 65536 in
+  let hdt_samples = (decomp_size + 7) land lnot 7 in
+  let total_needed =
+    if magic = "HDT1" then hdt_ptr + (hdt_samples * 4) else hdt_ptr
+  in
 
   Wasm.ensure_memory_bytes total_needed;
   let mem_ta = Wasm.get_ta () in
@@ -209,28 +215,32 @@ let decode_dataset ~inst msg =
 
   let kind, result =
     if magic = "HDT1" then begin
-      (* An HDT1 tile's heights, scaled here rather than on the page: there,
-         under wasm_of_ocaml, every bigarray element access is a call (about 1
-         s of main-thread time per location on a desktop), while this worker is
-         js_of_ocaml, where [Jv.Jarray] access is plain typed-array indexing.
-         The range fields hold the tile's base and step. Same arithmetic as
-         the page did, so the same float32 heights. *)
+      (* An HDT1 tile's heights, scaled here rather than on the page, where
+         every bigarray element access is a call under wasm_of_ocaml, and by
+         [scale_hdt] (decompress_tile.wat) rather than a JavaScript loop: on
+         a Pixel 8a, that loop was the largest item of the decode workers'
+         time in a switch. The range fields hold the tile's base and step;
+         the arithmetic is the page's, so the same float32 heights. The
+         result is copied out of the wasm memory, which is reused. *)
       let base = min_elev and step = max_elev in
-      let samples =
-        Brr.Tarray.to_jv
-          (Brr.Tarray.of_buffer Brr.Tarray.Uint16 ~byte_offset:target_ptr
-             ~length:decomp_size
-             (Brr.Tarray.Buffer.of_jv (Jv.get Wasm.memory "buffer")))
+      ignore
+        (Jv.call (Jv.get inst "exports") "scale_hdt"
+           [|
+             Jv.of_int target_ptr;
+             Jv.of_int hdt_ptr;
+             Jv.of_int hdt_samples;
+             Jv.of_float base;
+             Jv.of_float step;
+           |]);
+      let heights =
+        Brr.Tarray.of_buffer Brr.Tarray.Float32 ~byte_offset:hdt_ptr
+          ~length:decomp_size
+          (Brr.Tarray.Buffer.of_jv (Jv.get Wasm.memory "buffer"))
       in
-      let heights = Brr.Tarray.create Brr.Tarray.Float32 decomp_size in
-      let out = Brr.Tarray.to_jv heights in
-      for i = 0 to decomp_size - 1 do
-        let u = Jv.to_int (Jv.Jarray.get samples i) in
-        Jv.Jarray.set out i
-          (Jv.of_float
-             (if u = 65535 then -99999. else base +. (step *. float u)))
-      done;
-      ("result_hdt", Brr.Tarray.buffer heights)
+      let copy : Brr.Tarray.float32 =
+        Brr.Tarray.of_jv (Jv.call (Brr.Tarray.to_jv heights) "slice" [||])
+      in
+      ("result_hdt", Brr.Tarray.buffer copy)
     end
     else begin
       let result_ta = Brr.Tarray.create Brr.Tarray.Uint8 (decomp_size * 2) in
