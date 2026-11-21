@@ -335,8 +335,10 @@ let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
          (String.length high_compressed + String.length low_compressed)
     /. Float.of_int (tile_width * tile_height * 4))
 
-(* Tile size: 3600 / 3 = 1200 *)
-let sub_tile_size = 1200
+(* Tile size: 3600 / 6 = 600. Was 1200: a base grid of 4096 samples took 4 or
+   5 of those a side, and on average 60% of the bytes fetched were inside it;
+   at 600, 78% (and the first view's square 3.8 MB against 6.1). *)
+let sub_tile_size = 600
 
 (* Coarse tiles for the far field: the same nine sub-tiles per degree cell, at
    4 arcseconds (300 x 300), in the same format. Each sample is the soft
@@ -350,7 +352,7 @@ let sub_tile_size = 1200
    block whose centre is 4 col + 1.5 arcseconds east of the sub-tile's western
    sample column and 4 row + 1.5 arcseconds south of its northern sample
    row. *)
-let coarse_sub_tile_size = sub_tile_size / 4
+let coarse_sub_tile_size = 1200 / 4
 let downsample_k = 0.25
 
 let soft_max h00 h10 h01 h11 =
@@ -433,7 +435,8 @@ let () =
     Printf.eprintf "    %s input.tif data/dem\n" Sys.argv.(0);
     Printf.eprintf "    %s 45 6 data/dem\n" Sys.argv.(0);
     Printf.eprintf
-      "  Generates 9 tiles in output_dir/dem: N{lat}_E{lon}_{row}_{col}.dem\n";
+      "  Generates 36 tiles of 600 arcseconds in output_dir/dem:\n\
+      \  N{lat}_E{lon}_{row}_{col}.dem, row and col 0 to 5\n";
     Printf.eprintf
       "  Lat/lon are parsed from input filename (Copernicus format) or \
        provided directly.\n";
@@ -510,11 +513,12 @@ let () =
   let dem_dir = Filename.concat output_dir subdir in
   if not (Sys.file_exists dem_dir) then Unix.mkdir dem_dir 0o775;
 
-  Printf.eprintf "Splitting into 9 tiles of %dx%d...\n%!" sub_tile_size
+  let n = Bigarray.Array2.dim1 heights / sub_tile_size in
+  Printf.eprintf "Splitting into %d tiles of %dx%d...\n%!" (n * n) sub_tile_size
     sub_tile_size;
-  for tile_row = 0 to 2 do
-    for tile_col = 0 to 2 do
-      let src_row = (2 - tile_row) * sub_tile_size in
+  for tile_row = 0 to n - 1 do
+    for tile_col = 0 to n - 1 do
+      let src_row = (n - 1 - tile_row) * sub_tile_size in
       let src_col = tile_col * sub_tile_size in
       let lat_c = if lat >= 0 then 'N' else 'S' in
       let lon_c = if lon >= 0 then 'E' else 'W' in
@@ -526,4 +530,4 @@ let () =
         ~tile_height:sub_tile_size output_path
     done
   done;
-  Printf.eprintf "Done! Generated 9 tiles.\n%!"
+  Printf.eprintf "Done! Generated %d tiles.\n%!" (n * n)

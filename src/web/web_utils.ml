@@ -78,6 +78,20 @@ let data_cache =
          (Brr_io.Fetch.Cache.Storage.open' (Brr_io.Fetch.caches ())
             (Jstr.v Data_cache.name)))
 
+(* A tile set that changes moves to a new version: the data cache keeps a
+   tile, an absent one too, for ever under its URL. *)
+let tiles_base =
+  lazy
+    (let default = "https://tiles.vouillon.org/v2" in
+     try
+       let params = Brr.Uri.query_params (Brr.Window.location Brr.G.window) in
+       match Brr.Uri.Params.find (Jstr.v "tiles") params with
+       | Some url -> Jstr.to_string url
+       | None -> default
+     with _ -> default)
+
+let tiles_url path = Lazy.force tiles_base ^ "/" ^ path
+
 let is_cached url =
   let open Fut.Syntax in
   let* cache = Lazy.force data_cache in

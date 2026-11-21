@@ -369,7 +369,76 @@ end
 (* The water classes of CORINE, which the water of OSM stands in for *)
 let is_water_code code = code = 511 || code = 512 || (code >= 521 && code <= 523)
 
-let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
+(* A cell's tiles are its sub-cells of 600 arcseconds, [sub_cells] by
+   [sub_cells], as for the elevation. A sub-cell's coordinates run from 0 at
+   its south-west corner to [qmax] at its north-east one, exactly: the client
+   places a vertex at [k * qmax + q] quanta from the sub-cell grid of its cover
+   map, which a float holds exactly while under 2^24, so a vertex on an edge
+   lands where its neighbour's does, and no margin is needed. The quanta are
+   those of the 1° tiles, rounded to fractions of an arcsecond: 1/18 arcsecond (1.7 m)
+   for the land cover, as fine as the finest cover-map texel (16 bits over a
+   sub-cell, 28 cm, made the land 30% larger: deltas six times larger),
+   1/72 arcsecond (43 cm) for the water, in 24-bit fields. The POIs are read on the
+   CPU: all 24 bits. *)
+let sub_cells = 6
+let land_qmax = 600 * 18
+let water_qmax = 600 * 72
+let poi_qmax = 0xFFFFFF
+
+let sub_tile_name ~lat ~lon ~row ~col ext =
+  Printf.sprintf "%c%02d_%c%03d_%d_%d.%s"
+    (if lat >= 0. then 'N' else 'S')
+    (int_of_float (Float.abs lat))
+    (if lon >= 0. then 'E' else 'W')
+    (int_of_float (Float.abs lon))
+    row col ext
+
+(* A CLC6 tile of origin [min_lon, min_lat] and [range] degrees square: land
+   cover and water quantized by [quantize] already, the POIs here. *)
+let write_tile path (min_lon, min_lat) range ~cover ~water ~pois =
+  let scale = float land_qmax /. range in
+  let water_scale = float water_qmax /. range in
+  let poi_scale = float poi_qmax /. range in
+  let poi_encoder = Poi_encoder.create () in
+  List.iter
+    (fun poi ->
+      Poi_encoder.encode_poi poi_encoder poi (min_lon, min_lat)
+        (poi_scale, poi_scale))
+    pois;
+  let floats = Bytes.create 64 in
+  List.iteri
+    (fun i f -> Bytes.set_int64_le floats (8 * i) (Int64.bits_of_float f))
+    [
+      min_lon;
+      min_lat;
+      scale;
+      scale;
+      water_scale;
+      water_scale;
+      poi_scale;
+      poi_scale;
+    ];
+  let sizes =
+    Clc_file.write path
+      {
+        Clc_file.floats = Bytes.to_string floats;
+        cover;
+        water;
+        poi_count = List.length pois;
+        pois =
+          List.map Buffer.contents
+            [
+              poi_encoder.names;
+              poi_encoder.coords;
+              poi_encoder.elevations;
+              poi_encoder.types;
+            ];
+      }
+  in
+  List.fold_left ( + ) 112 (List.map (fun n -> n + 8) sizes)
+
+let process_tile ?(coarse = false) ?overture ?poi_dir db_path output_dir
+    tile_name =
   let lat, lon = parse_tile_string tile_name in
   Printf.printf "Processing Tile: %s (Lat: %.2f, Lon: %.2f)\n%!" tile_name lat
     lon;
@@ -386,13 +455,10 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
         end : PROJ) )
   in
 
-  (* Define Bounds with Margin.
-     The margin only provides overlap with the neighboring tiles so that
-     rasterization seams stay covered: it needs to exceed one texel of the
-     viewer's coarsest cover-map level (2 deg / 1024 = 0.002 deg) plus
-     quantization slack. 0.005 deg leaves headroom for a larger DEM extent
-     or a finer cover map. *)
-  let margin_deg = 0.005 in
+  (* Define Bounds, with a margin for the far field's grid only (whose
+     samples near the edge see past it). The sub-cells need none: see
+     [sub_cells]. *)
+  let margin_deg = if coarse then 0.005 else 0.0 in
   let min_lat = lat -. margin_deg in
   let max_lat = lat +. 1.0 +. margin_deg in
   let min_lon = lon -. margin_deg in
@@ -400,19 +466,13 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
 
   (* 
      Coordinate Normalization:
-     We Map [min_lon, max_lon] to [0, 65535].
-     This 16-bit quantization is sufficient for <1m precision within a 1-degree tile.
+     A sub-cell maps onto [0, land_qmax] (see [sub_cells]), 1.7 m.
      
      Note: Since we use LAEA (meters) for extraction but WGS84 for storage,
      there is non-linear distortion, but at the scale of 1 degree, simple linear 
      interpolation in the vertex shader is visually acceptable for this use-case,
      especially since we triangulate densely enough.
   *)
-  let range_x = max_lon -. min_lon in
-  let range_y = max_lat -. min_lat in
-  let scale_x = 65535.0 /. range_x in
-  let scale_y = 65535.0 /. range_y in
-
   let db = Sqlite3.db_open db_path in
 
   let laea_pts =
@@ -513,6 +573,46 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
             in
             acc @ res1 @ res2)
           [] result_polys
+  in
+
+  (* Where a feature goes: the far field's grid has the cell whole, the fine
+     tiles a sub-cell each, row 0 the southern one. *)
+  let regions =
+    if coarse then [ (0, clipper_region) ]
+    else
+      let edge i v = v +. (float i /. float sub_cells) in
+      List.init (sub_cells * sub_cells) (fun s ->
+          let row = s / sub_cells and col = s mod sub_cells in
+          ( s,
+            {
+              Geometry_types.min_x = edge col lon;
+              min_y = edge row lat;
+              max_x = edge (col + 1) lon;
+              max_y = edge (row + 1) lat;
+            } ))
+  in
+  (* A feature clipped to each region its outer ring's box meets, the pieces
+     tagged with the region. *)
+  let clip_to_regions flat_verts (poly : Geometry_types.polygon) =
+    let o = poly.outer in
+    let bx0 = ref infinity and bx1 = ref neg_infinity in
+    let by0 = ref infinity and by1 = ref neg_infinity in
+    for i = o.start to o.start + o.len - 1 do
+      let x = flat_verts.(2 * i) and y = flat_verts.((2 * i) + 1) in
+      bx0 := Float.min !bx0 x;
+      bx1 := Float.max !bx1 x;
+      by0 := Float.min !by0 y;
+      by1 := Float.max !by1 y
+    done;
+    List.concat_map
+      (fun (s, (r : Geometry_types.rect)) ->
+        if !bx1 < r.min_x || !bx0 > r.max_x || !by1 < r.min_y || !by0 > r.max_y
+        then []
+        else
+          List.map
+            (fun piece -> (s, piece))
+            (clip_with_split_fixed flat_verts poly r 0))
+      regions
   in
 
   let rec collect_features acc =
@@ -623,12 +723,11 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
 
                           (* 3. Clip with recursive splitting for large polygons *)
                           let clipped_pieces =
-                            clip_with_split_fixed flat_verts proper_poly
-                              clipper_region 0
+                            clip_to_regions flat_verts proper_poly
                           in
 
                           List.iter
-                            (fun (clipped_verts, clipped_poly) ->
+                            (fun (sub, (clipped_verts, clipped_poly)) ->
                               (* 4. Triangulate *)
                               let tris =
                                 try
@@ -709,6 +808,7 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
 
                                 batch_acc :=
                                   ( area,
+                                    sub,
                                     code,
                                     v_count,
                                     tri_count_val,
@@ -738,7 +838,8 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
   (* Sorting by Area Ascending (Smallest First) *)
   let sorted_features =
     List.sort
-      (fun (a1, _, _, _, _, _, _) (a2, _, _, _, _, _, _) -> Float.compare a1 a2)
+      (fun (a1, _, _, _, _, _, _, _) (a2, _, _, _, _, _, _, _) ->
+        Float.compare a1 a2)
       all_features
   in
 
@@ -799,12 +900,10 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
             in
 
             (* Clip to tile region *)
-            let clipped_pieces =
-              clip_with_split_fixed flat_verts proper_poly clipper_region 0
-            in
+            let clipped_pieces = clip_to_regions flat_verts proper_poly in
 
             List.iter
-              (fun (clipped_verts, clipped_poly) ->
+              (fun (sub, (clipped_verts, clipped_poly)) ->
                 (* Triangulate *)
                 let tris =
                   try
@@ -850,7 +949,8 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
 
                   if v_count > 0 && tri_count_val > 0 then
                     water_pieces :=
-                      ( clc_code,
+                      ( sub,
+                        clc_code,
                         final_verts,
                         v_count,
                         final_indices,
@@ -864,6 +964,34 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     water_features;
   let water_pieces = List.rev !water_pieces in
 
+  (* The POIs of the cell, a summit on its north or east edge being the next
+     cell's: the 1° POI tile of the far field, and the fine tiles'. *)
+  let pois =
+    lazy
+      (List.filter
+         (fun (poi : Poi_fetch.poi) ->
+           poi.lat >= lat
+           && poi.lat < lat +. 1.
+           && poi.lon >= lon
+           && poi.lon < lon +. 1.)
+         (match overture with
+         | Some dir ->
+             Overture.load_pois
+               (Filename.concat dir (tile_name ^ ".pois.geojsonl"))
+         | None -> Poi_fetch.fetch_pois ~min_lat ~min_lon ~max_lat ~max_lon))
+  in
+  Option.iter
+    (fun dir ->
+      let pois = Lazy.force pois in
+      let bytes =
+        write_tile
+          (Filename.concat dir (tile_name ^ ".clc"))
+          (lon, lat) 1.0 ~cover:[||] ~water:[||] ~pois
+      in
+      Printf.printf "%d POIs on their own: %d bytes.\n%!" (List.length pois)
+        bytes)
+    poi_dir;
+
   if coarse then begin
     let grid = Coarse.create () in
     (* The water of OSM first, which then has its samples, and in place of
@@ -875,7 +1003,7 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
        gravel of a wider one for sand, where OSM has the water. *)
     let water = Coarse.create_fine () in
     List.iter
-      (fun (code, verts, _, indices, tri_count, _) ->
+      (fun (_, code, verts, _, indices, tri_count, _) ->
         if code = 511 || Coarse.area verts indices tri_count >= 4. then
           Coarse.fill ~fine:true water ~lon ~lat
             ~index:(Clc_palette.get_index code)
@@ -884,7 +1012,7 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     Coarse.fill_water grid water;
     Coarse.drop_specks grid ~index:(Clc_palette.get_index 511) ~min:8;
     List.iter
-      (fun (_area, code, _, tri_count, _, verts, indices) ->
+      (fun (_area, _, code, _, tri_count, _, verts, indices) ->
         if overture = None || code = 511 || not (is_water_code code) then
           Coarse.fill grid ~lon ~lat
             ~index:(Clc_palette.get_index code)
@@ -909,12 +1037,8 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
         bytes :=
           !bytes
           + Coarse.write grid ~default ~row:(2 - row) ~col
-              (Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" output_dir
-                 (if lat >= 0. then 'N' else 'S')
-                 (int_of_float (Float.abs lat))
-                 (if lon >= 0. then 'E' else 'W')
-                 (int_of_float (Float.abs lon))
-                 row col)
+              (Filename.concat output_dir
+                 (sub_tile_name ~lat ~lon ~row ~col "dem"))
       done
     done;
     Printf.printf "Done. %d features over 9 tiles, %d bytes.\n%!"
@@ -923,109 +1047,79 @@ let process_tile ?(coarse = false) ?overture db_path output_dir tile_name =
     exit 0
   end;
 
-  let cover =
-    Array.of_list
-      (List.map
-         (fun (_area, code, _, _, valid_i_count, final_verts, final_indices) ->
-           let xs, ys =
-             quantize final_verts (min_lon, min_lat) (scale_x, scale_y) 0xFFFF
-           in
-           {
-             Clc_codec.code;
-             xs;
-             ys;
-             tris = Array.sub final_indices 0 valid_i_count;
-           })
-         sorted_features)
-  in
-
-  (* === WATER LAYER ENCODING === *)
-  (* Water scale: ~220000 values for 1.1° gives ~40cm precision *)
-  let water_scale_x = 220000.0 /. range_x in
-  let water_scale_y = 220000.0 /. range_y in
-
-  let water =
-    Array.of_list
-      (List.map
-         (fun (code, final_verts, _, final_indices, _, i_count) ->
-           let xs, ys =
-             quantize final_verts (min_lon, min_lat)
-               (water_scale_x, water_scale_y)
-               0xFFFFFF
-           in
-           { Clc_codec.code; xs; ys; tris = Array.sub final_indices 0 i_count })
-         water_pieces)
-  in
-  Printf.printf "Processed %d water features\n%!" (Array.length water);
-
-  (* === POI LAYER PROCESSING === *)
-  let poi_encoder = Poi_encoder.create () in
-  let poi_count = ref 0 in
-
-  (* Use same scale as water for ~40cm precision *)
-  let poi_scale_x = water_scale_x in
-  let poi_scale_y = water_scale_y in
-
-  let pois =
-    match overture with
-    | Some dir ->
-        (* The file reaches past the tile, which is all the encoding spans *)
+  let step = 1.0 /. float sub_cells in
+  let tiles = ref 0 and bytes = ref 0 in
+  for row = 0 to sub_cells - 1 do
+    for col = 0 to sub_cells - 1 do
+      let s = (row * sub_cells) + col in
+      let origin = (lon +. (float col *. step), lat +. (float row *. step)) in
+      let quantize verts qmax =
+        quantize verts origin (float qmax /. step, float qmax /. step) qmax
+      in
+      let cover =
+        Array.of_list
+          (List.filter_map
+             (fun (_area, sub, code, _, _, valid_i_count, verts, indices) ->
+               if sub <> s then None
+               else
+                 let xs, ys = quantize verts land_qmax in
+                 Some
+                   {
+                     Clc_codec.code;
+                     xs;
+                     ys;
+                     tris = Array.sub indices 0 valid_i_count;
+                   })
+             sorted_features)
+      in
+      let water =
+        Array.of_list
+          (List.filter_map
+             (fun (sub, code, verts, _, indices, _, i_count) ->
+               if sub <> s then None
+               else
+                 let xs, ys = quantize verts water_qmax in
+                 Some
+                   {
+                     Clc_codec.code;
+                     xs;
+                     ys;
+                     tris = Array.sub indices 0 i_count;
+                   })
+             water_pieces)
+      in
+      let pois =
         List.filter
           (fun (poi : Poi_fetch.poi) ->
-            poi.lat >= min_lat && poi.lat <= max_lat && poi.lon >= min_lon
-            && poi.lon <= max_lon)
-          (Overture.load_pois
-             (Filename.concat dir (tile_name ^ ".pois.geojsonl")))
-    | None -> Poi_fetch.fetch_pois ~min_lat ~min_lon ~max_lat ~max_lon
-  in
-  List.iter
-    (fun poi ->
-      Poi_encoder.encode_poi poi_encoder poi (min_lon, min_lat)
-        (poi_scale_x, poi_scale_y);
-      incr poi_count)
-    pois;
-
-  Printf.printf "Processed %d POIs\n%!" !poi_count;
-
-  (* === FILE OUTPUT (CLC6 Format, see Clc_file) === *)
-  let output_file_path = Filename.concat output_dir (tile_name ^ ".clc") in
-  let floats = Bytes.create 64 in
-  List.iteri
-    (fun i f -> Bytes.set_int64_le floats (8 * i) (Int64.bits_of_float f))
-    [
-      min_lon;
-      min_lat;
-      scale_x;
-      scale_y;
-      water_scale_x;
-      water_scale_y;
-      poi_scale_x;
-      poi_scale_y;
-    ];
-  let sizes =
-    Clc_file.write output_file_path
-      {
-        Clc_file.floats = Bytes.to_string floats;
-        cover;
-        water;
-        poi_count = !poi_count;
-        pois =
-          List.map Buffer.contents
-            [
-              poi_encoder.names;
-              poi_encoder.coords;
-              poi_encoder.elevations;
-              poi_encoder.types;
-            ];
-      }
-  in
+            let sub_of v v0 =
+              max 0
+                (min (sub_cells - 1)
+                   (int_of_float (Float.floor ((v -. v0) /. step))))
+            in
+            sub_of poi.lat lat = row && sub_of poi.lon lon = col)
+          (Lazy.force pois)
+      in
+      (* A sub-cell with nothing in it gets no tile: the client takes a
+         missing one for open sea. *)
+      if cover <> [||] || water <> [||] || pois <> [] then begin
+        incr tiles;
+        bytes :=
+          !bytes
+          + write_tile
+              (Filename.concat output_dir
+                 (sub_tile_name ~lat ~lon ~row ~col "clc"))
+              origin step ~cover ~water ~pois
+      end
+    done
+  done;
   ignore (Sqlite3.db_close db);
   Printf.printf
     "Done. Extracted %d CLC features (%d verts, %d indices) + %d water \
-     features + %d POIs: %d bytes.\n\
+     features + %d POIs: %d tiles, %d bytes.\n\
      %!"
-    !entry_count !total_vertices !total_indices (Array.length water) !poi_count
-    (List.fold_left ( + ) 112 (List.map (fun n -> n + 8) sizes))
+    !entry_count !total_vertices !total_indices (List.length water_pieces)
+    (List.length (Lazy.force pois))
+    !tiles !bytes
 
 (* The POIs of a tile on their own, as a tile with no land cover and no water
    that the client reads like any other: what it takes of a cell it only sees
@@ -1056,17 +1150,21 @@ let convert input output =
     (String.concat " " (List.map string_of_int sizes))
 
 let () =
-  let rec options ?(coarse = false) ?overture = function
-    | "--coarse" :: rest -> options ~coarse:true ?overture rest
-    | "--overture" :: dir :: rest -> options ~coarse ~overture:dir rest
+  let rec options ?(coarse = false) ?overture ?poi_dir = function
+    | "--coarse" :: rest -> options ~coarse:true ?overture ?poi_dir rest
+    | "--overture" :: dir :: rest -> options ~coarse ~overture:dir ?poi_dir rest
+    | "--poi-dir" :: dir :: rest -> options ~coarse ?overture ~poi_dir:dir rest
     | [ db; output_dir; tile ] ->
-        process_tile ~coarse ?overture db output_dir tile
+        process_tile ~coarse ?overture ?poi_dir db output_dir tile
     | _ ->
         Printf.printf
-          "Usage: %s [--coarse] [--overture <dir>] <DB> <Output Dir> \
-           <TileCode> (e.g. N45E006)\n\
+          "Usage: %s [--coarse] [--overture <dir>] [--poi-dir <dir>] <DB> \
+           <Output Dir> <TileCode> (e.g. N45E006)\n\
+          \  the cell's 36 sub-cells of 600 arcseconds, \
+           N45_E006_<row>_<col>.clc, row 0 the southern one\n\
           \  --coarse: the far field's land cover instead, nine tiles of \
            palette indices at 4 arcseconds\n\
+          \  --poi-dir: the cell's POIs on their own too, <dir>/N45E006.clc\n\
           \  --overture: the water, the sea included, and the POIs from the \
            files of <dir> (fetch_overture.sh) and not from the Overpass API\n\
           \       %s --pois <tile.clc> <output.clc>\n\

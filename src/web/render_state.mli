@@ -158,8 +158,8 @@ type ao_blur_uniforms = {
 (** Cached uniform locations for the AO blur shader. *)
 
 type clc_raster_uniforms = {
-  u_tile_range : Gl.uniform_location;
-  u_tile_min : Gl.uniform_location;
+  u_cell : Gl.uniform_location;
+  u_qmax : Gl.uniform_location;
   u_tex_min : Gl.uniform_location;
   u_tex_range : Gl.uniform_location;
 }
@@ -175,14 +175,9 @@ type cover_fill_uniforms = {
 }
 (** Cached uniform locations for the cover fill shader. *)
 
-type water_raster_uniforms = {
-  u_tile_range : Gl.uniform_location;
-  u_water_scale : Gl.uniform_location;
-  u_tile_min : Gl.uniform_location;
-  u_tex_min : Gl.uniform_location;
-  u_tex_range : Gl.uniform_location;
-}
-(** Cached uniform locations for the Water raster shader. *)
+type water_raster_uniforms = clc_raster_uniforms
+(** Cached uniform locations for the Water raster shader, the same as the CLC
+    one's. *)
 
 val compute_radial_params : n_sectors:int -> n_rings:int -> radial_params
 (** Compute radial grid parameters from sector/ring counts. *)

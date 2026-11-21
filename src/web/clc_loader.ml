@@ -121,22 +121,36 @@ let parse_header_ba ba =
     poi_scale_y;
   }
 
-(* Get CLC tile name from lat/lon *)
-let tile_name lat lon =
-  let lat_int = int_of_float (floor lat) in
-  let lon_int = int_of_float (floor lon) in
-  let lat_str = if lat_int >= 0 then "N" else "S" in
-  let lon_str = if lon_int >= 0 then "E" else "W" in
-  Printf.sprintf "%s%02d%s%03d.clc" lat_str (abs lat_int) lon_str (abs lon_int)
-
-(* Tile path for fetching *)
-let tile_path ?(pois = false) lat lon =
-  (if pois then "data/poi/" else "data/clc/") ^ tile_name lat lon
-
 let ( // ) x y =
   let q = x / y in
   let r = x mod y in
   if r >= 0 then q else q - 1
+
+(* The land cover comes in sub-cells of 600 arcseconds, [sub_cells] by [sub_cells] to
+   a degree as the elevation (extract_tiles), the POIs on their own in cells
+   of a degree. *)
+let sub_cells = 6
+let cell_arcsec ~pois = if pois then 3600 else 3600 / sub_cells
+
+(* The path of a tile, [lat] and [lon] its south-west corner counted in
+   tiles from 0°. *)
+let tile_path ?(pois = false) lat lon =
+  let cell lat lon =
+    let lat_str = if lat >= 0 then "N" else "S" in
+    let lon_str = if lon >= 0 then "E" else "W" in
+    Printf.sprintf "%s%02d%s%03d" lat_str (abs lat) lon_str (abs lon)
+  in
+  if pois then Web_utils.tiles_url ("poi/" ^ cell lat lon ^ ".clc")
+  else
+    let lat_str = if lat >= 0 then "N" else "S" in
+    let lon_str = if lon >= 0 then "E" else "W" in
+    Web_utils.tiles_url
+    @@ Printf.sprintf "clc/%s%02d_%s%03d_%d_%d.clc" lat_str
+         (abs (lat // sub_cells))
+         lon_str
+         (abs (lon // sub_cells))
+         (lat - (sub_cells * (lat // sub_cells)))
+         (lon - (sub_cells * (lon // sub_cells)))
 
 let rec parallel_iter min max f =
   if min > max then Lwt.return ()
@@ -144,7 +158,7 @@ let rec parallel_iter min max f =
 
 let prefetch_tile ?pois ~lat ~lon () =
   let open Lwt.Syntax in
-  let f = tile_path ?pois (float lat +. 0.5) (float lon +. 0.5) in
+  let f = tile_path ?pois lat lon in
   let request = Brr_io.Fetch.Request.v (Jstr.v f) in
   let* cache =
     to_lwt
@@ -163,9 +177,10 @@ let prefetch ?(pois = false) ~size ~lat ~lon () =
   let min_lon = Web_utils.arcsec_floor lon - (size / 2) in
   let max_lat = min_lat + size - 1 in
   let max_lon = min_lon + size - 1 in
+  let cell = cell_arcsec ~pois in
   let* () =
-    parallel_iter ((min_lat - 1) // 3600) ((max_lat - 1) // 3600) @@ fun lat ->
-    parallel_iter (min_lon // 3600) (max_lon // 3600) @@ fun lon ->
+    parallel_iter ((min_lat - 1) // cell) ((max_lat - 1) // cell) @@ fun lat ->
+    parallel_iter (min_lon // cell) (max_lon // cell) @@ fun lon ->
     (* Not every cell has POIs of its own (extract_tiles --pois), and one
        that has none is no reason to give up on the others. *)
     if pois then
@@ -368,27 +383,27 @@ let load_tiles ?(pois = false) ~lat ~lon ~size () =
   let dem_range_lon = dem_max_lon -. dem_min_lon in
   let dem_range_lat = dem_max_lat -. dem_min_lat in
 
-  let min_tile_lat = int_of_float (floor dem_min_lat) in
-  let max_tile_lat = int_of_float (floor dem_max_lat) in
-  let min_tile_lon = int_of_float (floor dem_min_lon) in
-  let max_tile_lon = int_of_float (floor dem_max_lon) in
+  let per_degree = float (3600 / cell_arcsec ~pois) in
+  let tile v = int_of_float (floor (v *. per_degree)) in
+  let min_tile_lat = tile dem_min_lat in
+  let max_tile_lat = tile dem_max_lat in
+  let min_tile_lon = tile dem_min_lon in
+  let max_tile_lon = tile dem_max_lon in
 
   let tasks = ref [] in
   for tile_lat = min_tile_lat to max_tile_lat do
     for tile_lon = min_tile_lon to max_tile_lon do
-      let path =
-        tile_path ~pois (float tile_lat +. 0.5) (float tile_lon +. 0.5)
-      in
+      let path = tile_path ~pois tile_lat tile_lon in
       let task =
         Lwt.catch
           (fun () ->
             let* tile = load_full_clc_tile path in
-            let tile_range_lon = 65535. /. tile.header.scale_x in
-            let tile_range_lat = 65535. /. tile.header.scale_y in
-            Lwt.return (Some (tile, tile_range_lon, tile_range_lat)))
+            let range = 1. /. per_degree in
+            Lwt.return (Some (tile, range, range)))
           (fun exn ->
-            (* Not every 1°×1° cell is published, so a 404 is expected and
-               stays silent; a decode or worker failure must be visible. *)
+            (* Not every tile is published (none for open sea), so a 404 is
+               expected and stays silent; a decode or worker failure must be
+               visible. *)
             (match exn with
             | Failure msg when String.starts_with ~prefix:"HTTP 404 " msg -> ()
             | _ ->

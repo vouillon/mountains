@@ -112,7 +112,14 @@ let delete_old_caches () =
 
 (* Earlier versions of this worker stored the application shell in the data
    cache; those entries must go, or [Cache.Storage.match'] would keep serving
-   them for ever. *)
+   them for ever. So must the retired tiles. *)
+(* The site's own tiles before they moved to R2 ([Web_utils.tiles_url]), with
+   the base grid's elevation and land cover in sub-cells of 600 arcseconds
+   instead: nothing asks for them any more. *)
+let is_retired_tile url =
+  List.exists (contains_sub url)
+    [ "/data/dem/"; "/data/clc/"; "/data/clc4/"; "/data/poi/" ]
+
 let prune_data_cache () =
   let* cache = open_cache data_cache_name in
   let* requests = Brr_io.Fetch.Cache.keys cache in
@@ -122,7 +129,8 @@ let prune_data_cache () =
       (List.filter_map
          (fun request ->
            let url = Jstr.to_string (Brr_io.Fetch.Request.url request) in
-           if is_tile url || is_tree_cover url then None
+           if (is_tile url || is_tree_cover url) && not (is_retired_tile url)
+           then None
            else Some (Brr_io.Fetch.Cache.delete cache request))
          requests)
   in

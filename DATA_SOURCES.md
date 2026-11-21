@@ -6,11 +6,11 @@ details; this is the map to them.
 
 | Data | Source | Licence | Where the client reads it | Made by |
 | --- | --- | --- | --- | --- |
-| Base elevation, 1" | Copernicus GLO-30 DSM | Copernicus DEM licence | `data/dem` (DEM1) | `Corine/compress_dem.ml` |
+| Base elevation, 1" | Copernicus GLO-30 DSM | Copernicus DEM licence | `tiles.vouillon.org/v2/dem` (DEM1) | `Corine/compress_dem.ml` |
 | Far-field elevation, 4" | Copernicus GLO-30 DSM | same | `data/dem4` (DEM1) | `compress_dem.exe --coarse` |
-| Land cover | CORINE Land Cover 2018 | Copernicus Land Monitoring Service | `data/clc` (CLC6) | `Corine/extract_tiles.ml` |
-| Far-field land cover | CLC 2018 + OSM water | both | `data/clc4` | `extract_tiles.exe --coarse` |
-| Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `data/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
+| Land cover | CORINE Land Cover 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/clc` (CLC6) | `Corine/extract_tiles.ml` |
+| Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/clc4` | `extract_tiles.exe --coarse` |
+| Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
 | Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | fetched at run time | `src/web/tree_cover.ml` |
 | High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v1` (HDT1) | `Corine/own_tiles.py` |
 | 2-D map picker | IGN Plan IGN v2, LiDAR HD shading, contours | Etalab 2.0 | fetched at run time | `src/web/map_picker.ml` |
@@ -19,7 +19,15 @@ The credits the app shows are in `src/web/index.html` (the startup notice) and
 `src/web/map_picker.ml` (the map's attribution); keep them in step with this
 file.
 
-## Base elevation: `data/dem`
+The base elevation, the land cover and the POIs are hosted on R2 under
+`https://tiles.vouillon.org/v2` (`Web_utils.tiles_url`; `?tiles=<base url>`
+overrides it, to try a tile set), the far-field elevation still in `data/dem4`.
+The data cache keeps a tile, and an absent one, for ever under its URL: a set
+that changes moves to a new version. The `data/dem`, `data/clc`, `data/clc4` and
+`data/poi` tiles of the site are the earlier set (1200" elevation tiles, 1°
+land-cover tiles, Overture 2026-10-21.0), which the service worker prunes.
+
+## Base elevation: `v2/dem`
 
 - **Source**: Copernicus GLO-30 DSM, 1 arc-second, as cloud-optimised GeoTIFFs
   from the public bucket
@@ -31,16 +39,17 @@ file.
   European Union and ESA; all rights reserved."
 - **Import**: `Corine/fetch_dem.sh <lat> <lon>` downloads one 1° cell into
   `data/` (the .tif files, ~40 MB each, are not tracked), then
-  `dune exec Corine/compress_dem.exe -- data/<file>.tif data` writes its nine
-  1200 × 1200 sub-tiles `data/dem/N<lat>_E<lon>_<row>_<col>.dem` (row 0 south).
-  `compress_dem.exe <lat> <lon> data` does both and deletes the .tif. A cell the
-  bucket lacks (open sea) is written as zeros.
+  `dune exec Corine/compress_dem.exe -- data/<file>.tif <dir>` writes its 36
+  600 × 600 sub-tiles `<dir>/dem/N<lat>_E<lon>_<row>_<col>.dem` (row 0 south).
+  `compress_dem.exe <lat> <lon> <dir>` does both and deletes the .tif. A cell
+  the bucket lacks (open sea) is written as zeros. 600" rather than 1200": a
+  location's base square of about 40 km fetches 78% of the bytes it did.
 - **Format**: DEM1, heights as u16 over -500…9000 m (14.5 cm steps),
   parallelogram-predicted, zigzagged, split into high and low bytes, each
   zlib-compressed. The range is hard-coded in the client too: changing it means
   regenerating every tile.
-- **Coverage**: 32 cells (288 files): N42 E008-009, N43-N46 E004-009, and La
-  Réunion (S21-S22 E054-056).
+- **Coverage**: 32 cells (1152 files, 195 MB): N42 E008-009, N43-N46 E004-009,
+  and La Réunion (S21-S22 E054-056).
 
 ## Far-field elevation: `data/dem4`
 
@@ -50,7 +59,7 @@ maximum of its 4 × 4 block (k = 0.25), the same as the client's own downsample
 (`downsample.frag`, `Viewer.downsample_k`), so distant summits keep their
 height. 50 cells (450 files), N41-N47 × E003-E010 without sea, and La Réunion.
 
-## Land cover: `data/clc`
+## Land cover: `v2/clc`
 
 - **Source**: CORINE Land Cover 2018 (v2018_20), as the GeoPackage
   `Corine/CLC2018_CLC2018_V2018_20.gpkg` (not tracked; downloadable from
@@ -59,21 +68,28 @@ height. 50 cells (450 files), N41-N47 × E003-E010 without sea, and La Réunion.
   `CLC2018_CLC2018_V2018_20_FR_REU` (EPSG:2975) for La Réunion.
 - **Credit**: "Generated using European Union's Copernicus Land Monitoring
   Service information."
-- **Import**: `extract_tiles.exe --overture <dir> <gpkg> data/clc N45E006`
-  clips the polygons to the cell plus 0.005°, repairs and triangulates them,
-  adds the water and summits of `<dir>` (see below), and writes CLC6. Without
-  `--overture` it asks the Overpass API instead (the older path).
+- **Import**: `extract_tiles.exe --overture <dir> --poi-dir <out>/poi <gpkg>
+  <out>/clc N45E006` clips the polygons to each of the cell's 36 sub-cells of
+  600" (no margin: a sub-cell runs from 0 to `qmax` exactly, and the client
+  places a vertex at `k * qmax + q` quanta from its cover map's sub-cell grid,
+  exactly, so neighbours meet without a crack), repairs and triangulates them,
+  adds the water and summits of `<dir>` (see below), and writes CLC6 as
+  `N45_E006_<row>_<col>.clc` (row 0 south; none for a sub-cell with nothing
+  in it, which the client takes for sea), and the cell's POIs on their own as
+  `<out>/poi/N45E006.clc`. Without `--overture` it asks the Overpass API
+  instead (the older path).
   `Corine/batch_extract_alps.sh` is a stale example: it runs without
   `--overture` over N43-47 E005-009.
-- **Format**: CLC6 (`Corine/clc_file.ml`): triangles in 16-bit coordinates,
-  water in 24-bit ones (~40 cm), and points of interest. `extract_tiles.exe
-  --convert` turned the earlier CLC5 tiles into CLC6.
-- **Coverage**: 65 cells, N42-N47 from E004 to E016, and La Réunion. All were
-  regenerated from Overture's 2026-10-21.0 release.
+- **Format**: CLC6 (`Corine/clc_file.ml`): triangles in 16-bit coordinates
+  (1/18", 1.7 m), water in 24-bit ones (1/72", 43 cm), and points of interest.
+  `extract_tiles.exe --convert` turned the earlier CLC5 tiles into CLC6.
+- **Coverage**: 65 cells, N42-N47 from E004 to E016, and La Réunion, from
+  Overture's 2026-11-18.0 release.
 
-## Far-field land cover: `data/clc4`
+## Far-field land cover: `v2/clc4`
 
-`extract_tiles.exe --coarse --overture <dir> <gpkg> data/clc4 <tile>`: a grid of
+`extract_tiles.exe --coarse --overture <dir> --poi-dir <out>/poi <gpkg>
+<out>/clc4 <tile>`: a grid of
 palette indices at 4", in the DEM1 framing (nine 300 × 300 sub-tiles, the
 elevation range in the header meaningless). OSM water first (a sample is water
 when at least half of its 16 arc-seconds are), patches under 8 samples dropped,
@@ -82,13 +98,13 @@ then CORINE, holes filled with the nearest land, the rest sea. 53 cells.
 ## Water, sea and summits: OpenStreetMap via Overture
 
 - **Source**: Overture Maps' base theme, which carries OpenStreetMap's water
-  and land features. Release 2026-10-21.0 for every current tile, pinned in
-  `fetch_overture.sh` (`OVERTURE_RELEASE` overrides it): rebuilt from it,
-  N45E006 comes out byte for byte as in `data/clc`; from 2026-11-18.0 it has 15
-  more summits, so a cell rebuilt from another release would not match its
-  neighbours. Overture keeps only its last two monthly releases (about 60 days):
-  once 2026-10-21.0 is gone, rebuilding needs archived downloads (7.5 MB a cell)
-  or every cell again from a newer release, with the pin moved.
+  and land features. Release 2026-11-18.0 for every current tile, pinned in
+  `fetch_overture.sh` (`OVERTURE_RELEASE` overrides it): a cell rebuilt from
+  another release would not match its neighbours (2026-11-18.0 has 15 more
+  summits than 2026-10-21.0 in N45E006 alone). Overture keeps only its last two
+  monthly releases (about 60 days): once 2026-11-18.0 is gone, rebuilding needs
+  archived downloads (7.5 MB a cell) or every cell again from a newer release,
+  with the pin moved.
 - **Credit**: "© OpenStreetMap contributors, Overture Maps Foundation (Open
   Database License)."
 - **Import**: `Corine/fetch_overture.sh <dir> <tile>...` (needs `pip install
@@ -97,9 +113,9 @@ then CORINE, holes filled with the nearest land, the rest sea. 53 cells.
   `<tile>.pois.geojsonl`. `Corine/overture.ml` maps water to CORINE classes
   (ocean 523, lagoon 521, rivers and canals 511, the rest 512) and names summits
   in French where Overture has a French name.
-- **`data/poi`**: POI-only CLC6 tiles, `extract_tiles.exe --pois
-  data/clc/<t>.clc data/poi/<t>.clc`, one per cell of `data/clc` and
-  `data/clc4` (81).
+- **`v2/poi`**: POI-only CLC6 tiles of a degree, one per cell of `v2/clc` and
+  `v2/clc4` (81), written by the extraction of either (`--poi-dir`).
+  `extract_tiles.exe --pois <t>.clc <out>.clc` takes them out of a tile.
 - `data/points.geojson` is an older overpass-turbo export of summits
   (2024-08-29) read only by the SDL client.
 

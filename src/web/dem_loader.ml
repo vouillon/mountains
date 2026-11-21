@@ -16,7 +16,9 @@ let ( // ) x y =
   let r = x mod y in
   if r >= 0 then q else q - 1
 
-let sub_tile_size = 1200
+(* A degree cell's sub-tiles, in arcseconds: 600 for the base tiles (6 x 6),
+   1200 for the far field's (3 x 3, of 300 samples at 4 arcseconds). *)
+let sub_tile_arcsec ~step = if step = 1 then 600 else 1200
 
 type t = { data : (int, int8_unsigned_elt, c_layout) Array2.t; size : int }
 
@@ -41,11 +43,15 @@ let to_lwt f =
 let path ?(step = 1) ?(cover = false) ~lat ~lon ~row ~col () =
   let lat_c = if lat >= 0 then 'N' else 'S' in
   let lon_c = if lon >= 0 then 'E' else 'W' in
-  Printf.sprintf "data/%s/%c%02d_%c%03d_%d_%d.dem"
-    (if cover then Printf.sprintf "clc%d" step
-     else if step = 1 then "dem"
-     else Printf.sprintf "dem%d" step)
-    lat_c (abs lat) lon_c (abs lon) row col
+  let name =
+    Printf.sprintf "%c%02d_%c%03d_%d_%d.dem" lat_c (abs lat) lon_c (abs lon) row
+      col
+  in
+  (* The far field's elevation stays with the site, until it is bundled with
+     its land cover. *)
+  if cover then Web_utils.tiles_url (Printf.sprintf "clc%d/%s" step name)
+  else if step = 1 then Web_utils.tiles_url ("dem/" ^ name)
+  else Printf.sprintf "data/dem%d/%s" step name
 
 (* [step] is the grid's spacing in arcseconds: 1 for the base tiles, 4 for the
    far field's (compress_dem --coarse), whose sample [k] of a degree cell
@@ -91,8 +97,9 @@ let shared_fetch p fetch =
    place, when it is run. A task never fails: a sub-tile that cannot be had is left at sea
    level, and counted in [failed] unless it is an absent far tile. *)
 let sub_tiles ~step ~cover ~lat ~lon ~size ~loaded ~failed =
-  let sub_tile_size = sub_tile_size / step in
+  let sub_tile_size = sub_tile_arcsec ~step / step in
   let degree = 3600 / step in
+  let last_sub = (degree / sub_tile_size) - 1 in
 
   (* Allocate full tile buffer (size * size * 2 bytes) *)
   let full_ba : (int, int8_unsigned_elt, c_layout) Array1.t =
@@ -141,13 +148,13 @@ let sub_tiles ~step ~cover ~lat ~lon ~size ~loaded ~failed =
         max 0 ((min_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
       let max_sub_row =
-        min 2 ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
+        min last_sub ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
       let min_sub_col =
         max 0 ((min_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
       in
       let max_sub_col =
-        min 2 ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
+        min last_sub ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
       in
 
       for sub_row = min_sub_row to max_sub_row do
@@ -346,8 +353,9 @@ let load_progressive ~lat ~lon ~size ~half_rows ~half_cols =
    meaning of [size]. *)
 let prefetch ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
   (* Simple prefetch to warm browser cache *)
-  let sub_tile_size = sub_tile_size / step in
+  let sub_tile_size = sub_tile_arcsec ~step / step in
   let degree = 3600 / step in
+  let last_sub = (degree / sub_tile_size) - 1 in
   let center_lat_arcsec = ((Web_utils.arcsec_floor lat - 1) // step) + 1 in
   let center_lon_arcsec = Web_utils.arcsec_floor lon // step in
   let min_lat_arcsec = center_lat_arcsec - (size / 2) in
@@ -369,13 +377,13 @@ let prefetch ?(step = 1) ?(cover = false) ~lat ~lon ~size () =
         max 0 ((min_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
       let max_sub_row =
-        min 2 ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
+        min last_sub ((max_lat_arcsec - tile_base_lat_arcsec) / sub_tile_size)
       in
       let min_sub_col =
         max 0 ((min_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
       in
       let max_sub_col =
-        min 2 ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
+        min last_sub ((max_lon_arcsec - tile_base_lon_arcsec) / sub_tile_size)
       in
 
       for sub_row = min_sub_row to max_sub_row do

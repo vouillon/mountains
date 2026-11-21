@@ -39,6 +39,12 @@ val timed_lwt : track:string -> string -> (unit -> 'a Lwt.t) -> 'a Lwt.t
 (** [timed_lwt ~track name f] records a span from now until [f ()] resolves.
     Nothing is recorded if it fails. *)
 
+val tiles_url : string -> string
+(** [tiles_url path] is the URL of [path] among the tiles of the base grid and
+    of the far field's land cover and POIs (compress_dem, extract_tiles), hosted
+    on R2 by version: [?tiles=<base url>] in the page's URL overrides the base,
+    to try a tile set. *)
+
 val is_cached : Jstr.t -> bool Fut.t
 (** [is_cached url] is whether the data cache holds an answer for [url]: a
     successful response, or a 404 -- a tile that does not exist, at sea or past

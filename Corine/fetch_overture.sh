@@ -12,7 +12,7 @@
 # OVERTUREMAPS.
 #
 # The release is pinned, OVERTURE_RELEASE overriding it: the tiles in data/clc,
-# data/clc4 and data/poi were all made from 2026-10-21.0, and a cell rebuilt from
+# data/clc4 and data/poi were all made from 2026-11-18.0, and a cell rebuilt from
 # another release would not meet its neighbours (a lake cut at the edge, a summit
 # moved or renamed). Overture keeps only its last two monthly releases (about 60
 # days, for the GDPR): once this one is gone, the download fails rather than
@@ -20,7 +20,7 @@
 # from a new release (then change the pin and the note in DATA_SOURCES.md).
 
 set -eu
-release="${OVERTURE_RELEASE:-2026-10-21.0}"
+release="${OVERTURE_RELEASE:-2026-11-18.0}"
 out="$1"
 shift
 mkdir -p "$out"

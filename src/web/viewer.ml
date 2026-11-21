@@ -1869,17 +1869,25 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
                 (Brr.Tarray.of_bigarray1 tile.Clc_loader.water_indices)
                 Gl.static_draw;
 
-              let water_scale =
-                tile_range_lon *. header.Clc_loader.water_scale_x
+              let water_qmax =
+                Float.round (tile_range_lon *. header.Clc_loader.water_scale_x)
               in
-              Some (pos_buf, col_buf, idx_buf, water_index_count, water_scale)
+              Some (pos_buf, col_buf, idx_buf, water_index_count, water_qmax)
             end
             else None
           in
 
+          (* The tile's sub-cell, counted from 0° *)
+          let sub = float Clc_loader.sub_cells in
+          let cell =
+            (Float.round (t_min_lon *. sub), Float.round (t_min_lat *. sub))
+          in
+          let land_qmax =
+            Float.round (tile_range_lon *. header.Clc_loader.scale_x)
+          in
           Some
-            ( tile_range_lon,
-              tile_range_lat,
+            ( cell,
+              land_qmax,
               t_min_lon,
               t_min_lat,
               t_max_lon,
@@ -1894,6 +1902,21 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
   for level = clc_levels - 1 downto 0 do
     let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, v_max_lon, v_max_lat =
       level_bounds.(level)
+    in
+    (* Positions in quanta of the tiles' grid, from the level's first
+       sub-cell (see clc_raster.vert) *)
+    let sub = float Clc_loader.sub_cells in
+    let first_x = Float.floor (v_min_lon *. sub) in
+    let first_y = Float.floor (v_min_lat *. sub) in
+    let set_grid u_cell u_qmax u_tex_min u_tex_range (cell_x, cell_y) qmax =
+      Gl.uniform2f ctx u_cell (cell_x -. first_x) (cell_y -. first_y);
+      Gl.uniform1f ctx u_qmax qmax;
+      Gl.uniform2f ctx u_tex_min
+        (((v_min_lon *. sub) -. first_x) *. qmax)
+        (((v_min_lat *. sub) -. first_y) *. qmax);
+      Gl.uniform2f ctx u_tex_range
+        (v_ext_lon *. sub *. qmax)
+        (v_ext_lat *. sub *. qmax)
     in
 
     (* The depth attachment is the same buffer for every level and was bound
@@ -1914,8 +1937,8 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
     Gl.use_program ctx clc_raster_pid;
 
     List.iter
-      (fun ( tile_range_lon,
-             tile_range_lat,
+      (fun ( cell,
+             land_qmax,
              t_min_lon,
              t_min_lat,
              t_max_lon,
@@ -1938,7 +1961,7 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
               (* Bind pre-uploaded buffers *)
               Gl.bind_buffer ctx Gl.array_buffer (Some pos_buf);
               Gl.enable_vertex_attrib_array ctx 0;
-              Gl.vertex_attrib_pointer ctx 0 2 Gl.unsigned_short true 0 0;
+              Gl.vertex_attrib_ipointer ctx 0 2 Gl.unsigned_short 0 0;
 
               Gl.bind_buffer ctx Gl.array_buffer (Some col_buf);
               Gl.enable_vertex_attrib_array ctx 1;
@@ -1947,10 +1970,8 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
               Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
 
               (* Set Uniforms *)
-              Gl.uniform2f ctx clc_u.u_tile_range tile_range_lon tile_range_lat;
-              Gl.uniform2f ctx clc_u.u_tile_min t_min_lon t_min_lat;
-              Gl.uniform2f ctx clc_u.u_tex_min v_min_lon v_min_lat;
-              Gl.uniform2f ctx clc_u.u_tex_range v_ext_lon v_ext_lat;
+              set_grid clc_u.u_cell clc_u.u_qmax clc_u.u_tex_min
+                clc_u.u_tex_range cell land_qmax;
 
               Gl.draw_elements ctx Gl.triangles index_count Gl.unsigned_int 0
             end)
@@ -1997,8 +2018,8 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
     Gl.use_program ctx water_raster_pid;
 
     List.iter
-      (fun ( tile_range_lon,
-             tile_range_lat,
+      (fun ( cell,
+             _land_qmax,
              t_min_lon,
              t_min_lat,
              t_max_lon,
@@ -2007,7 +2028,7 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
              water_buffers ) ->
         match water_buffers with
         | None -> ()
-        | Some (pos_buf, col_buf, idx_buf, water_index_count, water_scale) ->
+        | Some (pos_buf, col_buf, idx_buf, water_index_count, water_qmax) ->
             if
               Web_utils.intersects
                 (t_min_lon, t_min_lat, t_max_lon, t_max_lat)
@@ -2030,12 +2051,8 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
               Gl.bind_buffer ctx Gl.element_array_buffer (Some idx_buf);
 
               (* Set Uniforms *)
-              Gl.uniform1f ctx water_u.u_water_scale water_scale;
-              Gl.uniform2f ctx water_u.u_tile_range tile_range_lon
-                tile_range_lat;
-              Gl.uniform2f ctx water_u.u_tile_min t_min_lon t_min_lat;
-              Gl.uniform2f ctx water_u.u_tex_min v_min_lon v_min_lat;
-              Gl.uniform2f ctx water_u.u_tex_range v_ext_lon v_ext_lat;
+              set_grid water_u.u_cell water_u.u_qmax water_u.u_tex_min
+                water_u.u_tex_range cell water_qmax;
 
               Gl.draw_elements ctx Gl.triangles water_index_count
                 Gl.unsigned_int 0

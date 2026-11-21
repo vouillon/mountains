@@ -44,6 +44,11 @@ type clc_tile = {
 }
 (** Decoded CLC tile data *)
 
+val sub_cells : int
+(** The land cover's tiles are the sub-cells of a degree, [sub_cells] by
+    [sub_cells]: their vertices run from 0 to their [qmax] across one, [qmax]
+    the header's scale over [sub_cells]. *)
+
 val load_tiles :
   ?pois:bool ->
   lat:float ->
