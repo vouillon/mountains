@@ -210,15 +210,17 @@ let zigzag_encode n =
   let signed = if n >= 0x8000 then n - 0x10000 else n in
   (signed lsl 1) lxor (signed asr 15) land 0xFFFF
 
-(* Apply compression pipeline to a sub-region of the heightmap *)
-let compress heights ~src_row ~src_col ~tile_width ~tile_height =
+(* Apply compression pipeline to a sub-region of the heightmap, its 16-bit
+   heights rounded to multiples of [step] (the nearest, halves up). *)
+let compress ?(step = 1) heights ~src_row ~src_col ~tile_width ~tile_height =
   Printf.eprintf "Converting to 16-bit...\n%!";
   (* Step 1: Convert to 16-bit *)
   let u16_data = Array.make (tile_width * tile_height) 0 in
   for row = 0 to tile_height - 1 do
     for col = 0 to tile_width - 1 do
+      let q = float_to_u16 heights.{src_row + row, src_col + col} in
       u16_data.((row * tile_width) + col) <-
-        float_to_u16 heights.{src_row + row, src_col + col}
+        (if step = 1 then q else min 65535 ((q + (step / 2)) / step * step))
     done
   done;
   Printf.eprintf "Applying parallelogram predictor...\n%!";
@@ -310,12 +312,12 @@ let write_output path width height high_compressed low_compressed =
   Sys.rename tmp_path path
 
 (* Compress and write a single tile *)
-let process_tile heights ~src_row ~src_col ~tile_width ~tile_height output_path
-    =
+let process_tile ?step heights ~src_row ~src_col ~tile_width ~tile_height
+    output_path =
   Printf.eprintf "Processing tile at (%d, %d) -> %s\n%!" src_row src_col
     output_path;
   let high_bytes, low_bytes =
-    compress heights ~src_row ~src_col ~tile_width ~tile_height
+    compress ?step heights ~src_row ~src_col ~tile_width ~tile_height
   in
   Printf.eprintf "Compressing high bytes (%d bytes)...\n%!"
     (Bytes.length high_bytes);
@@ -354,6 +356,15 @@ let sub_tile_size = 600
    row. *)
 let coarse_sub_tile_size = 1200 / 4
 let downsample_k = 0.25
+
+(* The far field's heights in steps of 14 x 14.5 cm, 2.03 m, in the same
+   format: the client reads them as any other. Seen from 20 km and more, that
+   is invisible (renders against the full 14.5 cm: RMSE under 1.5 at zoom 3,
+   nearly all of it label antialiasing, over the Valais and the Rhone plain),
+   and the tiles are 35% smaller, 31% around Mont Blanc: a first view there
+   waits for 1.7 MB less. 1 m gave a quarter less; 4 m nearly half, but
+   visibly. *)
+let coarse_step = 14
 
 let soft_max h00 h10 h01 h11 =
   let m = Float.max (Float.max h00 h10) (Float.max h01 h11) in
@@ -506,9 +517,10 @@ let () =
   if not (Sys.file_exists output_dir) then Unix.mkdir output_dir 0o775;
   (* The grid to cut up, the side of a sub-tile in its samples, and where they
      go. *)
-  let heights, sub_tile_size, subdir =
-    if coarse then (halve (halve heights), coarse_sub_tile_size, "dem4")
-    else (heights, sub_tile_size, "dem")
+  let heights, sub_tile_size, subdir, step =
+    if coarse then
+      (halve (halve heights), coarse_sub_tile_size, "dem4", coarse_step)
+    else (heights, sub_tile_size, "dem", 1)
   in
   let dem_dir = Filename.concat output_dir subdir in
   if not (Sys.file_exists dem_dir) then Unix.mkdir dem_dir 0o775;
@@ -526,7 +538,7 @@ let () =
         Printf.sprintf "%s/%c%02d_%c%03d_%d_%d.dem" dem_dir lat_c (abs lat)
           lon_c (abs lon) tile_row tile_col
       in
-      process_tile heights ~src_row ~src_col ~tile_width:sub_tile_size
+      process_tile ~step heights ~src_row ~src_col ~tile_width:sub_tile_size
         ~tile_height:sub_tile_size output_path
     done
   done;

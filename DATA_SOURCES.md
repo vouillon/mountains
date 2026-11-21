@@ -58,7 +58,11 @@ The same GLO-30 cells at 4 arc-seconds: `compress_dem.exe --coarse <lat> <lon>
 data`, nine 300 × 300 sub-tiles per cell in `data/dem4`. Each sample is a soft
 maximum of its 4 × 4 block (k = 0.25), the same as the client's own downsample
 (`downsample.frag`, `Viewer.downsample_k`), so distant summits keep their
-height. 50 cells (450 files), N41-N47 × E003-E010 without sea, and La Réunion.
+height. The heights are in steps of 2.03 m (14 of DEM1's 14.5 cm,
+`compress_dem.coarse_step`), invisible from 20 km and more, for tiles 35%
+smaller; the current tiles were rounded from the earlier 14.5 cm ones, which
+gives the same heights. 50 cells (450 files, 19.6 MB), N41-N47 × E003-E010
+without sea, and La Réunion.
 
 ## Land cover: `v2/clc`
 
