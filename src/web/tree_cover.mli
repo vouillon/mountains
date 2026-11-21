@@ -32,10 +32,13 @@ val block_id : level:int -> lat:float -> lon:float -> string
 
 val fetch :
   ?timeout_s:float ->
+  ?network:unit Lwt.t ->
   level:int ->
   lat:float ->
   lon:float ->
   unit ->
   t option Lwt.t
-(** Fetch the block of [level] around [lat]/[lon]. Never fails: [None] when it
-    could not be had within [timeout_s] (60 by default). *)
+(** Fetch the block of [level] around [lat]/[lon]: from the cache, or once
+    [network] has resolved (at once by default) from the service. Never fails:
+    [None] when it could not be had within [timeout_s] (60 by default) of that.
+*)

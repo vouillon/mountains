@@ -5042,6 +5042,16 @@ let apply_tree_cover ctx ~terrain_pid =
 
 (* Start fetching the tree cover's blocks for a load at [lat]/[lon], unless
    they are held or on their way already. *)
+(* Resolved by a location's first publish, or by the next load: the tree cover
+   the cache does not have waits for it before going to the network. Nothing
+   waits for the tree cover, but on a first visit its 5.3 MB shared the link
+   with the tiles that do: about 4 s of a first view at 10 Mbit/s. *)
+let tree_cover_gate = ref (Lwt.wait ())
+
+let open_tree_cover_gate () =
+  let t, u = !tree_cover_gate in
+  if Lwt.state t = Lwt.Sleep then Lwt.wakeup_later u ()
+
 let start_tree_cover ~lat ~lon =
   for level = 0 to 1 do
     let block = Tree_cover.block_id ~level ~lat ~lon in
@@ -5059,7 +5069,9 @@ let start_tree_cover ~lat ~lon =
     if not held then begin
       tree_cover_fetching.(level) <- Some (block, generation);
       Lwt.async (fun () ->
-          let* c = Tree_cover.fetch ~level ~lat ~lon () in
+          let* c =
+            Tree_cover.fetch ~network:(fst !tree_cover_gate) ~level ~lat ~lon ()
+          in
           if !context_generation = generation then begin
             if tree_cover_fetching.(level) = Some (block, generation) then
               tree_cover_fetching.(level) <- None;
@@ -5365,6 +5377,8 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
       (match List.assq_opt Hd_dem.lidar_5m hd_fetches with
       | Some p -> Lwt.choose [ Lwt.map ignore !p; sleep 30. ]
       | None -> Lwt.return_unit);
+  open_tree_cover_gate ();
+  tree_cover_gate := Lwt.wait ();
   start_tree_cover ~lat:elat ~lon:elon;
   (* The land cover's tiles again, for a held base whose cover map is baked
      again around the eye below: from the cache, alongside the rings. *)
@@ -6295,6 +6309,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     in
     Web_utils.timed ~track:"Location" "Publish" (fun () ->
         publish ~keep:reused_slots ~slots:in_time);
+    open_tree_cover_gate ();
     (* A partial base: its outer tiles now, then the base baked again whole and
        the location published on it, as it stands -- its rings untouched, all
        within the part that was there. *)

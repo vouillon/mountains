@@ -135,7 +135,7 @@ let parse ~width (b : Brr.Tarray.uint8) =
 let cache_name = Jstr.v Data_cache.name
 let query_opts = Brr_io.Fetch.Cache.query_opts ~ignore_vary:true ()
 
-let fetch_layer ~service ~interpolation box =
+let fetch_layer ~network ~service ~interpolation box =
   let open Brr_io.Fetch in
   let width = width_of box in
   let request = Request.v (Jstr.v (request_url ~service ~interpolation box)) in
@@ -173,6 +173,7 @@ let fetch_layer ~service ~interpolation box =
   match cached with
   | Some _ -> Lwt.return cached
   | None -> (
+      let* () = network in
       let* res = to_lwt (Brr_io.Fetch.request request) in
       match res with
       | Ok resp when Response.ok resp ->
@@ -184,15 +185,16 @@ let fetch_layer ~service ~interpolation box =
           Lwt.return p
       | Ok _ | Error _ -> Lwt.return None)
 
-(* Never fails: [None] when either layer could not be had, in [timeout_s]. *)
-let fetch ?(timeout_s = 60.) ~level ~lat ~lon () =
+(* Never fails: [None] when either layer could not be had, in [timeout_s]
+   from when [network] let it go to the network. *)
+let fetch ?(timeout_s = 60.) ?(network = Lwt.return_unit) ~level ~lat ~lon () =
   let ((west, south, east, north) as box) = bounds ~level ~lat ~lon in
   let both =
     let* d =
-      fetch_layer ~service:"HRL_TreeCoverDensity_2018"
+      fetch_layer ~network ~service:"HRL_TreeCoverDensity_2018"
         ~interpolation:"RSP_BilinearInterpolation" box
     and* l =
-      fetch_layer ~service:"HRL_DominantLeafType2018"
+      fetch_layer ~network ~service:"HRL_DominantLeafType2018"
         ~interpolation:"RSP_NearestNeighbor" box
     in
     match (d, l) with
@@ -215,6 +217,7 @@ let fetch ?(timeout_s = 60.) ~level ~lat ~lon () =
         Lwt.return None
   in
   let timeout =
+    let* () = network in
     let t, w = Lwt.task () in
     ignore
       (Brr.G.set_timeout
