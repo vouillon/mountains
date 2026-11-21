@@ -40,17 +40,41 @@ let to_lwt f =
 (* Worker Pool Manager *)
 
 (* Path to a sub-tile file *)
-let path ?(step = 1) ?(cover = false) ~lat ~lon ~row ~col () =
+let path ?(step = 1) ?cover:(_ = false) ~lat ~lon ~row ~col () =
   let lat_c = if lat >= 0 then 'N' else 'S' in
   let lon_c = if lon >= 0 then 'E' else 'W' in
   let name =
     Printf.sprintf "%c%02d_%c%03d_%d_%d.dem" lat_c (abs lat) lon_c (abs lon) row
       col
   in
-  Web_utils.tiles_url
-    (if cover then Printf.sprintf "clc%d/%s" step name
-     else if step = 1 then "dem/" ^ name
-     else Printf.sprintf "dem%d/%s" step name)
+  (* The far field's two grids come bundled, one file a sub-tile
+     ([far_part]). *)
+  if step = 1 then Web_utils.tiles_url ("dem/" ^ name)
+  else
+    Web_utils.tiles_url
+      (Printf.sprintf "far/%c%02d_%c%03d_%d_%d.far" lat_c (abs lat) lon_c
+         (abs lon) row col)
+
+(* Of a bundle of the far field (Corine/far_bundles.py: "FAR1", the lengths
+   of its two DEM1 tiles, u32 little-endian, then the elevation and the land
+   cover), the one [cover] says, as an ArrayBuffer of its own; [None] when
+   that one does not exist (open sea). *)
+let far_part ~cover (buf : Jv.t) =
+  let b = Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv buf) in
+  let a = Brr.Tarray.to_bigarray1 b in
+  let n = Bigarray.Array1.dim a in
+  let u32 i =
+    a.{i} lor (a.{i + 1} lsl 8) lor (a.{i + 2} lsl 16) lor (a.{i + 3} lsl 24)
+  in
+  if n < 12 || a.{0} <> 70 || a.{1} <> 65 || a.{2} <> 82 || a.{3} <> 49 then
+    failwith "not a FAR1 bundle"
+  else
+    let dem = u32 4 and clc = u32 8 in
+    let start, len = if cover then (12 + dem, clc) else (12, dem) in
+    if len = 0 then None
+    else if start + len > n then failwith "truncated FAR1 bundle"
+    else
+      Some (Jv.call buf "slice" [| Jv.of_int start; Jv.of_int (start + len) |])
 
 (* [step] is the grid's spacing in arcseconds: 1 for the base tiles, 4 for the
    far field's (compress_dem --coarse), whose sample [k] of a degree cell
@@ -206,6 +230,18 @@ let sub_tiles ~step ~cover ~lat ~lon ~size ~loaded ~failed =
                     | Ok buf -> Lwt.return (Brr.Tarray.Buffer.to_jv buf))
               in
 
+              (* A far tile: its part of the bundle, shared with the load of
+                 the other grid ([shared_fetch]). An absent part is open sea,
+                 as an absent tile. *)
+              let* data_jv =
+                if step = 1 then Lwt.return data_jv
+                else
+                  match far_part ~cover data_jv with
+                  | Some part -> Lwt.return part
+                  | None ->
+                      Lwt.fail
+                        (Failure (Printf.sprintf "HTTP 404 (empty) for %s" p))
+              in
               let* w = Worker_pool.acquire () in
               let* res =
                 Lwt.finalize

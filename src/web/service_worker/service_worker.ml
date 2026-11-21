@@ -42,6 +42,7 @@ let is_tile url =
   || String.ends_with ~suffix:".dem" url
   || String.ends_with ~suffix:".clc" url
   || String.ends_with ~suffix:".tc" url
+  || String.ends_with ~suffix:".far" url
   || String.ends_with ~suffix:".tif" url
   || is_hd_dem url
 
@@ -119,7 +120,16 @@ let delete_old_caches () =
    instead: nothing asks for them any more. *)
 let is_retired_tile url =
   List.exists (contains_sub url)
-    [ "/data/dem/"; "/data/dem4/"; "/data/clc/"; "/data/clc4/"; "/data/poi/" ]
+    [
+      "/data/dem/";
+      "/data/dem4/";
+      "/data/clc/";
+      "/data/clc4/";
+      "/data/poi/";
+      (* The far field's two grids, bundled since ([Dem_loader.far_part]) *)
+      "/v2/dem4/";
+      "/v2/clc4/";
+    ]
   (* And the EEA's own tree cover responses: ours replaced them (.tc). *)
   || is_tree_cover url
 

@@ -7,9 +7,9 @@ details; this is the map to them.
 | Data | Source | Licence | Where the client reads it | Made by |
 | --- | --- | --- | --- | --- |
 | Base elevation, 1" | Copernicus GLO-30 DSM | Copernicus DEM licence | `tiles.vouillon.org/v2/dem` (DEM1) | `Corine/compress_dem.ml` |
-| Far-field elevation, 4" | Copernicus GLO-30 DSM | same | `tiles.vouillon.org/v2/dem4` (DEM1) | `compress_dem.exe --coarse` |
+| Far-field elevation, 4" | Copernicus GLO-30 DSM | same | `tiles.vouillon.org/v2/far` (DEM1, bundled) | `compress_dem.exe --coarse`, `Corine/far_bundles.py` |
 | Land cover | CORINE Land Cover 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/clc` (CLC6) | `Corine/extract_tiles.ml` |
-| Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/clc4` | `extract_tiles.exe --coarse` |
+| Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/far` (bundled) | `extract_tiles.exe --coarse`, `Corine/far_bundles.py` |
 | Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
 | Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/tc0`, `tc1` | `Corine/tree_cover_tiles.py`, `src/web/tree_cover.ml` |
 | High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v1` (HDT1) | `Corine/own_tiles.py` |
@@ -55,7 +55,7 @@ from the data cache by the service worker.
 - **Coverage**: 32 cells (1152 files, 195 MB): N42 E008-009, N43-N46 E004-009,
   and La Réunion (S21-S22 E054-056).
 
-## Far-field elevation: `v2/dem4`
+## Far-field elevation: `dem4`, served in `v2/far`
 
 The same GLO-30 cells at 4 arc-seconds: `compress_dem.exe --coarse <lat> <lon>
 <dir>`, nine 300 × 300 sub-tiles per cell in `<dir>/dem4`. Each sample is a soft
@@ -94,7 +94,7 @@ without sea, and La Réunion.
 - **Coverage**: 65 cells, N42-N47 from E004 to E016, and La Réunion, from
   Overture's 2026-11-18.0 release.
 
-## Far-field land cover: `v2/clc4`
+## Far-field land cover: `clc4`, served in `v2/far`
 
 `extract_tiles.exe --coarse --overture <dir> --poi-dir <out>/poi <gpkg>
 <out>/clc4 <tile>`: a grid of
@@ -102,6 +102,16 @@ palette indices at 4", in the DEM1 framing (nine 300 × 300 sub-tiles, the
 elevation range in the header meaningless). OSM water first (a sample is water
 when at least half of its 16 arc-seconds are), patches under 8 samples dropped,
 then CORINE, holes filled with the nearest land, the rest sea. 53 cells.
+
+## The far field's bundles: `v2/far`
+
+Every load wants both grids of the far field, so they are served together:
+`Corine/far_bundles.py <dem4> <clc4> <out>` writes one
+`N45_E006_<row>_<col>.far` per sub-tile, `FAR1`, the two tiles' lengths
+(u32, little-endian), then the elevation tile and the land-cover tile as they
+are, a length of 0 for one that does not exist (open sea). 477 bundles,
+25.6 MB; `Dem_loader.far_part` splits them. The separate `v2/dem4` and
+`v2/clc4` stay on R2, unused.
 
 ## Water, sea and summits: OpenStreetMap via Overture
 
