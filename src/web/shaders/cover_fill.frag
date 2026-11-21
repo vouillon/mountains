@@ -5,7 +5,9 @@
 // and the class of a land texel, the nearest found so far.
 //   u_step = 0: the seeds, a land texel of each cell that has one;
 //   u_step > 0: a pass of the flood, over the cells u_step apart;
-//   u_step < 0: the level itself, its holes filled.
+//   u_step = -1: the level itself, its holes filled;
+//   u_step = -2: the level from [u_far], the far field's land cover as RG8
+//   (the palette index in red), [u_shift] texels off and clamped at its edges.
 precision highp float;
 precision highp int;
 precision highp usampler2D;
@@ -15,6 +17,10 @@ uniform usampler2D u_coarse; // the level above, filled
 uniform int u_step;
 uniform bool u_has_coarse;
 uniform uint u_default; // for a hole no land was found for
+uniform ivec2 u_shift;
+// Normalised rather than integer: on a Pixel 8a, uploading the 2048 x 2048
+// grid as RG8UI took 55 ms, as RG8 a fraction of that.
+uniform highp sampler2D u_far;
 out uint out_value;
 
 const uint HOLE = 255u;
@@ -50,7 +56,12 @@ uint nearest(ivec2 cell, int stride, vec2 p) {
 
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
-  if (u_step < 0) {
+  if (u_step == -2) {
+    ivec2 last = textureSize(u_far, 0) - 1;
+    out_value = uint(
+        texelFetch(u_far, clamp(p + u_shift, ivec2(0), last), 0).r * 255.0 +
+        0.5);
+  } else if (u_step < 0) {
     uint c = texelFetch(u_cover, p, 0).r;
     if (c == HOLE) {
       uint s = nearest(p / 2, 1, vec2(p));

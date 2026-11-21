@@ -1643,8 +1643,26 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
    a square twice the base grid's side, so of half as many samples a side. *)
 let far_step = 4
 
-let rasterize_clc_tiles ?far_cover ?far_anchor ctx ~lat ~lon ~w ~clc_tiles
-    ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
+(* The far field's land cover as an RG8 texture, the palette index in red, for
+   [rasterize_clc_tiles] to copy into its coarsest level. An upload costs its
+   own time only when the GPU has nothing heavy queued: 2-3 ms for these 8 MB
+   on a Pixel 8a, against 55-100 ms made behind the base grid's bake. *)
+let far_cover_texture ctx (cover : Dem_loader.t) =
+  let tex = Gl.create_texture ctx in
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some tex);
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
+  Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 cover.size cover.size 0 Gl.rg
+    Gl.unsigned_byte
+    (Brr.Tarray.of_bigarray (Bigarray.genarray_of_array2 cover.data))
+    0;
+  Gl.bind_texture ctx Gl.texture_2d None;
+  tex
+
+(* [far_texture]: [far_cover_texture] of [far_cover], made earlier by the
+   caller, who keeps it; made and deleted here otherwise. *)
+let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
+    ~clc_tiles ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
     (clc_u : Render_state.clc_raster_uniforms)
     (fill_u : Render_state.cover_fill_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
@@ -1715,6 +1733,11 @@ let rasterize_clc_tiles ?far_cover ?far_anchor ctx ~lat ~lon ~w ~clc_tiles
   Gl.uniform1i ctx fill_u.u_cover 0;
   Gl.uniform1i ctx fill_u.u_seeds 1;
   Gl.uniform1i ctx fill_u.u_coarse 2;
+  (* Not on unit 0 with [u_cover] even where the far copy does not run: two
+     samplers of different types on one unit fail every draw. *)
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx cover_fill_pid (Jstr.v "u_far"))
+    3;
   (* A hole with no land in reach is out at sea *)
   Gl.uniform1ui ctx fill_u.u_default (Clc_palette.get_index 523);
 
@@ -2048,21 +2071,33 @@ let rasterize_clc_tiles ?far_cover ?far_anchor ctx ~lat ~lon ~w ~clc_tiles
         and dy =
           fdiv (centre_lat - far_lat + past (far_lat - 1) + (far_step / 2))
         in
-        let clamp k = max 0 (min (n - 1) k) in
-        let ids = Bigarray.(Array1.create int8_unsigned c_layout (n * n)) in
-        for i = 0 to n - 1 do
-          let row = clamp (i + dy) in
-          for j = 0 to n - 1 do
-            ids.{(i * n) + j} <- cover.data.{row, 2 * clamp (j + dx)}
-          done
-        done;
-        Gl.bind_texture ctx Gl.texture_2d_array (Some cover_map_texture);
-        Gl.pixel_storei ctx Gl.unpack_alignment 1;
-        Gl.tex_sub_image3d ctx Gl.texture_2d_array 0 0 0 (clc_levels - 1) n n 1
-          Gl.red_integer Gl.unsigned_byte
-          (Brr.Tarray.of_bigarray1 ids);
-        Gl.pixel_storei ctx Gl.unpack_alignment 4;
-        Gl.bind_texture ctx Gl.texture_2d_array None
+        (* Shifted and clamped on the GPU ([cover_fill.frag], u_step -2): a
+           palette index is the low byte of a sample, and picking those out on
+           the CPU was a 4-million-sample loop, 44 ms of a load on a Pixel 8a
+           under wasm_of_ocaml. *)
+        let src =
+          match far_texture with
+          | Some t -> t
+          | None -> far_cover_texture ctx cover
+        in
+        Gl.active_texture ctx Gl.texture3;
+        Gl.bind_texture ctx Gl.texture_2d (Some src);
+        Gl.bind_vertex_array ctx None;
+        Gl.disable ctx Gl.depth_test;
+        Gl.use_program ctx cover_fill_pid;
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some fill_fbo);
+        Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+          cover_map_texture 0 (clc_levels - 1);
+        Gl.viewport ctx 0 0 n n;
+        Gl.uniform1i ctx fill_u.u_step (-2);
+        Gl.uniform2i ctx
+          (Gl.get_uniform_location ctx cover_fill_pid (Jstr.v "u_shift"))
+          dx dy;
+        Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+        Gl.bind_framebuffer ctx Gl.framebuffer None;
+        Gl.bind_texture ctx Gl.texture_2d None;
+        Gl.active_texture ctx Gl.texture0;
+        if far_texture = None then Gl.delete_texture ctx src
       end)
     far_cover;
 
@@ -5678,6 +5713,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
             }
           end
       | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles, progress) ->
+          (* Before the bakes below queue up on the GPU (see
+             [far_cover_texture]). *)
+          let far_texture = Option.map (far_cover_texture ctx) far_cover in
           let relief_texture, relief_normal_texture, ao_texture =
             bake_base_relief tile
           in
@@ -5724,10 +5762,12 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           (* GPU rasterize CLC tiles to FBO *)
           let cover_map_texture =
             time_gpu ctx "rasterize_clc_tiles" (fun () ->
-                rasterize_clc_tiles ?far_cover ctx ~lat:alat ~lon:alon ~w
-                  ~clc_tiles ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
-                  clc_raster_uniforms cover_fill_uniforms water_raster_uniforms)
+                rasterize_clc_tiles ?far_cover ?far_texture ctx ~lat:alat
+                  ~lon:alon ~w ~clc_tiles ~clc_raster_pid ~cover_fill_pid
+                  ~water_raster_pid clc_raster_uniforms cover_fill_uniforms
+                  water_raster_uniforms)
           in
+          Option.iter (Gl.delete_texture ctx) far_texture;
           {
             anchor_lat;
             anchor_lon;
