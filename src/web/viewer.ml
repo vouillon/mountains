@@ -2825,6 +2825,9 @@ type trees_gl = {
   u_far : Gl.uniform_location;
   u_shadow_pass : Gl.uniform_location;
   u_shadow_view_proj : Gl.uniform_location;
+  any_pid : Gl.program;
+  any_vao : Gl.vertex_array_object;  (** [found]'s cells as points *)
+  any_fbo : Gl.framebuffer;  (** 1 x 1 *)
 }
 
 type trees_inputs = {
@@ -2843,6 +2846,10 @@ let tree_cover_find : ((float * float * float * float) option * float) ref =
   ref (None, 1400.)
 
 let trees_search : (string * int * Gl.sync option) option ref = ref None
+
+(* Whether the search found any tree, as an occlusion query
+   ([collect_trees]), once it has a result. *)
+let trees_query : Gl.query option ref = ref None
 let trees_found : (string * int * int array) option ref = ref None
 let trees_stale = ref false
 let trees_ready : (unit -> unit) ref = ref (fun () -> ())
@@ -2915,6 +2922,28 @@ let get_trees_gl ctx =
         pid
       in
       let draw_pid = Web_utils.create_program ctx tree_program in
+      (* A search's cells drawn as points, those without a tree outside the
+         clip volume, under an occlusion query: whether there is any tree to
+         read back. *)
+      let any_pid =
+        Web_utils.create_program ctx
+          {
+            vertex_shader =
+              "#version 300 es\n\
+               in vec4 a_pos;\n\
+               void main() {\n\
+              \  gl_PointSize = 1.0;\n\
+              \  gl_Position = a_pos.w > 0.0 ? vec4(0.0, 0.0, 0.0, 1.0)\n\
+              \                              : vec4(0.0, 0.0, 2.0, 1.0);\n\
+               }\n";
+            fragment_shader =
+              "#version 300 es\n\
+               precision mediump float;\n\
+               out vec4 c;\n\
+               void main() { c = vec4(1.0); }\n";
+            attributes = [];
+          }
+      in
       (* Bound for good: nothing else uses unit 0's 3D target. *)
       ignore (make_tree_noise ctx);
       let found = Gl.create_buffer ctx in
@@ -2923,6 +2952,22 @@ let get_trees_gl ctx =
         (tree_grid * tree_grid * 32)
         Gl.stream_read;
       Gl.bind_buffer ctx Gl.array_buffer None;
+      let any_vao = Gl.create_vertex_array ctx in
+      Gl.bind_vertex_array ctx (Some any_vao);
+      Gl.bind_buffer ctx Gl.array_buffer (Some found);
+      Gl.enable_vertex_attrib_array ctx 0;
+      Gl.vertex_attrib_pointer ctx 0 4 Gl.float false 32 0;
+      Gl.bind_vertex_array ctx None;
+      Gl.bind_buffer ctx Gl.array_buffer None;
+      let any_fbo = Gl.create_framebuffer ctx in
+      let rb = Gl.create_renderbuffer ctx in
+      Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
+      Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.rgba8 1 1;
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some any_fbo);
+      Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.color_attachment0
+        Gl.renderbuffer rb;
+      Gl.bind_framebuffer ctx Gl.framebuffer None;
+      Gl.bind_renderbuffer ctx Gl.renderbuffer None;
       let u name = Gl.get_uniform_location ctx draw_pid (Jstr.v name) in
       let t =
         {
@@ -2940,6 +2985,9 @@ let get_trees_gl ctx =
           u_far = u "u_far";
           u_shadow_pass = u "u_shadowPass";
           u_shadow_view_proj = u "u_shadowViewProj";
+          any_pid;
+          any_vao;
+          any_fbo;
         }
       in
       trees_gl := Some t;
@@ -3102,6 +3150,24 @@ let tree_readback =
 let collect_trees ctx =
   match (!trees_search, !trees_gl) with
   | Some (b, g, None), Some t when g = !context_generation && t.gen = g ->
+      (* Whether it found any tree: at Mont Blanc, where glaciers and water
+         leave none, reading back nothing took 19 ms of a Pixel 8a's main
+         thread. The query's answer comes with the fence below. *)
+      let scissor = Gl.is_enabled ctx Gl.scissor_test in
+      if scissor then Gl.disable ctx Gl.scissor_test;
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some t.any_fbo);
+      Gl.viewport ctx 0 0 1 1;
+      Gl.use_program ctx t.any_pid;
+      Gl.bind_vertex_array ctx (Some t.any_vao);
+      let q = Gl.create_query ctx in
+      Gl.begin_query ctx Gl.any_samples_passed_conservative q;
+      Gl.draw_arrays ctx Gl.points 0 (tree_grid * tree_grid);
+      Gl.end_query ctx Gl.any_samples_passed_conservative;
+      Gl.bind_vertex_array ctx None;
+      Gl.bind_framebuffer ctx Gl.framebuffer None;
+      if scissor then Gl.enable ctx Gl.scissor_test;
+      Option.iter (Gl.delete_query ctx) !trees_query;
+      trees_query := Some q;
       let sync = Gl.fence_sync ctx Gl.sync_gpu_commands_complete 0 in
       Gl.flush ctx;
       trees_search := Some (b, g, Some sync)
@@ -3110,90 +3176,112 @@ let collect_trees ctx =
       then begin
         trees_search := None;
         Gl.delete_sync ctx sync;
-        let t0 = now_ms () in
-        let n = tree_grid * tree_grid in
-        let raw = Lazy.force tree_readback in
-        Gl.bind_buffer ctx Gl.copy_read_buffer (Some t.found);
-        Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0
-          (Brr.Tarray.of_bigarray1 raw);
-        Gl.bind_buffer ctx Gl.copy_read_buffer None;
-        let t_read = now_ms () -. t0 in
-        (* One pass over the read back (element access to a Bigarray is slow
+        let none =
+          match !trees_query with
+          | Some q ->
+              trees_query := None;
+              let none =
+                Jv.to_bool
+                  (Gl.get_query_parameter ctx q Gl.query_result_available)
+                && Jv.to_int (Gl.get_query_parameter ctx q Gl.query_result) = 0
+              in
+              Gl.delete_query ctx q;
+              none
+          | None -> false
+        in
+        if none then begin
+          Format.eprintf "Trees: none, nothing read back@.";
+          trees_found := Some (b, g, Array.make 4 0);
+          force_redraw := true;
+          !trees_ready ()
+        end
+        else
+          let t0 = now_ms () in
+          let n = tree_grid * tree_grid in
+          let raw = Lazy.force tree_readback in
+          Gl.bind_buffer ctx Gl.copy_read_buffer (Some t.found);
+          Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0
+            (Brr.Tarray.of_bigarray1 raw);
+          Gl.bind_buffer ctx Gl.copy_read_buffer None;
+          let t_read = now_ms () -. t0 in
+          (* One pass over the read back (element access to a Bigarray is slow
            under wasm_of_ocaml) for each cell's distance and group (see
            [tree_group_vertices]; '\255' without a tree). *)
-        let dist = Array.make n 0. in
-        let groups = Bytes.make n '\255' in
-        let counts = Array.make 4 0 in
-        for i = 0 to n - 1 do
-          let o = i * 8 in
-          if raw.{o + 3} > 0. then begin
-            let d = Float.hypot raw.{o} raw.{o + 1} in
-            let k =
-              (if raw.{o + 5} > 0.5 then 0 else 2)
-              + if d > tree_far then 1 else 0
-            in
-            dist.(i) <- d;
-            Bytes.unsafe_set groups i (Char.unsafe_chr k);
-            counts.(k) <- counts.(k) + 1
-          end
-        done;
-        let firsts = Array.make 4 0 in
-        for k = 1 to 3 do
-          firsts.(k) <- firsts.(k - 1) + counts.(k - 1)
-        done;
-        let total = firsts.(3) + counts.(3) in
-        (* Each group nearest first: the eye stays put for the whole location,
+          let dist = Array.make n 0. in
+          let groups = Bytes.make n '\255' in
+          let counts = Array.make 4 0 in
+          for i = 0 to n - 1 do
+            let o = i * 8 in
+            if raw.{o + 3} > 0. then begin
+              let d = Float.hypot raw.{o} raw.{o + 1} in
+              let k =
+                (if raw.{o + 5} > 0.5 then 0 else 2)
+                + if d > tree_far then 1 else 0
+              in
+              dist.(i) <- d;
+              Bytes.unsafe_set groups i (Char.unsafe_chr k);
+              counts.(k) <- counts.(k) + 1
+            end
+          done;
+          let firsts = Array.make 4 0 in
+          for k = 1 to 3 do
+            firsts.(k) <- firsts.(k - 1) + counts.(k - 1)
+          done;
+          let total = firsts.(3) + counts.(3) in
+          (* Each group nearest first: the eye stays put for the whole location,
            so drawn in this order the depth test rejects most of a forest's
            hidden crowns before they are shaded. Half a metre is order enough
            for that: a counting sort on it, a comparison sort of this many
            trees taking 160 ms. *)
-        let buckets = 2048 in
-        let key i =
-          (Char.code (Bytes.unsafe_get groups i) * buckets)
-          + min (buckets - 1) (int_of_float (dist.(i) *. 2.))
-        in
-        let next = Array.make ((4 * buckets) + 1) 0 in
-        for i = 0 to n - 1 do
-          if Bytes.unsafe_get groups i <> '\255' then begin
-            let k = key i + 1 in
-            next.(k) <- next.(k) + 1
-          end
-        done;
-        for k = 1 to 4 * buckets do
-          next.(k) <- next.(k) + next.(k - 1)
-        done;
-        let out = Bigarray.(Array1.create float32 c_layout (max 1 total * 8)) in
-        for i = 0 to n - 1 do
-          if Bytes.unsafe_get groups i <> '\255' then begin
-            let k = key i in
-            (* A blit is a memcpy: faster than eight element copies, and
+          let buckets = 2048 in
+          let key i =
+            (Char.code (Bytes.unsafe_get groups i) * buckets)
+            + min (buckets - 1) (int_of_float (dist.(i) *. 2.))
+          in
+          let next = Array.make ((4 * buckets) + 1) 0 in
+          for i = 0 to n - 1 do
+            if Bytes.unsafe_get groups i <> '\255' then begin
+              let k = key i + 1 in
+              next.(k) <- next.(k) + 1
+            end
+          done;
+          for k = 1 to 4 * buckets do
+            next.(k) <- next.(k) + next.(k - 1)
+          done;
+          let out =
+            Bigarray.(Array1.create float32 c_layout (max 1 total * 8))
+          in
+          for i = 0 to n - 1 do
+            if Bytes.unsafe_get groups i <> '\255' then begin
+              let k = key i in
+              (* A blit is a memcpy: faster than eight element copies, and
                than a copy within one typed array, which took four times as
                long. *)
-            Bigarray.Array1.blit
-              (Bigarray.Array1.sub raw (i * 8) 8)
-              (Bigarray.Array1.sub out (next.(k) * 8) 8);
-            next.(k) <- next.(k) + 1
-          end
-        done;
-        Gl.bind_buffer ctx Gl.array_buffer (Some t.instances);
-        Gl.buffer_data ctx Gl.array_buffer
-          (Brr.Tarray.of_bigarray1 out)
-          Gl.static_draw;
-        Gl.bind_buffer ctx Gl.array_buffer None;
-        Array.iteri
-          (fun k vao -> point_trees ctx t vao ~first:firsts.(k))
-          t.group_vaos;
-        Format.eprintf
-          "Trees: %d conifers, %d broadleaves (%d, %d within %.0f m), read \
-           back in %.0f ms, %.0f of them the read@."
-          (counts.(0) + counts.(1))
-          (counts.(2) + counts.(3))
-          counts.(0) counts.(2) tree_far
-          (now_ms () -. t0)
-          t_read;
-        trees_found := Some (b, g, counts);
-        force_redraw := true;
-        !trees_ready ()
+              Bigarray.Array1.blit
+                (Bigarray.Array1.sub raw (i * 8) 8)
+                (Bigarray.Array1.sub out (next.(k) * 8) 8);
+              next.(k) <- next.(k) + 1
+            end
+          done;
+          Gl.bind_buffer ctx Gl.array_buffer (Some t.instances);
+          Gl.buffer_data ctx Gl.array_buffer
+            (Brr.Tarray.of_bigarray1 out)
+            Gl.static_draw;
+          Gl.bind_buffer ctx Gl.array_buffer None;
+          Array.iteri
+            (fun k vao -> point_trees ctx t vao ~first:firsts.(k))
+            t.group_vaos;
+          Format.eprintf
+            "Trees: %d conifers, %d broadleaves (%d, %d within %.0f m), read \
+             back in %.0f ms, %.0f of them the read@."
+            (counts.(0) + counts.(1))
+            (counts.(2) + counts.(3))
+            counts.(0) counts.(2) tree_far
+            (now_ms () -. t0)
+            t_read;
+          trees_found := Some (b, g, counts);
+          force_redraw := true;
+          !trees_ready ()
       end
   | Some _, _ -> trees_search := None
   | None, _ -> ()
