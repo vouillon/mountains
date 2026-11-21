@@ -67,7 +67,13 @@ val raw_samples :
 (** The samples, [size] x [size], row 0 northernmost; nodata below -1000. *)
 
 val fetch :
-  ?timeout_s:float -> layer -> lat:float -> lon:float -> raw option Lwt.t
+  ?timeout_s:float ->
+  ?network:unit Lwt.t ->
+  ?eye:bool ->
+  layer ->
+  lat:float ->
+  lon:float ->
+  raw option Lwt.t
 (** Fetch [layer]'s block around [lat]/[lon]. Never fails: [None] (not a single
     tile obtained, every request having failed) means the caller must carry on
     without this layer. Individual tiles that fail -- including the 404 of a
@@ -75,7 +81,12 @@ val fetch :
     -- are nodata, which {!blend} turns back into the coarser surface. The
     deadline is [timeout_s] seconds without a tile arriving, 25 by default, once
     the block holds one: an empty block goes on waiting. See {!raw_rest} for the
-    tiles that arrive past it. *)
+    tiles that arrive past it.
+
+    A tile the data cache does not have waits for [network] first. With [eye],
+    the tiles within the layer's fade of the block's centre, where the eye is,
+    do not wait, and the block is handed out once they are in, the others
+    following as its {!raw_rest}. *)
 
 val block_id : layer -> lat:float -> lon:float -> string
 (** Identity of the block [fetch] would ask for at [lat]/[lon]: two locations

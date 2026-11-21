@@ -585,13 +585,15 @@
         (global.set $g_turned (i32.const 0))
         (return (i32.const 0))))
 
-    (local.set $fade_nd (f64.min (local.get $fade_x) (local.get $fade_y)))
+    ;; At most the 255 the distances saturate at, as in blend_core.ml.
+    (local.set $fade_nd (f64.min (f64.const 255)
+      (f64.min (local.get $fade_x) (local.get $fade_y))))
     (if (local.get $has_nodata)
       (then
         ;; Grow the nodata box by ceil(fade_nodata): outside it only "at least
         ;; fade_nodata" matters. A fade wider than the saturation point would
         ;; make the distances outside observable, so fall back to the whole
-        ;; raster -- no layer does that today (l13 157, both rings 126).
+        ;; raster -- which the clamp above now rules out.
         (local.set $rad (i32.trunc_sat_f64_s (f64.ceil (local.get $fade_nd))))
         (if (i32.gt_s (local.get $rad) (i32.const 255))
           (then

@@ -710,8 +710,17 @@ let describe layer =
       Printf.sprintf "Own %s at %g m" product metres
 
 (* Fetch only: the blend needs the base tile, which is being fetched in
-   parallel. Never fails: [None] means "render from the base tile alone". *)
-let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
+   parallel. Never fails: [None] means "render from the base tile alone".
+
+   A tile the data cache does not have waits for [network] before going out
+   (a location's first view: the rings shared the link with the tiles it waits
+   for, 9 MB of 23 at Mont Blanc). With [eye], those around the block's centre
+   -- the ground within the ring's fade of the eye, whose height comes from the
+   finest ring -- go at once, and the block is handed out as soon as they are in, the others
+   following as its [rest]: the first view stands at the right height, and
+   the rest of the ring fades in. *)
+let fetch ?(timeout_s = timeout_s) ?(network = Lwt.return_unit) ?(eye = false)
+    layer ~lat ~lon : raw option Lwt.t =
   let size = layer.size in
   match plan layer ~lat ~lon with
   | None -> Lwt.return None
@@ -737,13 +746,37 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
       let rest, set_rest = Lwt.wait () in
       let t0 = Brr.(Performance.now_ms G.performance) in
       let last = ref t0 in
-      (* Every request is issued at once: the browser multiplexes them over one
-     HTTP/2 connection. *)
+      (* The requests about the block's centre: blocks are anchored on the
+     tile corner nearest the location, so the eye is within half a tile of it.
+     All the ground within the ring's fade of the eye, or the fade towards the
+     missing tiles would mix the surface beneath into the eye's height (10 m
+     at Mont Blanc's summit, with only the 2 x 2 tiles about the centre). *)
+      let at_eye req =
+        let c = size / 2 in
+        let reach step =
+          int_of_float (Float.ceil (layer.fade_metres /. step)) + (req.px / 2)
+        in
+        let rx = reach frame.step_x_m and ry = reach frame.step_y_m in
+        eye
+        && req.dst_row < c + ry
+        && req.dst_row + req.px > c - ry
+        && req.dst_col < c + rx
+        && req.dst_col + req.px > c - rx
+      in
+      let gate req =
+        if at_eye req then Lwt.return_unit
+        else
+          let* cached = to_lwt (Web_utils.is_cached (Jstr.v req.url)) in
+          if cached then Lwt.return_unit else network
+      in
+      (* Every request is issued at once, past its gate: the browser
+     multiplexes them over one HTTP/2 connection. *)
       let tasks =
         List.map
           (fun req ->
             Lwt.catch
               (fun () ->
+                let* () = gate req in
                 let* tile = fetch_one req in
                 let full =
                   if not !published then full
@@ -785,6 +818,14 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
                 Lwt.return ()))
           reqs
       in
+      (* With [eye], the block is handed out once its tiles at the eye are in,
+     unless none is: the others come as its [rest]. *)
+      let first, others =
+        if List.exists at_eye reqs then
+          List.partition (fun (req, _) -> at_eye req) (List.combine reqs tasks)
+          |> fun (a, b) -> (List.map snd a, List.map snd b)
+        else (tasks, [])
+      in
       let publish () =
         published := true;
         Web_utils.measure ~track:"Rings" (describe layer ^ " fetch") t0;
@@ -799,45 +840,64 @@ let fetch ?(timeout_s = timeout_s) layer ~lat ~lon : raw option Lwt.t =
               rest;
             }
       in
-      let all =
-        let* () = Lwt.join tasks in
-        (* The timeout got there first; [Lwt.choose] discards this. *)
-        if !published then begin
-          (match !late with
-          | None -> Lwt.wakeup_later set_rest None
-          | Some copy ->
-              Web_utils.measure ~track:"Rings"
-                (describe layer ^ " fetch, past the timeout")
-                t0;
-              Format.eprintf "%s: %d/%d tiles in %.0f ms, past the timeout@."
-                (describe layer) !arrived total
-                (Brr.(Performance.now_ms G.performance) -. t0);
-              Lwt.wakeup_later set_rest
-                (Some
-                   {
-                     layer;
-                     samples = Brr.Tarray.to_bigarray1 copy;
-                     frame;
-                     missing = total - !arrived;
-                     rest = Lwt.return None;
-                   }));
-          Lwt.return None
-        end
-        else begin
-          Lwt.wakeup_later set_rest None;
-          if !arrived = 0 then
-            Brr.Console.error
-              [
-                Jstr.v
-                  (Printf.sprintf "%s: no tile could be fetched"
-                     (describe layer));
-              ]
-          else
-            Format.eprintf "%s: %d/%d tiles in %.0f ms@." (describe layer)
+      (* Once every request has settled, the tiles that came after the block
+     was handed out, as its [rest]. *)
+      let settle_rest why =
+        match !late with
+        | None -> Lwt.wakeup_later set_rest None
+        | Some copy ->
+            Web_utils.measure ~track:"Rings"
+              (describe layer ^ " fetch, " ^ why)
+              t0;
+            Format.eprintf "%s: %d/%d tiles in %.0f ms, %s@." (describe layer)
               !arrived total
-              (Brr.(Performance.now_ms G.performance) -. t0);
-          Lwt.return (publish ())
+              (Brr.(Performance.now_ms G.performance) -. t0)
+              why;
+            Lwt.wakeup_later set_rest
+              (Some
+                 {
+                   layer;
+                   samples = Brr.Tarray.to_bigarray1 copy;
+                   frame;
+                   missing = total - !arrived;
+                   rest = Lwt.return None;
+                 })
+      in
+      let all =
+        let* () = Lwt.join first in
+        if (not !published) && others <> [] && !arrived > 0 then begin
+          Format.eprintf "%s: %d tiles at the eye in %.0f ms@." (describe layer)
+            !arrived
+            (Brr.(Performance.now_ms G.performance) -. t0);
+          let r = publish () in
+          Lwt.async (fun () ->
+              let* () = Lwt.join others in
+              settle_rest "the rest";
+              Lwt.return_unit);
+          Lwt.return r
         end
+        else
+          let* () = Lwt.join others in
+          (* The timeout got there first; [Lwt.choose] discards this. *)
+          if !published then begin
+            settle_rest "past the timeout";
+            Lwt.return None
+          end
+          else begin
+            Lwt.wakeup_later set_rest None;
+            if !arrived = 0 then
+              Brr.Console.error
+                [
+                  Jstr.v
+                    (Printf.sprintf "%s: no tile could be fetched"
+                       (describe layer));
+                ]
+            else
+              Format.eprintf "%s: %d/%d tiles in %.0f ms@." (describe layer)
+                !arrived total
+                (Brr.(Performance.now_ms G.performance) -. t0);
+            Lwt.return (publish ())
+          end
       in
       let timeout =
         let t, w = Lwt.task () in

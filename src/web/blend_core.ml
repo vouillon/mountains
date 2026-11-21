@@ -231,7 +231,11 @@ let run p ~(samples : (float, float32_elt, c_layout) Array1.t)
   else begin
     let g = geometry p in
     let dist = if !has_nodata then Some (nodata_distance ~size src) else None in
-    let fade_nodata = Float.min p.fade_x p.fade_y in
+    (* At most the 255 the distances saturate at: wider (the 1 m ring's 300),
+       no sample of a block with nodata anywhere was more than smoothstep
+       (255 / 300) = 94% the refinement, and at Mont Blanc's summit the eye
+       stood 0.8 m off the ground it would have once the block was whole. *)
+    let fade_nodata = Float.min 255. (Float.min p.fade_x p.fade_y) in
     (* In metres, decoded with the source's own quantisation: the surface beneath
        may itself be a refinement with a scale of its own. Indices are absolute
        source ones; clamping them into the window reproduces the clamp to the

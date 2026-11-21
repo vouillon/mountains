@@ -5011,6 +5011,17 @@ let apply_canopy ctx pids ~placeholder =
     pids;
   apply_trees_stand ctx pids
 
+(* Resolved by a location's first publish, or by the next load: the tree cover
+   and the rings the cache does not have wait for it before going to the
+   network. Nothing waits for them, but on a first visit they shared the link
+   with the tiles that do: the tree cover's 5.3 MB about 4 s of a first view
+   at 10 Mbit/s, the rings' 9 MB at Mont Blanc 7 s. *)
+let first_view_gate = ref (Lwt.wait ())
+
+let open_first_view_gate () =
+  let t, u = !first_view_gate in
+  if Lwt.state t = Lwt.Sleep then Lwt.wakeup_later u ()
+
 (* Start fetching the canopies for the rings a load at [lat]/[lon] will have,
    unless they are held or on their way already. The service sends some
    1.6 MB a second, whatever the number of requests sharing it, and a load
@@ -5042,7 +5053,9 @@ let start_canopy ~after ~lat ~lon =
           let* raw =
             (* Another location may have been asked for meanwhile. *)
             if !context_generation = generation && canopy_asked.(kind) = block
-            then Hd_dem.fetch ~timeout_s:120. canopy_layers.(kind) ~lat ~lon
+            then
+              Hd_dem.fetch ~timeout_s:120. ~network:(fst !first_view_gate)
+                canopy_layers.(kind) ~lat ~lon
             else Lwt.return None
           in
           if !context_generation = generation then begin
@@ -5204,16 +5217,6 @@ let apply_tree_cover ctx ~terrain_pid =
 
 (* Start fetching the tree cover's blocks for a load at [lat]/[lon], unless
    they are held or on their way already. *)
-(* Resolved by a location's first publish, or by the next load: the tree cover
-   the cache does not have waits for it before going to the network. Nothing
-   waits for the tree cover, but on a first visit its 5.3 MB shared the link
-   with the tiles that do: about 4 s of a first view at 10 Mbit/s. *)
-let tree_cover_gate = ref (Lwt.wait ())
-
-let open_tree_cover_gate () =
-  let t, u = !tree_cover_gate in
-  if Lwt.state t = Lwt.Sleep then Lwt.wakeup_later u ()
-
 let start_tree_cover ~lat ~lon =
   for level = 0 to 1 do
     let block = Tree_cover.block_id ~level ~lat ~lon in
@@ -5232,7 +5235,7 @@ let start_tree_cover ~lat ~lon =
       tree_cover_fetching.(level) <- Some (block, generation);
       Lwt.async (fun () ->
           let* c =
-            Tree_cover.fetch ~network:(fst !tree_cover_gate) ~level ~lat ~lon ()
+            Tree_cover.fetch ~network:(fst !first_view_gate) ~level ~lat ~lon ()
           in
           if !context_generation = generation then begin
             if tree_cover_fetching.(level) = Some (block, generation) then
@@ -5521,6 +5524,11 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
      can take [Hd_dem.timeout_s] to answer, and awaiting it holds the whole
      location -- base tiles that may well be in cache included -- behind that
      ceiling. *)
+  open_first_view_gate ();
+  first_view_gate := Lwt.wait ();
+  (* The rings wait for the first view, but for the finest one's tiles about
+     the eye, whose height it gives ([Hd_dem.fetch ~eye]). *)
+  let finest = List.nth hd_layers (List.length hd_layers - 1) in
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
     |> List.map (fun layer ->
@@ -5530,7 +5538,8 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                (Option.map
                   (Hd_dem.reanchor_raw ~old_anchor:plan_arcsec
                      ~anchor:(anchor_lat, anchor_lon)))
-               (Hd_dem.fetch layer ~lat:elat ~lon:elon)) ))
+               (Hd_dem.fetch ~network:(fst !first_view_gate)
+                  ~eye:(layer == finest) layer ~lat:elat ~lon:elon)) ))
   in
   start_canopy ~lat:elat ~lon:elon
     ~after:
@@ -5539,8 +5548,6 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
       (match List.assq_opt Hd_dem.lidar_5m hd_fetches with
       | Some p -> Lwt.choose [ Lwt.map ignore !p; sleep 30. ]
       | None -> Lwt.return_unit);
-  open_tree_cover_gate ();
-  tree_cover_gate := Lwt.wait ();
   start_tree_cover ~lat:elat ~lon:elon;
   (* The land cover's tiles again, for a held base whose cover map is baked
      again around the eye below: from the cache, alongside the rings. *)
@@ -6476,7 +6483,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     in
     Web_utils.timed ~track:"Location" "Publish" (fun () ->
         publish ~keep:reused_slots ~slots:in_time);
-    open_tree_cover_gate ();
+    open_first_view_gate ();
     (* A partial base: its outer tiles now, then the base baked again whole and
        the location published on it, as it stands -- its rings untouched, all
        within the part that was there. *)
