@@ -372,33 +372,39 @@ let load_full_clc_tile path_str =
         }
   | _ -> Lwt.fail (Failure "Invalid response type for CLC")
 
-(* Load CLC tiles in parallel *)
-let load_tiles ?(pois = false) ~lat ~lon ~size () =
-  let open Lwt.Syntax in
+(* The window of [load_tiles] -- its corner and extent in degrees -- and the
+   tiles it takes, counted from 0 degrees. *)
+let window ~pois ~lat ~lon ~size =
   let size_deg = float size /. 3600. in
   let dem_min_lat = lat -. (size_deg /. 2.) in
   let dem_max_lat = lat +. (size_deg /. 2.) in
   let dem_min_lon = lon -. (size_deg /. 2.) in
   let dem_max_lon = lon +. (size_deg /. 2.) in
-  let dem_range_lon = dem_max_lon -. dem_min_lon in
-  let dem_range_lat = dem_max_lat -. dem_min_lat in
-
   let per_degree = float (3600 / cell_arcsec ~pois) in
   let tile v = int_of_float (floor (v *. per_degree)) in
-  let min_tile_lat = tile dem_min_lat in
-  let max_tile_lat = tile dem_max_lat in
-  let min_tile_lon = tile dem_min_lon in
-  let max_tile_lon = tile dem_max_lon in
+  let cells = ref [] in
+  for tile_lat = tile dem_min_lat to tile dem_max_lat do
+    for tile_lon = tile dem_min_lon to tile dem_max_lon do
+      cells := (tile_lat, tile_lon) :: !cells
+    done
+  done;
+  ( ( dem_min_lon,
+      dem_min_lat,
+      dem_max_lon -. dem_min_lon,
+      dem_max_lat -. dem_min_lat ),
+    List.rev !cells )
 
-  let tasks = ref [] in
-  for tile_lat = min_tile_lat to max_tile_lat do
-    for tile_lon = min_tile_lon to max_tile_lon do
-      let path = tile_path ~pois tile_lat tile_lon in
-      let task =
+(* Those tiles, in parallel *)
+let load_cells ~pois cells =
+  let open Lwt.Syntax in
+  let range = float (cell_arcsec ~pois) /. 3600. in
+  let tasks =
+    List.map
+      (fun (tile_lat, tile_lon) ->
+        let path = tile_path ~pois tile_lat tile_lon in
         Lwt.catch
           (fun () ->
             let* tile = load_full_clc_tile path in
-            let range = 1. /. per_degree in
             Lwt.return (Some (tile, range, range)))
           (fun exn ->
             (* Not every tile is published (none for open sea), so a 404 is
@@ -413,13 +419,59 @@ let load_tiles ?(pois = false) ~lat ~lon ~size () =
                       (Printf.sprintf "CLC tile %s not loaded: %s" path
                          (Printexc.to_string exn));
                   ]);
-            Lwt.return None)
-      in
-      tasks := task :: !tasks
-    done
-  done;
+            Lwt.return None))
+      cells
+  in
+  let* results = Lwt.all tasks in
+  Lwt.return (List.filter_map Fun.id results)
 
-  let* results = Lwt.all !tasks in
-  let tiles = List.filter_map (fun x -> x) results in
+let load_tiles ?(pois = false) ~lat ~lon ~size () =
+  let open Lwt.Syntax in
+  let (min_lon, min_lat, range_lon, range_lat), cells =
+    window ~pois ~lat ~lon ~size
+  in
+  let* tiles = load_cells ~pois cells in
+  Lwt.return (min_lon, min_lat, range_lon, range_lat, tiles)
 
-  Lwt.return (dem_min_lon, dem_min_lat, dem_range_lon, dem_range_lat, tiles)
+let load_progressive ~lat ~lon ~size
+    ~inner:(i_min_lon, i_min_lat, i_max_lon, i_max_lat) =
+  let open Lwt.Syntax in
+  let (min_lon, min_lat, range_lon, range_lat), cells =
+    window ~pois:false ~lat ~lon ~size
+  in
+  let per_degree = float sub_cells in
+  let tile v = int_of_float (floor (v *. per_degree)) in
+  let la0 = tile i_min_lat and la1 = tile i_max_lat in
+  let lo0 = tile i_min_lon and lo1 = tile i_max_lon in
+  let inner, outer =
+    List.partition
+      (fun (la, lo) -> la >= la0 && la <= la1 && lo >= lo0 && lo <= lo1)
+      cells
+  in
+  (* The inner tiles are wanted either way: fetched while the cache is looked
+     into for the others. *)
+  let inner_tiles = load_cells ~pois:false inner in
+  let* cached =
+    Lwt.all
+      (List.map
+         (fun (la, lo) ->
+           let t, u = Lwt.wait () in
+           Fut.await
+             (Web_utils.is_cached (Jstr.v (tile_path la lo)))
+             (Lwt.wakeup u);
+           t)
+         outer)
+  in
+  let window = (min_lon, min_lat, range_lon, range_lat) in
+  if List.for_all Fun.id cached then
+    let* a = inner_tiles and* b = load_cells ~pois:false outer in
+    Lwt.return (window, a @ b, None)
+  else
+    let* a = inner_tiles in
+    let box =
+      ( float lo0 /. per_degree,
+        float la0 /. per_degree,
+        float (lo1 + 1) /. per_degree,
+        float (la1 + 1) /. per_degree )
+    in
+    Lwt.return (window, a, Some (box, fun () -> load_cells ~pois:false outer))

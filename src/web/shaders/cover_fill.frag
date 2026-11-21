@@ -5,7 +5,8 @@
 // and the class of a land texel, the nearest found so far.
 //   u_step = 0: the seeds, a land texel of each cell that has one;
 //   u_step > 0: a pass of the flood, over the cells u_step apart;
-//   u_step = -1: the level itself, its holes filled;
+//   u_step = -1: the level itself, its holes filled, and the ground whose land
+//   cover is not loaded yet (UNLOADED) taken from the level above;
 //   u_step = -2: the level from [u_far], the far field's land cover as RG8
 //   (the palette index in red), [u_shift] texels off and clamped at its edges.
 precision highp float;
@@ -24,6 +25,9 @@ uniform highp sampler2D u_far;
 out uint out_value;
 
 const uint HOLE = 255u;
+// Ground whose tiles a first view goes without: neither land nor a hole, it
+// takes what the level above has there, down from the far field's own grid.
+const uint UNLOADED = 254u;
 // No land found: no seed has HOLE for a class.
 const uint NONE = 0xFFFFFFFFu;
 
@@ -66,6 +70,11 @@ void main() {
     if (c == HOLE) {
       uint s = nearest(p / 2, 1, vec2(p));
       c = s == NONE ? u_default : s >> 24;
+    } else if (c == UNLOADED) {
+      // The level above spans twice the ground about the same centre.
+      c = u_has_coarse
+              ? texelFetch(u_coarse, p / 2 + textureSize(u_cover, 0) / 4, 0).r
+              : u_default;
     }
     out_value = c;
   } else if (u_step == 0) {
@@ -73,7 +82,7 @@ void main() {
     for (int i = 3; i >= 0; i--) {
       ivec2 q = 2 * p + ivec2(i & 1, i >> 1);
       uint c = texelFetch(u_cover, q, 0).r;
-      if (c != HOLE)
+      if (c != HOLE && c != UNLOADED)
         seed = pack(q, c);
     }
     // A level may lie inside a hole altogether, or see none of the land

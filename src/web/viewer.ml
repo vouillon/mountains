@@ -1687,8 +1687,8 @@ let far_cover_texture ctx (cover : Dem_loader.t) =
 
 (* [far_texture]: [far_cover_texture] of [far_cover], made earlier by the
    caller, who keeps it; made and deleted here otherwise. *)
-let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
-    ~clc_tiles ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
+let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ?loaded ctx ~lat
+    ~lon ~w ~clc_tiles ~clc_raster_pid ~cover_fill_pid ~water_raster_pid
     (clc_u : Render_state.clc_raster_uniforms)
     (fill_u : Render_state.cover_fill_uniforms)
     (water_u : Render_state.water_raster_uniforms) =
@@ -1719,6 +1719,11 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
   (* Sea clear value (index 44 = Sea and ocean) — clearBufferuiv requires 4 components *)
   let sea_clear_val = Brr.Tarray.create Brr.Tarray.Uint32 4 in
   (Brr.Tarray.to_bigarray1 sea_clear_val).{0} <- 44l;
+  (* With [loaded], the box of the tiles a first view has (min_lon, min_lat,
+     max_lon, max_lat): the ground outside it is UNLOADED ([cover_fill.frag]),
+     to be taken from the level above, down from the far field's grid. *)
+  let unloaded_clear_val = Brr.Tarray.create Brr.Tarray.Uint32 4 in
+  (Brr.Tarray.to_bigarray1 unloaded_clear_val).{0} <- 254l;
 
   (* Depth buffer for overdraw prevention (smaller features drawn first win).
      One buffer, not one per level: the render loop below is level-outer and
@@ -1751,6 +1756,12 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
   let coarse_tex = scratch Gl.r8ui cover_map_size in
   let raw_tex = scratch Gl.r8ui cover_map_size in
   let fill_fbo = Gl.create_framebuffer ctx in
+  (* Every unsigned sampler of [cover_fill.frag] on a texture of its type
+     before its first pass, now the far copy: a float texture left on unit 1
+     by the frames drawn since the last bake failed that draw
+     (INVALID_OPERATION), and level 7 stayed empty. *)
+  Gl.active_texture ctx Gl.texture1;
+  Gl.bind_texture ctx Gl.texture_2d (Some seeds.(0));
   Gl.active_texture ctx Gl.texture2;
   Gl.bind_texture ctx Gl.texture_2d (Some coarse_tex);
   Gl.active_texture ctx Gl.texture0;
@@ -1923,9 +1934,83 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
       clc_tiles
   in
 
+  (* The last level, over the far field's square, is not drawn from polygons
+     but copied from the far field's own land cover, a grid of palette indices
+     on the far elevation's samples ([Dem_loader.load ~cover]): megabytes less
+     to fetch for ground 45 km away and more. Those samples are a texel wide and
+     stand where [far_origin] has it about [far_anchor], the anchor the far
+     field was fetched around (by default the cover map's own centre), which
+     leaves them a texel off, or none, as that anchor is past a multiple of
+     [far_step] -- and as many more as the cover map's centre is far samples
+     from it. Without it the level keeps what the polygons of the base grid's
+     tiles drew, and sea around them. First, as the level above the others:
+     the ground a first view has no land-cover tiles for comes from it. *)
+  let far_applied = ref false in
+  Option.iter
+    (fun (cover : Dem_loader.t) ->
+      let n = cover_map_size in
+      if cover.size = n then begin
+        let centre_lat = Web_utils.arcsec_floor lat
+        and centre_lon = Web_utils.arcsec_floor lon in
+        let far_lat, far_lon =
+          Option.value far_anchor ~default:(centre_lat, centre_lon)
+        in
+        let past a = ((a mod far_step) + far_step) mod far_step in
+        (* Rounding down, either side of zero. *)
+        let fdiv a =
+          if a >= 0 then a / far_step else -((far_step - 1 - a) / far_step)
+        in
+        let dx = fdiv (centre_lon - far_lon + past far_lon + (far_step / 2))
+        and dy =
+          fdiv (centre_lat - far_lat + past (far_lat - 1) + (far_step / 2))
+        in
+        (* Shifted and clamped on the GPU ([cover_fill.frag], u_step -2): a
+           palette index is the low byte of a sample, and picking those out on
+           the CPU was a 4-million-sample loop, 44 ms of a load on a Pixel 8a
+           under wasm_of_ocaml. *)
+        let src =
+          match far_texture with
+          | Some t -> t
+          | None -> far_cover_texture ctx cover
+        in
+        Gl.active_texture ctx Gl.texture3;
+        Gl.bind_texture ctx Gl.texture_2d (Some src);
+        Gl.bind_vertex_array ctx None;
+        Gl.disable ctx Gl.depth_test;
+        Gl.use_program ctx cover_fill_pid;
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some fill_fbo);
+        Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+          cover_map_texture 0 (clc_levels - 1);
+        Gl.viewport ctx 0 0 n n;
+        Gl.uniform1i ctx fill_u.u_step (-2);
+        Gl.uniform2i ctx
+          (Gl.get_uniform_location ctx cover_fill_pid (Jstr.v "u_shift"))
+          dx dy;
+        Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+        Gl.bind_framebuffer ctx Gl.framebuffer None;
+        Gl.bind_texture ctx Gl.texture_2d None;
+        Gl.active_texture ctx Gl.texture0;
+        if far_texture = None then Gl.delete_texture ctx src;
+        far_applied := true
+      end)
+    far_cover;
+  (* Kept for the level below, as the loop keeps each level: its polygons are
+     not drawn. *)
+  if !far_applied then begin
+    Gl.bind_framebuffer ctx Gl.framebuffer (Some fill_fbo);
+    Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
+      cover_map_texture 0 (clc_levels - 1);
+    Gl.active_texture ctx Gl.texture2;
+    Gl.copy_tex_sub_image2d ctx Gl.texture_2d 0 0 0 0 0 cover_map_size
+      cover_map_size;
+    Gl.active_texture ctx Gl.texture0
+  end;
+
   (* Render each level in turn, the widest first: a level takes from the one
      above it the land around those of its holes that reach its border *)
-  for level = clc_levels - 1 downto 0 do
+  for
+    level = if !far_applied then clc_levels - 2 else clc_levels - 1 downto 0
+  do
     let v_min_lon, v_min_lat, v_ext_lon, v_ext_lat, v_max_lon, v_max_lat =
       level_bounds.(level)
     in
@@ -1951,8 +2036,34 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
     Gl.viewport ctx 0 0 cover_map_size cover_map_size;
     Gl.bind_vertex_array ctx (Some vao);
 
-    (* Clear color to sea and depth buffer *)
-    Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val;
+    (* Clear color to sea and depth buffer: what no polygon covers is sea, as
+       a missing tile is; with [loaded], only within it. *)
+    (match loaded with
+    | None -> Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val
+    | Some (l_min_lon, l_min_lat, l_max_lon, l_max_lat) ->
+        Gl.clear_bufferuiv ctx Gl.color 0 unloaded_clear_val;
+        (* The texels whose centre is strictly inside the box. Texel centres
+           are on whole arcseconds, as the sub-cells' edges are: a texel on
+           the box's edge is the inner polygons' or not as the rasterizer
+           decides, and cleared to sea it showed as a line of sea when not.
+           Left UNLOADED, it takes the level above's class. *)
+        let first v v0 ext =
+          let x = (v -. v0) /. ext *. float cover_map_size in
+          max 0 (int_of_float (Float.floor (x +. 1e-3 -. 0.5)) + 1)
+        and past v v0 ext =
+          let x = (v -. v0) /. ext *. float cover_map_size in
+          min cover_map_size (int_of_float (Float.ceil (x -. 1e-3 -. 0.5)))
+        in
+        let x0 = first l_min_lon v_min_lon v_ext_lon
+        and x1 = past l_max_lon v_min_lon v_ext_lon
+        and y0 = first l_min_lat v_min_lat v_ext_lat
+        and y1 = past l_max_lat v_min_lat v_ext_lat in
+        if x1 > x0 && y1 > y0 then begin
+          Gl.enable ctx Gl.scissor_test;
+          Gl.scissor ctx x0 y0 (x1 - x0) (y1 - y0);
+          Gl.clear_bufferuiv ctx Gl.color 0 sea_clear_val;
+          Gl.disable ctx Gl.scissor_test
+        end);
     Gl.clear_depth ctx 1.0;
     Gl.clear ctx Gl.depth_buffer_bit;
     Gl.depth_mask ctx true;
@@ -2085,64 +2196,6 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ctx ~lat ~lon ~w
             end)
       uploaded_tiles
   done;
-
-  (* The last level, over the far field's square, is not drawn from polygons
-     but copied from the far field's own land cover, a grid of palette indices
-     on the far elevation's samples ([Dem_loader.load ~cover]): megabytes less
-     to fetch for ground 45 km away and more. Those samples are a texel wide and
-     stand where [far_origin] has it about [far_anchor], the anchor the far
-     field was fetched around (by default the cover map's own centre), which
-     leaves them a texel off, or none, as that anchor is past a multiple of
-     [far_step] -- and as many more as the cover map's centre is far samples
-     from it. Without it the level keeps what the polygons of the base grid's
-     tiles drew, and sea around them. *)
-  Option.iter
-    (fun (cover : Dem_loader.t) ->
-      let n = cover_map_size in
-      if cover.size = n then begin
-        let centre_lat = Web_utils.arcsec_floor lat
-        and centre_lon = Web_utils.arcsec_floor lon in
-        let far_lat, far_lon =
-          Option.value far_anchor ~default:(centre_lat, centre_lon)
-        in
-        let past a = ((a mod far_step) + far_step) mod far_step in
-        (* Rounding down, either side of zero. *)
-        let fdiv a =
-          if a >= 0 then a / far_step else -((far_step - 1 - a) / far_step)
-        in
-        let dx = fdiv (centre_lon - far_lon + past far_lon + (far_step / 2))
-        and dy =
-          fdiv (centre_lat - far_lat + past (far_lat - 1) + (far_step / 2))
-        in
-        (* Shifted and clamped on the GPU ([cover_fill.frag], u_step -2): a
-           palette index is the low byte of a sample, and picking those out on
-           the CPU was a 4-million-sample loop, 44 ms of a load on a Pixel 8a
-           under wasm_of_ocaml. *)
-        let src =
-          match far_texture with
-          | Some t -> t
-          | None -> far_cover_texture ctx cover
-        in
-        Gl.active_texture ctx Gl.texture3;
-        Gl.bind_texture ctx Gl.texture_2d (Some src);
-        Gl.bind_vertex_array ctx None;
-        Gl.disable ctx Gl.depth_test;
-        Gl.use_program ctx cover_fill_pid;
-        Gl.bind_framebuffer ctx Gl.framebuffer (Some fill_fbo);
-        Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0
-          cover_map_texture 0 (clc_levels - 1);
-        Gl.viewport ctx 0 0 n n;
-        Gl.uniform1i ctx fill_u.u_step (-2);
-        Gl.uniform2i ctx
-          (Gl.get_uniform_location ctx cover_fill_pid (Jstr.v "u_shift"))
-          dx dy;
-        Gl.draw_arrays ctx Gl.triangle_strip 0 4;
-        Gl.bind_framebuffer ctx Gl.framebuffer None;
-        Gl.bind_texture ctx Gl.texture_2d None;
-        Gl.active_texture ctx Gl.texture0;
-        if far_texture = None then Gl.delete_texture ctx src
-      end)
-    far_cover;
 
   (* Cleanup - delete pre-uploaded buffers *)
   List.iter
@@ -5623,8 +5676,15 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           ( int_of_float (near_ground_m /. deltay),
             int_of_float (near_ground_m /. deltax) )
         in
+        (* The land cover under the elevation's inner tiles: the same grid of
+           600-arcsecond sub-cells. *)
+        let inner =
+          let dlat = float half_rows /. 3600.
+          and dlon = float half_cols /. 3600. in
+          (alon -. dlon, alat -. dlat, alon +. dlon, alat +. dlat)
+        in
         let* ( ((tile, progress), (far_tile, far_cover)),
-               ((_, _, _, _, clc_tiles), (_, _, _, _, poi_tiles)) ) =
+               ((_, clc_tiles, clc_progress), (_, _, _, _, poi_tiles)) ) =
           Web_utils.timed_lwt ~track:"Location" "Fetch DEM and land cover"
           @@ fun () ->
           Lwt.both
@@ -5633,9 +5693,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                   ~half_rows ~half_cols)
                (Lwt.both (far_grid false) (far_grid true)))
             (Lwt.both
-               (Clc_loader.load_tiles ~lat:alat ~lon:alon
+               (Clc_loader.load_progressive ~lat:alat ~lon:alon
                   ~size:(w + (2 * cover_margin))
-                  ())
+                  ~inner)
                (Clc_loader.load_tiles ~pois:true ~lat:alat ~lon:alon
                   ~size:(2 * w) ()))
         in
@@ -5647,8 +5707,27 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
               Lwt.return_none
           | progress -> Lwt.return progress
         in
+        (* The land cover is completed with the elevation, after the first
+           view, the far field's own standing in for it meanwhile
+           ([rasterize_clc_tiles ~loaded]); without either, now. *)
+        let* clc_tiles, clc_progress =
+          match (progress, clc_progress) with
+          | Some _, Some _ when far_cover <> None ->
+              Lwt.return (clc_tiles, clc_progress)
+          | _, Some (_, rest) ->
+              let* more = rest () in
+              Lwt.return (clc_tiles @ more, None)
+          | _, None -> Lwt.return (clc_tiles, None)
+        in
         Lwt.return
-          (Some (tile, far_tile, far_cover, clc_tiles, poi_tiles, progress))
+          (Some
+             ( tile,
+               far_tile,
+               far_cover,
+               clc_tiles,
+               poi_tiles,
+               progress,
+               clc_progress ))
   in
   (* Wait for the near-field grid, but only for [hd_grace_s]. Publishing twice is
      not free -- the eye is anchored on the surface that is drawn, so folding a
@@ -5755,7 +5834,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     let blend_rings ~keep =
       let tile =
         match fetched with
-        | Some (tile, _, _, _, _, _) -> tile
+        | Some (tile, _, _, _, _, _, _) -> tile
         | None -> (Option.get reused_base).tile
       in
       let source =
@@ -5861,6 +5940,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     in
     (* CPU time: the GPU runs the bakes later ("GPU drain" below). *)
     let t_base = now_ms () in
+    let kept_far_texture = ref None in
     let base =
       match fetched with
       (* Nothing was fetched exactly when the anchor was held, which is exactly
@@ -5889,7 +5969,14 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
               cover_lon = snd plan_arcsec;
             }
           end
-      | Some (tile, far_tile, far_cover, clc_tiles, poi_tiles, progress) ->
+      | Some
+          ( tile,
+            far_tile,
+            far_cover,
+            clc_tiles,
+            poi_tiles,
+            progress,
+            clc_progress ) ->
           (* Before the bakes below queue up on the GPU (see
              [far_cover_texture]). *)
           let far_texture = Option.map (far_cover_texture ctx) far_cover in
@@ -5923,7 +6010,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           (* The POIs of the base grid, and those beyond it as far as the far
              field has ground to stand them on: short of its edge, the two
              grids not being aligned. *)
-          let poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile clc_tiles in
+          (* From the POI tiles, which hold every cell's whole: the land cover's
+             may not all be in yet. *)
+          let poi = poi_positions ~w ~h ~lat:alat ~lon:alon ~tile poi_tiles in
           let far_poi =
             if far_tile = None then []
             else
@@ -5939,12 +6028,18 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           (* GPU rasterize CLC tiles to FBO *)
           let cover_map_texture =
             time_gpu ctx "rasterize_clc_tiles" (fun () ->
-                rasterize_clc_tiles ?far_cover ?far_texture ctx ~lat:alat
-                  ~lon:alon ~w ~clc_tiles ~clc_raster_pid ~cover_fill_pid
-                  ~water_raster_pid clc_raster_uniforms cover_fill_uniforms
-                  water_raster_uniforms)
+                rasterize_clc_tiles ?far_cover ?far_texture
+                  ?loaded:(Option.map fst clc_progress)
+                  ctx ~lat:alat ~lon:alon ~w ~clc_tiles ~clc_raster_pid
+                  ~cover_fill_pid ~water_raster_pid clc_raster_uniforms
+                  cover_fill_uniforms water_raster_uniforms)
           in
-          Option.iter (Gl.delete_texture ctx) far_texture;
+          (* Kept for the cover map's second bake, with the rest of the land
+             cover: uploaded again behind the base's, the 8 MB would wait for
+             the GPU (see [far_cover_texture]). *)
+          if clc_progress = None then
+            Option.iter (Gl.delete_texture ctx) far_texture
+          else kept_far_texture := far_texture;
           {
             anchor_lat;
             anchor_lon;
@@ -6531,14 +6626,27 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
        the location published on it, as it stands -- its rings untouched, all
        within the part that was there. *)
     (match fetched with
-    | Some (_, _, _, _, _, Some (_, rest)) ->
+    | Some (_, _, far_cover, clc_tiles, _, Some (_, rest), clc_progress) ->
         let settled, settle = Lwt.wait () in
         base_settled := settled;
         Lwt.async (fun () ->
             Lwt.finalize
               (fun () ->
+                (* The rest of the land cover alongside *)
+                let more_cover =
+                  Option.map
+                    (fun (_, rest) ->
+                      Web_utils.timed_lwt ~track:"Location"
+                        "Fetch outer land cover" rest)
+                    clc_progress
+                in
                 let* () =
                   Web_utils.timed_lwt ~track:"Location" "Fetch outer DEM" rest
+                in
+                let* more_cover =
+                  match more_cover with
+                  | Some p -> Lwt.map Option.some p
+                  | None -> Lwt.return_none
                 in
                 (* In steps a frame apart: as one task, the last tile's copy, the
                    bake and the publish were an 83 ms stall on a Pixel 8a. *)
@@ -6581,7 +6689,28 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                   let* () = request_animation_frame () in
                   if not (current ()) then Lwt.return_unit
                   else begin
-                    current_base := { old with valid = None };
+                    (* The cover map baked again with all the land cover, the
+                       far field's standing in for it no more. *)
+                    let cover_map_texture =
+                      match more_cover with
+                      | None -> old.cover_map_texture
+                      | Some more ->
+                          let t_cover = now_ms () in
+                          let tex =
+                            time_gpu ctx "rasterize_clc_tiles" (fun () ->
+                                rasterize_clc_tiles ?far_cover
+                                  ?far_texture:!kept_far_texture ctx ~lat:alat
+                                  ~lon:alon ~w ~clc_tiles:(clc_tiles @ more)
+                                  ~clc_raster_pid ~cover_fill_pid
+                                  ~water_raster_pid clc_raster_uniforms
+                                  cover_fill_uniforms water_raster_uniforms)
+                          in
+                          Gl.delete_texture ctx old.cover_map_texture;
+                          Web_utils.measure ~track:"Location" "Bake cover map"
+                            t_cover;
+                          tex
+                    in
+                    current_base := { old with valid = None; cover_map_texture };
                     Web_utils.timed ~track:"Location" "Publish" (fun () ->
                         match !session with
                         | Some { slots; _ } -> publish ~keep:slots ~slots
@@ -6592,6 +6721,8 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                   end
                 end)
               (fun () ->
+                Option.iter (Gl.delete_texture ctx) !kept_far_texture;
+                kept_far_texture := None;
                 Lwt.wakeup_later settle ();
                 Lwt.return_unit))
     | Some _ | None -> ());

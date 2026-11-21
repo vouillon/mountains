@@ -61,6 +61,24 @@ val load_tiles :
     (tile_data, tile_range_lon, tile_range_lat). With [pois], the tiles that
     hold the POIs alone (extract_tiles --pois), for an area seen from afar. *)
 
+val load_progressive :
+  lat:float ->
+  lon:float ->
+  size:int ->
+  inner:float * float * float * float ->
+  ((float * float * float * float)
+  * (clc_tile * float * float) list
+  * ((float * float * float * float)
+    * (unit -> (clc_tile * float * float) list Lwt.t))
+    option)
+  Lwt.t
+(** [load_progressive ~lat ~lon ~size ~inner] is {!load_tiles} of the land cover
+    (its window, then its tiles), but when some of the tiles are not in the
+    cache, only those meeting the box [inner] (min_lon, min_lat, max_lon,
+    max_lat) are loaded before it returns: with [Some (box, rest)], [box] the
+    ground they cover, a block of sub-cells, and [rest ()] the others. [None]
+    when every tile is in. *)
+
 val prefetch :
   ?pois:bool -> size:int -> lat:float -> lon:float -> unit -> unit Lwt.t
 (** Prefetch CLC tiles for the given range to warm browser cache: with [pois],
