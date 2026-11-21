@@ -884,6 +884,56 @@ highp float IGN(highp vec2 p) {
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
 
+// The ground mirrored in still water, as terrain_main.vert bakes it (see
+// [u_refl] there): across, the azimuth over [u_reflArc]; up, the tangent of
+// the elevation; the square root of a quarter
+// of the light, and what share of the texel the ground has, the rest being
+// sky.
+uniform highp vec4 u_refl;
+uniform mediump sampler2D u_reflTex;
+// The arc of the horizon the bake is of: where it starts, in turns
+// anticlockwise from east, and how many times it goes into the turn.
+uniform highp vec2 u_reflArc;
+uniform highp vec2 inv_delta; // as in radial_common.vert
+uniform highp float inv_w;
+// What the waves do to the mirrored ground. Turning the line of sight over
+// about the waves' own normal does not work: seen from the shore, the whole
+// of the picture stands within a few degrees of the horizon, a wave tilts
+// the ray by more than that, and half the rays go under the horizon, where
+// there is nothing -- the far shore came out in the colours of the ridge
+// above it and of the sky. So the picture is drawn out and squeezed along
+// the vertical instead, by the tilt towards the eye and in proportion to the
+// elevation, which leaves it standing on its shore, and sheared a little by
+// the tilt across.
+const highp float REFL_SLACK = 0.1;
+const highp float REFL_FOOT = 0.1;
+const float REFL_STRETCH = 1.5;
+const float REFL_SHEAR = 0.01; // turns per unit of tilt
+
+// The bake, through a cubic B-spline rather than the bilinear filter: zoomed
+// in, a texel of it is several pixels wide, and the edge of a ridge against
+// the sky, which the bake has in whole texels, came out as a staircase. Four
+// bilinear fetches, each standing for two of the spline's four taps a side.
+vec4 mirrored(highp vec2 uv) {
+  highp vec2 size = vec2(textureSize(u_reflTex, 0));
+  highp vec2 st = uv * size - 0.5;
+  highp vec2 i = floor(st);
+  highp vec2 f = st - i;
+  highp vec2 f2 = f * f;
+  highp vec2 f3 = f2 * f;
+  highp vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  highp vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  highp vec2 w3 = f3 / 6.0;
+  highp vec2 g0 = w0 + w1;
+  highp vec2 g1 = 1.0 - g0;
+  highp vec2 p0 = (i - 0.5 + w1 / g0) / size;
+  highp vec2 p1 = (i + 1.5 + w3 / g1) / size;
+  return g0.y * (g0.x * textureLod(u_reflTex, p0, 0.0) +
+                 g1.x * textureLod(u_reflTex, vec2(p1.x, p0.y), 0.0)) +
+         g1.y * (g0.x * textureLod(u_reflTex, vec2(p0.x, p1.y), 0.0) +
+                 g1.x * textureLod(u_reflTex, p1, 0.0));
+}
+
 // Sun against sky, on a slope facing the sun: about 7 to 1, which is what a
 // clear day at altitude measures. Both terms end up multiplied by the albedo,
 // so their ratio is what sets how far a shaded slope falls below a lit one, and
@@ -987,6 +1037,16 @@ void main() {
   // The cover map's outermost level spans the far field, twice the base
   // grid's side about the same centre.
   Surface surface = sampleCLCBilinear((reliefCoord - 0.5) * 0.5 + 0.5);
+  // To the mirror's bake, water standing above the plane is the bank it is
+  // drawn up, and takes the cover of the land above it: the nearest up the
+  // slope, looked for as far as 64 m.
+  if (u_refl.z > 0.5 && surface.waterFactor > 0.5) {
+    highp vec2 uphill =
+        -normal.xy / max(length(normal.xy), 1e-3) * inv_delta * (0.5 * inv_w);
+    for (int k = 0; k < 4 && surface.waterFactor > 0.5; k++)
+      surface = sampleCLCBilinear((reliefCoord - 0.5) * 0.5 + 0.5 +
+                                  uphill * (8.0 * exp2(float(k))));
+  }
 
   // === Canopy (LIDAR HD) ===
   // Inside the 1 m ring's block, the canopy height says where the trees are:
@@ -1271,6 +1331,11 @@ void main() {
 
   // Water handling
   float waterMask = getWaterMask(v_world_pos.xy, surface.waterFactor);
+  // To the mirror's bake, what water stands above the plane is ground: the
+  // banks the water is drawn up, whose image has to reach down to the image
+  // of the land above them.
+  if (u_refl.z > 0.5)
+    waterMask = 0.0;
   terrain_color = applyWaterEffects(terrain_color, waterMask, v_world_pos.xy);
 
   // Procedural normal perturbation (replaces rock_normal_map)
@@ -1522,6 +1587,51 @@ void main() {
   float sky_mix = smoothstep(0.0, 0.35, skyReflect);
   vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
 
+  // On the water, the ground the sky is hidden by. The direction is the
+  // pixel's own line of sight turned over, with nothing in it of where the
+  // surface was drawn: the water is not level in the data, and a mirror stood
+  // on it wobbles along every shore. Its height only says whether this is
+  // the water the bake was made for.
+  if (u_refl.w > 0.5 && waterMask > 0.01) {
+    highp vec2 away = -view_dir_n.xy / max(length(view_dir_n.xy), 1e-4);
+    // Water drawn away from the plane -- up a bank, which a coarse grid
+    // has metres above the shore it stands on, or on a lake at another
+    // level -- mirrors about its own height: to first order, the picture
+    // moved up by twice the difference over the distance, which is exact
+    // for what stands at the water's edge. So a shore and its image meet.
+    // Within REFL_SLACK of the plane it is the plane's, the water's own
+    // surface being that uneven.
+    highp float off = v_world_pos.z - u_refl.x;
+    off -= clamp(off, -REFL_SLACK, REFL_SLACK);
+    highp float reach = max(v_dist * length(view_dir_n.xy), 1.0);
+    highp float up =
+        (view_dir_n.z / max(length(view_dir_n.xy), 1e-4) + 2.0 * off / reach) *
+        u_refl.y;
+    highp float turn = atan(away.y, away.x) * (0.5 / PI);
+    // Never squeezed: under the foot of the shore the bake has nothing.
+    up *= clamp(1.0 - REFL_STRETCH * dot(final_normal.xy, away), 1.0, 1.5);
+    turn += REFL_SHEAR * dot(final_normal.xy, vec2(-away.y, away.x));
+    highp float across = fract(turn - u_reflArc.x) * u_reflArc.y;
+    vec4 m = mirrored(vec2(across, up));
+    // Where there is nothing, what stands just above: the foot of a shore
+    // is missing from the bake as far up as the water is drawn and clipped,
+    // and the water is taken for level within REFL_SLACK, so a shore's image
+    // would start that much short of the shore.
+    if (m.a < 0.99) {
+      highp float skirt = 2.0 * (REFL_SLACK + REFL_FOOT) / reach * u_refl.y;
+      vec4 m1 = textureLod(u_reflTex, vec2(across, up + 0.5 * skirt), 0.0);
+      m += (1.0 - m.a) * m1;
+      vec4 m2 = textureLod(u_reflTex, vec2(across, up + skirt), 0.0);
+      m += (1.0 - m.a) * m2;
+    }
+    float share = m.a * (1.0 - smoothstep(0.9, 1.0, up)) * step(across, 1.0) *
+                  (1.0 - smoothstep(20.0, 40.0, abs(v_world_pos.z - u_refl.x)));
+    if (share > 0.0) {
+      vec3 s = m.rgb / max(m.a, 1e-3);
+      envColor = mix(envColor, s * s * 4.0, share);
+    }
+  }
+
   // Specular and reflection are incident light: they are added after the
   // diffuse lighting multiply at the end, not folded into the albedo.
   float specBoost =
@@ -1634,10 +1744,29 @@ void main() {
   // the camera-to-fragment path rather than the fragment's own: with the
   // fragment altitude alone, a low valley seen from a summit was over-hazed
   // by the dense air it does not actually lie under.
-  float haze_density = exp((-center_height - (0.5 * v_world_pos.z)) * 0.0006);
-  float fog_coeff = exp(v_dist * -0.4e-4 * haze_density);
+  highp float haze_alt = 0.5 * v_world_pos.z;
+  highp float haze_dist = v_dist;
+  if (u_refl.z > 0.5) {
+    // The bake is of the light as it reaches the mirror: the air between the
+    // mirror and the eye is added where the water is drawn.
+    haze_dist *= (v_world_pos.z - u_refl.x) / (v_world_pos.z - 2.0 * u_refl.x);
+    haze_alt = 0.5 * (v_world_pos.z + u_refl.x);
+  }
+  float haze_density = exp((-center_height - haze_alt) * 0.0006);
+  float fog_coeff = exp(haze_dist * -0.4e-4 * haze_density);
 
   vec3 final_color = mix(fog_color, lit, fog_coeff);
+  if (u_refl.z > 0.5) {
+    // The underside of the ground is where a ray comes out that went in
+    // under the plane, through what the bake has clipped: it stops there,
+    // with nothing to show, rather than go on to the ground beyond the hill.
+    // (The picture is turned over from left to right, so that side is the
+    // one that faces front.)
+    color = gl_FrontFacing
+                ? vec4(0.0)
+                : vec4(sqrt(clamp(final_color * 0.25, 0.0, 1.0)), 1.0);
+    return;
+  }
 
   // Tone curve and gamma correction, then a +/-0.5/255 dither in output space
   // to break up banding

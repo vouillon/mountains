@@ -2108,6 +2108,331 @@ let bind_terrain_textures ctx ~relief_texture ~relief_normal_texture ~ao_texture
   Gl.active_texture ctx Gl.texture8;
   Gl.bind_texture ctx Gl.texture_2d (Some palette_texture);
   Gl.active_texture ctx Gl.texture0
+
+(* The ground mirrored in still water.
+
+   The eye stands still, so everything it can see in a level mirror, whichever
+   way it turns, is what its image in that mirror sees looking up: one picture
+   of the whole turn, baked when the location is published. The terrain
+   program draws it (terrain_main.vert, under [u_refl]): the azimuth across,
+   the tangent of the elevation up to [tan_max], and of each texel what
+   comes first from the eye outwards -- the order the index buffer has its
+   strips in within a block, which a stencil holds it to, the depth being
+   spent on clipping what lies under the plane. *)
+let reflections_enabled =
+  lazy
+    (not
+       (Brr.Uri.Params.mem (Jstr.v "norefl")
+          (Brr.Uri.query_params (Brr.Window.location Brr.G.window))))
+
+let refl_height = 1024
+
+(* What the bake is of: the level of the water, in metres; the arc of the
+   horizon that has water to mirror it, from [arc_from] over [arc_span]
+   radians anticlockwise from east, the whole turn at most; and the tangent
+   of the highest elevation the water is seen to mirror. The strip has the
+   same texels whatever these are, so the narrower the arc, the sharper the
+   picture: a lake seen across a valley takes a few degrees of the turn. *)
+type mirror = {
+  level : float;
+  arc_from : float;
+  arc_span : float;
+  tan_max : float;
+}
+
+type reflection_gl = {
+  refl_gen : int;
+  refl_width : int;
+  refl_texture : Gl.texture;
+  refl_fbo : Gl.framebuffer;
+}
+
+let reflection_gl : reflection_gl option ref = ref None
+
+let get_reflection_gl ctx =
+  match !reflection_gl with
+  | Some r when r.refl_gen = !context_generation -> r
+  | _ ->
+      let refl_width =
+        min 8192 (Jv.to_int (Gl.get_parameter ctx Gl.max_texture_size))
+      in
+      let refl_texture = Gl.create_texture ctx in
+      Gl.active_texture ctx Gl.texture0;
+      Gl.bind_texture ctx Gl.texture_2d (Some refl_texture);
+      Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rgba8 refl_width refl_height;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.linear;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.linear;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.repeat;
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
+      Gl.bind_texture ctx Gl.texture_2d None;
+      let stencil = Gl.create_renderbuffer ctx in
+      Gl.bind_renderbuffer ctx Gl.renderbuffer (Some stencil);
+      Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.stencil_index8 refl_width
+        refl_height;
+      Gl.bind_renderbuffer ctx Gl.renderbuffer None;
+      let refl_fbo = Gl.create_framebuffer ctx in
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some refl_fbo);
+      Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+        Gl.texture_2d refl_texture 0;
+      Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.stencil_attachment
+        Gl.renderbuffer stencil;
+      if
+        Gl.check_framebuffer_status ctx Gl.framebuffer
+        <> Gl.framebuffer_complete
+      then Format.eprintf "reflection: incomplete framebuffer@.";
+      Gl.bind_framebuffer ctx Gl.framebuffer None;
+      let r =
+        { refl_gen = !context_generation; refl_width; refl_texture; refl_fbo }
+      in
+      reflection_gl := Some r;
+      r
+
+(* Bake the mirror of the plane [plane] m above the eye (so below it), or
+   leave the water to the sky alone without one. To be called with the terrain
+   program's uniforms and textures all set for the location. *)
+let bake_reflection ctx ~terrain_pid
+    ~(terrain_uniforms : Render_state.terrain_uniforms) ~terrain_geo
+    ~index_count ~placeholder ~fog_color mirror =
+  let u name = Gl.get_uniform_location ctx terrain_pid (Jstr.v name) in
+  let u_refl = u "u_refl" in
+  Gl.use_program ctx terrain_pid;
+  Gl.uniform1i ctx (u "u_reflTex") 19;
+  (* Not the bake itself while it is being drawn into. *)
+  Gl.active_texture ctx Gl.texture19;
+  Gl.bind_texture ctx Gl.texture_2d (Some placeholder);
+  (match mirror with
+  | None -> Gl.uniform4f ctx u_refl 0. 0. 0. 0.
+  | Some (plane, { arc_from; arc_span; tan_max; _ }) ->
+      let r = get_reflection_gl ctx in
+      let width = Brr_canvas.Gl.drawing_buffer_width ctx in
+      let height = Brr_canvas.Gl.drawing_buffer_height ctx in
+      Gl.bind_framebuffer ctx Gl.framebuffer (Some r.refl_fbo);
+      Gl.disable ctx Gl.scissor_test;
+      Gl.disable ctx Gl.blend;
+      Gl.disable ctx Gl.depth_test;
+      (* Both sides: terrain.frag's bake has the underside stop the ray. *)
+      Gl.disable ctx Gl.cull_face';
+      Gl.color_mask ctx true true true true;
+      Gl.viewport ctx 0 0 r.refl_width refl_height;
+      Gl.clear_color ctx 0. 0. 0. 0.;
+      Gl.stencil_mask ctx 0xff;
+      Gl.clear_stencil ctx 0;
+      Gl.clear ctx (Gl.color_buffer_bit lor Gl.stencil_buffer_bit);
+      Gl.enable ctx Gl.stencil_test;
+      Gl.stencil_func ctx Gl.equal 0 0xff;
+      Gl.stencil_op ctx Gl.keep Gl.keep Gl.incr;
+      Gl.uniform4f ctx u_refl plane (1. /. tan_max) 1. 0.;
+      Gl.bind_vertex_array ctx (Some terrain_geo);
+      let indices_per_block = index_count / n_index_blocks in
+      let strip_indices = indices_per_block / (n_rings - 1) in
+      (* Not the first strip, which starts at the eye's own vertical. *)
+      let count = (n_rings - 2) * strip_indices in
+      (* The arc, a quarter turn of it per rotation of the wedge, each over
+         its share of the width: what of the last one overshoots is clipped,
+         and its blocks beyond the edge are not drawn at all. *)
+      let u_wedge = u "u_reflWedge" in
+      let share = pi /. 2. /. arc_span in
+      for
+        rot = 0 to int_of_float (ceil ((arc_span /. (pi /. 2.)) -. 1e-6)) - 1
+      do
+        Gl.uniform1f ctx terrain_uniforms.snapped_alpha
+          (arc_from -. (pi /. 4.) +. (float rot *. (pi /. 2.)));
+        Gl.uniform2f ctx u_wedge (float rot *. share) share;
+        for b = 0 to n_index_blocks - 1 do
+          if (float rot +. (float b /. float n_index_blocks)) *. share < 1. then
+            Gl.draw_elements ctx Gl.triangle_strip count Gl.unsigned_int
+              (((b * indices_per_block) + strip_indices) * 4)
+        done
+      done;
+      Gl.bind_vertex_array ctx None;
+      Gl.disable ctx Gl.stencil_test;
+      Gl.bind_framebuffer ctx Gl.framebuffer None;
+      Gl.viewport ctx 0 0 width height;
+      (let r, g, b = fog_color in
+       Gl.clear_color ctx r g b 1.);
+      Gl.uniform4f ctx u_refl plane (1. /. tan_max) 0. 1.;
+      Gl.uniform2f ctx (u "u_reflArc")
+        (arc_from /. (2. *. pi))
+        (2. *. pi /. arc_span);
+      Gl.bind_texture ctx Gl.texture_2d (Some r.refl_texture);
+      (* The whole turn closes on itself; an arc has nothing past its ends. *)
+      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s
+        (if arc_span >= 2. *. pi then Gl.repeat else Gl.clamp_to_edge));
+  Gl.active_texture ctx Gl.texture0;
+  force_redraw := true
+
+(* The open water of the base grid, for choosing the mirror's plane: of each
+   triangle of the tiles' water layer, where its centre lies in base-grid
+   samples, and its area in square samples, three by three. *)
+let water_samples ~w ~h ~anchor_lat ~anchor_lon clc_tiles =
+  let min_lon = float (anchor_lon - (w / 2))
+  and min_lat = float (anchor_lat - (h / 2)) in
+  let acc = ref [] and n = ref 0 in
+  List.iter
+    (fun (tile, range_lon, range_lat) ->
+      let header = tile.Clc_loader.header in
+      let pos = tile.Clc_loader.water_positions in
+      let idx = tile.Clc_loader.water_indices in
+      if Bigarray.Array1.dim idx > 0 then begin
+        (* As water_raster.vert places them. *)
+        let sx = 3600. /. header.Clc_loader.water_scale_x in
+        let sy = sx *. range_lat /. range_lon in
+        let ox = (header.Clc_loader.min_lon *. 3600.) -. min_lon in
+        let oy = (header.Clc_loader.min_lat *. 3600.) -. min_lat in
+        let vx i = (Int32.to_float pos.{2 * i} *. sx) +. ox in
+        let vy i = (Int32.to_float pos.{(2 * i) + 1} *. sy) +. oy in
+        for t = 0 to (Bigarray.Array1.dim idx / 3) - 1 do
+          let i0 = Int32.to_int idx.{3 * t}
+          and i1 = Int32.to_int idx.{(3 * t) + 1}
+          and i2 = Int32.to_int idx.{(3 * t) + 2} in
+          let x0 = vx i0 and y0 = vy i0 in
+          let x1 = vx i1 and y1 = vy i1 in
+          let x2 = vx i2 and y2 = vy i2 in
+          let gx = (x0 +. x1 +. x2) /. 3. and gy = (y0 +. y1 +. y2) /. 3. in
+          if gx >= 0. && gy >= 0. && gx <= float (w - 1) && gy <= float (h - 1)
+          then begin
+            let area =
+              0.5
+              *. abs_float
+                   (((x1 -. x0) *. (y2 -. y0)) -. ((x2 -. x0) *. (y1 -. y0)))
+            in
+            acc := (gx, gy, area) :: !acc;
+            incr n
+          end
+        done
+      end)
+    clc_tiles;
+  let a = Array.make (3 * !n) 0. in
+  List.iteri
+    (fun i (gx, gy, area) ->
+      a.(3 * i) <- gx;
+      a.((3 * i) + 1) <- gy;
+      a.((3 * i) + 2) <- area)
+    !acc;
+  a
+
+(* The height of the water that takes most of the view from an eye at [eye]:
+   each sample of [water] counts for the solid angle it is seen under, [at]
+   giving its position on the eye's plane and its height as drawn, and the
+   metre of height that gathers the most, with its two neighbours, has it.
+   None when no water takes a share of the view worth a bake. *)
+let reflection_plane ~eye ~sample_area ~at water =
+  let bins = Hashtbl.create 64 in
+  let reach2 = 30000. *. 30000. in
+  (* What a sample counts for, where it is on the eye's plane and how far
+     below the eye; nothing if it is out of reach or not below. *)
+  let sample i =
+    let px, py, z = at water.(3 * i) water.((3 * i) + 1) in
+    let h2 = (px *. px) +. (py *. py) in
+    let drop = eye -. z in
+    if drop > 1. && h2 < reach2 then
+      let d2 = h2 +. (drop *. drop) in
+      let area = water.((3 * i) + 2) *. sample_area in
+      Some (area *. drop /. (d2 *. sqrt d2), px, py, z, drop, area)
+    else None
+  in
+  let n = Array.length water / 3 in
+  for i = 0 to n - 1 do
+    match sample i with
+    | Some (weight, _, _, z, _, _) ->
+        let bin = int_of_float (Float.floor z) in
+        let sw, swz =
+          Option.value ~default:(0., 0.) (Hashtbl.find_opt bins bin)
+        in
+        Hashtbl.replace bins bin (sw +. weight, swz +. (weight *. z))
+    | None -> ()
+  done;
+  let around bin =
+    List.fold_left
+      (fun (sw, swz) b ->
+        match Hashtbl.find_opt bins b with
+        | Some (w, wz) -> (sw +. w, swz +. wz)
+        | None -> (sw, swz))
+      (0., 0.)
+      [ bin - 1; bin; bin + 1 ]
+  in
+  let best =
+    Hashtbl.fold
+      (fun bin _ best ->
+        let sw, swz = around bin in
+        match best with
+        | Some (sw', _) when sw' >= sw -> best
+        | _ -> Some (sw, swz))
+      bins None
+  in
+  match best with
+  | Some (sw, swz) when sw > 1e-4 && Lazy.force reflections_enabled ->
+      let level = swz /. sw in
+      (* Of the water at that level -- one lake, as a rule -- the azimuths it
+         has, per degree, and how steeply it is looked down on, per hundredth
+         of tangent. A sample stands for a triangle: over the azimuths it may
+         reach to, and from its nearer end. *)
+      let arc = Array.make 360 0. and steep = Array.make 50 0. in
+      for i = 0 to n - 1 do
+        match sample i with
+        | Some (weight, px, py, z, drop, area) when abs_float (z -. level) < 3.
+          ->
+            let size = sqrt area and dist = sqrt ((px *. px) +. (py *. py)) in
+            let centre = atan2 py px *. 180. /. pi in
+            let half = Float.min 180. (atan2 size dist *. 180. /. pi) in
+            for
+              a = int_of_float (Float.floor (centre -. half))
+              to int_of_float (Float.floor (centre +. half))
+            do
+              let a = ((a mod 360) + 360) mod 360 in
+              arc.(a) <- arc.(a) +. weight
+            done;
+            let t = drop /. Float.max 1. (dist -. size) in
+            let k = min 49 (int_of_float (t *. 100.)) in
+            steep.(k) <- steep.(k) +. weight
+        | _ -> ()
+      done;
+      (* The arc is the turn less its longest stretch without water worth a
+         few pixels, with three degrees to spare at either end; all of the
+         turn when that leaves less than a sixth of it out. *)
+      let wet a = arc.(a mod 360) > 1e-6 in
+      let gap_from = ref 0 and gap = ref 0 in
+      for a = 0 to 359 do
+        if wet (a + 359) && not (wet a) then begin
+          let n = ref 1 in
+          while !n < 360 && not (wet (a + !n)) do
+            incr n
+          done;
+          if !n > !gap then begin
+            gap_from := a;
+            gap := !n
+          end
+        end
+      done;
+      let arc_from, arc_span =
+        if !gap < 66 then (0., 2. *. pi)
+        else
+          ( float (!gap_from + !gap - 3) *. pi /. 180.,
+            float (360 - !gap + 6) *. pi /. 180. )
+      in
+      (* Up to where nine tenths of that water is, by what it takes of the
+         view -- the rest is at the eye's feet, seen from above, where water
+         mirrors little -- and half as much again, for the waves, which draw
+         the picture out. *)
+      let tan_max =
+        let total = Array.fold_left ( +. ) 0. steep in
+        let k = ref 0 and sum = ref steep.(0) in
+        while !k < 49 && !sum < 0.9 *. total do
+          incr k;
+          sum := !sum +. steep.(!k)
+        done;
+        Float.max 0.05 (Float.min 0.5 (1.6 *. float (!k + 1) /. 100.))
+      in
+      Format.eprintf
+        "reflection: water at %.1f m, %.4f sr, over %.0f deg from %.0f, up to \
+         %.1f deg@."
+        level sw
+        (arc_span *. 180. /. pi)
+        (arc_from *. 180. /. pi)
+        (atan tan_max *. 180. /. pi);
+      Some { level; arc_from; arc_span; tan_max }
+  | _ -> None
+
 (* Text Rendering *)
 
 (* The labels are read outdoors, where sunlight reflecting off the screen adds a
@@ -2390,6 +2715,7 @@ type base = {
           came *)
   ao_texture : Gl.texture;
   cover_map_texture : Gl.texture;
+  water : float array;  (** the open water: see [water_samples] *)
 }
 (** What a location bakes around its anchor arcsecond. Every one of these is a
     function of that arcsecond alone -- the base grid, the cover map and the
@@ -5356,6 +5682,7 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
             far;
             ao_texture;
             cover_map_texture;
+            water = water_samples ~w ~h ~anchor_lat ~anchor_lon clc_tiles;
           }
     in
     if Option.is_some fetched then
@@ -5475,6 +5802,9 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
              slots)
       in
       let hd_grids = List.map (fun r -> r.grid) rings in
+      (* The water's mirror, baked once the publish has the terrain program
+         set, and again when the ground changes late (the canopy). *)
+      let bake_mirror = ref (fun () -> ()) in
       (* Bilinear interpolation for height *)
       let height =
         let base_height =
@@ -5545,6 +5875,72 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
         | Some h -> h
         | None -> base_height
       in
+      (* The height of the ground at a sample of the base grid, on the surface
+         that is actually drawn: the innermost ring that covers it, which
+         resolves summits the 30 m base grid smooths away, and the base grid
+         elsewhere. The frame of a ring is stated from the anchor, which sits
+         at the centre of the base grid -- not at the eye, which is free to
+         stand elsewhere in the tile. *)
+      let ground_at =
+        let base = Dem_loader.get_height tile in
+        let rings =
+          List.map
+            (fun (g : Hd_dem.t) ->
+              let get_h = Hd_dem.get_height g in
+              let limit = float (g.layer.size - 2) in
+              fun gx gy ->
+                let hx, hy =
+                  Warp.apply g.frame.to_index
+                    (gx -. float (w / 2))
+                    (gy -. float (h / 2))
+                in
+                if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
+                  Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
+                else None)
+            hd_grids
+        in
+        fun row col ->
+          match List.find_map (fun r -> r (float col) (float row)) rings with
+          | Some h -> h
+          | None -> base row col
+      in
+      (* A position of the base grid, in its samples, on the eye's plane, in
+         metres east and north of it: the inverse of the grid mapping in
+         radial_common.vert (meridian convergence to second order); two
+         fixed-point iterations converge to millimetres. *)
+      let conv = Render_state.meridian_convergence ~lat:alat in
+      let plane_of gx gy =
+        let ge = deltax *. (gx -. float x -. off_x) in
+        let gn = deltay *. (gy -. float y -. off_y) in
+        let px = ge /. (1. +. (gn *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        let px = ge /. (1. +. (py *. conv)) in
+        let py = gn +. (px *. px *. conv /. 2.) in
+        (px, py)
+      in
+      (* The level of the water the view has most of, if any: the mirror's
+         plane (see [bake_reflection]), and what the mesh draws that water
+         level at (radial_common.vert's [u_waterLevel]) in every program that
+         stands on it, the shadows' first, which are drawn below. *)
+      let water_level =
+        reflection_plane ~eye:(height +. 2.) ~sample_area:(deltax *. deltay)
+          ~at:(fun gx gy ->
+            let px, py = plane_of gx gy in
+            ( px,
+              py,
+              ground_at
+                (int_of_float (Float.round gy))
+                (int_of_float (Float.round gx)) ))
+          base.water
+      in
+      List.iter
+        (fun pid ->
+          Gl.use_program ctx pid;
+          let loc = Gl.get_uniform_location ctx pid (Jstr.v "u_waterLevel") in
+          match water_level with
+          | Some { level; _ } -> Gl.uniform2f ctx loc level 1.
+          | None -> Gl.uniform2f ctx loc 0. 0.)
+        [ terrain_pid; shadow_pid; path_pid ];
       (* Slots the rings do not fill get the 1x1 placeholder: their [hd_valid] is
          false, so nothing samples them, but a texture must still be bound or the
          driver may complain about an incomplete unit. *)
@@ -5632,7 +6028,8 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
                ~cover_map_texture ~palette_texture ~hd_slot_textures ctx);
          bind_terrain_textures ctx ~relief_texture ~relief_normal_texture
            ~ao_texture ~detail_map ~shadow_map ~cover_map_texture
-           ~palette_texture ~hd_slot_textures
+           ~palette_texture ~hd_slot_textures;
+         !bake_mirror ()
        in
        tree_cover_frame := Some (anchor_lat, anchor_lon, w);
        (* Trees found: the mesh stands down under them, and they cast. *)
@@ -5694,49 +6091,17 @@ let load_location ctx ~graphics ~w ~h ~detail_map ~palette_texture ~lat ~lon =
       (let r, g, b = fog_color in
        Gl.clear_color ctx r g b 1.);
 
-      (* The height of the ground at a sample of the base grid, on the surface
-         that is actually drawn: the innermost ring that covers it, which
-         resolves summits the 30 m base grid smooths away, and the base grid
-         elsewhere. The frame of a ring is stated from the anchor, which sits
-         at the centre of the base grid -- not at the eye, which is free to
-         stand elsewhere in the tile. *)
-      let ground_at =
-        let base = Dem_loader.get_height tile in
-        let rings =
-          List.map
-            (fun (g : Hd_dem.t) ->
-              let get_h = Hd_dem.get_height g in
-              let limit = float (g.layer.size - 2) in
-              fun gx gy ->
-                let hx, hy =
-                  Warp.apply g.frame.to_index
-                    (gx -. float (w / 2))
-                    (gy -. float (h / 2))
-                in
-                if hx >= 0. && hx <= limit && hy >= 0. && hy <= limit then
-                  Some (Visibility.bilinear_height get_h ~x:hx ~y:hy)
-                else None)
-            hd_grids
-        in
-        fun row col ->
-          match List.find_map (fun r -> r (float col) (float row)) rings with
-          | Some h -> h
-          | None -> base row col
-      in
-      (* A position of the base grid, in its samples, on the eye's plane, in
-         metres east and north of it: the inverse of the grid mapping in
-         radial_common.vert (meridian convergence to second order); two
-         fixed-point iterations converge to millimetres. *)
-      let conv = Render_state.meridian_convergence ~lat:alat in
-      let plane_of gx gy =
-        let ge = deltax *. (gx -. float x -. off_x) in
-        let gn = deltay *. (gy -. float y -. off_y) in
-        let px = ge /. (1. +. (gn *. conv)) in
-        let py = gn +. (px *. px *. conv /. 2.) in
-        let px = ge /. (1. +. (py *. conv)) in
-        let py = gn +. (px *. px *. conv /. 2.) in
-        (px, py)
-      in
+      (let plane =
+         Option.map (fun m -> (m.level -. (height +. 2.), m)) water_level
+       in
+       let generation = !context_generation in
+       bake_mirror :=
+         fun () ->
+           if !context_generation = generation then
+             time_gpu ctx "bake_reflection" (fun () ->
+                 bake_reflection ctx ~terrain_pid ~terrain_uniforms ~terrain_geo
+                   ~index_count ~placeholder:hd_placeholder ~fog_color plane));
+      !bake_mirror ();
       let all_poi = poi @ far_poi in
       let sight_targets =
         let far_at =

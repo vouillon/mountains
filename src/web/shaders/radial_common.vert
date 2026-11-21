@@ -331,6 +331,10 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
   return lift * rest;
 }
 
+// x: the level of the water that is drawn level, in metres; y: 1 if any.
+uniform highp vec2 u_waterLevel;
+const highp vec2 WATER_SNAP = vec2(0.6, 1.8);
+
 // A ring slot's normalised coordinate.
 highp vec2 slotCoord(highp vec2 c0, highp vec2 c1, highp vec2 c2, int slot) {
   return slot == 0 ? c0 : (slot == 1 ? c1 : c2);
@@ -382,6 +386,21 @@ RadialVertex computeRadialVertex() {
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopyFarSlot),
       r, grid_spacing);
+
+  // Still water is level, which it is not in the data: unrectified LIDAR
+  // has it uneven by decimetres, and a coarse grid runs it up the banks.
+  // Within WATER_SNAP.x of the level of the water the view has most of
+  // (Viewer.reflection_plane), it is drawn at that level, and eased back to
+  // the data by WATER_SNAP.y from it, where it is other water. The mirror
+  // (terrain_main.vert, terrain.frag) wants its plane to be where the water
+  // is drawn: with the eye three metres above a lake, a few decimetres of
+  // difference displace the picture by a tenth of its height.
+  if (u_waterLevel.y > 0.5) {
+    highp float d = v.height - u_waterLevel.x;
+    if (abs(d) < WATER_SNAP.y && overWater(v.norm_coord))
+      v.height =
+          u_waterLevel.x + d * smoothstep(WATER_SNAP.x, WATER_SNAP.y, abs(d));
+  }
 
   // Earth curvature with standard atmospheric refraction folded in
   // (effective radius R / (1 - 0.13) ~ 7320 km). The grid is centred on the
