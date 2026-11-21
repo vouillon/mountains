@@ -1,13 +1,15 @@
-Running 1055 regression tests...
+Running 1057 regression tests...
 Triangulation quality warning for  water (Area OK): 2323 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.03 deg
   QUALITY WARNING: Triangle count mismatch: got 2323, expected 2428
+Cheap validation errors for tile  type clc:
+  - Duplicate point at index 110 (5.000000, 46.000000)
 Triangulation quality warning for  water (Area OK): 4376 tris
   QUALITY WARNING: Degenerate triangles: min angle 0.27 deg
   QUALITY WARNING: Triangle count mismatch: got 4376, expected 4529
 
 Test Results:
-Total: 1055
-Passed: 1055
+Total: 1057
+Passed: 1057
 Failed: 0
 Regression suite PASSED.

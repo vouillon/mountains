@@ -356,19 +356,6 @@ module Triangulator = struct
 
   let cross_product_coords ax ay bx by = (ax *. by) -. (ay *. bx)
 
-  let point_in_triangle_coords ax ay bx by cx cy px py =
-    let cp1 =
-      cross_product_coords (bx -. ax) (by -. ay) (px -. ax) (py -. ay)
-    in
-    let cp2 =
-      cross_product_coords (cx -. bx) (cy -. by) (px -. bx) (py -. by)
-    in
-    let cp3 =
-      cross_product_coords (ax -. cx) (ay -. cy) (px -. cx) (py -. cy)
-    in
-    (cp1 >= -.epsilon && cp2 >= -.epsilon && cp3 >= -.epsilon)
-    || (cp1 <= epsilon && cp2 <= epsilon && cp3 <= epsilon)
-
   (* Hash table mapping (x, y) coordinates to outer ring node indices.
      Used for O(1) lookup of touching points between holes and outer ring. *)
   type outer_vertex_map = (float * float, int) Hashtbl.t
@@ -404,8 +391,12 @@ module Triangulator = struct
      incoming to its outgoing edge. The hole sector must lie within the outer
      one. Clipped rings can pass through T several times, with edges
      collinear with the outer ones (e.g. a hole running along both sides of
-     a tile corner): only one of the passes is adjacent to the outer one. *)
-  let hole_sector_fits verts poly_list o h =
+     a tile corner): only one of the passes is adjacent to the outer one.
+     Returns the width of the hole's sector when it fits: a pass that comes
+     to T and goes back the way it came (a spike, width 0) fits any outer
+     sector, but splicing there leaves the hole's real pass at T to cross the
+     outer ring's. *)
+  let hole_sector verts poly_list o h =
     let open PolygonList in
     let vert_idx = poly_list.vert_idx in
     let tx, ty = (get_x verts vert_idx.(o), get_y verts vert_idx.(o)) in
@@ -413,20 +404,35 @@ module Triangulator = struct
       let vi = vert_idx.(n) in
       (get_x verts vi -. tx, get_y verts vi -. ty)
     in
-    let ox, oy = dir poly_list.next.(o) in
+    (* The neighbour in direction [step], past those at T itself: a ring can
+       repeat the point (the clipper gives a corner twice), and a zero
+       direction has no angle. *)
+    let away step n =
+      let rec go m k =
+        let dx, dy = dir m in
+        if (dx = 0. && dy = 0.) && m <> n && k > 0 then go (step m) (k - 1)
+        else m
+      in
+      go (step n) 64
+    in
+    let prev n = away (fun m -> poly_list.prev.(m)) n in
+    let next n = away (fun m -> poly_list.next.(m)) n in
+    let ox, oy = dir (next o) in
     let angle n =
       let vx, vy = dir n in
       ccw_angle ox oy vx vy
     in
-    let a_in_h = angle poly_list.prev.(h) in
-    let a_out_h = angle poly_list.next.(h) in
-    let a_in_o = angle poly_list.prev.(o) in
-    a_in_h <= a_out_h +. 1e-9 && a_out_h <= a_in_o +. 1e-9
+    let a_in_h = angle (prev h) in
+    let a_out_h = angle (next h) in
+    let a_in_o = angle (prev o) in
+    if a_in_h <= a_out_h +. 1e-9 && a_out_h <= a_in_o +. 1e-9 then
+      Some (a_out_h -. a_in_h)
+    else None
 
   (* Find if any vertex in the hole touches (has same coordinates as) any vertex
      in the current outer ring. Uses hash table for O(1) lookup per hole vertex.
-     Prefers a pair whose sectors are compatible (see [hole_sector_fits]),
-     falling back to the first touching pair. *)
+     Prefers the pair whose sectors are compatible with the widest hole sector
+     (see [hole_sector]), falling back to the first touching pair. *)
   let find_touching_point (verts : float array) hole_start_node
       (outer_map : outer_vertex_map) poly_list =
     let open PolygonList in
@@ -436,16 +442,18 @@ module Triangulator = struct
     let hole_loop = ref true in
     let first = ref None in
     let result = ref None in
-    while !hole_loop && !result = None do
+    let best = ref neg_infinity in
+    while !hole_loop do
       let h_vi = vert_idx.(!hole_curr) in
       let key = (get_x verts h_vi, get_y verts h_vi) in
       List.iter
         (fun outer_node ->
           if !first = None then first := Some (!hole_curr, outer_node);
-          if
-            !result = None
-            && hole_sector_fits verts poly_list outer_node !hole_curr
-          then result := Some (!hole_curr, outer_node))
+          match hole_sector verts poly_list outer_node !hole_curr with
+          | Some width when width > !best +. 1e-9 ->
+              best := width;
+              result := Some (!hole_curr, outer_node)
+          | _ -> ())
         (Hashtbl.find_all outer_map key);
       hole_curr := next.(!hole_curr);
       if !hole_curr = hole_start_node then hole_loop := false
@@ -733,7 +741,24 @@ module Triangulator = struct
         Printf.printf "  Eberly Step 4: Hit edge, P is %d (node %d)\n%!" p_idx
           p_node;
 
-      (* Step 5-6: Search reflex vertices *)
+      (* Step 5-6: Search reflex vertices, in the triangle M I P or within
+         [tol] of it: rounding can leave the vertex M sees just outside (a
+         spike's tip 3 mm above the side M P in N44E011, every vertex inside
+         hidden, and P too). Each candidate is checked for visibility. *)
+      let tol = 1e-6 in
+      let near_triangle ax ay bx by cx cy px py =
+        let side ux uy vx vy =
+          let ex = vx -. ux and ey = vy -. uy in
+          let l = sqrt ((ex *. ex) +. (ey *. ey)) in
+          if l = 0. then 0.
+          else cross_product_coords ex ey (px -. ux) (py -. uy) /. l
+        in
+        let d1 = side ax ay bx by
+        and d2 = side bx by cx cy
+        and d3 = side cx cy ax ay in
+        (d1 >= -.tol && d2 >= -.tol && d3 >= -.tol)
+        || (d1 <= tol && d2 <= tol && d3 <= tol)
+      in
       let reflex_candidates = ref [] in
       let search_curr = ref outer_node in
       let search_loop = ref true in
@@ -754,10 +779,7 @@ module Triangulator = struct
              let cp = cross_product verts vi_prv v_idx vi_rn in
              if cp < -.epsilon then
                let rx, ry = (get_x verts v_idx, get_y verts v_idx) in
-               if
-                 point_in_triangle_coords mx my !best.intersection_x my p_x p_y
-                   rx ry
-               then
+               if near_triangle mx my !best.intersection_x my p_x p_y rx ry then
                  let dx = rx -. mx in
                  let dy = abs_float (ry -. my) in
                  if dx > epsilon then
