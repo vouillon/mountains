@@ -712,15 +712,16 @@ let describe layer =
 (* Fetch only: the blend needs the base tile, which is being fetched in
    parallel. Never fails: [None] means "render from the base tile alone".
 
-   A tile the data cache does not have waits for [network] before going out
+   A tile the data cache does not have waits for [network] before going out,
+   calling [on_network] if it is still closed
    (a location's first view: the rings shared the link with the tiles it waits
    for, 9 MB of 23 at Mont Blanc). With [eye], those around the block's centre
    -- the ground within the ring's fade of the eye, whose height comes from the
    finest ring -- go at once, and the block is handed out as soon as they are in, the others
    following as its [rest]: the first view stands at the right height, and
    the rest of the ring fades in. *)
-let fetch ?(timeout_s = timeout_s) ?(network = Lwt.return_unit) ?(eye = false)
-    layer ~lat ~lon : raw option Lwt.t =
+let fetch ?(timeout_s = timeout_s) ?(network = Lwt.return_unit)
+    ?(on_network = ignore) ?(eye = false) layer ~lat ~lon : raw option Lwt.t =
   let size = layer.size in
   match plan layer ~lat ~lon with
   | None -> Lwt.return None
@@ -767,7 +768,11 @@ let fetch ?(timeout_s = timeout_s) ?(network = Lwt.return_unit) ?(eye = false)
         if at_eye req then Lwt.return_unit
         else
           let* cached = to_lwt (Web_utils.is_cached (Jstr.v req.url)) in
-          if cached then Lwt.return_unit else network
+          if cached then Lwt.return_unit
+          else begin
+            if Lwt.is_sleeping network then on_network ();
+            network
+          end
       in
       (* Every request is issued at once, past its gate: the browser
      multiplexes them over one HTTP/2 connection. *)

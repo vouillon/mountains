@@ -69,6 +69,7 @@ val raw_samples :
 val fetch :
   ?timeout_s:float ->
   ?network:unit Lwt.t ->
+  ?on_network:(unit -> unit) ->
   ?eye:bool ->
   layer ->
   lat:float ->
@@ -83,10 +84,11 @@ val fetch :
     the block holds one: an empty block goes on waiting. See {!raw_rest} for the
     tiles that arrive past it.
 
-    A tile the data cache does not have waits for [network] first. With [eye],
-    the tiles within the layer's fade of the block's centre, where the eye is,
-    do not wait, and the block is handed out once they are in, the others
-    following as its {!raw_rest}. *)
+    A tile the data cache does not have waits for [network] first, calling
+    [on_network] if it is not resolved yet: the block will not be complete
+    before it is. With [eye], the tiles within the layer's fade of the block's
+    centre, where the eye is, do not wait, and the block is handed out once they
+    are in, the others following as its {!raw_rest}. *)
 
 val block_id : layer -> lat:float -> lon:float -> string
 (** Identity of the block [fetch] would ask for at [lat]/[lon]: two locations

@@ -5529,16 +5529,26 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
   (* The rings wait for the first view, but for the finest one's tiles about
      the eye, whose height it gives ([Hd_dem.fetch ~eye]). *)
   let finest = List.nth hd_layers (List.length hd_layers - 1) in
+  (* Resolved for a ring as soon as one of its tiles waits for the first view:
+     the wait for the rings below must not wait for it. Not for the finest,
+     whose fetch resolves with its tiles at the eye. *)
+  let hd_gated = ref [] in
   let hd_fetches =
     List.filteri (fun i _ -> i >= kept_rings) hd_layers
     |> List.map (fun layer ->
+        let gated, gate_hit = Lwt.wait () in
+        hd_gated := (layer, gated) :: !hd_gated;
+        let on_network () =
+          if layer != finest && Lwt.is_sleeping gated then
+            Lwt.wakeup_later gate_hit ()
+        in
         ( layer,
           ref
             (Lwt.map
                (Option.map
                   (Hd_dem.reanchor_raw ~old_anchor:plan_arcsec
                      ~anchor:(anchor_lat, anchor_lon)))
-               (Hd_dem.fetch ~network:(fst !first_view_gate)
+               (Hd_dem.fetch ~network:(fst !first_view_gate) ~on_network
                   ~eye:(layer == finest) layer ~lat:elat ~lon:elon)) ))
   in
   start_canopy ~lat:elat ~lon:elon
@@ -5618,13 +5628,18 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
      summit -- so the cache hits and the fast rejections of being offline, which
      is nearly every load, are kept on a single publish. Only a fetch slow enough
      that waiting for it is itself the problem gets published around. A load that
-     kept every ring waits for nothing here. *)
+     kept every ring waits for nothing here, and none waits for a ring with tiles
+     to fetch after the first view: the finest one is then handed out with its
+     tiles at the eye ([Hd_dem.fetch ~eye]). *)
   let* () =
     Web_utils.timed_lwt ~track:"Location" "Wait for rings" @@ fun () ->
     Lwt.choose
       [
-        (let* _ = Lwt.all (List.map (fun (_, p) -> !p) hd_fetches) in
-         Lwt.return_unit);
+        Lwt.join
+          (List.map
+             (fun (layer, p) ->
+               Lwt.choose [ Lwt.map ignore !p; List.assq layer !hd_gated ])
+             hd_fetches);
         sleep hd_grace_s;
       ]
   in
