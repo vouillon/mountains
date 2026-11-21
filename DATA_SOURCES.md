@@ -11,7 +11,7 @@ details; this is the map to them.
 | Land cover | CORINE Land Cover 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/clc` (CLC6) | `Corine/extract_tiles.ml` |
 | Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/clc4` | `extract_tiles.exe --coarse` |
 | Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
-| Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | fetched at run time | `src/web/tree_cover.ml` |
+| Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/tc0`, `tc1` | `Corine/tree_cover_tiles.py`, `src/web/tree_cover.ml` |
 | High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v1` (HDT1) | `Corine/own_tiles.py` |
 | 2-D map picker | IGN Plan IGN v2, LiDAR HD shading, contours | Etalab 2.0 | fetched at run time | `src/web/map_picker.ml` |
 
@@ -127,15 +127,27 @@ then CORINE, holes filled with the nearest land, the rest sea. 53 cells.
 - `data/points.geojson` is an older overpass-turbo export of summits
   (2024-08-29) read only by the SDL client.
 
-## Tree cover, at run time
+## Tree cover: `v2/tc0`, `v2/tc1`
 
-`src/web/tree_cover.ml` asks the EEA's image server
-(`image.discomap.eea.europa.eu/…/GioLandPublic/<layer>/ImageServer/exportImage`)
-for `HRL_TreeCoverDensity_2018` (bilinear) and `HRL_DominantLeafType2018`
-(nearest), 10 m layers, in blocks of 1024 samples at ~20 m or ~80 m. The
-service makes its samples square in degrees, so the request's width is fitted to
-the box. The service worker caches the answers. Near the eye, where the
-high-resolution canopy has data, trees come from the canopy instead.
+- **Source**: the EEA's `HRL_TreeCoverDensity_2018` and
+  `HRL_DominantLeafType2018` (10 m), resampled by their public image service
+  (`image.discomap.eea.europa.eu/…/GioLandPublic/<layer>/ImageServer/exportImage`)
+  in WGS84, bilinear for the density, nearest for the leaf type.
+- **Terms**: full, open and free access on three conditions: inform of the
+  source, state any adaptation, imply no EU endorsement. The credit says
+  "resampled and re-encoded".
+- **Import**: `Corine/tree_cover_tiles.py` asks the service for blocks of 8 x 8 cells and writes one file per cell: 300" at
+  0.6" (`tc0`, 500 x 500 samples) and 1200" at 2.4" (`tc1`), named
+  `N45_E006_<row>_<col>.tc` (row 0 south). A byte per sample, rows from the
+  north: the density in steps of 10% in the low 4 bits (15 for no data), the
+  leaf type (0 neither, 1 broadleaved, 2 coniferous) in the next 2; `TCC1`
+  then zlib. A cell with no data at all is not written. Coverage: 41.9-47.1 N,
+  3.9-10.1 E at level 0, half a degree more at level 1 (5078 + 507 cells,
+  220 MB).
+- **Client**: `src/web/tree_cover.ml` cuts its blocks of 1024 samples tall
+  (about 20 km and 80 km) from the cells, as the service's tiled TIFFs were
+  laid out. Near the eye, where the high-resolution canopy has data, trees
+  come from the canopy instead.
 
 ## High-resolution ground and canopy: our own tiles
 

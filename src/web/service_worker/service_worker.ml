@@ -41,6 +41,7 @@ let is_tile url =
   is_own_hd_tile url
   || String.ends_with ~suffix:".dem" url
   || String.ends_with ~suffix:".clc" url
+  || String.ends_with ~suffix:".tc" url
   || String.ends_with ~suffix:".tif" url
   || is_hd_dem url
 
@@ -119,6 +120,8 @@ let delete_old_caches () =
 let is_retired_tile url =
   List.exists (contains_sub url)
     [ "/data/dem/"; "/data/dem4/"; "/data/clc/"; "/data/clc4/"; "/data/poi/" ]
+  (* And the EEA's own tree cover responses: ours replaced them (.tc). *)
+  || is_tree_cover url
 
 let prune_data_cache () =
   let* cache = open_cache data_cache_name in
