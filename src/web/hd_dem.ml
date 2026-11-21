@@ -213,6 +213,16 @@ let l13 =
     (wmts_layer ~matrix_level:13 ~block_tiles:8 ~fade_metres:1500.)
     ~product:"ground" ~metres:8. ~size:2048 ~fade_metres:1500.
 
+(* The 16 m ring, between [l13] and the base (one arcsecond): the 2 x 2 mean of our 8 m
+   tiles (Corine/ring16_tiles.py), 2048 samples, 32.8 km a side. Under [?ign],
+   WMTS level 12, half [l13]'s resolution. The base is Copernicus' radar DSM,
+   much smoother than IGN's ground model: without this ring the change of
+   source stood 8 km from the eye, where it shows; it is now twice as far. *)
+let l16 =
+  own_or
+    (wmts_layer ~matrix_level:12 ~block_tiles:8 ~fade_metres:3000.)
+    ~product:"ground" ~metres:16. ~size:2048 ~fade_metres:3000.
+
 (* The two LIDAR HD rings, fetched in the CRS the product is stored in --
    Lambert-93 over metropolitan France, RGR92 / UTM 40S over La Reunion -- rather
    than in the WGS84G reprojection the service also offers. Measured (PLAN.md):

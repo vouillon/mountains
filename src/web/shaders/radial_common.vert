@@ -40,7 +40,7 @@ const highp float FAR_LOD_BIAS = -2.0;
 // innermost ring. The scalars are arrays, which GLSL ES 3.0 lets us index
 // dynamically; the sampler arrays it only lets us index by literal, hence the
 // unrolled chain in [sampleTerrainHeight].
-#define HD_SLOTS 3
+#define HD_SLOTS 4
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief[HD_SLOTS];
 // Arcseconds from the anchor to a position normalized over the ring. A ring on
@@ -171,6 +171,12 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
         hd_relief[2], c2,
         min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]),
         hd_height_scale_n[2], hd_height_offset[2]);
+  highp vec2 c3 = hdCoord(3, coord);
+  if (insideHd(3, c3))
+    return sampleReliefHeight(
+        hd_relief[3], c3,
+        min(int(max(0.0, lod_raw + hd_lod_bias[3])), hd_max_lod[3]),
+        hd_height_scale_n[3], hd_height_offset[3]);
   highp float w = baseWeight(norm_coord);
   highp float h = BASE_OFFSET;
   if (w < 1.0 && far_valid)
@@ -383,6 +389,7 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[0] = hdCoord(0, coord);
   v.hd_coord[1] = hdCoord(1, coord);
   v.hd_coord[2] = hdCoord(2, coord);
+  v.hd_coord[3] = hdCoord(3, coord);
   v.far_coord = (coord + far_map.xy) * far_map.z;
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
   v.height += canopyLift(

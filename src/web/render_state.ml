@@ -42,9 +42,13 @@ let compute_center_offset ~lat ~eye_x ~eye_y =
   (deltax *. eye_x, deltay *. eye_y)
 
 (* Number of nested near-field refinement rings the shaders declare (HD_SLOTS in
-   radial_common.vert). Adding a ring is a change to this and to the layer list
-   [viewer.ml] passes, and nothing else. *)
-let hd_slots = 3
+   radial_common.vert and terrain.frag). Adding a ring is a change to this, to
+   the layer list [viewer.ml] passes, to the texture units ([upload_texture_units]
+   and [Viewer.hd_height_unit]) and to the per-slot code the shaders spell out
+   (they may index a sampler array by constants only): the height selection in
+   radial_common.vert, the varyings of terrain_main.vert and the normal
+   composite in terrain.frag. *)
+let hd_slots = 4
 
 type radial_params = {
   w_mask : int;
@@ -452,6 +456,9 @@ let upload_texture_units ctx (u : terrain_uniforms) =
   Gl.uniform1i ctx u.hd_relief_normal.(1) 11;
   Gl.uniform1i ctx u.hd_relief.(2) 12;
   Gl.uniform1i ctx u.hd_relief_normal.(2) 13;
+  (* 16 to 18 are the far field's ([Viewer.apply_far]). *)
+  Gl.uniform1i ctx u.hd_relief.(3) 19;
+  Gl.uniform1i ctx u.hd_relief_normal.(3) 20;
   (* Bound once for the session by [Viewer.make_bump_gradients]. *)
   Gl.uniform1i ctx u.u_bumpGrad 14;
   (* Bound by [Viewer.update_canopy], with a placeholder while absent. *)
@@ -462,7 +469,8 @@ let upload_texture_units_shadow ctx (u : shadow_uniforms) =
   Gl.uniform1i ctx u.relief 0;
   Gl.uniform1i ctx u.hd_relief.(0) 6;
   Gl.uniform1i ctx u.hd_relief.(1) 10;
-  Gl.uniform1i ctx u.hd_relief.(2) 12
+  Gl.uniform1i ctx u.hd_relief.(2) 12;
+  Gl.uniform1i ctx u.hd_relief.(3) 19
 
 type hd_params = {
   hd_size : int;  (** samples per side *)
@@ -779,6 +787,7 @@ let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.hd_relief.(0) 6;
   Gl.uniform1i ctx u.hd_relief.(1) 10;
   Gl.uniform1i ctx u.hd_relief.(2) 12;
+  Gl.uniform1i ctx u.hd_relief.(3) 19;
   Gl.uniform4f ctx u.u_color 0.70 0.08 0.20 1.0
 (* [u_linewidth] follows the canvas, so it is uploaded per frame instead. *)
 

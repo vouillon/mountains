@@ -8,7 +8,7 @@ uniform highp sampler2D relief_normal;
 // first. Selected by the same extent tests as the vertex stage; [hd_valid] is
 // shared with it, and bool needs no precision qualifier, so the two
 // declarations cannot disagree.
-#define HD_SLOTS 3
+#define HD_SLOTS 4
 uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
 // Encoded normals of the far field, which has the ground beyond the base grid
@@ -107,6 +107,7 @@ in highp vec2 reliefCoord; // Highp for texture coords
 in highp vec2 hdReliefCoord0;
 in highp vec2 hdReliefCoord1;
 in highp vec2 hdReliefCoord2;
+in highp vec2 hdReliefCoord3;
 in highp vec2 farReliefCoord;
 in highp float v_dist;
 in highp vec3 v_view_dir;
@@ -922,6 +923,7 @@ void main() {
   mediump float f0 = ringFade(hd_valid[0], hdReliefCoord0);
   mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
   mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
+  mediump float f3 = ringFade(hd_valid[3], hdReliefCoord3);
   mediump float fb = baseFade();
   mediump vec2 encodedN;
   // Highp: it is mixed down from the 60000 sentinel, and at fp16 (ulp 32 there)
@@ -937,6 +939,9 @@ void main() {
   } else if (f2 >= 1.0 && f1 <= 0.0 && f0 <= 0.0) {
     encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
     data_step = hd_step[2];
+  } else if (f3 >= 1.0 && f2 <= 0.0 && f1 <= 0.0 && f0 <= 0.0) {
+    encodedN = texture(hd_relief_normal[3], hdReliefCoord3).rg;
+    data_step = hd_step[3];
   } else {
     // A ring's border band (rare: the bands are ~6% of each extent), or
     // outside every ring. Composite outside-in so each ring fades over the
@@ -953,11 +958,21 @@ void main() {
         encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
         data_step = hd_step[2];
       } else {
-        encodedN = baseNormal(fb);
-        // The base gets the same sentinel [Render_state] uploads for empty
-        // slots: far above any footprint, i.e. the full bump, exactly as the
-        // base always had -- and mediump-safe, unlike an infinity.
-        data_step = 60000.0;
+        if (f3 >= 1.0) {
+          encodedN = texture(hd_relief_normal[3], hdReliefCoord3).rg;
+          data_step = hd_step[3];
+        } else {
+          encodedN = baseNormal(fb);
+          // The base gets the same sentinel [Render_state] uploads for empty
+          // slots: far above any footprint, i.e. the full bump, exactly as
+          // the base always had -- and mediump-safe, unlike an infinity.
+          data_step = 60000.0;
+          if (f3 > 0.0) {
+            encodedN = mix(encodedN,
+                           texture(hd_relief_normal[3], hdReliefCoord3).rg, f3);
+            data_step = mix(data_step, hd_step[3], f3);
+          }
+        }
         if (f2 > 0.0) {
           encodedN = mix(encodedN,
                          texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);

@@ -22,6 +22,10 @@ type layer = {
 (** One refinement ring. Rings nest: each is blended onto the next coarser
     surface, so the renderer can pick between them on a plain extent test. *)
 
+val l16 : layer
+(** 16 m, 2048 samples (32.8 km) a side, from our 8 m tiles; WMTS level 12 under
+    [?ign]. *)
+
 val l13 : layer
 (** RGE ALTI over WMTS level 13, 8 x 8 tiles: 0.309 arcsec (9.5 m N-S), 2048
     samples per side, 19.5 x 13.6 km at 46 degrees, ~13.7 MB on the wire. *)

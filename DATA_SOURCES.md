@@ -12,7 +12,7 @@ details; this is the map to them.
 | Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/far` (bundled) | `extract_tiles.exe --coarse`, `Corine/far_bundles.py` |
 | Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
 | Tree cover and leaf type | EEA HRL Tree Cover Density / Dominant Leaf Type 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/tc0`, `tc1` | `Corine/tree_cover_tiles.py`, `src/web/tree_cover.ml` |
-| High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v2/rings` (bundles of `v1`'s HDT1) | `Corine/own_tiles.py`, `Corine/ring_bundles.py` |
+| High-resolution ground and canopy | IGN LiDAR HD, swisstopo, Regione Piemonte, TINITALY, Regione Valle d'Aosta | Etalab 2.0, swisstopo open data, CC BY 4.0 | `tiles.vouillon.org/v2/rings` (bundles of `v1`'s HDT1, and the 16 m ring made from them) | `Corine/own_tiles.py`, `Corine/ring_bundles.py`, `Corine/ring16_tiles.py` |
 | 2-D map picker | IGN Plan IGN v2, LiDAR HD shading, contours | Etalab 2.0 | fetched at run time | `src/web/map_picker.ml` |
 
 The credits the app shows are in `src/web/index.html` (the startup notice) and
@@ -175,7 +175,17 @@ tile with one 4 m canopy tile (1024 m), the 8 m ring's 2 x 2 tiles with the
 16 m canopy tile (4096 m) -- the tiles as they are behind a header (`HDB1`).
 A location asks for 48 of them rather than ~190 tiles. A run of
 `own_tiles.py` that rebuilds blocks must be followed by `ring_bundles.py`
-over the same blocks (`--only`).
+over the same blocks (`--only`), and by `ring16_tiles.py` over the bundles
+holding them (`--only C R`, C and R the block's halved).
+
+A fourth ring, 16 m, stands between the 8 m one and the base: without it, the
+change from IGN's ground model to Copernicus' much smoother radar surface
+stood 8 km from the eye, where it shows as a range drawn soft; it is now 16 km
+out. It has no tiles of its own in `v1`: `Corine/ring16_tiles.py` makes each
+16 m sample the mean of the 8 m ring's 2 x 2 (nodata if any of them is), in
+10 cm steps, and writes the same bundles directly -- 2 x 2 ground tiles over
+8192 m, the step its 2048-sample block snaps to, no canopy -- under
+`v2/rings/<region>/16/`. A location reads 16 of them, about 3.3 MB.
 
 ### Sources
 
@@ -286,7 +296,7 @@ neighbours.
 ## IGN services at run time
 
 With `?ign` the 3-D rings read IGN's services directly, as before the own tiles:
-WMTS `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` (RGE ALTI, level 13) and the
+WMTS `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES` (RGE ALTI, levels 12 and 13) and the
 LiDAR HD WMS layers above. The 2-D map picker always uses IGN's WMTS:
 `GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2`,
 `IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW` and

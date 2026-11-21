@@ -2233,17 +2233,19 @@ let rasterize_clc_tiles ?far_cover ?far_texture ?far_anchor ?loaded ctx ~lat
   cover_map_texture
 
 (* Texture units per refinement ring. Ring 0 keeps the units the single HD layer
-   always used; ring 1 takes the first two that were free. Must agree with
-   [Render_state.upload_texture_units]. *)
+   always used; ring 1 takes the first two that were free, ring 3 the two
+   past the far field's. Must agree with [Render_state.upload_texture_units]. *)
 let hd_height_unit = function
   | 0 -> Gl.texture6
   | 1 -> Gl.texture10
-  | _ -> Gl.texture12
+  | 2 -> Gl.texture12
+  | _ -> Gl.texture19
 
 let hd_normal_unit = function
   | 0 -> Gl.texture9
   | 1 -> Gl.texture11
-  | _ -> Gl.texture13
+  | 2 -> Gl.texture13
+  | _ -> Gl.texture20
 
 let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
     (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~casters
@@ -4880,7 +4882,7 @@ let eye_clearance_m = 4.
 
 (* Coarsest first: each ring is blended onto its predecessor, so this is the
    nesting order, and the order the slots of a location are listed in. *)
-let hd_layers = [ Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_1m ]
+let hd_layers = [ Hd_dem.l16; Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_1m ]
 
 (* The canopy atlas: [Hd_dem.canopy], [Hd_dem.canopy_far] and the EEA tree
    cover's two levels ([Tree_cover]) side by side, each 1024 samples square, RGBA8 (see
@@ -8843,7 +8845,8 @@ let main () =
              Clc_loader.prefetch ~pois:true ~size:far ~lat ~lon ()));
         (* With our own tiles, the 8 m ring's bundles hold the 16 m canopy
            too: the trees of the same surroundings. *)
-        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon)
+        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l13 ~lat ~lon);
+        Lwt.async (fun () -> Hd_dem.prefetch Hd_dem.l16 ~lat ~lon)
       end
   in
   update_startup_status "Loading Terrain..." true;
