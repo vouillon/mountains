@@ -3303,7 +3303,26 @@ type sight_gl = {
   sight_eye : Gl.uniform_location;
   sight_vao : Gl.vertex_array_object;
   sight_feedback : Gl.transform_feedback;
+  sight_fbo : Gl.framebuffer;
+      (** 1 x 1, bound for the march: see [offscreen_fbo] *)
 }
+
+(* A 1 x 1 framebuffer, to bind for a draw that renders nothing to the screen
+   (rasterizer off, transform feedback, or an occlusion query): issued with the
+   canvas bound, a draw marks it as changed, and a frame held while a
+   read back is waited for ([readback_waiting]) then shows the canvas cleared
+   -- a black flash at every publish. *)
+let offscreen_fbo ctx =
+  let fbo = Gl.create_framebuffer ctx in
+  let rb = Gl.create_renderbuffer ctx in
+  Gl.bind_renderbuffer ctx Gl.renderbuffer (Some rb);
+  Gl.renderbuffer_storage ctx Gl.renderbuffer Gl.rgba8 1 1;
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
+  Gl.framebuffer_renderbuffer ctx Gl.framebuffer Gl.color_attachment0
+    Gl.renderbuffer rb;
+  Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.bind_renderbuffer ctx Gl.renderbuffer None;
+  fbo
 
 let sight_gl = ref None
 
@@ -3351,6 +3370,7 @@ let get_sight_gl ctx ~radial_params =
           sight_eye = Gl.get_uniform_location ctx pid (Jstr.v "center_height");
           sight_vao = Gl.create_vertex_array ctx;
           sight_feedback = Gl.create_transform_feedback ctx;
+          sight_fbo = offscreen_fbo ctx;
         }
       in
       sight_gl := Some s;
@@ -3380,6 +3400,7 @@ let start_sight ctx s targets =
   Gl.bind_buffer ctx Gl.array_buffer None;
   if n > 0 then
     time_gpu ctx "sight_lines" (fun () ->
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some s.sight_fbo);
         Gl.bind_transform_feedback ctx Gl.transform_feedback
           (Some s.sight_feedback);
         Gl.bind_buffer_base ctx Gl.transform_feedback_buffer 0 seen;
@@ -3389,7 +3410,8 @@ let start_sight ctx s targets =
         Gl.end_transform_feedback ctx;
         Gl.disable ctx Gl.rasterizer_discard;
         Gl.bind_transform_feedback ctx Gl.transform_feedback None;
-        Gl.bind_buffer ctx Gl.transform_feedback_buffer None);
+        Gl.bind_buffer ctx Gl.transform_feedback_buffer None;
+        Gl.bind_framebuffer ctx Gl.framebuffer None);
   Gl.bind_vertex_array ctx None;
   (* The vertex array keeps it for the draw just issued. *)
   Gl.delete_buffer ctx positions;
