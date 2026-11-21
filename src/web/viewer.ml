@@ -2612,13 +2612,42 @@ let delete_labels ctx points =
       | None -> ())
     points
 
-let delete_publish ctx { points; gpx_path; _ } =
+let delete_trace ctx gpx_path =
   Option.iter
     (fun (vao, vbo, _) ->
       Gl.delete_vertex_array ctx vao;
       Gl.delete_buffer ctx vbo)
-    gpx_path;
+    gpx_path
+
+let delete_publish ctx { points; gpx_path; _ } =
+  delete_trace ctx gpx_path;
   delete_labels ctx points
+
+(* The labels of [points], for those made again with the same text -- the
+   location published again, or its labels made again once its sight lines
+   are in -- to take over rather than draw anew: each is a canvas render and an
+   upload, and all of them landed in the first frame after the publish, a
+   60-100 ms stall on a Pixel 8a. [take text] is such a label, or a new one;
+   [release ()] deletes the textures of those nobody took. *)
+let label_pool ctx points =
+  let pool = Hashtbl.create 64 in
+  List.iter (fun ((t : lazy_text), _) -> Hashtbl.add pool t.text t) points;
+  let take text =
+    match Hashtbl.find_opt pool text with
+    | Some t ->
+        Hashtbl.remove pool text;
+        t
+    | None -> prepare_text ctx text
+  in
+  let release () =
+    Hashtbl.iter
+      (fun _ t ->
+        match t.texture with
+        | Some (tid, _) -> Gl.delete_texture ctx tid
+        | None -> ())
+      pool
+  in
+  (take, release)
 
 (* The canopy height over the 1 m ring's block (Hd_dem.canopy, kind 0) and
    over the 5 m ring's (Hd_dem.canopy_far, kind 1), as the two halves of one
@@ -6132,12 +6161,12 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
       let sight_job = start_sight ctx sight sight_targets in
       let seen_of seen = List.filteri (fun i _ -> seen.(i)) all_poi in
       let kept = Option.value ~default:[] !visible in
-      let label points =
+      let label ~take points =
         let inv_avg_delta = 2. /. (deltax +. deltay) in
         List.map
           (fun ({ Points.name; elevation; _ }, (x', y')) ->
             let texture =
-              prepare_text ctx
+              take
                 (match elevation with
                 | None -> name
                 | Some elevation -> Printf.sprintf "%s (%dm)" name elevation)
@@ -6199,16 +6228,21 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
         |> List.sort (fun (_, h) (_, h') : int -> Stdlib.compare h' h)
         |> List.map fst
       in
-      let points = label kept in
+      let take, release =
+        label_pool ctx (match !session with Some s -> s.points | None -> [])
+      in
+      let points = label ~take kept in
       let gpx_path = build_gpx_path ctx ~lat ~lon ~radial_params in
       (* A refinement supersedes the first publish of this same location, and
          that record shares its surroundings and its settled rings with this
          one: only what it owns alone goes -- the POI labels [draw_text] has
-         materialised since, the trace, and the rings this publish has just
-         blended again over a ring that landed late. *)
+         materialised since and this one did not take over, the trace, and the
+         rings this publish has just blended again over a ring that landed
+         late. *)
+      release ();
       Option.iter
         (fun (prev : location) ->
-          delete_publish ctx prev;
+          delete_trace ctx prev.gpx_path;
           List.iteri
             (fun i slot -> if i >= List.length keep then delete_slot ctx slot)
             prev.slots)
@@ -6234,8 +6268,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
               List.compare_lengths seen kept <> 0
               || not (List.for_all2 ( == ) seen kept)
             then begin
-              delete_labels ctx s.points;
-              session := Some { s with points = label seen };
+              let take, release = label_pool ctx s.points in
+              session := Some { s with points = label ~take seen };
+              release ();
               force_redraw := true
             end
       in
