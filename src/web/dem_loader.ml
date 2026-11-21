@@ -47,11 +47,10 @@ let path ?(step = 1) ?(cover = false) ~lat ~lon ~row ~col () =
     Printf.sprintf "%c%02d_%c%03d_%d_%d.dem" lat_c (abs lat) lon_c (abs lon) row
       col
   in
-  (* The far field's elevation stays with the site, until it is bundled with
-     its land cover. *)
-  if cover then Web_utils.tiles_url (Printf.sprintf "clc%d/%s" step name)
-  else if step = 1 then Web_utils.tiles_url ("dem/" ^ name)
-  else Printf.sprintf "data/dem%d/%s" step name
+  Web_utils.tiles_url
+    (if cover then Printf.sprintf "clc%d/%s" step name
+     else if step = 1 then "dem/" ^ name
+     else Printf.sprintf "dem%d/%s" step name)
 
 (* [step] is the grid's spacing in arcseconds: 1 for the base tiles, 4 for the
    far field's (compress_dem --coarse), whose sample [k] of a degree cell

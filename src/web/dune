@@ -26,21 +26,9 @@
  (js_of_ocaml
   (javascript_files inflate.js)))
 
-; Only what the client actually fetches from the site: the far field's
-; elevation. The base elevation, the land cover and the POIs are on R2
-; (Web_utils.tiles_url); the raw Copernicus .tif sources (~940 MB) are
-; pipeline inputs for compress_dem, and points.geojson is the SDL client's.
-
-(rule
- (target
-  (dir data))
- (alias all)
- (deps
-  (glob_files_rec ../../data/dem4/**))
- (action
-  (progn
-   (run mkdir -p %{target})
-   (run cp -r ../../data/dem4 %{target}/dem4))))
+; No tiles on the site: they are all on R2 (Web_utils.tiles_url). data/ holds
+; the raw Copernicus .tif sources (~940 MB), pipeline inputs for compress_dem,
+; and points.geojson, the SDL client's.
 
 (rule
  (target

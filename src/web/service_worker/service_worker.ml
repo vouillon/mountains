@@ -118,7 +118,7 @@ let delete_old_caches () =
    instead: nothing asks for them any more. *)
 let is_retired_tile url =
   List.exists (contains_sub url)
-    [ "/data/dem/"; "/data/clc/"; "/data/clc4/"; "/data/poi/" ]
+    [ "/data/dem/"; "/data/dem4/"; "/data/clc/"; "/data/clc4/"; "/data/poi/" ]
 
 let prune_data_cache () =
   let* cache = open_cache data_cache_name in

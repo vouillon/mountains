@@ -7,7 +7,7 @@ details; this is the map to them.
 | Data | Source | Licence | Where the client reads it | Made by |
 | --- | --- | --- | --- | --- |
 | Base elevation, 1" | Copernicus GLO-30 DSM | Copernicus DEM licence | `tiles.vouillon.org/v2/dem` (DEM1) | `Corine/compress_dem.ml` |
-| Far-field elevation, 4" | Copernicus GLO-30 DSM | same | `data/dem4` (DEM1) | `compress_dem.exe --coarse` |
+| Far-field elevation, 4" | Copernicus GLO-30 DSM | same | `tiles.vouillon.org/v2/dem4` (DEM1) | `compress_dem.exe --coarse` |
 | Land cover | CORINE Land Cover 2018 | Copernicus Land Monitoring Service | `tiles.vouillon.org/v2/clc` (CLC6) | `Corine/extract_tiles.ml` |
 | Far-field land cover | CLC 2018 + OSM water | both | `tiles.vouillon.org/v2/clc4` | `extract_tiles.exe --coarse` |
 | Water, sea, summits | OpenStreetMap, via Overture Maps | ODbL | inside the CLC6 tiles, `tiles.vouillon.org/v2/poi` | `Corine/fetch_overture.sh`, `overture.ml` |
@@ -19,14 +19,17 @@ The credits the app shows are in `src/web/index.html` (the startup notice) and
 `src/web/map_picker.ml` (the map's attribution); keep them in step with this
 file.
 
-The base elevation, the land cover and the POIs are hosted on R2 under
+Every tile is hosted on R2, the site serving none: the rings under
+`https://tiles.vouillon.org/v1` (`Hd_dem.own_tiles_url`), the base and
+far-field elevation, the land cover and the POIs under
 `https://tiles.vouillon.org/v2` (`Web_utils.tiles_url`; `?tiles=<base url>`
-overrides it, to try a tile set), the far-field elevation still in `data/dem4`.
+overrides it, to try a tile set).
 The data cache keeps a tile, and an absent one, for ever under its URL: a set
-that changes moves to a new version. The site's `data/dem`, `data/clc`,
-`data/clc4` and `data/poi` were the earlier set (1200" elevation tiles, 1°
-land-cover tiles, Overture 2026-10-21.0): gone from the repository (its history
-keeps them), and pruned from the data cache by the service worker.
+that changes moves to a new version. The site's `data/dem`, `data/dem4`,
+`data/clc`, `data/clc4` and `data/poi` were the earlier set (1200" elevation
+tiles, a far field in 14.5 cm steps, 1° land-cover tiles, Overture
+2026-10-21.0): gone from the repository (its history keeps them), and pruned
+from the data cache by the service worker.
 
 ## Base elevation: `v2/dem`
 
@@ -52,10 +55,10 @@ keeps them), and pruned from the data cache by the service worker.
 - **Coverage**: 32 cells (1152 files, 195 MB): N42 E008-009, N43-N46 E004-009,
   and La Réunion (S21-S22 E054-056).
 
-## Far-field elevation: `data/dem4`
+## Far-field elevation: `v2/dem4`
 
 The same GLO-30 cells at 4 arc-seconds: `compress_dem.exe --coarse <lat> <lon>
-data`, nine 300 × 300 sub-tiles per cell in `data/dem4`. Each sample is a soft
+<dir>`, nine 300 × 300 sub-tiles per cell in `<dir>/dem4`. Each sample is a soft
 maximum of its 4 × 4 block (k = 0.25), the same as the client's own downsample
 (`downsample.frag`, `Viewer.downsample_k`), so distant summits keep their
 height. The heights are in steps of 2.03 m (14 of DEM1's 14.5 cm,
