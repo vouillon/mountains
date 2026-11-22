@@ -25,7 +25,6 @@ val compute_center_offset :
 type radial_params = {
   w_mask : int;
   w_shift : int;
-  inv_sectors_div : float;
   sector_angle : float;
   last_ring : int;
   grid_k : float;
@@ -40,7 +39,6 @@ type radial_params = {
 type terrain_uniforms = {
   w_shift : Gl.uniform_location;
   w_mask : Gl.uniform_location;
-  inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
@@ -51,7 +49,7 @@ type terrain_uniforms = {
   inv_delta : Gl.uniform_location;
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
-  view_proj : Gl.uniform_location;
+  view_proj_ubo : Gl.buffer;
   relief : Gl.uniform_location;
   relief_normal : Gl.uniform_location;
   hd_valid : Gl.uniform_location;
@@ -84,7 +82,6 @@ type terrain_uniforms = {
 type shadow_uniforms = {
   w_shift : Gl.uniform_location;
   w_mask : Gl.uniform_location;
-  inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
@@ -241,6 +238,10 @@ val upload_hd_params :
     refinement rings to both programs, innermost first. Slots past the end of
     [hd], and [None] entries, are disabled -- with none valid this restores
     exactly the base-only rendering. *)
+
+val upload_terrain_view_proj :
+  Gl.t -> terrain_uniforms -> Brr.Tarray.float32 -> unit
+(** Update the terrain shader's [ViewProj] UBO with a 4x4 float32 matrix. *)
 
 val upload_ortho_shadow_mat4x3 : Gl.t -> Gl.uniform_location -> Matrix.t -> unit
 (** Upload an orthographic shadow matrix as a [mat4x3] with the clip-to-[0, 1]

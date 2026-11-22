@@ -3979,7 +3979,8 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   Matrix.blit transform transform_ba;
   Matrix.mult_into terrain_view_proj transform proj;
   Matrix.blit terrain_view_proj terrain_view_proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.view_proj false terrain_view_proj_ta;
+  Render_state.upload_terrain_view_proj ctx terrain_uniforms
+    terrain_view_proj_ta;
   set_depth_range ctx `Near;
   draw_trees ctx ~view_proj_ta:terrain_view_proj_ta ~x_scale ~y_scale;
   Gl.use_program ctx terrain_pid;
@@ -3998,7 +3999,8 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   proj.(14) <- -2. *. far_depth_near;
   Matrix.mult_into terrain_view_proj transform proj;
   Matrix.blit terrain_view_proj terrain_view_proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.view_proj false terrain_view_proj_ta;
+  Render_state.upload_terrain_view_proj ctx terrain_uniforms
+    terrain_view_proj_ta;
   draw_rings ~first:split_ring ~last:(n_rings - 1);
   proj.(14) <- -2.;
   set_depth_range ctx `Near;

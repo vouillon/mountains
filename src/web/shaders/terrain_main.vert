@@ -1,6 +1,8 @@
 
 // Pre-multiplied projection * view matrix (computed once per pass on CPU).
-uniform highp mat4 view_proj;
+// Kept in a std140 UBO so it loads as 4 vec4s instead of spilling into 16
+// scalar loads when the default uniform block fills Mali's 128 uniform regs.
+layout(std140) uniform ViewProj { highp mat4 view_proj; };
 
 out highp vec2 reliefCoord;
 out highp vec2 hdReliefCoord0;

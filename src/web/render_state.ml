@@ -53,7 +53,6 @@ let hd_slots = 4
 type radial_params = {
   w_mask : int;
   w_shift : int;
-  inv_sectors_div : float;
   sector_angle : float;
   last_ring : int;
   grid_k : float;
@@ -69,7 +68,6 @@ type terrain_uniforms = {
   (* Radial grid *)
   w_shift : Gl.uniform_location;
   w_mask : Gl.uniform_location;
-  inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
@@ -82,7 +80,7 @@ type terrain_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   (* Matrices *)
-  view_proj : Gl.uniform_location;
+  view_proj_ubo : Gl.buffer;
   (* Texture samplers *)
   relief : Gl.uniform_location; (* heights, vertex stage *)
   relief_normal : Gl.uniform_location; (* encoded normals, fragment stage *)
@@ -121,7 +119,6 @@ type shadow_uniforms = {
   (* Radial grid *)
   w_shift : Gl.uniform_location;
   w_mask : Gl.uniform_location;
-  inv_sectors_div : Gl.uniform_location;
   grid_k : Gl.uniform_location;
   grid_scale : Gl.uniform_location;
   snapped_alpha : Gl.uniform_location;
@@ -220,7 +217,6 @@ let compute_radial_params ~n_sectors ~n_rings =
   {
     w_mask;
     w_shift;
-    inv_sectors_div = 1. /. float n_sectors;
     (* The grid spans a quarter turn (see radial_common.vert); numerically this
        equals [grid_k], which is what makes the cells asymptotically square. *)
     sector_angle = Web_utils.pi /. 2. /. float n_sectors;
@@ -232,10 +228,16 @@ let compute_radial_params ~n_sectors ~n_rings =
 (** Initialize terrain uniform locations. Call once after program creation. *)
 let init_terrain_uniforms ctx pid =
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
+  let idx = Gl.get_uniform_block_index ctx pid (Jstr.v "ViewProj") in
+  Gl.uniform_block_binding ctx pid idx 0;
+  let view_proj_ubo = Gl.create_buffer ctx in
+  Gl.bind_buffer ctx Gl.uniform_buffer (Some view_proj_ubo);
+  Gl.buffer_data_size ctx Gl.uniform_buffer 64 Gl.dynamic_draw;
+  Gl.bind_buffer ctx Gl.uniform_buffer None;
+  Gl.bind_buffer_base ctx Gl.uniform_buffer 0 view_proj_ubo;
   {
     w_shift = u "w_shift";
     w_mask = u "w_mask";
-    inv_sectors_div = u "inv_sectors_div";
     grid_k = u "grid_k";
     grid_scale = u "grid_scale";
     snapped_alpha = u "snapped_alpha";
@@ -246,7 +248,7 @@ let init_terrain_uniforms ctx pid =
     inv_delta = u "inv_delta";
     meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
-    view_proj = u "view_proj";
+    view_proj_ubo;
     relief = u "relief";
     relief_normal = u "relief_normal";
     hd_valid = u "hd_valid";
@@ -283,7 +285,6 @@ let init_shadow_uniforms ctx pid =
   {
     w_shift = u "w_shift";
     w_mask = u "w_mask";
-    inv_sectors_div = u "inv_sectors_div";
     grid_k = u "grid_k";
     grid_scale = u "grid_scale";
     snapped_alpha = u "snapped_alpha";
@@ -387,7 +388,6 @@ let init_water_raster_uniforms ctx pid =
 let upload_radial_static ctx (u : terrain_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.w_shift p.w_shift;
   Gl.uniform1i ctx u.w_mask p.w_mask;
-  Gl.uniform1f ctx u.inv_sectors_div p.inv_sectors_div;
   Gl.uniform1f ctx u.grid_k p.grid_k;
   Gl.uniform1f ctx u.grid_scale p.grid_scale
 
@@ -395,9 +395,13 @@ let upload_radial_static ctx (u : terrain_uniforms) (p : radial_params) =
 let upload_radial_static_shadow ctx (u : shadow_uniforms) (p : radial_params) =
   Gl.uniform1i ctx u.w_shift p.w_shift;
   Gl.uniform1i ctx u.w_mask p.w_mask;
-  Gl.uniform1f ctx u.inv_sectors_div p.inv_sectors_div;
   Gl.uniform1f ctx u.grid_k p.grid_k;
   Gl.uniform1f ctx u.grid_scale p.grid_scale
+
+let upload_terrain_view_proj ctx (u : terrain_uniforms) ta =
+  Gl.bind_buffer ctx Gl.uniform_buffer (Some u.view_proj_ubo);
+  Gl.buffer_sub_data ctx Gl.uniform_buffer 0 ta;
+  Gl.bind_buffer ctx Gl.uniform_buffer None
 
 (** Upload static texture unit bindings. Call once at initialization. *)
 let upload_texture_units ctx (u : terrain_uniforms) =
@@ -477,6 +481,8 @@ let hd_slot_values = function
         hd_height_offset;
         hd_step_m = _;
       } ->
+      (* radial_common.vert computes mip l's size as 1 << (max_lod - l). *)
+      assert (hd_size > 0 && hd_size land (hd_size - 1) = 0);
       let s = 1. /. float hd_size in
       let w = hd_to_index in
       let m = w.Warp.lin in

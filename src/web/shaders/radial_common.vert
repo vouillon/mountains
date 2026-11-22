@@ -4,7 +4,6 @@ uniform highp int w_mask;
 uniform highp int w_shift;
 uniform highp vec2 center_offset;
 uniform highp float snapped_alpha;
-uniform highp float inv_sectors_div;
 uniform highp float grid_k;
 uniform highp float grid_scale;
 uniform highp vec2 inv_delta;
@@ -67,44 +66,35 @@ struct RadialVertex {
   highp vec2 coord_meters;       // Absolute world position in meters
   highp vec2 norm_coord;         // Normalized texture coordinate (0..1)
   highp vec2 hd_coord[HD_SLOTS]; // Same, over each refinement ring
-  highp vec2 far_coord;          // Same, over the far field
   highp float height;            // Terrain height at this position
 };
 
-// Bilinear fetch over a height pyramid, in the corner convention (the level-l
-// texel j sits at level-0 index j << l) that [rendered_height] replicates on
-// the CPU. Shared by the base and high-resolution paths so that they cannot
-// drift apart.
+// Bilinear fetch over a square height pyramid of [tex_size] samples at [lod],
+// in the corner convention (the level-l texel j sits at level-0 index j << l)
+// that [rendered_height] replicates on the CPU. Shared by the base and
+// high-resolution paths so that they cannot drift apart.
 // [scale_n] is metres per normalised unit (the pyramid's metres-per-u16-step
 // times 255) and [offset] the metres at zero: each refinement pyramid carries
 // its own, the base pyramid the pipeline's.
 highp float sampleReliefHeight(highp sampler2D tex, highp vec2 norm_coord,
-                               int lod, highp float scale_n,
+                               int lod, int tex_size, highp float scale_n,
                                highp float offset) {
-  ivec2 tex_size = textureSize(tex, lod);
-
-  // Texel position for manual bilinear interpolation
-  highp vec2 lod_pos = norm_coord * vec2(tex_size);
-  highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(tex_size - 1));
+  int max_i = tex_size - 1;
+  highp vec2 lod_pos = norm_coord * float(tex_size);
+  highp vec2 lod_tex_pos = clamp(lod_pos, vec2(0.0), vec2(float(max_i)));
   highp ivec2 base = ivec2(lod_tex_pos);
+  highp ivec2 p1 = min(base + 1, ivec2(max_i));
   highp vec2 f = fract(lod_tex_pos);
 
   // Fetch 4 samples
   highp vec2 s00 = texelFetch(tex, base, lod).rg;
-  highp vec2 s10 =
-      texelFetch(tex, min(base + ivec2(1, 0), tex_size - 1), lod).rg;
-  highp vec2 s01 =
-      texelFetch(tex, min(base + ivec2(0, 1), tex_size - 1), lod).rg;
-  highp vec2 s11 =
-      texelFetch(tex, min(base + ivec2(1, 1), tex_size - 1), lod).rg;
+  highp vec2 s10 = texelFetch(tex, ivec2(p1.x, base.y), lod).rg;
+  highp vec2 s01 = texelFetch(tex, ivec2(base.x, p1.y), lod).rg;
+  highp vec2 s11 = texelFetch(tex, p1, lod).rg;
 
-  // Decode heights: high*256 + low, through this pyramid's own quantisation.
-  highp vec4 H = vec4(dot(s00, vec2(1.0, 256.0)), dot(s10, vec2(1.0, 256.0)),
-                      dot(s01, vec2(1.0, 256.0)), dot(s11, vec2(1.0, 256.0))) *
-                     scale_n +
-                 offset;
-
-  return mix(mix(H.x, H.y, f.x), mix(H.z, H.w, f.x), f.y);
+  // Decode heights: high*256 + low, factored outside the bilinear mix.
+  highp vec2 m = mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+  return (m.x + 256.0 * m.y) * scale_n + offset;
 }
 
 // The part of the base grid that holds its data, in normalised coordinates
@@ -156,40 +146,48 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
                                 highp vec2 c1, highp vec2 c2, highp vec2 c3) {
   // The bias is relative to the base spacing, and applies before the clamp to
   // level 0: near the camera the mesh is finer than the base grid, which is
-  // precisely where the extra levels pay off.
-  if (insideHd(0, c0))
-    return sampleReliefHeight(
-        hd_relief[0], c0,
-        min(int(max(0.0, lod_raw + hd_params[0].x)), int(hd_params[0].y)),
-        hd_params[0].z, hd_params[0].w);
-  if (insideHd(1, c1))
-    return sampleReliefHeight(
-        hd_relief[1], c1,
-        min(int(max(0.0, lod_raw + hd_params[1].x)), int(hd_params[1].y)),
-        hd_params[1].z, hd_params[1].w);
-  if (insideHd(2, c2))
-    return sampleReliefHeight(
-        hd_relief[2], c2,
-        min(int(max(0.0, lod_raw + hd_params[2].x)), int(hd_params[2].y)),
-        hd_params[2].z, hd_params[2].w);
-  if (insideHd(3, c3))
-    return sampleReliefHeight(
-        hd_relief[3], c3,
-        min(int(max(0.0, lod_raw + hd_params[3].x)), int(hd_params[3].y)),
-        hd_params[3].z, hd_params[3].w);
+  // precisely where the extra levels pay off. HD rings are power-of-two
+  // squares of size 1 << max_lod (asserted in Render_state.hd_slot_values).
+  if (insideHd(0, c0)) {
+    int ml = int(hd_params[0].y);
+    int l = min(int(max(0.0, lod_raw + hd_params[0].x)), ml);
+    return sampleReliefHeight(hd_relief[0], c0, l, 1 << (ml - l),
+                              hd_params[0].z, hd_params[0].w);
+  }
+  if (insideHd(1, c1)) {
+    int ml = int(hd_params[1].y);
+    int l = min(int(max(0.0, lod_raw + hd_params[1].x)), ml);
+    return sampleReliefHeight(hd_relief[1], c1, l, 1 << (ml - l),
+                              hd_params[1].z, hd_params[1].w);
+  }
+  if (insideHd(2, c2)) {
+    int ml = int(hd_params[2].y);
+    int l = min(int(max(0.0, lod_raw + hd_params[2].x)), ml);
+    return sampleReliefHeight(hd_relief[2], c2, l, 1 << (ml - l),
+                              hd_params[2].z, hd_params[2].w);
+  }
+  if (insideHd(3, c3)) {
+    int ml = int(hd_params[3].y);
+    int l = min(int(max(0.0, lod_raw + hd_params[3].x)), ml);
+    return sampleReliefHeight(hd_relief[3], c3, l, 1 << (ml - l),
+                              hd_params[3].z, hd_params[3].w);
+  }
+  int base_w = int(1.0 / inv_w + 0.5);
   highp float w = baseWeight(norm_coord);
   highp float h = BASE_OFFSET;
-  if (w < 1.0 && far_valid)
-    h = sampleReliefHeight(
-        far_relief, (coord + far_map.xy) * far_map.z,
-        min(int(max(0.0, lod_raw + FAR_LOD_BIAS)), far_max_lod), BASE_SCALE_N,
-        BASE_OFFSET);
-  if (w > 0.0)
+  if (w < 1.0 && far_valid) {
+    int l = min(int(max(0.0, lod_raw + FAR_LOD_BIAS)), far_max_lod);
+    h = sampleReliefHeight(far_relief, (coord + far_map.xy) * far_map.z, l,
+                           max(1, (base_w >> 1) >> l), BASE_SCALE_N,
+                           BASE_OFFSET);
+  }
+  if (w > 0.0) {
+    int l = min(int(max(0.0, lod_raw)), max_lod);
     h = mix(h,
-            sampleReliefHeight(relief, norm_coord,
-                               min(int(max(0.0, lod_raw)), max_lod),
+            sampleReliefHeight(relief, norm_coord, l, max(1, base_w >> l),
                                BASE_SCALE_N, BASE_OFFSET),
             w);
+  }
   return h;
 }
 
@@ -257,21 +255,13 @@ float canopyRest(highp float r, float nearEdge) {
   return (1.0 - treesStood(r, nearEdge)) * clearing;
 }
 
-// The canopy mip level the mesh reads at [grid_spacing] m between rings, for
-// a canopy of [step] m: two levels coarser than the spacing (~8 m averages
-// near the eye), so the mesh carries a stand's shape and its crowns stay in
-// the shading -- at the spacing itself every crown became a spike.
-// terrain.frag shades with the slope of this same level.
-float canopyLod(highp float grid_spacing, float step) {
-  return log2(max(grid_spacing / step, 1.0)) + 2.0;
-}
-
-// Only stands are stood up: averaged at [canopyLod], a lone tree became a
-// grassy mound three times its width with a green crown on top (the colour
-// reads the canopy at full resolution). The averaged crown tone measures the
-// cover -- about 0.5 in a closed canopy, 0.1-0.2 around a lone tree -- so
-// lone trees and small groups stay flat, drawn by their crown shading alone.
-// terrain.frag weighs the slope it shades with by the same factor.
+// Only stands are stood up: averaged two levels coarser than the mesh spacing,
+// a lone tree became a grassy mound three times its width with a green crown
+// on top (the colour reads the canopy at full resolution). The averaged crown
+// tone measures the cover -- about 0.5 in a closed canopy, 0.1-0.2 around a
+// lone tree -- so lone trees and small groups stay flat, drawn by their crown
+// shading alone. terrain.frag weighs the slope it shades with by the same
+// factor.
 float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 
 // The land cover (terrain.frag's, on the same units, hence the precisions):
@@ -298,11 +288,15 @@ bool nearWater(highp vec2 c, highp float s) {
   highp vec2 fsize = vec2(size);
   highp vec2 base = ((uv - 0.5) * scale + 0.5) * fsize;
   highp vec2 step_t = e * scale * fsize;
-  for (int dy = -1; dy <= 1; dy++) {
-    for (int dx = -1; dx <= 1; dx++) {
-      ivec2 p = clamp(ivec2(floor(base + step_t * vec2(float(dx), float(dy)))),
-                      ivec2(0), size - 1);
-      if (texelFetch(u_coverMap, ivec3(p, level), 0).r >= 38u)
+  ivec2 max_p = size - 1;
+  ivec2 p0 = clamp(ivec2(floor(base - step_t)), ivec2(0), max_p);
+  ivec2 p1 = clamp(ivec2(floor(base)), ivec2(0), max_p);
+  ivec2 p2 = clamp(ivec2(floor(base + step_t)), ivec2(0), max_p);
+  int xs[3] = int[3](p0.x, p1.x, p2.x);
+  int ys[3] = int[3](p0.y, p1.y, p2.y);
+  for (int dy = 0; dy < 3; dy++) {
+    for (int dx = 0; dx < 3; dx++) {
+      if (texelFetch(u_coverMap, ivec3(xs[dx], ys[dy], level), 0).r >= 38u)
         return true;
     }
   }
@@ -310,11 +304,10 @@ bool nearWater(highp vec2 c, highp float s) {
 }
 
 // The lift from one canopy's sample [s]: 0 under 1.5 m of canopy, without
-// data, and above 40 m (cliffs, where surface and ground models disagree).
-highp float liftOf(vec4 s) {
-  if (s.a < 0.5 / 255.0)
-    return 0.0;
-  float h = s.r * (255.0 / 5.0);
+// data (smoothstep(0.2, 0.4, s.a) is already 0 for s.a < 0.5/255), and above
+// 40 m (cliffs, where surface and ground models disagree).
+mediump float liftOf(mediump vec4 s) {
+  mediump float h = s.r * (255.0 / 5.0);
   return h * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *
          canopyCover(s.a);
 }
@@ -332,13 +325,16 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
     return 0.0;
   float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
   float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
+  if (nearEdge + farEdge <= 0.0)
+    return 0.0;
+  highp float log_gs = log2(max(grid_spacing, 1e-4));
   // Where the near canopy has no data (across a border, a tile that did not
   // come) it is not there: no trees stand on it (tree_find.vert), and the
   // far canopy has the ground, which would otherwise be bare.
-  vec4 sn = vec4(0.0);
+  mediump vec4 sn = vec4(0.0);
   if (nearEdge > 0.0) {
     sn = textureLod(u_canopy, canopyNearUV(cn),
-                    canopyLod(grid_spacing, u_canopyStep.x));
+                    max(log_gs - log2(u_canopyStep.x), 0.0) + 2.0);
     if (sn.a < 0.5 / 255.0)
       nearEdge = 0.0;
   }
@@ -349,9 +345,8 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
   if (nearEdge < 1.0 && farEdge > 0.0)
     lift += (1.0 - nearEdge) * farEdge *
             liftOf(textureLod(u_canopy, canopyFarUV(cf),
-                              canopyLod(grid_spacing, u_canopyStep.y)));
-  if (lift <= 0.0 ||
-      nearWater(c, max(grid_spacing, r * inv_sectors_div * 1.5708)))
+                              max(log_gs - log2(u_canopyStep.y), 0.0) + 2.0));
+  if (lift <= 0.0 || nearWater(c, max(grid_spacing, r * grid_k)))
     return 0.0;
   return lift * rest;
 }
@@ -365,15 +360,18 @@ highp vec2 slotCoord(highp vec2 c0, highp vec2 c1, highp vec2 c2, highp vec2 c3,
 // Compute radial grid vertex position and sample terrain height
 RadialVertex computeRadialVertex() {
   const float PI = 3.14159265359;
+  const highp float LOG2_E = 1.4426950408889634;
   RadialVertex v;
 
   int sector = gl_VertexID & w_mask;
   int ring = gl_VertexID >> w_shift;
-  float theta = (float(sector) * inv_sectors_div) * (PI / 2.0) - (PI / 4.0);
+  float theta = float(sector) * grid_k - (PI / 4.0);
   float angle = theta + snapped_alpha + (PI / 2.0);
 
   // Exponential radial distance: r = A(e^(k*ring) - 1)
-  highp float r = grid_scale * (exp(grid_k * float(ring)) - 1.0);
+  highp float rk_log2e = (grid_k * LOG2_E) * float(ring);
+  highp float e_rk = exp2(rk_log2e);
+  highp float r = grid_scale * (e_rk - 1.0);
   v.pos_plane = vec2(cos(angle), sin(angle)) * r;
   v.coord_meters = center_offset + v.pos_plane;
 
@@ -390,11 +388,11 @@ RadialVertex computeRadialVertex() {
            v.pos_plane.y - 0.5 * v.pos_plane.x * v.pos_plane.x * meridian_conv);
   highp vec2 coord = (center_offset + proj) * inv_delta;
 
-  // Grid spacing for LOD: dr = k(r + A)
-  highp float grid_spacing = grid_k * (r + grid_scale);
+  // Grid spacing for LOD: dr = k(r + A) = k*A*e^(k*ring)
+  highp float grid_spacing = (grid_k * grid_scale) * e_rk;
 
-  // LOD level based on grid spacing
-  highp float lod_raw = log2(grid_spacing * inv_avg_delta);
+  // LOD level based on grid spacing (linear in ring, constant term hoisted)
+  highp float lod_raw = log2(grid_k * grid_scale * inv_avg_delta) + rk_log2e;
 
   // Normalized coordinate (no flip: row 0 is south, see [Dem_loader.load])
   v.norm_coord = vec2(coord.x, coord.y) * inv_w + 0.5;
@@ -402,7 +400,6 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[1] = hdCoord(1, coord);
   v.hd_coord[2] = hdCoord(2, coord);
   v.hd_coord[3] = hdCoord(3, coord);
-  v.far_coord = (coord + far_map.xy) * far_map.z;
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw,
                                  v.hd_coord[0], v.hd_coord[1], v.hd_coord[2],
                                  v.hd_coord[3]);
