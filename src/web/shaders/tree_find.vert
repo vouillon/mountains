@@ -9,8 +9,9 @@ precision highp int;
 // it stands and how tall it is, [f_shape] its crown radius, species and
 // random draws; otherwise [f_pos.w] is 0. tree.vert draws them.
 
-// The canopy bake (Viewer.canopy_texture): R height (0.2 m per step).
-uniform mediump sampler2D u_canopy;
+// The canopy array (Viewer.canopy_atlas): layer 0 near canopy (R height, 0.2 m
+// per step), layer 2 EEA tree cover.
+uniform mediump sampler2DArray u_canopy;
 // The 1 m ring's height pyramid, and its decoding (as [sampleReliefHeight] in
 // radial_common.vert).
 uniform highp sampler2D u_ground;
@@ -72,7 +73,7 @@ float valueNoise(highp vec2 p) {
 }
 
 float canopyAt(ivec2 t) {
-  vec4 s = texelFetch(u_canopy, t, 0);
+  vec4 s = texelFetch(u_canopy, ivec3(t, 0), 0);
   return s.a < 0.5 / 255.0 ? -1.0 : s.r * (255.0 / 5.0);
 }
 
@@ -125,9 +126,8 @@ void main() {
   ivec2 cell =
       ivec2(gl_VertexID % u_grid, gl_VertexID / u_grid) - ivec2(u_grid / 2);
   ivec2 t0 = ivec2(floor(u_eyeTexel * 0.5)) * 2 + cell * 2;
-  // The near canopy is the atlas's first slot, of three columns and two rows
-  // (Viewer.canopy_atlas).
-  int csize = textureSize(u_canopy, 0).y / 2;
+  // The near canopy is layer 0 of the canopy array (Viewer.canopy_atlas).
+  int csize = textureSize(u_canopy, 0).x;
   if (any(lessThan(t0, ivec2(2))) || any(greaterThan(t0, ivec2(csize - 4))))
     return;
   // Beyond the radius, or within 40 m of the eye: a tree beside a viewer
@@ -196,10 +196,8 @@ void main() {
   if (u_treeCoverOn) {
     highp vec2 uv = (arc - u_treeCoverArc.xy) * u_treeCoverArc.zw;
     if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) {
-      vec4 tc = texelFetch(
-          u_canopy,
-          ivec2(2 * csize + int(uv.x * float(csize)), int(uv.y * float(csize))),
-          0);
+      ivec2 tc_p = clamp(ivec2(uv * float(csize)), ivec2(0), ivec2(csize - 1));
+      vec4 tc = texelFetch(u_canopy, ivec3(tc_p, 2), 0);
       if (tc.b > 0.5 && tc.a > 0.5)
         conifer = tc.g > 0.5;
     }

@@ -14,8 +14,7 @@
 
 uniform highp sampler2D u_heights; // R32F, rows north-up as served
 uniform int u_size;
-uniform ivec2 u_offset; // the target slot's first texel (Viewer.canopy_atlas)
-uniform float u_step;   // metres per sample
+uniform float u_step; // metres per sample
 // The 20 m canopy, of which only the height is read, filtered over many
 // samples at a distance: A is instead whether the sample has data, so that a
 // filtered read gives the share with data and, R divided by it, their mean
@@ -40,7 +39,7 @@ float N(ivec2 p, float v) {
 }
 
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy) - u_offset;
+  ivec2 p = ivec2(gl_FragCoord.xy);
   float v = H(p);
   if (v < 0.0) {
     color = vec4(0.0, 128.0 / 255.0, 128.0 / 255.0, 0.0);

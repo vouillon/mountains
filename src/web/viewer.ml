@@ -784,6 +784,16 @@ let make_hd_placeholder ctx =
   Gl.bind_texture ctx Gl.texture_2d None;
   tid
 
+(* 1x1x5 zero-filled RGBA8 texture array bound on unit 15 while [canopy_atlas]
+   has not been allocated yet (A = 0 is nodata on every layer). *)
+let make_canopy_placeholder ctx =
+  let tid = Gl.create_texture ctx in
+  Gl.bind_texture ctx Gl.texture_2d_array (Some tid);
+  Gl.tex_storage3d ctx Gl.texture_2d_array 1 Gl.rgba8 1 1 5;
+  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d_array;
+  Gl.bind_texture ctx Gl.texture_2d_array None;
+  tid
+
 (* Create CLC palette texture (256x1 RGBA, 3 pixels per material) *)
 let make_palette_texture ctx =
   let data = Clc_palette.generate_palette () in
@@ -950,6 +960,7 @@ type graphics_resources = {
   radial_params : Render_state.radial_params;
   nearest_sampler : Gl.sampler;
   hd_placeholder : Gl.texture;
+  canopy_placeholder : Gl.texture;
   path_pid : Gl.program;
   path_uniforms : Render_state.path_uniforms;
 }
@@ -1062,14 +1073,18 @@ let init_graphics ctx =
 
   Gl.use_program ctx shadow_pid;
   Render_state.upload_radial_static_shadow ctx shadow_uniforms radial_params;
-  (* The land cover's units ([apply_canopy] sets them again): left at 0, an
-     array sampler would share the relief's unit, and no draw is valid then. *)
+  (* The land cover and canopy units ([apply_canopy] sets them again): left at
+     0, an array sampler would share the relief's unit, and no draw is valid
+     then. *)
   Gl.uniform1i ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "u_coverMap"))
     7;
   Gl.uniform1i ctx
     (Gl.get_uniform_location ctx shadow_pid (Jstr.v "u_paletteTex"))
     8;
+  Gl.uniform1i ctx
+    (Gl.get_uniform_location ctx shadow_pid (Jstr.v "u_canopy"))
+    15;
   Render_state.upload_texture_units_shadow ctx shadow_uniforms;
 
   let relief_uniforms = Render_state.init_relief_uniforms ctx normal_pid in
@@ -1099,6 +1114,7 @@ let init_graphics ctx =
   Gl.uniform1i ctx
     (Gl.get_uniform_location ctx path_pid (Jstr.v "u_paletteTex"))
     8;
+  Gl.uniform1i ctx (Gl.get_uniform_location ctx path_pid (Jstr.v "u_canopy")) 15;
   Render_state.upload_path_static ctx path_uniforms radial_params;
 
   (* Create nearest sampler for AO passes (relief texture needs nearest filtering there) *)
@@ -1107,6 +1123,11 @@ let init_graphics ctx =
   Gl.sampler_parameteri ctx nearest_sampler Gl.texture_mag_filter Gl.nearest;
   Gl.sampler_parameteri ctx nearest_sampler Gl.texture_wrap_s Gl.clamp_to_edge;
   Gl.sampler_parameteri ctx nearest_sampler Gl.texture_wrap_t Gl.clamp_to_edge;
+
+  let canopy_placeholder = make_canopy_placeholder ctx in
+  Gl.active_texture ctx Gl.texture15;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some canopy_placeholder);
+  Gl.active_texture ctx Gl.texture0;
 
   {
     terrain_geo;
@@ -1142,6 +1163,7 @@ let init_graphics ctx =
     radial_params;
     nearest_sampler;
     hd_placeholder = make_hd_placeholder ctx;
+    canopy_placeholder;
     path_pid;
     path_uniforms;
   }
@@ -3269,7 +3291,7 @@ let find_trees ctx =
               | None -> false) ->
       let t = get_trees_gl ctx in
       Gl.active_texture ctx Gl.texture15;
-      Gl.bind_texture ctx Gl.texture_2d (Some canopy);
+      Gl.bind_texture ctx Gl.texture_2d_array (Some canopy);
       Gl.active_texture ctx inp.ground_unit;
       Gl.bind_texture ctx Gl.texture_2d (Some inp.ground);
       Gl.active_texture ctx Gl.texture7;
@@ -4988,10 +5010,10 @@ let eye_clearance_m = 4.
    nesting order, and the order the slots of a location are listed in. *)
 let hd_layers = [ Hd_dem.l16; Hd_dem.l13; Hd_dem.lidar_5m; Hd_dem.lidar_1m ]
 
-(* The canopy atlas: [Hd_dem.canopy], [Hd_dem.canopy_far] and the EEA tree
-   cover's two levels ([Tree_cover]) side by side, each 1024 samples square, RGBA8 (see
-   canopy_prep.frag, tree_cover_prep.frag) and mipmapped: the mesh reads the
-   level matching its vertex spacing (see radial_common.vert's [canopyLift]).
+(* The canopy texture array: 5 layers of 1024x1024 RGBA8 ([Hd_dem.canopy],
+   [Hd_dem.canopy_far], the EEA tree cover's two levels [Tree_cover], and
+   [Hd_dem.canopy_mid], see canopy_prep.frag, tree_cover_prep.frag), mipmapped
+   independently per layer so distant/grazing reads never bleed across slots.
    Made once per context. *)
 let canopy_size = Hd_dem.canopy.size
 
@@ -5023,12 +5045,12 @@ let get_canopy_atlas ctx =
   | _ ->
       let tid = Gl.create_texture ctx in
       Gl.active_texture ctx Gl.texture15;
-      Gl.bind_texture ctx Gl.texture_2d (Some tid);
-      let levels = 1 + truncate (Float.log2 (float (3 * canopy_size))) in
-      Gl.tex_storage2d ctx Gl.texture_2d levels Gl.rgba8 (3 * canopy_size)
-        (2 * canopy_size);
-      Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d;
-      Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter
+      Gl.bind_texture ctx Gl.texture_2d_array (Some tid);
+      let levels = 1 + truncate (Float.log2 (float canopy_size)) in
+      Gl.tex_storage3d ctx Gl.texture_2d_array levels Gl.rgba8 canopy_size
+        canopy_size 5;
+      Web_utils.set_texture_params_linear_clamp ctx Gl.texture_2d_array;
+      Gl.tex_parameteri ctx Gl.texture_2d_array Gl.texture_min_filter
         Gl.linear_mipmap_linear;
       Gl.active_texture ctx Gl.texture0;
       canopy_atlas := Some (!context_generation, tid);
@@ -5050,18 +5072,18 @@ let prep_program ctx cache shaders =
       cache := Some (!context_generation, pid);
       pid
 
-(* Bake into [slot] of [atlas] with [pid], in use with its own uniforms set,
-   from [input], bound on unit 15 and deleted afterwards. The atlas's mipmaps
-   are left stale: [atlas_mipmaps], once after a run of bakes. *)
+(* Bake into layer [slot] of [atlas] with [pid], in use with its own uniforms
+   set, from [input], bound on unit 15 (2D target) and deleted afterwards. The
+   array's mipmaps are left stale: [atlas_mipmaps], once after a run of bakes. *)
 let bake_into_atlas ctx atlas pid ~slot ~input =
   let size = canopy_size in
   let u name = Gl.get_uniform_location ctx pid (Jstr.v name) in
   Gl.uniform1i ctx (u "u_size") size;
-  Gl.uniform2i ctx (u "u_offset") (slot mod 3 * size) (slot / 3 * size);
+  Gl.bind_texture ctx Gl.texture_2d_array None;
   let fbo = Gl.create_framebuffer ctx in
   Gl.bind_framebuffer ctx Gl.framebuffer (Some fbo);
-  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
-    atlas 0;
+  Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.color_attachment0 atlas 0
+    slot;
   (* This may run between frames, whatever state the frame loop left: save
      and restore what the full-screen pass must not have on. *)
   let depth = Gl.is_enabled ctx Gl.depth_test
@@ -5070,7 +5092,7 @@ let bake_into_atlas ctx atlas pid ~slot ~input =
   Gl.disable ctx Gl.depth_test;
   Gl.disable ctx Gl.blend;
   Gl.disable ctx Gl.cull_face';
-  Gl.viewport ctx (slot mod 3 * size) (slot / 3 * size) size size;
+  Gl.viewport ctx 0 0 size size;
   Gl.draw_arrays ctx Gl.triangle_strip 0 4;
   if depth then Gl.enable ctx Gl.depth_test;
   if blend then Gl.enable ctx Gl.blend;
@@ -5081,14 +5103,14 @@ let bake_into_atlas ctx atlas pid ~slot ~input =
     (Gl.drawing_buffer_height ctx);
   Gl.delete_framebuffer ctx fbo;
   Gl.delete_texture ctx input;
-  Gl.bind_texture ctx Gl.texture_2d (Some atlas);
+  Gl.bind_texture ctx Gl.texture_2d_array (Some atlas);
   Gl.active_texture ctx Gl.texture0
 
-(* Rebuild the atlas's mipmaps after bakes into it; leaves it on unit 15. *)
+(* Rebuild the array's mipmaps after bakes into it; leaves it on unit 15. *)
 let atlas_mipmaps ctx =
   Gl.active_texture ctx Gl.texture15;
-  Gl.bind_texture ctx Gl.texture_2d (Some (get_canopy_atlas ctx));
-  Gl.generate_mipmap ctx Gl.texture_2d;
+  Gl.bind_texture ctx Gl.texture_2d_array (Some (get_canopy_atlas ctx));
+  Gl.generate_mipmap ctx Gl.texture_2d_array;
   Gl.active_texture ctx Gl.texture0
 
 (* Bake canopy [kind]'s raw heights, [step] m apart, into its slot of the
@@ -5137,7 +5159,7 @@ let apply_canopy ctx pids ~placeholder =
   in
   let near = slot 0 and far = slot 1 in
   Gl.active_texture ctx Gl.texture15;
-  Gl.bind_texture ctx Gl.texture_2d
+  Gl.bind_texture ctx Gl.texture_2d_array
     (Some (Option.value atlas ~default:placeholder));
   Gl.active_texture ctx Gl.texture0;
   (* The 20 m canopy's map from the base grid's normalised coordinate [c] (see
@@ -5902,6 +5924,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
     radial_params;
     nearest_sampler;
     hd_placeholder;
+    canopy_placeholder;
     path_pid;
     path_uniforms;
     _;
@@ -6455,7 +6478,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
             end);
        update_canopy ctx
          [ terrain_pid; shadow_pid; path_pid ]
-         ~placeholder:hd_placeholder ~on_late
+         ~placeholder:canopy_placeholder ~on_late
          [|
            near_ring;
            ring_of Hd_dem.lidar_5m;

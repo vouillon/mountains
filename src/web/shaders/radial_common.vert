@@ -204,12 +204,12 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
 // stands up, the forest that casts shadows and the forest a GPX trace is
 // draped over are one surface. Precisions explicit: terrain.frag declares the
 // same uniforms, and they must match across stages.
-uniform mediump sampler2D u_canopy;
+uniform mediump sampler2DArray u_canopy;
 uniform mediump int u_canopySlot;
 // The far canopy (Hd_dem.canopy_far, 5 m over the 5 m ring's block), read
-// through slot [u_canopyFarSlot], -1 when there is none. Both are in
-// [u_canopy] (Viewer.canopy_atlas), with the EEA tree cover and the 20 m
-// canopy that terrain.frag reads.
+// through slot [u_canopyFarSlot], -1 when there is none. Both are layers of
+// [u_canopy] (Viewer.canopy_atlas: 0 near, 1 far, 2-3 EEA tree cover, 4 20 m
+// canopy).
 uniform mediump int u_canopyFarSlot;
 // Whether tree.vert stands trees over the near canopy (Viewer.apply_canopy).
 uniform bool u_treesStand;
@@ -217,19 +217,8 @@ uniform bool u_treesStand;
 // 5 for the far one over La Reunion: Hd_dem.served_metres).
 uniform mediump vec2 u_canopyStep;
 
-// Slot [slot] of the atlas (Viewer.canopy_atlas: three columns, two rows):
-// 0 the near canopy, 1 the far one, 2 and 3 the EEA tree cover's two levels,
-// 4 the 20 m canopy.
-highp vec2 atlasUV(highp vec2 c, int slot) {
-  return (vec2(float(slot % 3), float(slot / 3)) + clamp(c, 0.0, 1.0)) /
-         vec2(3.0, 2.0);
-}
-highp vec2 canopyNearUV(highp vec2 c) { return atlasUV(c, 0); }
-highp vec2 canopyFarUV(highp vec2 c) { return atlasUV(c, 1); }
-
-// How far a canopy is trusted at its block coordinate [c]: not over the
-// block's last 3% (~60 m near, ~150 m far), which also keeps the two halves
-// of the atlas from bleeding into each other's reads.
+// How far a canopy is trusted at its block coordinate [c]: fades out over the
+// block's last 3% (~60 m near, ~150 m far) so the hand-over is seamless.
 float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
   return smoothstep(0.0, 0.03, min(e.x, e.y));
@@ -334,7 +323,7 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
   // far canopy has the ground, which would otherwise be bare.
   mediump vec4 sn = vec4(0.0);
   if (nearEdge > 0.0) {
-    sn = textureLod(u_canopy, canopyNearUV(cn),
+    sn = textureLod(u_canopy, vec3(cn, 0.0),
                     max(log_gs - log2(u_canopyStep.x), 0.0) + 2.0);
     if (sn.a < 0.5 / 255.0)
       nearEdge = 0.0;
@@ -345,7 +334,7 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
   highp float lift = nearEdge * liftOf(sn);
   if (nearEdge < 1.0 && farEdge > 0.0)
     lift += (1.0 - nearEdge) * farEdge *
-            liftOf(textureLod(u_canopy, canopyFarUV(cf),
+            liftOf(textureLod(u_canopy, vec3(cf, 1.0),
                               max(log_gs - log2(u_canopyStep.y), 0.0) + 2.0));
   if (lift <= 0.0 || nearWater(c, max(grid_spacing, r * grid_k)))
     return 0.0;

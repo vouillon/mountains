@@ -38,7 +38,9 @@ uniform mediump sampler2DArray u_bumpGrad;
 // (Viewer.canopy_atlas), the near one in its first slot. [u_treesStand]:
 // whether tree.vert stands trees over the near canopy.
 // Declared in radial_common.vert too, with the same precisions.
-uniform mediump sampler2D u_canopy;
+// Layers of [u_canopy] (Viewer.canopy_atlas): 0 near canopy, 1 far canopy,
+// 2-3 EEA tree cover (near, far), 4 20 m canopy.
+uniform mediump sampler2DArray u_canopy;
 uniform mediump int u_canopySlot;
 uniform mediump int u_canopyFarSlot;
 uniform bool u_treesStand;
@@ -440,20 +442,6 @@ vec2 g_liftGrad = vec2(0.0);
 uniform highp float grid_k;
 uniform highp float grid_scale;
 
-// As in radial_common.vert.
-// Slot [slot] of the atlas (Viewer.canopy_atlas: three columns, two rows):
-// 0 the near canopy, 1 the far one, 2 and 3 the EEA tree cover's two levels,
-// 4 the 20 m canopy.
-highp vec2 atlasUV(highp vec2 c, int slot) {
-  return (vec2(float(slot % 3), float(slot / 3)) + clamp(c, 0.0, 1.0)) /
-         vec2(3.0, 2.0);
-}
-highp vec2 canopyNearUV(highp vec2 c) { return atlasUV(c, 0); }
-highp vec2 canopyFarUV(highp vec2 c) { return atlasUV(c, 1); }
-// The tree cover's level [level] (0 the finer).
-highp vec2 canopyCoverUV(highp vec2 c, int level) {
-  return atlasUV(c, 2 + level);
-}
 // The 20 m canopy's normalised coordinate, from the base grid's
 // (u_canopyMid*: Viewer.apply_canopy).
 highp vec2 canopyMidCoord() {
@@ -497,7 +485,7 @@ void canopyGeometry(highp float r, highp vec2 cn, highp vec2 cf, float nearEdge,
   highp float log_sp = log2(max(spacing, 1e-4));
   vec4 sn = vec4(0.0);
   if (nearEdge > 0.0) {
-    sn = textureLod(u_canopy, canopyNearUV(cn),
+    sn = textureLod(u_canopy, vec3(cn, 0.0),
                     max(log_sp - log2(u_canopyStep.x), 0.0) + 2.0);
     if (sn.a < 0.5 / 255.0)
       nearEdge = 0.0;
@@ -511,7 +499,7 @@ void canopyGeometry(highp float r, highp vec2 cn, highp vec2 cf, float nearEdge,
     if (w <= 0.0)
       continue;
     vec4 s = k == 0 ? sn
-                    : textureLod(u_canopy, canopyFarUV(cf),
+                    : textureLod(u_canopy, vec3(cf, 1.0),
                                  max(log_sp - log2(u_canopyStep.y), 0.0) + 2.0);
     float h = s.r * (255.0 / 5.0);
     float c = w * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *
@@ -532,34 +520,31 @@ float g_canopyStands = 0.0;
 vec3 canopyTrees(highp vec2 cn, highp vec2 cf, float nearEdge, float farEdge) {
   // Derivatives inside uniform gates stay defined in GLES 3.00 while skipping
   // work whenever the corresponding canopy layer is inactive.
-  highp vec2 uv_n = vec2(0.0), dx_n = vec2(0.0), dy_n = vec2(0.0);
+  highp vec2 dx_n = vec2(0.0), dy_n = vec2(0.0);
   if (u_canopySlot >= 0) {
-    uv_n = canopyNearUV(cn);
-    dx_n = dFdx(uv_n);
-    dy_n = dFdy(uv_n);
+    dx_n = dFdx(cn);
+    dy_n = dFdy(cn);
   }
   float midEdge = 0.0;
-  highp vec2 uv_m = vec2(0.0), dx_m = vec2(0.0), dy_m = vec2(0.0);
+  highp vec2 cm = vec2(0.0), dx_m = vec2(0.0), dy_m = vec2(0.0);
   if (u_canopyMidOn) {
-    highp vec2 cm = canopyMidCoord();
+    cm = canopyMidCoord();
     midEdge = canopyEdge(cm);
-    uv_m = atlasUV(cm, 4);
-    dx_m = dFdx(uv_m);
-    dy_m = dFdy(uv_m);
+    dx_m = dFdx(cm);
+    dy_m = dFdy(cm);
   }
   if (nearEdge + farEdge + midEdge <= 0.0)
     return vec3(0.0);
   if (nearEdge > 0.0)
-    g_canopy = textureGrad(u_canopy, uv_n, dx_n, dy_n);
+    g_canopy = textureGrad(u_canopy, vec3(cn, 0.0), dx_n, dy_n);
   float wn = g_canopy.a < 0.5 / 255.0 ? 0.0 : nearEdge;
-  vec4 f = farEdge > 0.0 && wn < 1.0
-               ? textureLod(u_canopy, canopyFarUV(cf), 0.0)
-               : vec4(0.0);
+  vec4 f = farEdge > 0.0 && wn < 1.0 ? textureLod(u_canopy, vec3(cf, 1.0), 0.0)
+                                     : vec4(0.0);
   float wf = f.a < 0.5 / 255.0 ? 0.0 : (1.0 - wn) * farEdge;
   // Its A is the share of the read that has data, its R their heights'
   // sum (canopy_prep.frag's [u_flagged]).
   vec4 m = (midEdge > 0.0 && wn + wf < 1.0)
-               ? textureGrad(u_canopy, uv_m, dx_m, dy_m)
+               ? textureGrad(u_canopy, vec3(cm, 4.0), dx_m, dy_m)
                : vec4(0.0);
   float wm = (1.0 - wn - wf) * midEdge * m.a;
   float wsum = wn + wf + wm;
@@ -986,10 +971,9 @@ void main() {
         highp vec2 cu = reliefCoord * m.xy + m.zw;
         float ce = canopyEdge(cu);
         if (ce > 0.0 && coverTrust < 1.0) {
-          // cu is affine in reliefCoord and unclamped while ce > 0.
-          highp vec2 gradScale = m.xy / vec2(3.0, 2.0);
-          vec4 tc = textureGrad(u_canopy, canopyCoverUV(cu, level),
-                                drc_dx * gradScale, drc_dy * gradScale);
+          // cu is affine in reliefCoord: d(cu)/dx = drc_dx * m.xy.
+          vec4 tc = textureGrad(u_canopy, vec3(cu, float(2 + level)),
+                                drc_dx * m.xy, drc_dy * m.xy);
           float e = ce * tc.b * (1.0 - coverTrust);
           if (e > 0.0) {
             float density = tc.r / tc.b;
