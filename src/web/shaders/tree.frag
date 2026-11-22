@@ -48,14 +48,18 @@ float shadowAt(int layer, highp mat4x3 m, highp vec3 p, highp float bias,
   highp float compare = c.z - bias / span;
   highp float t = 0.000488;
   float l = float(layer);
-  float v = texture(shadow_map, vec4(c.xy, l, compare));
+  // Keep the 1-tap far path and 5-tap near PCF in separate basic blocks:
+  // branching on u_far between tap 1 and taps 2..5 forced ANGLE's Vulkan
+  // SPIR-V over Mali's 32-register cliff (46 regs / 50% occ -> 32 regs / 100%
+  // occ on G715/G78/G720) and serialized tap 1 ahead of taps 2..5 on Adreno.
   if (u_far)
-    return v;
+    return texture(shadow_map, vec4(c.xy, l, compare));
+  float v = texture(shadow_map, vec4(c.xy, l, compare));
   v += texture(shadow_map, vec4(c.xy + vec2(t, 0.0), l, compare));
   v += texture(shadow_map, vec4(c.xy - vec2(t, 0.0), l, compare));
   v += texture(shadow_map, vec4(c.xy + vec2(0.0, t), l, compare));
   v += texture(shadow_map, vec4(c.xy - vec2(0.0, t), l, compare));
-  return v / 5.0;
+  return v * 0.2;
 }
 
 // The relief's shadow, away from the surface by a coarse shadow texel
