@@ -2277,9 +2277,10 @@ let hd_normal_unit = function
   | _ -> Gl.texture20
 
 let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
-    (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~casters
-    ~terrain_geo ~index_count ~(radial_params : Render_state.radial_params)
-    ~relief_texture ~cover_map_texture ~palette_texture
+    (shadow_uniforms : Render_state.shadow_uniforms) ~matrices ~center_offset
+    ~casters ~terrain_geo ~index_count
+    ~(radial_params : Render_state.radial_params) ~relief_texture
+    ~cover_map_texture ~palette_texture
     ~(hd_slot_textures : (Gl.texture * Gl.texture) array) ctx =
   let width = Brr_canvas.Gl.drawing_buffer_width ctx in
   let height = Brr_canvas.Gl.drawing_buffer_height ctx in
@@ -2336,53 +2337,78 @@ let draw_shadows ?(layers = 3) ~shadow_pid ~shadow_fbo ~shadow_map
 
     (* Clear full texture including 1-pixel border with depth=1.0 *)
     Gl.disable ctx Gl.scissor_test;
-    Gl.clear ctx (Gl.depth_buffer_bit lor Gl.color_buffer_bit);
+    Gl.clear ctx Gl.depth_buffer_bit;
 
     (* Enable scissor to render only inner area, leaving 1-pixel border *)
     Gl.enable ctx Gl.scissor_test;
     Gl.scissor ctx 1 1 2046 2046;
 
+    let m = matrices.(layer) in
     Gl.uniform_matrix4fv ctx shadow_uniforms.shadow_view_proj false
-      (Brr.Tarray.of_bigarray1 (Matrix.array matrices.(layer)));
+      (Brr.Tarray.of_bigarray1 (Matrix.array m));
 
-    (* A ring can only cast into this cascade's ortho box if it lies within
-       shadow_radius * sqrt 2 + depth_range of the centre (constants mirrored
-       from [calculate_shadow_matrices]); ring [r] sits at radius
-       grid_scale * (exp (grid_k * r) - 1), see radial_common.vert. Rings are
-       contiguous within each index block, so restrict every block to the
-       strips actually needed. *)
-    let ring_limit =
-      let split_radius =
-        if layer = 0 then 2000.0 else if layer = 1 then 8000.0 else 25000.0
-      in
-      let shadow_radius = split_radius *. 1.5 in
-      let depth_range = Float.max 10000. (shadow_radius *. 2.) in
-      let reach = (shadow_radius *. sqrt 2.) +. depth_range in
-      let gk = radial_params.Render_state.grid_k in
-      let gs = radial_params.Render_state.grid_scale in
-      let r = int_of_float (ceil (log ((reach /. gs) +. 1.) /. gk)) + 1 in
-      min (n_rings - 1) (max 1 r)
-    in
+    (* A ring in sector block [b] can only cast into this cascade's ortho clip
+       box [-1, 1]^3 if some (r, angle, z) on the block lands inside all three
+       clip axes. Using conservative global elevation bounds [-2000, 9100] m
+       (covers Dead Sea minus 140 km curvature drop up to Everest + canopy),
+       each clip axis bounds r from above whenever its directional derivative
+       keeps a constant sign over the 5.625-degree block. *)
+    let shadow_radius, depth_range = shadow_cascade_box layer in
+    let base_reach = (shadow_radius *. sqrt 2.) +. depth_range in
+    let gk = radial_params.Render_state.grid_k in
+    let gs = radial_params.Render_state.grid_scale in
+    let cx, cy = center_offset in
+    let z_min = -2000.0 and z_max = 9100.0 in
+    let z_lo = Array.make 3 0. and z_hi = Array.make 3 0. in
+    for k = 0 to 2 do
+      let base = (m.(k) *. cx) +. (m.(4 + k) *. cy) +. m.(12 + k) in
+      let v0 = (m.(8 + k) *. z_min) +. base in
+      let v1 = (m.(8 + k) *. z_max) +. base in
+      z_lo.(k) <- Float.min v0 v1;
+      z_hi.(k) <- Float.max v0 v1
+    done;
     let indices_per_block = index_count / n_index_blocks in
     let strip_indices = indices_per_block / (n_rings - 1) in
-    let block_count = ring_limit * strip_indices in
+    let block_angle = float index_block_size *. gk in
 
-    (* Render 4 rotations to cover full terrain *)
+    (* Render 4 rotations to cover full terrain, restricting each sector block
+       to the rings that can intersect the cascade's ortho clip box. *)
     for rotation = 0 to 3 do
-      Gl.uniform1f ctx shadow_uniforms.snapped_alpha rotation_angles.(rotation);
-      if ring_limit = n_rings - 1 then
-        Gl.draw_elements ctx Gl.triangle_strip index_count Gl.unsigned_int 0
-      else
-        for b = 0 to n_index_blocks - 1 do
-          Gl.draw_elements ctx Gl.triangle_strip block_count Gl.unsigned_int
-            (b * indices_per_block * 4)
-        done
+      let snapped_alpha = rotation_angles.(rotation) in
+      Gl.uniform1f ctx shadow_uniforms.snapped_alpha snapped_alpha;
+      let base_angle = snapped_alpha +. (pi /. 4.) in
+      for b = 0 to n_index_blocks - 1 do
+        let a0 = base_angle +. (float b *. block_angle) in
+        let a1 = a0 +. block_angle in
+        let c0 = cos a0 and s0 = sin a0 and c1 = cos a1 and s1 = sin a1 in
+        let rmax = ref base_reach in
+        for k = 0 to 2 do
+          let mx = m.(k) and my = m.(4 + k) in
+          let f0 = (mx *. c0) +. (my *. s0) in
+          let f1 = (mx *. c1) +. (my *. s1) in
+          if f0 > 0. && f1 > 0. then
+            rmax := Float.min !rmax ((1.0 -. z_lo.(k)) /. Float.min f0 f1)
+          else if f0 < 0. && f1 < 0. then
+            rmax := Float.min !rmax ((1.0 +. z_hi.(k)) /. -.Float.max f0 f1)
+        done;
+        let rl =
+          if !rmax <= 0. then 1
+          else
+            let r = int_of_float (ceil (log ((!rmax /. gs) +. 1.) /. gk)) + 1 in
+            min (n_rings - 1) (max 1 r)
+        in
+        Gl.draw_elements ctx Gl.triangle_strip (rl * strip_indices)
+          Gl.unsigned_int
+          (b * indices_per_block * 4)
+      done
     done;
     (* Other casters (the trees, [draw_tree_shadows]), with this program and
        geometry back afterwards. *)
     casters layer;
-    Gl.use_program ctx shadow_pid;
-    Gl.bind_vertex_array ctx (Some terrain_geo);
+    if layer < layers - 1 then begin
+      Gl.use_program ctx shadow_pid;
+      Gl.bind_vertex_array ctx (Some terrain_geo)
+    end;
 
     Gl.disable ctx Gl.scissor_test
   done;
@@ -6393,6 +6419,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
          time_gpu ctx "draw_shadows" (fun () ->
              draw_shadows ~layers ~shadow_pid ~shadow_fbo ~shadow_map
                shadow_uniforms ~matrices:shadow_matrices
+               ~center_offset:(world_center.Matrix.x, world_center.Matrix.y)
                ~casters:
                  (draw_tree_shadows ctx ~shadow_map ~terrain_pid
                     ~cascade:shadow_matrices.(0) ~matrix:tree_shadow_matrix)
@@ -6444,6 +6471,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
       time_gpu ctx "draw_shadows" (fun () ->
           draw_shadows ~shadow_pid ~shadow_fbo ~shadow_map shadow_uniforms
             ~matrices:shadow_matrices
+            ~center_offset:(world_center.Matrix.x, world_center.Matrix.y)
             ~casters:
               (draw_tree_shadows ctx ~shadow_map ~terrain_pid
                  ~cascade:shadow_matrices.(0) ~matrix:tree_shadow_matrix)
