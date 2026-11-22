@@ -531,7 +531,12 @@ let generate_palette () =
     (* Pixel C green: built-up (CORINE 1xx, artificial surfaces), where a
        canopy height model reads buildings as trees. *)
     Array1.set data (base + 9)
-      (if m.code >= 100 && m.code < 200 then 255 else 0)
+      (if m.code >= 100 && m.code < 200 then 255 else 0);
+    (* Pixel C blue: ice/snow flag (detail weights ~0 and not water), pre-baked
+       so terrain.frag accumulates raw palette texels without branching. *)
+    let detail_sum = m.detail_rock +. m.detail_grass +. m.detail_forest in
+    Array1.set data (base + 10)
+      (if detail_sum < 0.05 && m.water_factor < 0.5 then 255 else 0)
   done;
   data
 

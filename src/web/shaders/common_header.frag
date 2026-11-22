@@ -57,6 +57,7 @@ const float TONE_PIVOT_125 = 0.278855; // 0.36^1.25
 vec3 tone_map(vec3 c) {
   vec3 s = max(c, 0.0);
   float m = max(max(s.r, s.g), s.b);
-  float t = m * sqrt(sqrt(m)); // m^1.25, cheaper than a pow
-  return s * (t / ((t + TONE_PIVOT_125) * max(m, 1e-6)));
+  float q =
+      sqrt(sqrt(m)); // m^0.25; m^1.25 / ((m^1.25 + p) * m) = q / (m*q + p)
+  return s * (q / (m * q + TONE_PIVOT_125));
 }

@@ -128,33 +128,10 @@ struct Surface {
   float built;   // artificial surfaces (buildings read as canopy there)
 };
 
-// Lookup surface properties from palette by material ID
-Surface getSurfaceFromID(uint id) {
-  Surface s;
-  // Use texelFetch for direct integer addressing (no filtering overhead)
-  ivec2 coord = ivec2(int(id) * 3, 0);
-  vec4 pixelA = texelFetch(u_paletteTex, coord, 0);
-  vec4 pixelB = texelFetch(u_paletteTex, coord + ivec2(1, 0), 0);
-  vec4 pixelC = texelFetch(u_paletteTex, coord + ivec2(2, 0), 0);
-  s.conifer = pixelC.r;
-  s.built = pixelC.g;
-
-  // Palette is pre-baked with linear values (gamma decoded on CPU)
-  s.albedo = pixelA.rgb;
-  s.roughness = pixelA.a;
-  s.detailWeights = vec4(pixelB.rgb, 0.0); // RGB weights, ice computed below
-  s.waterFactor = pixelB.a;
-
-  // ICE LOGIC: If RGB weights are ~0 and not water, force ice (alpha channel)
-  float weightSum = dot(pixelB.rgb, vec3(1.0));
-  if (weightSum < 0.05 && s.waterFactor < 0.5) {
-    s.detailWeights.a = 1.0; // Force ice/snow weight
-  }
-
-  return s;
-}
-
-// Manual bilinear filtering of CLC IDs (blend Surface properties)
+// Manual bilinear filtering of CLC IDs: merge duplicate IDs into weights
+// w00..w11 and accumulate raw palette texels (pixelC.b carries the pre-baked
+// ice flag from Clc_palette), fetching each unique ID once without holding
+// four full Surface structs live.
 Surface sampleCLCBilinear(highp vec2 uv) {
   // Distance-based LOD (Coverage Constraint)
   // The concentric clipmaps have limited extent. Level L covers radius 0.5 /
@@ -185,75 +162,75 @@ Surface sampleCLCBilinear(highp vec2 uv) {
   highp vec2 texelPos = levelUV * texSize - 0.5;
 
   ivec2 p00_raw = ivec2(floor(texelPos));
-  highp vec2 frac = fract(texelPos);
+  vec2 f = vec2(fract(texelPos));
 
-  // Clamp to valid range
+  // Clamp to valid range (2 clamps instead of 4)
   ivec2 maxCoord = ivec2(texSize) - 1;
-  ivec2 p00 = clamp(p00_raw, ivec2(0), maxCoord);
-  ivec2 p10 = clamp(p00_raw + ivec2(1, 0), ivec2(0), maxCoord);
-  ivec2 p01 = clamp(p00_raw + ivec2(0, 1), ivec2(0), maxCoord);
-  ivec2 p11 = clamp(p00_raw + ivec2(1, 1), ivec2(0), maxCoord);
+  ivec2 p0 = clamp(p00_raw, ivec2(0), maxCoord);
+  ivec2 p1 = clamp(p00_raw + 1, ivec2(0), maxCoord);
 
   // Sample 4 neighbors from selected array layer
-  // usampler2DArray fetch returns uvec4, we take .r component
-  uint id00 = texelFetch(u_coverMap, ivec3(p00, level), 0).r;
-  uint id10 = texelFetch(u_coverMap, ivec3(p10, level), 0).r;
-  uint id01 = texelFetch(u_coverMap, ivec3(p01, level), 0).r;
-  uint id11 = texelFetch(u_coverMap, ivec3(p11, level), 0).r;
+  uint id00 = texelFetch(u_coverMap, ivec3(p0, level), 0).r;
+  uint id10 = texelFetch(u_coverMap, ivec3(p1.x, p0.y, level), 0).r;
+  uint id01 = texelFetch(u_coverMap, ivec3(p0.x, p1.y, level), 0).r;
+  uint id11 = texelFetch(u_coverMap, ivec3(p1, level), 0).r;
 
-  // Fast path: skip bilinear blend when all 4 texels have the same ID
-  if (id00 == id10 && id00 == id01 && id00 == id11) {
-    return getSurfaceFromID(id00);
+  float w00 = (1.0 - f.x) * (1.0 - f.y);
+  float w10 = f.x * (1.0 - f.y);
+  float w01 = (1.0 - f.x) * f.y;
+  float w11 = f.x * f.y;
+  if (id10 == id00) {
+    w00 += w10;
+    w10 = 0.0;
+  }
+  if (id01 == id00) {
+    w00 += w01;
+    w01 = 0.0;
+  } else if (id01 == id10) {
+    w10 += w01;
+    w01 = 0.0;
+  }
+  if (id11 == id00) {
+    w00 += w11;
+    w11 = 0.0;
+  } else if (id11 == id10) {
+    w10 += w11;
+    w11 = 0.0;
+  } else if (id11 == id01) {
+    w01 += w11;
+    w11 = 0.0;
   }
 
-  // Get surfaces for each neighbor, reusing lookups when IDs repeat
-  // (a boundary between two classes has only two distinct IDs).
-  Surface s00 = getSurfaceFromID(id00);
-  Surface s10;
-  if (id10 == id00)
-    s10 = s00;
-  else
-    s10 = getSurfaceFromID(id10);
-  Surface s01;
-  if (id01 == id00)
-    s01 = s00;
-  else if (id01 == id10)
-    s01 = s10;
-  else
-    s01 = getSurfaceFromID(id01);
-  Surface s11;
-  if (id11 == id00)
-    s11 = s00;
-  else if (id11 == id10)
-    s11 = s10;
-  else if (id11 == id01)
-    s11 = s01;
-  else
-    s11 = getSurfaceFromID(id11);
+  int c00 = int(id00) * 3;
+  vec4 pA = texelFetch(u_paletteTex, ivec2(c00, 0), 0) * w00;
+  vec4 pB = texelFetch(u_paletteTex, ivec2(c00 + 1, 0), 0) * w00;
+  vec3 pC = texelFetch(u_paletteTex, ivec2(c00 + 2, 0), 0).rgb * w00;
+  if (w10 > 0.0) {
+    int c = int(id10) * 3;
+    pA += texelFetch(u_paletteTex, ivec2(c, 0), 0) * w10;
+    pB += texelFetch(u_paletteTex, ivec2(c + 1, 0), 0) * w10;
+    pC += texelFetch(u_paletteTex, ivec2(c + 2, 0), 0).rgb * w10;
+  }
+  if (w01 > 0.0) {
+    int c = int(id01) * 3;
+    pA += texelFetch(u_paletteTex, ivec2(c, 0), 0) * w01;
+    pB += texelFetch(u_paletteTex, ivec2(c + 1, 0), 0) * w01;
+    pC += texelFetch(u_paletteTex, ivec2(c + 2, 0), 0).rgb * w01;
+  }
+  if (w11 > 0.0) {
+    int c = int(id11) * 3;
+    pA += texelFetch(u_paletteTex, ivec2(c, 0), 0) * w11;
+    pB += texelFetch(u_paletteTex, ivec2(c + 1, 0), 0) * w11;
+    pC += texelFetch(u_paletteTex, ivec2(c + 2, 0), 0).rgb * w11;
+  }
 
-  // Bilinear blend of surface properties
   Surface result;
-  vec3 a0 = mix(s00.albedo, s10.albedo, frac.x);
-  vec3 a1 = mix(s01.albedo, s11.albedo, frac.x);
-  result.albedo = mix(a0, a1, frac.y);
-
-  float r0 = mix(s00.roughness, s10.roughness, frac.x);
-  float r1 = mix(s01.roughness, s11.roughness, frac.x);
-  result.roughness = mix(r0, r1, frac.y);
-
-  vec4 w0 = mix(s00.detailWeights, s10.detailWeights, frac.x);
-  vec4 w1 = mix(s01.detailWeights, s11.detailWeights, frac.x);
-  result.detailWeights = mix(w0, w1, frac.y);
-
-  float wf0 = mix(s00.waterFactor, s10.waterFactor, frac.x);
-  float wf1 = mix(s01.waterFactor, s11.waterFactor, frac.x);
-  result.waterFactor = mix(wf0, wf1, frac.y);
-
-  result.conifer = mix(mix(s00.conifer, s10.conifer, frac.x),
-                       mix(s01.conifer, s11.conifer, frac.x), frac.y);
-  result.built = mix(mix(s00.built, s10.built, frac.x),
-                     mix(s01.built, s11.built, frac.x), frac.y);
-
+  result.albedo = pA.rgb;
+  result.roughness = pA.a;
+  result.detailWeights = vec4(pB.rgb, pC.b);
+  result.waterFactor = pB.a;
+  result.conifer = pC.r;
+  result.built = pC.g;
   return result;
 }
 
@@ -380,67 +357,50 @@ highp vec2 farReliefCoord() {
 
 // The encoded normal beneath every ring: the base grid's, the far field's
 // beyond it, and both across the band where one fades into the other ([fb],
-// from [baseFade]).
+// from [baseFade]). Single texture() site per sampler.
 mediump vec2 baseNormal(mediump float fb) {
-  if (fb >= 1.0 || !far_valid)
-    return texture(relief_normal, reliefCoord).rg;
-  mediump vec2 n = texture(far_relief_normal, farReliefCoord()).rg;
-  if (fb > 0.0)
-    n = mix(n, texture(relief_normal, reliefCoord).rg, fb);
+  mediump vec2 n = vec2(0.0);
+  if (fb > 0.0 || !far_valid)
+    n = texture(relief_normal, reliefCoord).rg;
+  if (fb < 1.0 && far_valid) {
+    mediump vec2 nf = texture(far_relief_normal, farReliefCoord()).rg;
+    n = fb > 0.0 ? mix(nf, n, fb) : nf;
+  }
   return n;
 }
 
 // Per scale (macro, mid, fine), each material's amplitude of pattern A and of
-// pattern B, materials in (rock, grass, forest, ice) order. A is ridged noise
-// -- sharp crests over rounded hollows -- stretched down the fall line on the
-// side planes: rock takes it as is. Negated it is the opposite, rounded domes
-// parted by sharp creases: a canopy for forest, a groove network for ice
-// (crevasses) at the macro and mid scales. B is smooth noise -- grass, and ice
-// at the fine scale; the macro scale has none, and grass takes nothing there:
-// distant meadows read best flat. Nothing longer than 31 m either: a
-// 125-31 m band (Voronoi grooves, then strata along the contours) read as
-// drawn on, where a photo of the same view shows only the couloirs and ribs
-// the relief data already holds. Calibrated so each
-// land-cover class keeps the texture strength the photo-texture bump gave it:
-// the gradient energy over the band each scale covers (total RMS would count
-// long tilts, which shade as blotches rather than texture), except the
-// rock's macro A, at 0.6 of that (distant rock read too dark and pitted), and
-// the forest's, at 0.4 (at 1, distant forest read as a 30 m maze).
-const vec4 BUMP_AMP_A[3] =
-    vec4[3](vec4(174.2, 0.0, -103.9, -114.8), vec4(290.5, 0.0, -259.7, -116.1),
-            vec4(290.5, 0.0, -259.7, 0.0));
-const vec4 BUMP_AMP_B[3] =
-    vec4[3](vec4(0.0, 0.0, 0.0, 0.0), vec4(0.0, 44.2, 0.0, 0.0),
-            vec4(0.0, 44.2, 0.0, 117.8));
+// pattern B, materials in (rock, grass, forest, ice) order, with each scale's
+// (2 * BUMP_ENC * scale / divisor) factor pre-folded in:
+//   macro: 2 * 4 * 0.002              = 0.016        (B is all zeros)
+//   mid:   2 * 4 * BUMP_SCALE_MID / 8 = 0.0141421
+//   fine:  2 * 4 * BUMP_SCALE_FINE/60 = 0.01302084
+const vec4 BUMP_AMP_A[3] = vec4[3](
+    vec4(174.2, 0.0, -103.9, -114.8) * (2.0 * BUMP_ENC * 0.002),
+    vec4(290.5, 0.0, -259.7, -116.1) * (2.0 * BUMP_ENC * BUMP_SCALE_MID / 8.0),
+    vec4(290.5, 0.0, -259.7, 0.0) * (2.0 * BUMP_ENC * BUMP_SCALE_FINE / 60.0));
+const vec4 BUMP_AMP_B_MID =
+    vec4(0.0, 44.2, 0.0, 0.0) * (2.0 * BUMP_ENC * BUMP_SCALE_MID / 8.0);
+const vec4 BUMP_AMP_B_FINE =
+    vec4(0.0, 44.2, 0.0, 117.8) * (2.0 * BUMP_ENC * BUMP_SCALE_FINE / 60.0);
 
-// The share of a bump band [lmin, lmax] (wavelengths, m) that the relief data
-// cannot hold, counted in octaves: data with post spacing [step] resolves
-// wavelengths down to about three posts, everything shorter is the bump's to
-// draw.
-float bandShare(float lmin, float lmax, float step) {
-  return clamp(log2(3.0 * step / lmin) / log2(lmax / lmin), 0.0, 1.0);
-}
-
-// Value noise in [0, 1] over unit cells, hashed from the cell itself: no tile,
-// so nothing repeats. Single-round 32-bit integer mix (highp: mediump ints are
-// 16-bit on Mali); cheaper on SFU/CVT than two-round PCG2D while keeping
-// smooth low-frequency noise indistinguishable.
-highp uint cellHash(highp ivec2 c) {
-  highp uint h = uint(c.x) * 374761393u + uint(c.y) * 668265263u;
-  h = (h ^ (h >> 13u)) * 1274126177u;
-  return h ^ (h >> 16u);
-}
-
+// Vectorized 4-corner value noise in [0, 1] over unit cells: single-round
+// 32-bit integer mix (highp: mediump ints are 16-bit on Mali), 10-bit extract
+// (exact in FP16, 1/1024 well above FP16 min normal) scaled once after mix.
 float valueNoise(highp vec2 p) {
   highp vec2 i = floor(p);
-  highp vec2 f = p - i;
+  vec2 f = vec2(p - i);
   highp ivec2 c = ivec2(i);
-  float a = float(cellHash(c) & 0xffffu) / 65535.0;
-  float b = float(cellHash(c + ivec2(1, 0)) & 0xffffu) / 65535.0;
-  float d = float(cellHash(c + ivec2(0, 1)) & 0xffffu) / 65535.0;
-  float e = float(cellHash(c + ivec2(1, 1)) & 0xffffu) / 65535.0;
-  vec2 u = vec2(f * f * (3.0 - 2.0 * f));
-  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+  highp uint cx0 = uint(c.x) * 374761393u;
+  highp uint cx1 = uint(c.x + 1) * 374761393u;
+  highp uint cy0 = uint(c.y) * 668265263u;
+  highp uint cy1 = uint(c.y + 1) * 668265263u;
+  highp uvec4 h = uvec4(cx0 + cy0, cx1 + cy0, cx0 + cy1, cx1 + cy1);
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  h ^= h >> 16u;
+  vec4 v = vec4(h >> 22u);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(v.x, v.y, u.x), mix(v.z, v.w, u.x), u.y) * (1.0 / 1024.0);
 }
 
 // 1D variant (two hashes instead of four) for the canopy-flank trunk bands.
@@ -449,38 +409,30 @@ float valueNoise1D(highp float p, highp uint seed) {
   float f = float(p - i);
   highp int ci = int(i);
   highp uint c = uint(ci);
-  highp uint h0 = (c * 374761393u + seed) * 1274126177u;
-  highp uint h1 = ((c + 1u) * 374761393u + seed) * 1274126177u;
-  float a = float((h0 ^ (h0 >> 16u)) & 0xffffu) * (1.0 / 65535.0);
-  float b = float((h1 ^ (h1 >> 16u)) & 0xffffu) * (1.0 / 65535.0);
-  return mix(a, b, f * f * (3.0 - 2.0 * f));
+  highp uvec2 h = (uvec2(c, c + 1u) * 374761393u + seed) * 1274126177u;
+  h ^= h >> 16u;
+  vec2 v = vec2(h >> 22u);
+  return mix(v.x, v.y, f * f * (3.0 - 2.0 * f)) * (1.0 / 1024.0);
 }
 
 // One species' crown layer of u_bumpGrad ([layer], 6 broadleaf, 7 conifer):
-// two copies of the tile, turned and offset differently, blended by [pick]
-// (0 or 1 away from narrow transitions). The gradient comes back in the frame
-// of the first copy, turned by [rc]; the caller turns it back to the world.
-vec4 crownSample(float layer, float pick, highp vec2 rc) {
-  vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
-  if (pick < 1.0)
-    cs = texture(
-        u_bumpGrad,
-        vec3(mat2(rc.x, rc.y, -rc.y, rc.x) * v_world_pos.xy / CROWN_TILE,
-             layer),
-        0.);
-  if (pick > 0.0) {
-    const vec2 rc2 = vec2(-0.276, 0.961); // turned 106 degrees
-    vec4 cs2 = texture(
-        u_bumpGrad,
-        vec3(mat2(rc2.x, rc2.y, -rc2.y, rc2.x) * v_world_pos.xy / CROWN_TILE +
-                 vec2(0.37, 0.61),
-             layer),
-        0.);
-    highp vec2 g2 = mat2(rc2.x, -rc2.y, rc2.y, rc2.x) * (cs2.gb - 0.5);
-    cs2.gb = mat2(rc.x, rc.y, -rc.y, rc.x) * g2 + 0.5;
-    cs = mix(cs, cs2, pick);
+// two copies of the tile at pre-rotated coordinates [uv1] (23 deg) and [uv2]
+// (106 deg + offset), blended by [pick]. Returns vec3(height, world_grad.xy)
+// with gradients rotated directly to world space.
+vec3 crownSample(float layer, float pick, highp vec2 uv1, highp vec2 uv2) {
+  const mat2 R1_T = mat2(0.921, -0.389, 0.389, 0.921);
+  const mat2 R2_T = mat2(-0.276, -0.961, 0.961, -0.276);
+  vec3 res = vec3(0.0);
+  if (pick < 1.0) {
+    vec3 s1 = texture(u_bumpGrad, vec3(uv1, layer), 0.0).rgb;
+    res = vec3(s1.r, R1_T * (s1.gb - 0.5));
   }
-  return cs;
+  if (pick > 0.0) {
+    vec3 s2 = texture(u_bumpGrad, vec3(uv2, layer), 0.0).rgb;
+    vec3 r2 = vec3(s2.r, R2_T * (s2.gb - 0.5));
+    res = pick < 1.0 ? mix(res, r2, pick) : r2;
+  }
+  return res;
 }
 
 // What the canopy says at this fragment: (tree share, confidence, height in
@@ -495,10 +447,9 @@ vec4 crownSample(float layer, float pick, highp vec2 rc) {
 // its confidence times its tree share, set by the canopy block in main.
 vec4 g_canopy = vec4(0.0);
 float g_canopyReal = 0.0;
-// The slope of the canopy the mesh stands up (radial_common.vert's
-// [canopyLift] and [canopyLod]), and how far it is stood up here.
-vec2 g_liftSlope = vec2(0.0);
-float g_liftWeight = 0.0;
+// Weighted slope (slope * rest) of the canopy the mesh stands up
+// (radial_common.vert's [canopyLift]).
+vec2 g_liftGrad = vec2(0.0);
 
 // Radial grid spacing, as in radial_common.vert (same uniforms).
 uniform highp float grid_k;
@@ -530,19 +481,7 @@ float canopyEdge(highp vec2 c) {
   highp vec2 e = min(c, 1.0 - c);
   return smoothstep(0.0, 0.03, min(e.x, e.y));
 }
-// The ring radius the mesh, the search and the trees measure from the eye
-// with: across the ground. Not [v_dist], which takes in the height between
-// them -- on a slope 400 m below the eye the two are 100 m apart, and the
-// ground under standing trees was shaded as canopy still.
 uniform highp vec2 center_offset;
-highp float eyeRadius() { return length(v_world_pos.xy - center_offset); }
-// Height above the sea: the mesh is lowered by the Earth's curvature
-// (radial_common.vert), 250 m at 60 km, which would otherwise raise the
-// altitude limits below by as much on distant slopes.
-highp float elevation() {
-  highp vec2 d = v_world_pos.xy - center_offset;
-  return v_world_pos.z + center_height + dot(d, d) * 6.8306e-8;
-}
 float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
 }
@@ -561,7 +500,8 @@ highp vec2 slotCoord(int slot) {
 // Read the canopies at the level the mesh did, and the share of each the
 // mesh was raised by -- the same factors as [canopyLift] (its [canopyCover]
 // included, and the near canopy counting for nothing where it has no data).
-void canopyGeometry(highp float r, float nearEdge, float farEdge) {
+void canopyGeometry(highp float r, highp vec2 cn, highp vec2 cf, float nearEdge,
+                    float farEdge) {
   if (nearEdge + farEdge <= 0.0)
     return;
   if ((u_canopySlot >= 0 && r < 40.0) || (u_canopySlot < 0 && r < 300.0))
@@ -569,10 +509,11 @@ void canopyGeometry(highp float r, float nearEdge, float farEdge) {
   if (u_treesStand && r < 840.0 && nearEdge >= 1.0 && g_canopy.a >= 0.5 / 255.0)
     return;
   highp float spacing = grid_k * (r + grid_scale);
+  highp float log_sp = log2(max(spacing, 1e-4));
   vec4 sn = vec4(0.0);
   if (nearEdge > 0.0) {
-    sn = textureLod(u_canopy, canopyNearUV(slotCoord(u_canopySlot)),
-                    log2(max(spacing / u_canopyStep.x, 1.0)) + 2.0);
+    sn = textureLod(u_canopy, canopyNearUV(cn),
+                    max(log_sp - log2(u_canopyStep.x), 0.0) + 2.0);
     if (sn.a < 0.5 / 255.0)
       nearEdge = 0.0;
   }
@@ -580,25 +521,19 @@ void canopyGeometry(highp float r, float nearEdge, float farEdge) {
   if (rest <= 0.0)
     return;
   vec2 slope = vec2(0.0);
-  float weight = 0.0;
   for (int k = 0; k < 2; k++) {
     float w = k == 0 ? nearEdge : (1.0 - nearEdge) * farEdge;
     if (w <= 0.0)
       continue;
-    vec4 s = k == 0
-                 ? sn
-                 : textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)),
-                              log2(max(spacing / u_canopyStep.y, 1.0)) + 2.0);
+    vec4 s = k == 0 ? sn
+                    : textureLod(u_canopy, canopyFarUV(cf),
+                                 max(log_sp - log2(u_canopyStep.y), 0.0) + 2.0);
     float h = s.r * (255.0 / 5.0);
-    float c = s.a < 0.5 / 255.0 ? 0.0
-                                : w * smoothstep(1.0, 3.0, h) *
-                                      (1.0 - smoothstep(40.0, 48.0, h)) *
-                                      smoothstep(0.2, 0.4, s.a);
-    slope += c * (s.gb * 255.0 - 128.0) / 32.0;
-    weight += c;
+    float c = w * smoothstep(1.0, 3.0, h) * (1.0 - smoothstep(40.0, 48.0, h)) *
+              smoothstep(0.2, 0.4, s.a);
+    slope += c * (s.gb * (255.0 / 32.0) - 4.0);
   }
-  g_liftSlope = weight > 0.0 ? slope / weight : vec2(0.0);
-  g_liftWeight = weight * rest;
+  g_liftGrad = slope * rest;
 }
 
 // The share of this fragment's canopy reading taken from the near canopy:
@@ -609,26 +544,32 @@ void canopyGeometry(highp float r, float nearEdge, float farEdge) {
 float g_canopyNear = 0.0;
 float g_canopyStands = 0.0;
 
-vec3 canopyTrees(float nearEdge, float farEdge) {
-  highp vec2 cm = canopyMidCoord();
-  float midEdge = u_canopyMidOn ? canopyEdge(cm) : 0.0;
-  // Gradients outside the edge gates so textureGrad stays defined while
-  // skipping fetches outside each block (the near block is ~2 km, the 20 m
-  // canopy ~20 km).
-  highp vec2 uv_n =
-      u_canopySlot >= 0 ? canopyNearUV(slotCoord(u_canopySlot)) : vec2(0.0);
-  highp vec2 dx_n = dFdx(uv_n), dy_n = dFdy(uv_n);
-  highp vec2 uv_m = u_canopyMidOn ? atlasUV(cm, 4) : vec2(0.0);
-  highp vec2 dx_m = dFdx(uv_m), dy_m = dFdy(uv_m);
+vec3 canopyTrees(highp vec2 cn, highp vec2 cf, float nearEdge, float farEdge) {
+  // Derivatives inside uniform gates stay defined in GLES 3.00 while skipping
+  // work whenever the corresponding canopy layer is inactive.
+  highp vec2 uv_n = vec2(0.0), dx_n = vec2(0.0), dy_n = vec2(0.0);
+  if (u_canopySlot >= 0) {
+    uv_n = canopyNearUV(cn);
+    dx_n = dFdx(uv_n);
+    dy_n = dFdy(uv_n);
+  }
+  float midEdge = 0.0;
+  highp vec2 uv_m = vec2(0.0), dx_m = vec2(0.0), dy_m = vec2(0.0);
+  if (u_canopyMidOn) {
+    highp vec2 cm = canopyMidCoord();
+    midEdge = canopyEdge(cm);
+    uv_m = atlasUV(cm, 4);
+    dx_m = dFdx(uv_m);
+    dy_m = dFdy(uv_m);
+  }
   if (nearEdge + farEdge + midEdge <= 0.0)
     return vec3(0.0);
   if (nearEdge > 0.0)
     g_canopy = textureGrad(u_canopy, uv_n, dx_n, dy_n);
   float wn = g_canopy.a < 0.5 / 255.0 ? 0.0 : nearEdge;
-  vec4 f =
-      farEdge > 0.0 && wn < 1.0
-          ? textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)), 0.0)
-          : vec4(0.0);
+  vec4 f = farEdge > 0.0 && wn < 1.0
+               ? textureLod(u_canopy, canopyFarUV(cf), 0.0)
+               : vec4(0.0);
   float wf = f.a < 0.5 / 255.0 ? 0.0 : (1.0 - wn) * farEdge;
   // Its A is the share of the read that has data, its R their heights'
   // sum (canopy_prep.frag's [u_flagged]).
@@ -659,53 +600,68 @@ float lodFade(float lmax, highp float fp) {
   return 1.0 - smoothstep(lmax / 8.0, lmax / 3.0, fp);
 }
 
-// World-space gradient of one scale's bump: one fetch per open projection
-// plane, the plane blend and fades being [t]'s (they depend on the normal
-// only, so every scale shares them). [amp] is the amplitude of A and B.
-vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
-              vec2 rot, float mix2) {
+// World-space gradient of macro scale (s == 0): BUMP_AMP_B is zero and top
+// rotation is identity; [ampA] already includes 2 * BUMP_ENC * scale *
+// strength.
+vec3 bumpGradMacro(Triplanar t, highp vec3 pos, float ampA, float mix2) {
   float w_y = t.blend.y * t.fade_y;
   float w_x = t.blend.x * t.fade_x;
-  float top = float(2 * s);
-  float side = top + 1.0;
-  vec3 g = vec3(0.);
-  // The top plane turns by a different angle per scale (rot = cos, sin), so
-  // the scales do not share axes; the gradient is turned back below.
-  highp vec2 rxy = mat2(rot.x, rot.y, -rot.y, rot.x) * pos.xy;
+  float bias = -0.5 * ampA;
+  vec3 g = vec3(0.0);
   if (t.blend.z > 0.0) {
-    highp vec3 c = vec3(rxy * scale, top);
-    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
-    d *= 2.0 * BUMP_ENC;
-    vec2 gt = mat2(rot.x, -rot.y, rot.y, rot.x) * (amp.x * d.xy + amp.y * d.zw);
+    vec2 gt =
+        texture(u_bumpGrad, vec3(pos.xy * 0.002, 0.0), 1.0).xy * ampA + bias;
     // [mix2] > 0: blend in a second copy of the layer, turned 63 degrees and
-    // offset half a tile, which breaks the tile's repetition where nothing
-    // else does (flat forest). The blend keeps the gradient variance, so the
-    // mixing zones do not wash out.
+    // offset half a tile, which breaks the tile's repetition on flat forest.
     if (mix2 > 0.0) {
       const vec2 rot2 = vec2(0.454, 0.891);
       highp vec2 r2 = mat2(rot2.x, rot2.y, -rot2.y, rot2.x) * pos.xy;
-      vec4 d2 = texture(u_bumpGrad, vec3(r2 * scale + 0.5, top), 1.) - 0.5;
-      d2 *= 2.0 * BUMP_ENC;
-      vec2 gt2 = mat2(rot2.x, -rot2.y, rot2.y, rot2.x) *
-                 (amp.x * d2.xy + amp.y * d2.zw);
+      vec2 d2 =
+          texture(u_bumpGrad, vec3(r2 * 0.002 + 0.5, 0.0), 1.0).xy * ampA +
+          bias;
+      vec2 gt2 = mat2(rot2.x, -rot2.y, rot2.y, rot2.x) * d2;
       gt = (gt * (1.0 - mix2) + gt2 * mix2) *
            inversesqrt((1.0 - mix2) * (1.0 - mix2) + mix2 * mix2);
     }
     g.xy = (1.0 - w_x - w_y) * gt;
   }
+  if (w_y > 0.0)
+    g.xz +=
+        w_y *
+        (texture(u_bumpGrad, vec3(pos.xz * 0.002, 1.0), 1.0).xy * ampA + bias);
+  if (w_x > 0.0)
+    g.yz +=
+        w_x *
+        (texture(u_bumpGrad, vec3(pos.yz * 0.002, 1.0), 1.0).xy * ampA + bias);
+  return g;
+}
+
+// World-space gradient of mid/fine bump scales: [amp] already includes
+// 2 * BUMP_ENC * (scale / divisor) * bumpStrength.
+vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
+              vec2 rot) {
+  float w_y = t.blend.y * t.fade_y;
+  float w_x = t.blend.x * t.fade_x;
+  float top = float(2 * s);
+  float side = top + 1.0;
+  float bias = -0.5 * (amp.x + amp.y);
+  vec3 g = vec3(0.0);
+  highp vec2 rxy = mat2(rot.x, rot.y, -rot.y, rot.x) * pos.xy;
+  if (t.blend.z > 0.0) {
+    vec4 d = texture(u_bumpGrad, vec3(rxy * scale, top), 1.0);
+    vec2 gt = mat2(rot.x, -rot.y, rot.y, rot.x) *
+              (amp.x * d.xy + amp.y * d.zw + bias);
+    g.xy = (1.0 - w_x - w_y) * gt;
+  }
   if (w_y > 0.0) {
-    highp vec3 c = vec3(pos.xz * scale, side);
-    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
-    d *= 2.0 * BUMP_ENC;
-    g.xz += w_y * (amp.x * d.xy + amp.y * d.zw);
+    vec4 d = texture(u_bumpGrad, vec3(pos.xz * scale, side), 1.0);
+    g.xz += w_y * (amp.x * d.xy + amp.y * d.zw + bias);
   }
   if (w_x > 0.0) {
-    highp vec3 c = vec3(pos.yz * scale, side);
-    vec4 d = texture(u_bumpGrad, c, 1.) - 0.5;
-    d *= 2.0 * BUMP_ENC;
-    g.yz += w_x * (amp.x * d.xy + amp.y * d.zw);
+    vec4 d = texture(u_bumpGrad, vec3(pos.yz * scale, side), 1.0);
+    g.yz += w_x * (amp.x * d.xy + amp.y * d.zw + bias);
   }
-  return g * scale;
+  return g;
 }
 
 // Procedural normal perturbation: the baked bump gradients (see [bumpGrad])
@@ -765,18 +721,16 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   bwSum = dot(bw, vec4(1.0));
   bw = bwSum > 1e-4 ? bw / bwSum : vec4(0.0);
 
-  // Each band is weighed by the share of its octaves the relief data cannot
-  // hold (see [bandShare]), so the texture does not bury the relief: in the
-  // 2.4 m rings the 31-4 m band keeps under a third, on the 30 m base all of
-  // it stays. A function of where
-  // the pixel is, not of its size -- the footprint law this replaces (data
-  // samples per pixel) made the texture change with the zoom. The base's
-  // sentinel step stands for its real 30 m here, and as the step is per
-  // metre of horizontal grid, along a steep face the posts sit 1/n_z further
-  // apart and the data holds less.
+  // Share of each bump band [4..31], [0.55..9], [0.08..1.25] m that the
+  // relief data cannot hold: single log2(ds) + affine remap, scaled by
+  // bumpStrength.
+  //   BAND_INV_SPAN = 1 / log2(lmax / lmin)
+  //   BAND_OFF      = log2(3 / lmin) / log2(lmax / lmin)
+  const vec3 BAND_INV_SPAN = vec3(0.3385075, 0.2479539, 0.2521600);
+  const vec3 BAND_OFF = vec3(-0.1404921, 0.6068757, 1.3185003);
   float ds = min(dataStep, 30.0) / max(geomNormal.z, 0.25);
-  vec3 band = vec3(bandShare(4.0, 31.0, ds), bandShare(0.55, 9.0, ds),
-                   bandShare(0.08, 1.25, ds));
+  vec3 band =
+      clamp(log2(ds) * BAND_INV_SPAN + BAND_OFF, 0.0, 1.0) * bumpStrength;
 
   // One fetch per open projection plane per scale (past [triplanarSideGate]
   // two planes, below it the XY plane alone), accumulated directly in world
@@ -784,9 +738,8 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   // live across the bump fetches (eliminates register spilling on Mali).
   vec3 grad = vec3(0.);
   if (fade_macro > 0.0) {
-    vec2 amp = vec2(dot(bw, BUMP_AMP_A[0]), dot(bw, BUMP_AMP_B[0])) *
-               (band.x * fade_macro);
-    if (any(notEqual(amp, vec2(0.0)))) {
+    float ampA = dot(bw, BUMP_AMP_A[0]) * (band.x * fade_macro);
+    if (ampA != 0.0) {
       // Forest: two copies of the layer, alternating over zones 700 m to
       // 1.1 km across (a mask of incommensurate sinusoids): flat forest showed
       // the 500 m tile repeating, with nothing in the relief to break it up.
@@ -797,27 +750,27 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
                          0.5 * sin((0.8 * q.x + 0.6 * q.y) * 0.0057 + 1.0);
         mix2 = smoothstep(-0.35, 0.35, float(wn)) * smoothstep(0.05, 0.3, bw.b);
       }
-      grad += bumpGrad(tri, v_world_pos, 0.002, 0, amp, vec2(1.0, 0.0), mix2);
+      grad += bumpGradMacro(tri, v_world_pos, ampA, mix2);
     }
   }
   if (fade_mid > 0.0) {
-    vec2 amp = vec2(dot(bw, BUMP_AMP_A[1]), dot(bw, BUMP_AMP_B[1])) *
-               (band.y * fade_mid / 8.0);
+    vec2 amp = vec2(dot(bw, BUMP_AMP_A[1]), dot(bw, BUMP_AMP_B_MID)) *
+               (band.y * fade_mid);
     if (any(notEqual(amp, vec2(0.0))))
-      grad += bumpGrad(tri, v_world_pos, BUMP_SCALE_MID, 1, amp,
-                       vec2(0.866, 0.5), 0.0);
+      grad +=
+          bumpGrad(tri, v_world_pos, BUMP_SCALE_MID, 1, amp, vec2(0.866, 0.5));
   }
   if (fade_fine > 0.0) {
-    vec2 amp = vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B[2])) *
-               (band.z * fade_fine / 60.0);
+    vec2 amp = vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B_FINE)) *
+               (band.z * fade_fine);
     if (any(notEqual(amp, vec2(0.0))))
       grad += bumpGrad(tri, v_world_pos, BUMP_SCALE_FINE, 2, amp,
-                       vec2(0.454, 0.891), 0.0);
+                       vec2(0.454, 0.891));
   }
 
   // Project the analytic 3D gradient onto the surface's tangent plane.
   vec3 surfGrad = grad - dot(grad, geomNormal) * geomNormal;
-  return normalize(geomNormal - surfGrad * bumpStrength);
+  return normalize(geomNormal - surfGrad);
 }
 
 // Procedural water with organic shoreline.
@@ -936,82 +889,57 @@ void main() {
   // this is exactly u_fogColor.
   // View vector and distance from v_world_pos (saves 4 highp varying floats).
   highp vec3 to_eye = vec3(center_offset, 0.0) - v_world_pos;
-  highp float v_dist = length(to_eye);
+  highp float r_eye_sq = dot(to_eye.xy, to_eye.xy);
+  highp float v_dist = sqrt(r_eye_sq + to_eye.z * to_eye.z);
   highp vec3 view_dir_n = to_eye / max(v_dist, 1e-4);
+  vec3 view_dir_m = vec3(view_dir_n);
   vec3 fog_color =
-      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_n.z));
+      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_m.z));
 
-  // Decode normal from the relief normal texture, preferring the
-  // high-resolution one inside its extent (quad-coherent branch: neighbouring
-  // fragments are on the same side of a boundary kilometres away, and both
-  // sources derive from the same heights there).
+  // Decode normal from the relief normal textures, composited inside-out so
+  // each ring fades over the coarser ones beneath it. Evaluates outer fades
+  // lazily (1 fetch inside any ring, 2 on a ring border) with 6 texture sites
+  // total instead of 14.
+  mediump vec2 encodedN = vec2(0.0);
+  float data_step = 0.0;
+  mediump float rem = 1.0;
   mediump float f0 = ringFade(hd_valid[0], hdReliefCoord0);
-  mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
-  mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
-  mediump float f3 = ringFade(hd_valid[3], hdReliefCoord3);
+  if (f0 > 0.0) {
+    encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg * f0;
+    data_step = hd_step[0] * f0;
+    rem -= f0;
+  }
+  if (rem > 0.0) {
+    mediump float f1 = ringFade(hd_valid[1], hdReliefCoord1);
+    if (f1 > 0.0) {
+      mediump float w = rem * f1;
+      encodedN += texture(hd_relief_normal[1], hdReliefCoord1).rg * w;
+      data_step += hd_step[1] * w;
+      rem -= w;
+    }
+  }
+  if (rem > 0.0) {
+    mediump float f2 = ringFade(hd_valid[2], hdReliefCoord2);
+    if (f2 > 0.0) {
+      mediump float w = rem * f2;
+      encodedN += texture(hd_relief_normal[2], hdReliefCoord2).rg * w;
+      data_step += hd_step[2] * w;
+      rem -= w;
+    }
+  }
+  if (rem > 0.0) {
+    mediump float f3 = ringFade(hd_valid[3], hdReliefCoord3);
+    if (f3 > 0.0) {
+      mediump float w = rem * f3;
+      encodedN += texture(hd_relief_normal[3], hdReliefCoord3).rg * w;
+      data_step += hd_step[3] * w;
+      rem -= w;
+    }
+  }
   mediump float fb = baseFade();
-  mediump vec2 encodedN;
-  float data_step;
-  if (f0 >= 1.0) {
-    encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
-    data_step = hd_step[0];
-  } else if (f1 >= 1.0 && f0 <= 0.0) {
-    encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
-    data_step = hd_step[1];
-  } else if (f2 >= 1.0 && f1 <= 0.0 && f0 <= 0.0) {
-    encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
-    data_step = hd_step[2];
-  } else if (f3 >= 1.0 && f2 <= 0.0 && f1 <= 0.0 && f0 <= 0.0) {
-    encodedN = texture(hd_relief_normal[3], hdReliefCoord3).rg;
-    data_step = hd_step[3];
-  } else {
-    // A ring's border band (rare: the bands are ~6% of each extent), or
-    // outside every ring. Composite outside-in so each ring fades over the
-    // one beneath it; the fetch count is bounded by the fades that are
-    // actually open, and the branches stay quad-coherent away from the
-    // bands' own edges (the same acceptance as the selection above). The
-    // composite starts at the innermost ring that is fully open here:
-    // everything beneath it would only be mixed away at weight one.
-    if (f1 >= 1.0) {
-      encodedN = texture(hd_relief_normal[1], hdReliefCoord1).rg;
-      data_step = hd_step[1];
-    } else {
-      if (f2 >= 1.0) {
-        encodedN = texture(hd_relief_normal[2], hdReliefCoord2).rg;
-        data_step = hd_step[2];
-      } else {
-        if (f3 >= 1.0) {
-          encodedN = texture(hd_relief_normal[3], hdReliefCoord3).rg;
-          data_step = hd_step[3];
-        } else {
-          encodedN = baseNormal(fb);
-          // The base grid's 30 m spacing, matching
-          // [Render_state.hd_step_sentinel] so the ring-border fade blends
-          // smoothly from 30 m to hd_step[i].
-          data_step = 30.0;
-          if (f3 > 0.0) {
-            encodedN = mix(encodedN,
-                           texture(hd_relief_normal[3], hdReliefCoord3).rg, f3);
-            data_step = mix(data_step, hd_step[3], f3);
-          }
-        }
-        if (f2 > 0.0) {
-          encodedN = mix(encodedN,
-                         texture(hd_relief_normal[2], hdReliefCoord2).rg, f2);
-          data_step = mix(data_step, hd_step[2], f2);
-        }
-      }
-      if (f1 > 0.0) {
-        encodedN =
-            mix(encodedN, texture(hd_relief_normal[1], hdReliefCoord1).rg, f1);
-        data_step = mix(data_step, hd_step[1], f1);
-      }
-    }
-    if (f0 > 0.0) {
-      encodedN =
-          mix(encodedN, texture(hd_relief_normal[0], hdReliefCoord0).rg, f0);
-      data_step = mix(data_step, hd_step[0], f0);
-    }
+  if (rem > 0.0) {
+    encodedN += baseNormal(fb) * rem;
+    data_step += 30.0 * rem;
   }
   vec3 normal;
   normal.xy = encodedN * 2.0 - 1.0;
@@ -1039,14 +967,17 @@ void main() {
   // forest green (by the conifer share) or to meadow green. Not on water, nor
   // on built-up classes, whose buildings the canopy model reads as trees.
   {
-    highp float r_eye = eyeRadius();
-    float nearEdge =
-        u_canopySlot >= 0 ? canopyEdge(slotCoord(u_canopySlot)) : 0.0;
-    float farEdge =
-        u_canopyFarSlot >= 0 ? canopyEdge(slotCoord(u_canopyFarSlot)) : 0.0;
-    vec3 ct = canopyTrees(nearEdge, farEdge);
+    highp float r_eye = sqrt(r_eye_sq);
+    // Height above the sea: compensate Earth's curvature drop.
+    highp float elev = v_world_pos.z + center_height + r_eye_sq * 6.8306e-8;
+    highp vec2 cn = u_canopySlot >= 0 ? slotCoord(u_canopySlot) : vec2(0.0);
+    highp vec2 cf =
+        u_canopyFarSlot >= 0 ? slotCoord(u_canopyFarSlot) : vec2(0.0);
+    float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
+    float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
+    vec3 ct = canopyTrees(cn, cf, nearEdge, farEdge);
     if (surface.waterFactor < 0.99)
-      canopyGeometry(r_eye, nearEdge, farEdge);
+      canopyGeometry(r_eye, cn, cf, nearEdge, farEdge);
     // Beyond the canopies, the EEA tree cover: forest where its density is
     // over ~30-60%. Its leaf type (10 m) says conifer or broadleaf wherever it
     // has trees, inside the canopies too: finer than the land cover's classes,
@@ -1058,42 +989,45 @@ void main() {
     // forest, half trees, rather than meadow.
     surface.conifer =
         mix(surface.conifer, 1.0,
-            smoothstep(u_coniferLine, u_coniferLine + 500.0, elevation()));
-    float coverTrust = 0.0;
-    float clcForest = 0.5 * smoothstep(0.35, 0.6, surface.detailWeights.b);
-    for (int level = 0; level < 2; level++) {
-      if (level == 0 ? !u_treeCoverOn : !u_treeCoverFarOn)
-        continue;
-      highp vec4 m = level == 0 ? u_treeCoverMap : u_treeCoverFarMap;
-      highp vec2 cu = reliefCoord * m.xy + m.zw;
-      // Not where the finer level has it all, nor outside the level's block:
-      // gradients computed outside the branch for textureGrad.
-      highp vec2 uv = canopyCoverUV(cu, level);
-      highp vec2 dx = dFdx(uv), dy = dFdy(uv);
-      float ce = canopyEdge(cu);
-      vec4 tc = (ce > 0.0 && coverTrust < 1.0)
-                    ? textureGrad(u_canopy, uv, dx, dy)
-                    : vec4(0.0);
-      float e = ce * tc.b * (1.0 - coverTrust);
-      if (e > 0.0) {
-        float density = tc.r / tc.b;
-        float total = ct.y + (1.0 - ct.y) * e;
-        ct.x = mix(max(smoothstep(0.3, 0.6, density), clcForest), ct.x,
-                   ct.y / total);
-        ct.y = total;
-        // Only as far as the leaf type is known: elsewhere the conifer
-        // line's share, or the class's, stands (as in tree_find.vert). With
-        // G premultiplied by A, mix(conifer, G / A, w A) without the
-        // division.
-        surface.conifer +=
-            (tc.g - surface.conifer * tc.a) * e * smoothstep(0.1, 0.4, density);
-        coverTrust += e;
+            smoothstep(u_coniferLine, u_coniferLine + 500.0, elev));
+    if (u_treeCoverOn || u_treeCoverFarOn) {
+      highp vec2 drc_dx = dFdx(reliefCoord);
+      highp vec2 drc_dy = dFdy(reliefCoord);
+      float coverTrust = 0.0;
+      float clcForest = 0.5 * smoothstep(0.35, 0.6, surface.detailWeights.b);
+      for (int level = 0; level < 2; level++) {
+        if (level == 0 ? !u_treeCoverOn : !u_treeCoverFarOn)
+          continue;
+        highp vec4 m = level == 0 ? u_treeCoverMap : u_treeCoverFarMap;
+        highp vec2 cu = reliefCoord * m.xy + m.zw;
+        float ce = canopyEdge(cu);
+        if (ce > 0.0 && coverTrust < 1.0) {
+          // cu is affine in reliefCoord and unclamped while ce > 0.
+          highp vec2 gradScale = m.xy / vec2(3.0, 2.0);
+          vec4 tc = textureGrad(u_canopy, canopyCoverUV(cu, level),
+                                drc_dx * gradScale, drc_dy * gradScale);
+          float e = ce * tc.b * (1.0 - coverTrust);
+          if (e > 0.0) {
+            float density = tc.r / tc.b;
+            float total = ct.y + (1.0 - ct.y) * e;
+            ct.x = mix(max(smoothstep(0.3, 0.6, density), clcForest), ct.x,
+                       ct.y / total);
+            ct.y = total;
+            // Only as far as the leaf type is known: elsewhere the conifer
+            // line's share, or the class's, stands (as in tree_find.vert). With
+            // G premultiplied by A, mix(conifer, G / A, w A) without the
+            // division.
+            surface.conifer += (tc.g - surface.conifer * tc.a) * e *
+                               smoothstep(0.1, 0.4, density);
+            coverTrust += e;
+          }
+        }
       }
     }
     // No forest on glaciers -- the canopy models read seracs and crevasses
     // as a metre or two of trees -- nor above the treeline.
     ct.x *= (1.0 - surface.detailWeights.a) *
-            (1.0 - smoothstep(2500.0, 2800.0, elevation()));
+            (1.0 - smoothstep(2500.0, 2800.0, elev));
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
     // Where tree.vert stands the trees, this is the ground under them: no
@@ -1173,14 +1107,15 @@ void main() {
   // [perturbNormal].
   highp vec3 ddx = dFdx(v_world_pos);
   highp vec3 ddy = dFdy(v_world_pos);
-  highp float fp =
-      max(0.25 * max(length(ddx), length(ddy)), min(length(ddx), length(ddy)));
+  highp float l2x = dot(ddx, ddx);
+  highp float l2y = dot(ddy, ddy);
+  highp float fp = sqrt(max(0.0625 * max(l2x, l2y), min(l2x, l2y)));
 
   float crownFade = 0.0;
   float coniferAmt = 0.0;
   float coniferTone = 0.0;
   float crownH = 0.0;
-  highp vec2 crownGrad = vec2(0.0);
+  vec2 crownGrad = vec2(0.0);
   {
     // Conifer stands within the class's share, by a non-repeating value
     // noise over ~60 m: mixed forest comes out as stands of each, not as
@@ -1217,12 +1152,19 @@ void main() {
       if (g_canopyReal < 1.0) {
         float pick = smoothstep(
             0.42, 0.58, valueNoise(v_world_pos.xy / 250.0 + vec2(17.0, 31.0)));
-        highp vec2 rc = vec2(0.921, 0.389); // turned 23 degrees
-        vec4 cs = vec4(0.0, 0.5, 0.5, 0.0);
+        const highp mat2 M1 =
+            mat2(0.921, 0.389, -0.389, 0.921) * (1.0 / CROWN_TILE);
+        const highp mat2 M2 =
+            mat2(-0.276, 0.961, -0.961, -0.276) * (1.0 / CROWN_TILE);
+        highp vec2 uv1 = M1 * v_world_pos.xy;
+        highp vec2 uv2 = M2 * v_world_pos.xy + vec2(0.37, 0.61);
+        vec3 cs = vec3(0.0);
         if (coniferAmt < 1.0)
-          cs = crownSample(6.0, pick, rc);
+          cs = crownSample(6.0, pick, uv1, uv2);
         if (coniferAmt > 0.0)
-          cs = mix(cs, crownSample(7.0, pick, rc), coniferAmt);
+          cs = coniferAmt < 1.0
+                   ? mix(cs, crownSample(7.0, pick, uv1, uv2), coniferAmt)
+                   : crownSample(7.0, pick, uv1, uv2);
         // Density varies over ~150 m by a non-repeating value noise: crowns
         // lowered by [thin] and rescaled, so the small and low ones drop out
         // first, leaving clearings in some stands and a closed canopy in
@@ -1230,10 +1172,11 @@ void main() {
         // that tile, as large light and dark patches over a big forest.)
         float thin =
             0.12 * smoothstep(0.55, 0.15, valueNoise(v_world_pos.xy / 150.0));
-        crownH = max(cs.r - thin, 0.0) / (1.0 - thin);
-        crownGrad = (cs.r > thin ? 1.0 / (1.0 - thin) : 0.0) *
-                    (mat2(rc.x, -rc.y, rc.y, rc.x) *
-                     ((cs.gb - 0.5) * (2.0 * CROWN_GMAX / CROWN_TILE)));
+        float invScale = 1.0 / (1.0 - thin);
+        crownH = max(cs.x - thin, 0.0) * invScale;
+        crownGrad = cs.x > thin
+                        ? cs.yz * ((2.0 * CROWN_GMAX / CROWN_TILE) * invScale)
+                        : vec2(0.0);
       }
       // Where the LIDAR canopy has trees, the crowns are the real ones: its
       // tone (tops lit, flanks and gaps dark) and their slope beyond what the
@@ -1244,8 +1187,7 @@ void main() {
       if (g_canopyReal > 0.0) {
         crownH = mix(crownH, g_canopy.a, g_canopyReal);
         crownGrad = mix(crownGrad,
-                        ((g_canopy.gb * 255.0 - 128.0) / 32.0 -
-                         g_liftSlope * g_liftWeight) *
+                        (g_canopy.gb * (255.0 / 32.0) - 4.0 - g_liftGrad) *
                             (0.5 / CROWN_RELIEF),
                         g_canopyReal);
       }
@@ -1258,7 +1200,9 @@ void main() {
   // canopy, as the canopy photo does where crowns fade out: brighter, the
   // forest turned to a lawn up close and darkened with distance.
   float crownTone =
-      0.05 + 0.55 * smoothstep(0.0, 0.12, crownH) * (0.6 + 0.4 * crownH);
+      crownFade > 0.0
+          ? 0.05 + 0.55 * smoothstep(0.0, 0.12, crownH) * (0.6 + 0.4 * crownH)
+          : 0.0;
 
   // -----------------------------------------------------------------------
   // STEP B: BIO-VARIATION (Color & Texture)
@@ -1349,20 +1293,19 @@ void main() {
   // gradients add): forest edges and the sides of stands shade as walls, not
   // as the ground beneath them. The crown tilt below then adds only the
   // detail beyond this smoothed slope.
-  if (g_liftWeight > 0.0) {
-    final_normal =
-        normalize(final_normal + vec3(-g_liftSlope * g_liftWeight, 0.0));
+  if (dot(g_liftGrad, g_liftGrad) > 0.0) {
+    final_normal = normalize(final_normal + vec3(-g_liftGrad, 0.0));
     // The flank of a stand seen from the side: shade under the crowns, broken
     // by the gaps between trunks -- not the top-down crown pattern, smeared
     // down the wall, which made groves read as moss-covered mounds. Bands
     // along the flank's horizontal direction (constant in height, so
     // vertical on screen), ~2.5 m and ~1 m, non-repeating; gone by 3 km,
     // where they would alias.
-    highp vec2 sl = g_liftSlope * g_liftWeight;
-    float wall = smoothstep(0.4, 1.2, length(sl)) *
+    float slLen = length(g_liftGrad);
+    float wall = smoothstep(0.4, 1.2, slLen) *
                  (1.0 - smoothstep(1500.0, 3000.0, v_dist));
     if (wall > 0.0) {
-      highp vec2 along = normalize(vec2(-sl.y, sl.x));
+      vec2 along = vec2(-g_liftGrad.y, g_liftGrad.x) / slLen;
       highp float t = dot(v_world_pos.xy, along);
       float gaps =
           0.65 * valueNoise1D(t * 0.4, 73u) + 0.35 * valueNoise1D(t, 191u);
@@ -1501,7 +1444,8 @@ void main() {
   // back but not the contrast. What is wrong with this term is its shape rather
   // than its size, and shape is not what the app is short of.
   float NdotH = max(0.0, dot(final_normal, halfVec));
-  float NdotV = clamp(dot(final_normal, view_dir_n), 1e-3, 1.0);
+  float NdotV_raw = dot(final_normal, view_dir_m);
+  float NdotV = clamp(NdotV_raw, 1e-3, 1.0);
   float roughSq = material_roughness * material_roughness;
   // NdotH^2 (roughSq - 1) + 1, rewritten as (1 - NdotH^2) + NdotH^2 roughSq
   // with 1 - NdotH^2 taken as |N x H|^2: the direct form subtracts two numbers
@@ -1580,9 +1524,9 @@ void main() {
     }
   }
 
-  // Environment reflection (sky color for glossy surfaces)
-  vec3 reflectDir = reflect(-view_dir_n, final_normal);
-  float skyReflect = max(0.0, reflectDir.z);
+  // Environment reflection (sky color for glossy surfaces): z of
+  // reflect(-view_dir_m, final_normal) = 2 * dot(N, V) * N.z - V.z.
+  float skyReflect = max(0.0, 2.0 * NdotV_raw * final_normal.z - view_dir_m.z);
   // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
   // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
   // We use the exact same mixing factor for consistency
@@ -1632,14 +1576,10 @@ void main() {
   float normalAO = mix(0.85, 1.0, max(0.0, dot(final_normal, geoNormal)));
 
   // Noise-based Micro-AO: Darken crevasses/gaps (low noise values)
-  // 1. Compute per-material AO factors (Low noise = Darker)
-  float rockAO = smoothstep(0.0, 0.6, texNoise.r);
-  float forestAO = smoothstep(0.0, 0.5, mix(texNoise.b, crownTone, crownFade));
-  float iceAO = smoothstep(0.0, 0.6, texNoise.a);
-
-  // 2. Combine based on weights (Grass/Green channel gets 1.0 = no darkening)
-  float combinedNoiseAO = rockAO * finalWeights.r + 1.0 * finalWeights.g +
-                          forestAO * finalWeights.b + iceAO * finalWeights.a;
+  vec3 matAO = smoothstep(
+      vec3(0.0), vec3(0.6, 0.5, 0.6),
+      vec3(texNoise.r, mix(texNoise.b, crownTone, crownFade), texNoise.a));
+  float combinedNoiseAO = dot(matAO, finalWeights.rba) + finalWeights.g;
 
   // 3. Remap to valid range (0.5 to 1.0) so it doesn't get too dark
   float noiseAO = mix(0.5, 1.0, combinedNoiseAO);
