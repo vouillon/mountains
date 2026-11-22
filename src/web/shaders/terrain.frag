@@ -1462,7 +1462,10 @@ void main() {
   // back but not the contrast. What is wrong with this term is its shape rather
   // than its size, and shape is not what the app is short of.
   float NdotH = max(0.0, dot(final_normal, halfVec));
-  float NdotV = max(dot(final_normal, view_dir_n), 1e-3);
+  // Clamped to 1 too: at fp16 the dot of two unit vectors can come out a
+  // little over it, and pow(1 - NdotV, n) of a negative is undefined (NaN
+  // where pow is exp2(n log2 x)).
+  float NdotV = clamp(dot(final_normal, view_dir_n), 1e-3, 1.0);
   float roughSq = material_roughness * material_roughness;
   // NdotH^2 (roughSq - 1) + 1, rewritten as (1 - NdotH^2) + NdotH^2 roughSq
   // with 1 - NdotH^2 taken as |N x H|^2: the direct form subtracts two numbers
