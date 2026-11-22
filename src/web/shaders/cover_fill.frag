@@ -33,29 +33,15 @@ const uint NONE = 0xFFFFFFFFu;
 
 uint pack(ivec2 p, uint c) { return uint(p.x) | (uint(p.y) << 12) | (c << 24); }
 
-// Of the seeds of the cells around [cell], [stride] apart, the nearest to the
-// texel position [p].
-uint nearest(ivec2 cell, int stride, vec2 p) {
-  ivec2 size = textureSize(u_seeds, 0);
-  uint best = NONE;
-  float best_d = 1e12;
-  for (int dy = -1; dy <= 1; dy++) {
-    for (int dx = -1; dx <= 1; dx++) {
-      ivec2 c = cell + ivec2(dx, dy) * stride;
-      if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, size)))
-        continue;
-      uint s = texelFetch(u_seeds, c, 0).r;
-      if (s == NONE)
-        continue;
-      vec2 d = vec2(float(s & 0xFFFu), float((s >> 12) & 0xFFFu)) - p;
-      float dd = dot(d, d);
-      if (dd < best_d) {
-        best_d = dd;
-        best = s;
-      }
+void updateBest(uint s, vec2 target, inout uint best, inout float best_d) {
+  if (s != NONE) {
+    vec2 d = vec2(float(s & 0xFFFu), float((s >> 12) & 0xFFFu)) - target;
+    float dd = dot(d, d);
+    if (dd < best_d) {
+      best_d = dd;
+      best = s;
     }
   }
-  return best;
 }
 
 void main() {
@@ -65,35 +51,92 @@ void main() {
     out_value = uint(
         texelFetch(u_far, clamp(p + u_shift, ivec2(0), last), 0).r * 255.0 +
         0.5);
-  } else if (u_step < 0) {
-    uint c = texelFetch(u_cover, p, 0).r;
-    if (c == HOLE) {
-      uint s = nearest(p / 2, 1, vec2(p));
-      c = s == NONE ? u_default : s >> 24;
-    } else if (c == UNLOADED) {
-      // The level above spans twice the ground about the same centre.
-      c = u_has_coarse
-              ? texelFetch(u_coarse, p / 2 + textureSize(u_cover, 0) / 4, 0).r
-              : u_default;
-    }
-    out_value = c;
-  } else if (u_step == 0) {
-    uint seed = NONE;
-    for (int i = 3; i >= 0; i--) {
-      ivec2 q = 2 * p + ivec2(i & 1, i >> 1);
-      uint c = texelFetch(u_cover, q, 0).r;
-      if (c != HOLE && c != UNLOADED)
-        seed = pack(q, c);
-    }
-    // A level may lie inside a hole altogether, or see none of the land
-    // nearest to its holes: the cells of its border take what the level
-    // above, twice as wide around the same centre, has found there.
-    ivec2 cells = textureSize(u_cover, 0) / 2;
-    if (seed == NONE && u_has_coarse &&
-        (p.x == 0 || p.y == 0 || p.x == cells.x - 1 || p.y == cells.y - 1))
-      seed = pack(2 * p, texelFetch(u_coarse, p + cells / 2, 0).r);
-    out_value = seed;
-  } else {
-    out_value = nearest(p, u_step, vec2(2 * p) + 0.5);
+    return;
   }
+  if (u_step == 0) {
+    ivec2 q0 = p * 2;
+    // Pick the first valid (non-HOLE, non-UNLOADED) texel in 0..3 order: on
+    // land cells (the common case) the first fetch already succeeds.
+    uint c0 = texelFetch(u_cover, q0, 0).r;
+    if (c0 < UNLOADED) {
+      out_value = pack(q0, c0);
+      return;
+    }
+    uint c1 = texelFetch(u_cover, q0 + ivec2(1, 0), 0).r;
+    uint c2 = texelFetch(u_cover, q0 + ivec2(0, 1), 0).r;
+    uint c3 = texelFetch(u_cover, q0 + ivec2(1, 1), 0).r;
+    uint seed = NONE;
+    if (c1 < UNLOADED)
+      seed = pack(q0 + ivec2(1, 0), c1);
+    else if (c2 < UNLOADED)
+      seed = pack(q0 + ivec2(0, 1), c2);
+    else if (c3 < UNLOADED)
+      seed = pack(q0 + ivec2(1, 1), c3);
+    else if (u_has_coarse) {
+      // A level may lie inside a hole altogether, or see none of the land
+      // nearest to its holes: the cells of its border take what the level
+      // above (u_coarse holds its central half) has found there.
+      ivec2 cells = textureSize(u_cover, 0) / 2;
+      if (p.x == 0 || p.y == 0 || p.x == cells.x - 1 || p.y == cells.y - 1)
+        seed = pack(q0, texelFetch(u_coarse, p, 0).r);
+    }
+    out_value = seed;
+    return;
+  }
+
+  // Resolve (u_step < 0) and JFA flood (u_step > 0) share one row-batched
+  // 3x3 nearest-seed search below.
+  ivec2 cell;
+  int stride;
+  vec2 target;
+  if (u_step < 0) {
+    uint c = texelFetch(u_cover, p, 0).r;
+    if (c < UNLOADED) {
+      out_value = c;
+      return;
+    }
+    if (c == UNLOADED) {
+      // u_coarse holds the central half of the level above.
+      out_value = u_has_coarse ? texelFetch(u_coarse, p / 2, 0).r : u_default;
+      return;
+    }
+    cell = p / 2;
+    stride = 1;
+    target = vec2(p);
+  } else {
+    // A cell whose own seed lies inside its 2x2 texels is already at the
+    // unique global minimum squared distance (0.5) to vec2(2*p) + 0.5; no
+    // neighbour at any stride can tie or beat it.
+    uint sc = texelFetch(u_seeds, p, 0).r;
+    if (sc != NONE &&
+        ivec2(int(sc & 0xFFFu) >> 1, int((sc >> 12) & 0xFFFu) >> 1) == p) {
+      out_value = sc;
+      return;
+    }
+    cell = p;
+    stride = u_step;
+    target = vec2(2 * p) + 0.5;
+  }
+
+  ivec2 size = textureSize(u_seeds, 0);
+  uint best = NONE;
+  float best_d = 1e12;
+  int x0 = cell.x - stride;
+  int x2 = cell.x + stride;
+  int cx0 = max(x0, 0);
+  int cx2 = min(x2, size.x - 1);
+  for (int dy = -1; dy <= 1; dy++) {
+    int cy = cell.y + dy * stride;
+    if (cy < 0 || cy >= size.y)
+      continue;
+    uint s0 = texelFetch(u_seeds, ivec2(cx0, cy), 0).r;
+    uint s1 = texelFetch(u_seeds, ivec2(cell.x, cy), 0).r;
+    uint s2 = texelFetch(u_seeds, ivec2(cx2, cy), 0).r;
+    if (x0 >= 0)
+      updateBest(s0, target, best, best_d);
+    updateBest(s1, target, best, best_d);
+    if (x2 < size.x)
+      updateBest(s2, target, best, best_d);
+  }
+  out_value = u_step < 0 ? (best == NONE ? u_default : best >> 24) : best;
 }
