@@ -3649,18 +3649,32 @@ let get_sight_gl ctx ~radial_params =
       s
 
 (* Have the sight lines to [targets] marched: positions on the eye's plane,
-   in metres east and north, and the height of the ground there. The program's uniforms and the height pyramids
-   are those of the location being published. The answer is in the buffer
-   returned, a float per target, once the GPU gets to it. *)
+   in metres east and north, and the height of the ground there. Targets are
+   sorted by azimuth before upload so threads in a GPU warp march nearly
+   parallel rays (coherent L1 texture cache access and reduced warp tail
+   divergence), and scattered back to their original indices on readback. *)
 let start_sight ctx s targets =
-  let n = List.length targets in
+  let arr = Array.of_list targets in
+  let total = Array.length arr in
+  (* Skip targets strictly beyond sight.vert's REACH (140 km). *)
+  let active =
+    let l = ref [] in
+    for i = 0 to total - 1 do
+      let px, py, _ = arr.(i) in
+      if Float.hypot px py <= 140001. then l := (i, atan2 py px) :: !l
+    done;
+    Array.of_list !l
+  in
+  Array.sort (fun (_, a) (_, b) -> Float.compare a b) active;
+  let n = Array.length active in
+  let order = Array.init n (fun i -> fst active.(i)) in
   let data = Bigarray.(Array1.create float32 c_layout (max 1 (3 * n))) in
-  List.iteri
-    (fun i (px, py, h) ->
-      data.{3 * i} <- px;
-      data.{(3 * i) + 1} <- py;
-      data.{(3 * i) + 2} <- h)
-    targets;
+  for i = 0 to n - 1 do
+    let px, py, h = arr.(order.(i)) in
+    data.{3 * i} <- px;
+    data.{(3 * i) + 1} <- py;
+    data.{(3 * i) + 2} <- h
+  done;
   let seen = Gl.create_buffer ctx in
   Gl.bind_buffer ctx Gl.array_buffer (Some seen);
   Gl.buffer_data_size ctx Gl.array_buffer (max 1 n * 4) Gl.stream_read;
@@ -3687,24 +3701,25 @@ let start_sight ctx s targets =
   Gl.bind_vertex_array ctx None;
   (* The vertex array keeps it for the draw just issued. *)
   Gl.delete_buffer ctx positions;
-  (n, seen)
+  ((total, order), seen)
 
 (* Read the answer back: for each target, whether it is seen. This waits for
    the GPU to be done with all it was asked so far. A march that ran out of
    steps (0.5) is given the benefit of the doubt. *)
-let read_sight ctx (n, seen) =
+let read_sight ctx ((total, order), seen) =
+  let n = Array.length order in
   let raw = Bigarray.(Array1.create float32 c_layout (max 1 n)) in
   Gl.bind_buffer ctx Gl.copy_read_buffer (Some seen);
   Gl.get_buffer_sub_data ctx Gl.copy_read_buffer 0 (Brr.Tarray.of_bigarray1 raw);
   Gl.bind_buffer ctx Gl.copy_read_buffer None;
   Gl.delete_buffer ctx seen;
   let unsure = ref 0 in
-  let res =
-    Array.init n (fun i ->
-        let v = raw.{i} in
-        if v > 0.25 && v < 0.75 then incr unsure;
-        v > 0.25)
-  in
+  let res = Array.make total false in
+  for i = 0 to n - 1 do
+    let v = raw.{i} in
+    if v > 0.25 && v < 0.75 then incr unsure;
+    res.(order.(i)) <- v > 0.25
+  done;
   if !unsure > 0 then
     Format.eprintf "visibility: %d sight lines ran out of steps@." !unsure;
   res
