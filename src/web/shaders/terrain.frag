@@ -753,9 +753,12 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
   highp vec3 grad1 = vec3(0.);
   highp vec3 grad2 = vec3(0.);
   highp vec3 grad3 = vec3(0.);
-  if (mask_macro > 0.0) {
+  // Past its fade (~10 m footprints) the macro scale's amplitude is zero:
+  // skip its fetches there, as the other two scales do.
+  float fade_macro = lodFade(31.0, fpL);
+  if (mask_macro > 0.0 && fade_macro > 0.0) {
     vec2 amp = vec2(dot(bw, BUMP_AMP_A[0]), dot(bw, BUMP_AMP_B[0])) * band.x *
-               lodFade(31.0, fpL);
+               fade_macro;
     // Forest: two copies of the layer, alternating over zones 700 m to 1.1 km
     // across (a mask of incommensurate sinusoids): flat forest showed the
     // 500 m tile repeating, with nothing in the relief to break it up.
