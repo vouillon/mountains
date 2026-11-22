@@ -1542,11 +1542,18 @@ void main() {
     highp float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
                                         max(cosTheta, 0.1));
     highp float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;
-    if (proj_coords.z <= 1.0 && proj_coords.z >= 0.0 &&
-        all(greaterThanEqual(proj_coords.xy, vec2(0.0))) &&
-        all(lessThanEqual(proj_coords.xy, vec2(1.0))))
+    // Only inside the cascade's box: past it (the last one's ends at 37.5 km,
+    // and the ground goes on to 140) the clamped fetches would stretch its
+    // border texels outwards. The last cascade fades out over its outer 5%,
+    // so that its shadows do not stop at a line.
+    highp vec2 inBox = min(proj_coords.xy, 1.0 - proj_coords.xy);
+    highp float edge = min(inBox.x, inBox.y);
+    if (proj_coords.z <= 1.0 && proj_coords.z >= 0.0 && edge > 0.0) {
       shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
                               vec2(0.000488));
+      if (cascade == 2)
+        shadow_val = mix(1.0, shadow_val, smoothstep(0.0, 0.05, float(edge)));
+    }
     // The trees' shadows, at ~0.5 m per texel: the layer holds nothing else,
     // so a small bias does (a trunk's buried foot is below the ground).
     if (u_treeShadowOn && v_dist < 600.0) {
