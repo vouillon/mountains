@@ -470,8 +470,16 @@ let tree_cover_prep_program =
 
 let tree_program =
   {
-    vertex_shader = [%blob "shaders/tree.vert"];
+    vertex_shader = "#version 300 es\n" ^ [%blob "shaders/tree.vert"];
     fragment_shader = common_fragment_header ^ [%blob "shaders/tree.frag"];
+    attributes = [ "a_pos"; "a_shape" ];
+  }
+
+let tree_shadow_program =
+  {
+    vertex_shader =
+      "#version 300 es\n#define TREE_SHADOW\n" ^ [%blob "shaders/tree.vert"];
+    fragment_shader = [%blob "shaders/shadow.frag"];
     attributes = [ "a_pos"; "a_shape" ];
   }
 
@@ -1267,6 +1275,7 @@ let prepare_programs ctx =
       cover_fill_program;
       water_raster_program;
       tree_program;
+      tree_shadow_program;
       canopy_prep_program;
       tree_cover_prep_program;
     ]
@@ -2919,17 +2928,19 @@ type trees_gl = {
   gen : int;
   find_pid : Gl.program;
   draw_pid : Gl.program;
+  shadow_pid : Gl.program;
   find_vao : Gl.vertex_array_object;
   feedback : Gl.transform_feedback;
   found : Gl.buffer;
   instances : Gl.buffer;
   group_vaos : Gl.vertex_array_object array;
-  u_proj : Gl.uniform_location;
-  u_transform : Gl.uniform_location;
+  u_view_proj : Gl.uniform_location;
+  u_proj_margin_scale : Gl.uniform_location;
   u_broadleaf : Gl.uniform_location;
   u_far : Gl.uniform_location;
-  u_shadow_pass : Gl.uniform_location;
   u_shadow_view_proj : Gl.uniform_location;
+  u_shadow_broadleaf : Gl.uniform_location;
+  u_shadow_far : Gl.uniform_location;
   any_pid : Gl.program;
   any_vao : Gl.vertex_array_object;  (** [found]'s cells as points *)
   any_fbo : Gl.framebuffer;  (** 1 x 1 *)
@@ -3027,6 +3038,7 @@ let get_trees_gl ctx =
         pid
       in
       let draw_pid = Web_utils.create_program ctx tree_program in
+      let shadow_pid = Web_utils.create_program ctx tree_shadow_program in
       (* A search's cells drawn as points, those without a tree outside the
          clip volume, under an occlusion query: whether there is any tree to
          read back. *)
@@ -3074,22 +3086,25 @@ let get_trees_gl ctx =
       Gl.bind_framebuffer ctx Gl.framebuffer None;
       Gl.bind_renderbuffer ctx Gl.renderbuffer None;
       let u name = Gl.get_uniform_location ctx draw_pid (Jstr.v name) in
+      let us name = Gl.get_uniform_location ctx shadow_pid (Jstr.v name) in
       let t =
         {
           gen = !context_generation;
           find_pid;
           draw_pid;
+          shadow_pid;
           find_vao = Gl.create_vertex_array ctx;
           feedback = Gl.create_transform_feedback ctx;
           found;
           instances = Gl.create_buffer ctx;
           group_vaos = Array.init 4 (fun _ -> Gl.create_vertex_array ctx);
-          u_proj = u "proj";
-          u_transform = u "transform";
+          u_view_proj = u "u_viewProj";
+          u_proj_margin_scale = u "u_projMarginScale";
           u_broadleaf = u "u_broadleaf";
           u_far = u "u_far";
-          u_shadow_pass = u "u_shadowPass";
-          u_shadow_view_proj = u "u_shadowViewProj";
+          u_shadow_view_proj = us "u_shadowViewProj";
+          u_shadow_broadleaf = us "u_broadleaf";
+          u_shadow_far = us "u_far";
           any_pid;
           any_vao;
           any_fbo;
@@ -3158,11 +3173,14 @@ let set_tree_params ctx ~block ~slot ~(g : Hd_dem.t) ~ground ~cover_map ~palette
   Gl.uniform3f ctx (u "u_zenithColor") r gg b;
   Gl.uniform1i ctx (u "shadow_map") 4;
   Gl.uniform1i ctx (u "u_noise") 0;
-  Gl.uniform_matrix4fv ctx (u "u_shadowMatrix") false
-    (Brr.Tarray.of_bigarray1 (Matrix.array shadow_matrix));
+  Render_state.upload_ortho_shadow_mat4x3 ctx (u "u_shadowMatrix") shadow_matrix;
   Gl.uniform2f ctx (u "u_shadowCascade") texel depth;
-  Gl.uniform_matrix4fv ctx (u "u_treeShadowMatrix") false
-    (Brr.Tarray.of_bigarray1 (Matrix.array tree_shadow_matrix));
+  Render_state.upload_ortho_shadow_mat4x3 ctx (u "u_treeShadowMatrix")
+    tree_shadow_matrix;
+  Gl.use_program ctx t.shadow_pid;
+  let us name = Gl.get_uniform_location ctx t.shadow_pid (Jstr.v name) in
+  Gl.uniform1f ctx (us "u_radius") tree_radius;
+  Gl.uniform2f ctx (us "u_centerOffset") cx cy;
   (* A publish that changes nothing the search reads (the coarser rings
      landing) keeps the trees found. One from elsewhere in the same block does
      not: they are stored from the eye. *)
@@ -3396,24 +3414,27 @@ let tree_draw_order = [| 0; 2; 1; 3 |]
 
 (* The found trees, if they are for the canopy on screen: the groups [only]
    selects by distance ([Some far]), or all of them. For a shadow pass, [m] is
-   the light's matrix ([m'] is not read); in the frame, they are the
-   projection and the transform. Whether there were any. Takes no closure: it
-   runs every frame. *)
-let draw_found_trees ?only ctx ~shadow_pass m m' =
+   the light's matrix; in the frame, it is the pre-multiplied view-projection
+   matrix and [margin_x]/[margin_y] are [sqrt (proj_ii^2 + 1)]. Whether there
+   were any. Takes no closure: it runs every frame. *)
+let draw_found_trees ?only ctx ~shadow_pass ~margin_x ~margin_y m =
   match (!trees_gl, !trees_found, canopy_ring.(0)) with
   | Some t, Some (b, g, counts), Some (b', _)
     when Lazy.force trees_enabled && b = b' && g = !context_generation
          && t.gen = g ->
-      Gl.use_program ctx t.draw_pid;
-      if shadow_pass then begin
-        Gl.uniform1i ctx t.u_shadow_pass 1;
-        Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false m
-      end
-      else begin
-        Gl.uniform1i ctx t.u_shadow_pass 0;
-        Gl.uniform_matrix4fv ctx t.u_proj false m;
-        Gl.uniform_matrix4fv ctx t.u_transform false m'
-      end;
+      let u_broadleaf, u_far =
+        if shadow_pass then begin
+          Gl.use_program ctx t.shadow_pid;
+          Gl.uniform_matrix4fv ctx t.u_shadow_view_proj false m;
+          (t.u_shadow_broadleaf, t.u_shadow_far)
+        end
+        else begin
+          Gl.use_program ctx t.draw_pid;
+          Gl.uniform_matrix4fv ctx t.u_view_proj false m;
+          Gl.uniform2f ctx t.u_proj_margin_scale margin_x margin_y;
+          (t.u_broadleaf, t.u_far)
+        end
+      in
       let drawn = ref false in
       for j = 0 to 3 do
         let k = tree_draw_order.(j) in
@@ -3421,9 +3442,14 @@ let draw_found_trees ?only ctx ~shadow_pass m m' =
           counts.(k) > 0
           && match only with Some far -> tree_group_far k = far | None -> true
         then begin
-          Gl.uniform1i ctx t.u_broadleaf
-            (if tree_group_broadleaf k then 1 else 0);
-          Gl.uniform1i ctx t.u_far (if tree_group_far k then 1 else 0);
+          let broadleaf = tree_group_broadleaf k in
+          (* Broadleaf crowns and trunks are closed outward-CCW meshes; conifers
+             have open hollow cone undersides. Shadow passes leave culling off. *)
+          if not shadow_pass then
+            if broadleaf then Gl.enable ctx Gl.cull_face'
+            else Gl.disable ctx Gl.cull_face';
+          Gl.uniform1i ctx u_broadleaf (if broadleaf then 1 else 0);
+          Gl.uniform1i ctx u_far (if tree_group_far k then 1 else 0);
           Gl.bind_vertex_array ctx (Some t.group_vaos.(k));
           Gl.draw_arrays_instanced ctx Gl.triangles 0 tree_group_vertices.(k)
             counts.(k);
@@ -3443,24 +3469,32 @@ let draw_tree_shadows ctx ~shadow_map ~terrain_pid ~cascade ~matrix layer =
   if layer = 0 then begin
     find_trees ctx;
     let m = Brr.Tarray.of_bigarray1 (Matrix.array cascade) in
-    ignore (draw_found_trees ~only:true ctx ~shadow_pass:true m m);
+    ignore
+      (draw_found_trees ~only:true ctx ~shadow_pass:true ~margin_x:0.
+         ~margin_y:0. m);
     Gl.framebuffer_texture_layer ctx Gl.framebuffer Gl.depth_attachment
       shadow_map 0 3;
     Gl.disable ctx Gl.scissor_test;
     Gl.clear ctx Gl.depth_buffer_bit;
     Gl.enable ctx Gl.scissor_test;
     let m = Brr.Tarray.of_bigarray1 (Matrix.array matrix) in
-    let drawn = draw_found_trees ~only:false ctx ~shadow_pass:true m m in
+    let drawn =
+      draw_found_trees ~only:false ctx ~shadow_pass:true ~margin_x:0.
+        ~margin_y:0. m
+    in
     Gl.use_program ctx terrain_pid;
     Gl.uniform1i ctx
       (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowOn"))
       (if drawn then 1 else 0)
   end
 
-(* In the frame, with the terrain's matrices. [draw] has culling on here. *)
-let draw_trees ctx ~proj_ta ~transform_ta =
-  Gl.disable ctx Gl.cull_face';
-  ignore (draw_found_trees ctx ~shadow_pass:false proj_ta transform_ta);
+(* In the frame, with the terrain's view-projection matrix. [draw] has culling
+   on here and expects it back afterwards. *)
+let draw_trees ctx ~view_proj_ta ~x_scale ~y_scale =
+  let margin_x = sqrt ((x_scale *. x_scale) +. 1.) in
+  let margin_y = sqrt ((y_scale *. y_scale) +. 1.) in
+  ignore
+    (draw_found_trees ctx ~shadow_pass:false ~margin_x ~margin_y view_proj_ta);
   Gl.enable ctx Gl.cull_face'
 
 (* The two ranges of depth the ground is drawn in (see [draw]): the rings from
@@ -3947,7 +3981,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   Matrix.blit terrain_view_proj terrain_view_proj_ba;
   Gl.uniform_matrix4fv ctx terrain_uniforms.view_proj false terrain_view_proj_ta;
   set_depth_range ctx `Near;
-  draw_trees ctx ~proj_ta ~transform_ta;
+  draw_trees ctx ~view_proj_ta:terrain_view_proj_ta ~x_scale ~y_scale;
   Gl.use_program ctx terrain_pid;
   Gl.bind_vertex_array ctx (Some terrain_geo);
   (* The ground is drawn from the eye outwards along every direction, and what

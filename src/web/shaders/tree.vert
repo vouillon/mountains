@@ -1,4 +1,3 @@
-#version 300 es
 precision highp float;
 precision highp int;
 
@@ -7,67 +6,59 @@ precision highp int;
 // stacked cones with ragged rims, a broadleaf as a lumpy ellipsoid, both on a
 // trunk; further out ([u_far], Viewer.tree_far) one cone of five sides, and
 // a lumpy bipyramid, on a flat trunk. One draw per species and distance
-// ([u_broadleaf], [u_far]). Also drawn into the sun's shadow map
-// ([u_shadowPass]), so that trees cast shadows on the ground and on each other.
+// ([u_broadleaf], [u_far]). Also compiled with TREE_SHADOW defined for the
+// sun's shadow map (with shadow.frag), dropping all varyings and culling.
 
-uniform mat4 proj;
-uniform mat4 transform;
-uniform highp float u_eyeHeight;   // metres
+#ifdef TREE_SHADOW
 uniform highp vec2 u_centerOffset; // the eye, metres from the anchor
+uniform highp mat4 u_shadowViewProj;
+#else
+uniform highp mat4 u_viewProj;
+uniform highp vec2
+    u_projMarginScale;           // sqrt(vec2(proj[0][0]^2, proj[1][1]^2) + 1)
+uniform highp float u_eyeHeight; // metres
+#endif
 uniform bool u_broadleaf;
 uniform bool u_far;
 uniform highp float u_radius; // metres: the search's (tree_find.vert)
-uniform bool u_shadowPass;
-uniform highp mat4 u_shadowViewProj;
 
 in vec4 a_pos;   // metres from the eye east and north, ground, height
 in vec4 a_shape; // crown radius, 1 for a conifer, two draws in [0, 1]
 
-out vec3 v_normal;
-out highp float v_dist;
-out highp float v_z; // metres, relative to the eye
-out float v_up;      // 0 at the crown's base, 1 at its top
-out highp vec3 v_world;
-out vec3 v_fromEye; // the eye to this point, metres
-flat out float v_tint;
-flat out float v_bark;
+#ifndef TREE_SHADOW
+out mediump vec3 v_normal;
+out mediump float v_up;        // 0 at the crown's base, 1 at its top
+out highp vec3 v_fromEye;      // the eye to this point, metres
+flat out mediump float v_tint; // < 0 for bark
 // For the foliage pattern (tree.frag): the point from the tree's foot,
-// metres; the tree's seed; its height and crown radius.
+// metres; the tree's seed; 1 / conifer branch-whorl period.
 out highp vec3 v_local;
 flat out highp float v_seed;
-flat out vec2 v_size;
+flat out mediump float v_invPeriod;
+#endif
 
 const int SIDES = 7;
 const float TAU = 6.2831853;
 
-highp uint hash(highp uvec2 v) {
-  v = v * 1664525u + 1013904223u;
-  v.x += v.y * 1664525u;
-  v.y += v.x * 1664525u;
-  v ^= v >> 16u;
-  v.x += v.y * 1664525u;
-  v.y += v.x * 1664525u;
-  v ^= v >> 16u;
-  return v.x ^ v.y;
-}
-
 float rand(highp uint seed, int a, int b) {
-  return float(hash(uvec2(seed, uint(a * 64 + b))) & 0xffffu) / 65535.0;
+  highp uint k = seed * 1664525u + uint(a * 64 + b) * 1013904223u;
+  k ^= k >> 16u;
+  k *= 0x45d9f3bu;
+  k ^= k >> 16u;
+  return float(k & 0xffffu) * (1.0 / 65535.0);
 }
 
 void collapse() {
   gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+#ifndef TREE_SHADOW
   v_normal = vec3(0.0, 0.0, 1.0);
-  v_dist = 0.0;
-  v_z = 0.0;
   v_up = 0.0;
-  v_world = vec3(0.0);
   v_fromEye = vec3(0.0, 0.0, 1.0);
   v_tint = 1.0;
-  v_bark = 0.0;
   v_local = vec3(0.0);
   v_seed = 0.0;
-  v_size = vec2(1.0);
+  v_invPeriod = 1.0;
+#endif
 }
 
 // Conifer: tier [tier] of three overlapping cones, each one narrower and
@@ -77,7 +68,6 @@ const vec3 TIER_TOP = vec3(0.55, 0.8, 1.0);
 const vec3 TIER_RADIUS = vec3(1.0, 0.72, 0.45);
 
 void main() {
-  highp mat4 view_proj = proj * transform;
   highp float h = a_pos.w;
   float r = a_shape.x;
   highp uint seed =
@@ -100,29 +90,28 @@ void main() {
   r *= grow;
   highp float ground = a_pos.z;
 
-  if (!u_shadowPass) {
-    // Off screen: the tree's axis against the side, top, bottom and near
-    // planes, as a capsule of its crown radius.
-    highp vec4 lo = view_proj * vec4(a_pos.xy, ground - 1.0, 1.0);
-    highp vec4 hi = view_proj * vec4(a_pos.xy, ground + h, 1.0);
-    highp vec2 m =
-        (r + 1.0) *
-        sqrt(vec2(proj[0][0] * proj[0][0], proj[1][1] * proj[1][1]) + 1.0);
-    highp vec4 margin = vec4(m.x, m.x, m.y, m.y);
-    highp vec4 plo = vec4(lo.w + lo.x, lo.w - lo.x, lo.w + lo.y, lo.w - lo.y);
-    highp vec4 phi = vec4(hi.w + hi.x, hi.w - hi.x, hi.w + hi.y, hi.w - hi.y);
-    if (any(lessThan(max(plo, phi), -margin)) || max(lo.w, hi.w) < -(r + 1.0)) {
-      collapse();
-      return;
-    }
+#ifndef TREE_SHADOW
+  // Off screen: the tree's axis against the side, top, bottom and near
+  // planes, as a capsule of its crown radius.
+  highp vec4 lo = u_viewProj * vec4(a_pos.xy, ground - 1.0, 1.0);
+  highp vec4 hi = u_viewProj * vec4(a_pos.xy, ground + h, 1.0);
+  highp vec2 m = (r + 1.0) * u_projMarginScale;
+  highp vec4 margin = vec4(m.x, m.x, m.y, m.y);
+  highp vec4 plo = vec4(lo.w + lo.x, lo.w - lo.x, lo.w + lo.y, lo.w - lo.y);
+  highp vec4 phi = vec4(hi.w + hi.x, hi.w - hi.x, hi.w + hi.y, hi.w - hi.y);
+  if (any(lessThan(max(plo, phi), -margin)) || max(lo.w, hi.w) < -(r + 1.0)) {
+    collapse();
+    return;
   }
+#endif
 
   int tri = gl_VertexID / 3;
   int corner = gl_VertexID % 3;
   highp vec3 p;
+#ifndef TREE_SHADOW
   vec3 n;
   v_up = 0.0;
-  v_bark = 0.0;
+#endif
   // Crown triangles first, then the trunk's.
   int sides = u_far ? 5 : SIDES;
   int crownTris =
@@ -145,7 +134,9 @@ void main() {
       right = second ? corner == 1 : corner != 0;
       vec2 toEye = -normalize(a_pos.xy);
       dir = vec2(-toEye.y, toEye.x) * (right ? 1.0 : -1.0);
+#ifndef TREE_SHADOW
       n = vec3(toEye, 0.0);
+#endif
     } else {
       int side = q / 2;
       bool second = (q & 1) == 1;
@@ -153,11 +144,14 @@ void main() {
       int s = side + (second ? (corner == 2 ? 0 : 1) : (corner == 1 ? 1 : 0));
       float a = float(s) * (TAU / 3.0) + spin;
       dir = vec2(cos(a), sin(a));
+#ifndef TREE_SHADOW
       n = vec3(dir, 0.0);
+#endif
     }
     p = vec3(a_pos.xy + dir * tr, ground + (upper ? top : -0.5));
-    v_tint = 1.0;
-    v_bark = 1.0;
+#ifndef TREE_SHADOW
+    v_tint = -1.0;
+#endif
   } else if (!u_broadleaf) {
     int tier = tri / sides;
     int side = tri % sides;
@@ -172,12 +166,14 @@ void main() {
     highp float bot = zb + tierBottom * len;
     highp float top = zb + tierTop * len;
     if (corner == 2) {
+      p = vec3(a_pos.xy, ground + top);
+#ifndef TREE_SHADOW
       float a =
           (float(side) + 0.5 + 0.5 * float(tier)) * (TAU / float(sides)) + spin;
       vec2 dir = vec2(cos(a), sin(a));
-      p = vec3(a_pos.xy, ground + top);
       n = normalize(vec3(dir * (top - bot), r * tierRadius));
       v_up = tierTop;
+#endif
     } else {
       int s = (side + corner) % sides;
       float a = (float(s) + 0.5 * float(tier)) * (TAU / float(sides)) + spin;
@@ -185,10 +181,14 @@ void main() {
       float rr = r * tierRadius * (0.75 + 0.5 * rand(seed, tier, s));
       // The rim hangs a little, as branches do.
       p = vec3(a_pos.xy + rr * dir, ground + bot - 0.15 * rr);
+#ifndef TREE_SHADOW
       n = normalize(vec3(dir * (top - bot), rr));
       v_up = tierBottom;
+#endif
     }
+#ifndef TREE_SHADOW
     v_tint = (0.75 + 0.4 * a_shape.w) * (0.8 + 0.4 * rand(seed, 7, tri));
+#endif
   } else {
     // Broadleaf crown: an ellipsoid from 35% of the height to the top, as
     // rings (0 the bottom pole, 1 and 2 at -25 and +30 degrees, 3 the top),
@@ -198,7 +198,7 @@ void main() {
     int ring, s;
     if (tri < sides) {
       ring = corner == 0 ? 0 : 1;
-      s = tri + (corner == 2 ? 1 : 0);
+      s = tri + (corner == 1 ? 1 : 0);
     } else if (!u_far && tri < 3 * sides) {
       int q = tri - sides;
       int side = q / 2;
@@ -228,21 +228,25 @@ void main() {
     float pole = u_far && (ring == 0 || ring == 3) ? 0.65 : 1.0;
     p = vec3(a_pos.xy + dir * (r * cp * lump),
              ground + zc + c * sp * lump * pole);
+#ifndef TREE_SHADOW
     n = normalize(vec3(dir * (cp / r), sp / c + 0.15 / c));
     v_up = 0.5 + 0.5 * sp;
     v_tint = (0.75 + 0.4 * a_shape.w) * (0.8 + 0.4 * rand(seed, 7, tri));
+#endif
   }
+#ifndef TREE_SHADOW
   v_normal = n;
   v_local = p - vec3(a_pos.xy, ground);
   v_seed = float(seed);
-  v_size = vec2(h, r);
+  v_invPeriod = 1.0 / max(0.45, h / 22.0);
+#endif
 
   // Earth curvature, as the mesh (radial_common.vert).
   p.z -= dot(p.xy, p.xy) * 6.8306e-8;
-  v_world = vec3(p.xy + u_centerOffset, p.z);
-  v_z = p.z - u_eyeHeight;
-  v_dist = length(vec3(p.xy, v_z));
-  v_fromEye = vec3(p.xy, v_z);
-  gl_Position = u_shadowPass ? u_shadowViewProj * vec4(v_world, 1.0)
-                             : view_proj * vec4(p, 1.0);
+#ifdef TREE_SHADOW
+  gl_Position = u_shadowViewProj * vec4(p.xy + u_centerOffset, p.z, 1.0);
+#else
+  v_fromEye = vec3(p.xy, p.z - u_eyeHeight);
+  gl_Position = u_viewProj * vec4(p, 1.0);
+#endif
 }
