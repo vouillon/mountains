@@ -994,8 +994,6 @@ let resize_canvas ?device_width ?device_height canvas =
     Brr_canvas.Canvas.set_h canvas canvas_height
 
 let init_graphics ctx =
-  (* Initialize GPU timer extension *)
-  Gpu_timer.init ctx;
   (* Initialize anisotropic filtering extension *)
   let triangle_pid = Web_utils.create_program ctx triangle_program in
   let text_pid = Web_utils.create_program ctx text_program in
@@ -1283,9 +1281,10 @@ let prepare_programs ctx =
 (* [submitted]: the programs were prepared for [ctx] already. *)
 let make_gpu_state ?(submitted = false) ctx =
   if not submitted then prepare_programs ctx;
+  Gpu_timer.init ctx;
   init_anisotropic_filtering ctx;
   let detail_map = make_detail_map ctx in
-  make_bump_gradients ctx;
+  time_gpu ctx "make_bump_gradients" (fun () -> make_bump_gradients ctx);
   let graphics = init_graphics ctx in
   let palette_texture = make_palette_texture ctx in
   { detail_map; graphics; palette_texture }
@@ -5231,7 +5230,8 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
             | Some grid -> grid.metres
             | None -> 0.5 *. (frame.step_x_m +. frame.step_y_m)
           in
-          canopy_texture ctx kind raw ~step;
+          time_gpu ctx "bake_canopy" (fun () ->
+              canopy_texture ctx kind raw ~step);
           canopy_steps.(kind) <- step;
           canopy_state.(kind) <- Some (b, g);
           if kind = 2 then canopy_mid_frame := Some (frame, anchor);
@@ -5243,7 +5243,8 @@ let update_canopy ctx pids ~placeholder ~on_late rings =
           uploaded := true
       | _ -> ()
     done;
-    if !uploaded then atlas_mipmaps ctx;
+    if !uploaded then
+      time_gpu ctx "canopy_atlas_mipmaps" (fun () -> atlas_mipmaps ctx);
     apply_canopy ctx pids ~placeholder;
     if late && !layers > 0 then on_late !layers
   in
@@ -5393,7 +5394,8 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
       match tree_cover_raw.(level) with
       | Some (b, g, c)
         when Some b = tree_cover_wanted.(level) && g = !context_generation ->
-          tree_cover_texture ctx level c;
+          time_gpu ctx "bake_tree_cover" (fun () ->
+              tree_cover_texture ctx level c);
           tree_cover_state.(level) <-
             Some (b, g, (c.west, c.south, c.east, c.north));
           tree_cover_raw.(level) <- None;
@@ -5405,7 +5407,8 @@ let update_tree_cover ctx ~terrain_pid ~on_late ~lat ~lon ~frame =
           force_redraw := true
       | _ -> ()
     done;
-    if !uploaded then atlas_mipmaps ctx;
+    if !uploaded then
+      time_gpu ctx "canopy_atlas_mipmaps" (fun () -> atlas_mipmaps ctx);
     apply_tree_cover ctx ~terrain_pid;
     if !fine && late then on_late 1
   in
@@ -6764,7 +6767,10 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                         match !session with
                         | Some { slots; _ } -> publish ~keep:slots ~slots
                         | None -> ());
-                    let* () = Web_utils.on_gpu_finished ctx in
+                    let* () =
+                      Web_utils.timed_lwt ~track:"Location" "GPU drain"
+                        (fun () -> Web_utils.on_gpu_finished ctx)
+                    in
                     force_redraw := true;
                     Lwt.return_unit
                   end
