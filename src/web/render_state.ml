@@ -451,10 +451,9 @@ type hd_params = {
    (the bump carries them), while a pixel spanning a sample or more shows
    exactly the band the data owns (the bump would bury it: PLAN.md,
    2026-08-06). The shader computes that ratio from its own footprint, with
-   the pitch stretched by 1/n_z on steep faces. Empty slots get the same
-   sentinel the base path uses: far above any footprint, read as "the data
-   holds nothing visible", i.e. the full bump. *)
-let hd_step_sentinel = 60000.
+   the pitch stretched by 1/n_z on steep faces. Empty slots get the base grid's
+   30 m spacing so ring-border fades blend smoothly instead of snapping. *)
+let hd_step_sentinel = 30.
 
 (* The shader wants the same map normalised to [0, 1] over the ring, as a 2x2, a
    translation and the quadratic terms: a ring on a projected grid has axes

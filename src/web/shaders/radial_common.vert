@@ -357,8 +357,9 @@ highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
 }
 
 // A ring slot's normalised coordinate.
-highp vec2 slotCoord(highp vec2 c0, highp vec2 c1, highp vec2 c2, int slot) {
-  return slot == 0 ? c0 : (slot == 1 ? c1 : c2);
+highp vec2 slotCoord(highp vec2 c0, highp vec2 c1, highp vec2 c2, highp vec2 c3,
+                     int slot) {
+  return slot == 0 ? c0 : (slot == 1 ? c1 : (slot == 2 ? c2 : c3));
 }
 
 // Compute radial grid vertex position and sample terrain height
@@ -405,11 +406,12 @@ RadialVertex computeRadialVertex() {
   v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw,
                                  v.hd_coord[0], v.hd_coord[1], v.hd_coord[2],
                                  v.hd_coord[3]);
-  v.height += canopyLift(
-      v.norm_coord,
-      slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),
-      slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopyFarSlot),
-      r, grid_spacing);
+  v.height += canopyLift(v.norm_coord,
+                         slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2],
+                                   v.hd_coord[3], u_canopySlot),
+                         slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2],
+                                   v.hd_coord[3], u_canopyFarSlot),
+                         r, grid_spacing);
 
   // Earth curvature with standard atmospheric refraction folded in
   // (effective radius R / (1 - 0.13) ~ 7320 km). The grid is centred on the

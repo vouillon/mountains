@@ -447,7 +447,8 @@ float valueNoise(highp vec2 p) {
 float valueNoise1D(highp float p, highp uint seed) {
   highp float i = floor(p);
   float f = float(p - i);
-  highp uint c = uint(int(i));
+  highp int ci = int(i);
+  highp uint c = uint(ci);
   highp uint h0 = (c * 374761393u + seed) * 1274126177u;
   highp uint h1 = ((c + 1u) * 374761393u + seed) * 1274126177u;
   float a = float((h0 ^ (h0 >> 16u)) & 0xffffu) * (1.0 / 65535.0);
@@ -551,8 +552,10 @@ float canopyRest(highp float r, float nearEdge) {
   return (1.0 - treesStood(r, nearEdge)) * clearing;
 }
 highp vec2 slotCoord(int slot) {
-  return slot == 0 ? hdReliefCoord0
-                   : (slot == 1 ? hdReliefCoord1 : hdReliefCoord2);
+  return slot == 0   ? hdReliefCoord0
+         : slot == 1 ? hdReliefCoord1
+         : slot == 2 ? hdReliefCoord2
+                     : hdReliefCoord3;
 }
 
 // Read the canopies at the level the mesh did, and the share of each the
@@ -621,11 +624,11 @@ vec3 canopyTrees(float nearEdge, float farEdge) {
     return vec3(0.0);
   if (nearEdge > 0.0)
     g_canopy = textureGrad(u_canopy, uv_n, dx_n, dy_n);
+  float wn = g_canopy.a < 0.5 / 255.0 ? 0.0 : nearEdge;
   vec4 f =
-      farEdge > 0.0 && nearEdge < 1.0
+      farEdge > 0.0 && wn < 1.0
           ? textureLod(u_canopy, canopyFarUV(slotCoord(u_canopyFarSlot)), 0.0)
           : vec4(0.0);
-  float wn = g_canopy.a < 0.5 / 255.0 ? 0.0 : nearEdge;
   float wf = f.a < 0.5 / 255.0 ? 0.0 : (1.0 - wn) * farEdge;
   // Its A is the share of the read that has data, its R their heights'
   // sum (canopy_prep.frag's [u_flagged]).
@@ -948,10 +951,7 @@ void main() {
   mediump float f3 = ringFade(hd_valid[3], hdReliefCoord3);
   mediump float fb = baseFade();
   mediump vec2 encodedN;
-  // Highp: it is mixed down from the 60000 sentinel, and at fp16 (ulp 32 there)
-  // a mix that should land on a ring's metre-scale pitch lands tens of metres
-  // off it -- or on zero.
-  highp float data_step;
+  float data_step;
   if (f0 >= 1.0) {
     encodedN = texture(hd_relief_normal[0], hdReliefCoord0).rg;
     data_step = hd_step[0];
@@ -985,10 +985,10 @@ void main() {
           data_step = hd_step[3];
         } else {
           encodedN = baseNormal(fb);
-          // The base gets the same sentinel [Render_state] uploads for empty
-          // slots: far above any footprint, i.e. the full bump, exactly as
-          // the base always had -- and mediump-safe, unlike an infinity.
-          data_step = 60000.0;
+          // The base grid's 30 m spacing, matching
+          // [Render_state.hd_step_sentinel] so the ring-border fade blends
+          // smoothly from 30 m to hd_step[i].
+          data_step = 30.0;
           if (f3 > 0.0) {
             encodedN = mix(encodedN,
                            texture(hd_relief_normal[3], hdReliefCoord3).rg, f3);
@@ -1573,7 +1573,8 @@ void main() {
           u_treeShadowMatrix *
           vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
       if (all(greaterThan(t_coords.xy, vec2(0.0))) &&
-          all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z <= 1.0)
+          all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z >= 0.0 &&
+          t_coords.z <= 1.0)
         shadow_val *= pcf_shadow(3, t_coords.xy, t_coords.z - 0.3 / 4000.0,
                                  vec2(0.000488));
     }
