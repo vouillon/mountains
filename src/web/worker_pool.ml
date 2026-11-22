@@ -3,7 +3,8 @@ open Bigarray
 
 type request_data =
   | DEM of Jv.t (* ArrayBuffer *)
-  | CLC of Jv.t (* ArrayBuffer *)
+  | CLC of { data : Jv.t; pois : bool }
+      (** an ArrayBuffer, and whether its POIs are wanted *)
 
 type request =
   | Decode of request_data
@@ -154,8 +155,13 @@ let post w req =
     | Decode (DEM data) ->
         ( obj [| ("type", of_string "decode_dem"); ("data", data) |],
           [ Obj.magic data ] )
-    | Decode (CLC data) ->
-        ( obj [| ("type", of_string "decode_clc"); ("data", data) |],
+    | Decode (CLC { data; pois }) ->
+        ( obj
+            [|
+              ("type", of_string "decode_clc");
+              ("data", data);
+              ("pois", of_bool pois);
+            |],
           [ Obj.magic data ] )
     | Blend { msg; transfer } ->
         ( obj [| ("type", of_string "blend"); ("data", msg) |],

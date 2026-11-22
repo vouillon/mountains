@@ -2,7 +2,8 @@ open Bigarray
 
 type request_data =
   | DEM of Jv.t  (** ArrayBuffer containing DEM data *)
-  | CLC of Jv.t  (** ArrayBuffer containing CLC data *)
+  | CLC of { data : Jv.t; pois : bool }
+      (** an ArrayBuffer, and whether its POIs are wanted *)
 
 type request =
   | Decode of request_data  (** Worker request type *)

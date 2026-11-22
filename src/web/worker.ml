@@ -269,6 +269,13 @@ let decode_dataset ~inst msg =
    by decode_clc.wasm, the POI streams inflated for the page to read. *)
 let decode_clc_dataset ~inst msg =
   let open Lwt.Syntax in
+  (* The POI streams only when asked for ([Clc_loader]): a land-cover
+     sub-cell's are copies of its POI tile's, which the page reads instead --
+     4 inflates a tile, a third of its decode on a Pixel 8a. *)
+  let want_pois =
+    let v = Jv.get msg "pois" in
+    Jv.is_none v || Jv.to_bool v
+  in
   let data_jv = Jv.get msg "data" in
   let data_ta =
     Brr.Tarray.of_buffer Brr.Tarray.Uint8 (Brr.Tarray.Buffer.of_jv data_jv)
@@ -446,7 +453,7 @@ let decode_clc_dataset ~inst msg =
   in
 
   let* poi_names, poi_coords, poi_elevs, poi_types =
-    if poi_count > 0 then
+    if poi_count > 0 && want_pois then
       let* n = read_and_inflate 18 in
       let* c = read_and_inflate 19 in
       let* e = read_and_inflate 20 in
@@ -475,7 +482,7 @@ let decode_clc_dataset ~inst msg =
   if water_count > 0 then
     transfer_list :=
       water_pos_buf :: water_col_buf :: water_idx_buf :: !transfer_list;
-  if poi_count > 0 then
+  if poi_count > 0 && want_pois then
     transfer_list :=
       poi_names :: poi_coords :: poi_elevs :: poi_types :: !transfer_list;
 

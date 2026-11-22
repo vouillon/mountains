@@ -263,7 +263,7 @@ let parse_pois header names_jv coords_jv elevs_jv types_jv =
     List.rev !pois
 
 (* Full CLC tile loading: offload to worker *)
-let load_full_clc_tile path_str =
+let load_full_clc_tile ~pois path_str =
   let open Lwt.Syntax in
   let* resp = to_lwt (Web_utils.fetch_tile (Jstr.v path_str)) in
   let* () =
@@ -289,7 +289,8 @@ let load_full_clc_tile path_str =
         (* We need to transfer valid ArrayBuffer. *)
         (* data is Uint8Array? Brr.Tarray.buffer gets the ArrayBuffer *)
         let buf_jv = Brr.Tarray.Buffer.to_jv (Brr.Tarray.buffer data) in
-        Worker_pool.post w (Worker_pool.Decode (Worker_pool.CLC buf_jv)))
+        Worker_pool.post w
+          (Worker_pool.Decode (Worker_pool.CLC { data = buf_jv; pois })))
       (fun () ->
         Worker_pool.release w;
         Lwt.return ())
@@ -352,8 +353,10 @@ let load_full_clc_tile path_str =
           (wp, wc, wi)
       in
 
+      (* The page takes its POIs from the 1-degree POI tiles alone: those the
+         land-cover sub-cells carry as well are neither decoded nor read. *)
       let pois =
-        if header.poi_count > 0 then
+        if pois && header.poi_count > 0 then
           parse_pois header (Jv.get obj "poi_names") (Jv.get obj "poi_coords")
             (Jv.get obj "poi_elevs") (Jv.get obj "poi_types")
         else []
@@ -404,7 +407,7 @@ let load_cells ~pois cells =
         let path = tile_path ~pois tile_lat tile_lon in
         Lwt.catch
           (fun () ->
-            let* tile = load_full_clc_tile path in
+            let* tile = load_full_clc_tile ~pois path in
             Lwt.return (Some (tile, range, range)))
           (fun exn ->
             (* Not every tile is published (none for open sea), so a 404 is
