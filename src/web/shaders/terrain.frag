@@ -262,16 +262,6 @@ void applySlopeModification(inout Surface s, float slope) {
   }
 }
 
-// Triplanar sample of the packed RGBA detail map, kept per-plane: the raw
-// samples, the orientation blend and the side-projection fades survive, the
-// blend and fades serving the bump ([bumpGrad]) at every scale. The samples
-// are consumed via [triplanarCombine].
-struct Triplanar {
-  vec4 d_xy, d_xz, d_yz; // raw plane samples (0.5 where a plane is faded out)
-  vec3 blend;
-  float fade_x, fade_y; // side-projection fade-ins
-};
-
 // The side projections only pay for themselves where the XY projection is
 // genuinely distorted: the stretch is 1/normal.z, a benign 1.4x at 45
 // degrees. Below ~50 degrees they are indistinguishable noise-for-noise,
@@ -283,10 +273,13 @@ float triplanarSideGate(vec3 normal) {
   return smoothstep(0.35, 0.55, 1.0 - abs(normal.z));
 }
 
-Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
-                          float sideGate) {
-  Triplanar t;
-  t.blend = abs(normal);
+// Triplanar sample of the packed RGBA detail map, combined directly to avoid
+// keeping 3 raw vec4 plane samples live. Returns the combined sample and
+// outputs the per-plane weights [triW = (w_x, w_y, blend.z)] for [bumpGrad].
+// Top/Bottom (blend.z) -> XY, Side-Y (blend.y) -> XZ, Side-X (blend.x) -> YZ.
+vec4 sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
+                     float sideGate, out vec3 triW) {
+  vec3 blend = abs(normal);
   // Biplanar past the gate: the weakest plane's weight goes to exactly zero
   // and its fetches are skipped. It is the plane the surface is most oblique
   // to, so it carried the least and the most stretched texture -- on a wall
@@ -296,36 +289,27 @@ Triplanar sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
   // leaves as its weight reaches the minimum, so no seam where the choice
   // changes. Two noises average less than three, so walls read a little
   // crisper. Below the gate the blend is untouched.
-  float weakest = min(min(t.blend.x, t.blend.y), t.blend.z);
-  t.blend = mix(t.blend, max(t.blend - weakest, 0.0), sideGate);
-  t.blend /= (t.blend.x + t.blend.y + t.blend.z + 0.0001);
+  float weakest = min(min(blend.x, blend.y), blend.z);
+  blend = mix(blend, max(blend - weakest, 0.0), sideGate);
+  blend /= (blend.x + blend.y + blend.z + 0.0001);
 
   // Sample each projection plane. The side projections are faded by their
   // blend weight and by [sideGate] (see [triplanarSideGate]), and default to
   // the neutral 0.5. What the material blend loses under the gate is a
   // statistically identical share of the same noise, sampled less obliquely.
   float bias = 1.;
-  t.d_xy = vec4(0.5);
-  if (t.blend.z > 0.0)
-    t.d_xy = texture(u_detailMap, worldPos.xy * scale, bias);
-  t.d_xz = vec4(0.5);
-  t.fade_y = smoothstep(0.003, 0.01, t.blend.y) * sideGate;
-  if (t.fade_y > 0.0)
-    t.d_xz = texture(u_detailMap, worldPos.xz * scale, bias);
-  t.d_yz = vec4(0.5);
-  t.fade_x = smoothstep(0.003, 0.01, t.blend.x) * sideGate;
-  if (t.fade_x > 0.0)
-    t.d_yz = texture(u_detailMap, worldPos.yz * scale, bias);
-  return t;
-}
+  float w_y = blend.y * smoothstep(0.003, 0.01, blend.y) * sideGate;
+  float w_x = blend.x * smoothstep(0.003, 0.01, blend.x) * sideGate;
+  triW = vec3(w_x, w_y, blend.z);
 
-// Blend based on surface orientation (Corrected for Z-up)
-// Top/Bottom (blend.z) -> XY projection
-// Side-Y (blend.y)     -> XZ projection
-// Side-X (blend.x)     -> YZ projection
-vec4 triplanarCombine(Triplanar t) {
-  return (t.d_xy * t.blend.z) + (mix(vec4(0.5), t.d_xz, t.fade_y) * t.blend.y) +
-         (mix(vec4(0.5), t.d_yz, t.fade_x) * t.blend.x);
+  vec4 res = vec4(0.5 * (blend.y - w_y + blend.x - w_x));
+  if (blend.z > 0.0)
+    res += texture(u_detailMap, worldPos.xy * scale, bias) * blend.z;
+  if (w_y > 0.0)
+    res += texture(u_detailMap, worldPos.xz * scale, bias) * w_y;
+  if (w_x > 0.0)
+    res += texture(u_detailMap, worldPos.yz * scale, bias) * w_x;
+  return res;
 }
 
 // A ring's weight at this fragment: 1 well inside its extent, fading to 0
@@ -603,12 +587,12 @@ float lodFade(float lmax, highp float fp) {
 // World-space gradient of macro scale (s == 0): BUMP_AMP_B is zero and top
 // rotation is identity; [ampA] already includes 2 * BUMP_ENC * scale *
 // strength.
-vec3 bumpGradMacro(Triplanar t, highp vec3 pos, float ampA, float mix2) {
-  float w_y = t.blend.y * t.fade_y;
-  float w_x = t.blend.x * t.fade_x;
+vec3 bumpGradMacro(vec3 triW, highp vec3 pos, float ampA, float mix2) {
+  float w_x = triW.x;
+  float w_y = triW.y;
   float bias = -0.5 * ampA;
   vec3 g = vec3(0.0);
-  if (t.blend.z > 0.0) {
+  if (triW.z > 0.0) {
     vec2 gt =
         texture(u_bumpGrad, vec3(pos.xy * 0.002, 0.0), 1.0).xy * ampA + bias;
     // [mix2] > 0: blend in a second copy of the layer, turned 63 degrees and
@@ -638,16 +622,16 @@ vec3 bumpGradMacro(Triplanar t, highp vec3 pos, float ampA, float mix2) {
 
 // World-space gradient of mid/fine bump scales: [amp] already includes
 // 2 * BUMP_ENC * (scale / divisor) * bumpStrength.
-vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
+vec3 bumpGrad(vec3 triW, highp vec3 pos, float scale, int s, vec2 amp,
               vec2 rot) {
-  float w_y = t.blend.y * t.fade_y;
-  float w_x = t.blend.x * t.fade_x;
+  float w_x = triW.x;
+  float w_y = triW.y;
   float top = float(2 * s);
   float side = top + 1.0;
   float bias = -0.5 * (amp.x + amp.y);
   vec3 g = vec3(0.0);
   highp vec2 rxy = mat2(rot.x, rot.y, -rot.y, rot.x) * pos.xy;
-  if (t.blend.z > 0.0) {
+  if (triW.z > 0.0) {
     vec4 d = texture(u_bumpGrad, vec3(rxy * scale, top), 1.0);
     vec2 gt = mat2(rot.x, -rot.y, rot.y, rot.x) *
               (amp.x * d.xy + amp.y * d.zw + bias);
@@ -665,10 +649,10 @@ vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
 }
 
 // Procedural normal perturbation: the baked bump gradients (see [bumpGrad])
-// at three scales. [tri] is the macro material-blend sample from main; its
-// plane blend and fades serve every scale. [fpL] is the anisotropic pixel
-// footprint computed once in main.
-vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
+// at three scales. [triW] is the per-plane weight triple (w_x, w_y, blend.z)
+// from [sampleTriplanar]. [fpL] is the anisotropic pixel footprint computed
+// once in main.
+vec3 perturbNormal(vec3 geomNormal, vec3 triW, float roughness,
                    vec4 detailWeights, float dataStep, highp float fpL,
                    highp float v_dist) {
   // Near-field masks: the macro scale only beyond ~200 m, the mid scale
@@ -750,7 +734,7 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
                          0.5 * sin((0.8 * q.x + 0.6 * q.y) * 0.0057 + 1.0);
         mix2 = smoothstep(-0.35, 0.35, float(wn)) * smoothstep(0.05, 0.3, bw.b);
       }
-      grad += bumpGradMacro(tri, v_world_pos, ampA, mix2);
+      grad += bumpGradMacro(triW, v_world_pos, ampA, mix2);
     }
   }
   if (fade_mid > 0.0) {
@@ -758,13 +742,13 @@ vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
                (band.y * fade_mid);
     if (any(notEqual(amp, vec2(0.0))))
       grad +=
-          bumpGrad(tri, v_world_pos, BUMP_SCALE_MID, 1, amp, vec2(0.866, 0.5));
+          bumpGrad(triW, v_world_pos, BUMP_SCALE_MID, 1, amp, vec2(0.866, 0.5));
   }
   if (fade_fine > 0.0) {
     vec2 amp = vec2(dot(bw, BUMP_AMP_A[2]), dot(bw, BUMP_AMP_B_FINE)) *
                (band.z * fade_fine);
     if (any(notEqual(amp, vec2(0.0))))
-      grad += bumpGrad(tri, v_world_pos, BUMP_SCALE_FINE, 2, amp,
+      grad += bumpGrad(triW, v_world_pos, BUMP_SCALE_FINE, 2, amp,
                        vec2(0.454, 0.891));
   }
 
@@ -882,20 +866,6 @@ const float DIRECT_LIGHT = 1.0;
 const float AMBIENT_LIGHT = 0.15;
 
 void main() {
-  // Define fog color early for use in water reflection.
-  // Blend toward the zenith colour above the eye line exactly as sky.frag
-  // does (-view.z is the sky's cos_theta), so fogged ridges meet the sky
-  // without a tonal step. At or below the eye line the smoothstep is 0 and
-  // this is exactly u_fogColor.
-  // View vector and distance from v_world_pos (saves 4 highp varying floats).
-  highp vec3 to_eye = vec3(center_offset, 0.0) - v_world_pos;
-  highp float r_eye_sq = dot(to_eye.xy, to_eye.xy);
-  highp float v_dist = sqrt(r_eye_sq + to_eye.z * to_eye.z);
-  highp vec3 view_dir_n = to_eye / max(v_dist, 1e-4);
-  vec3 view_dir_m = vec3(view_dir_n);
-  vec3 fog_color =
-      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_m.z));
-
   // Decode normal from the relief normal textures, composited inside-out so
   // each ring fades over the coarser ones beneath it. Evaluates outer fades
   // lazily (1 fetch inside any ring, 2 on a ring border) with 6 texture sites
@@ -941,6 +911,17 @@ void main() {
     encodedN += baseNormal(fb) * rem;
     data_step += 30.0 * rem;
   }
+  // Baked AO measures sky visibility: sampled early while [fb] is live so it
+  // does not stay in a register across the entire material/bump/shadow block.
+  // Attenuates the ambient term and the sky reflection, not the direct sun,
+  // which the shadow map already handles (multiplying the whole color darkened
+  // sunlit couloirs twice). The far field has its own bake beyond the base
+  // grid, faded into like the normals.
+  float occlusion = 1.0;
+  if (fb < 1.0 && far_valid)
+    occlusion = texture(far_ao, farReliefCoord()).r;
+  if (fb > 0.0)
+    occlusion = mix(occlusion, texture(ao, reliefCoord).r, fb);
   vec3 normal;
   normal.xy = encodedN * 2.0 - 1.0;
   normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
@@ -967,9 +948,9 @@ void main() {
   // forest green (by the conifer share) or to meadow green. Not on water, nor
   // on built-up classes, whose buildings the canopy model reads as trees.
   {
+    highp vec2 d_eye = center_offset - v_world_pos.xy;
+    highp float r_eye_sq = dot(d_eye, d_eye);
     highp float r_eye = sqrt(r_eye_sq);
-    // Height above the sea: compensate Earth's curvature drop.
-    highp float elev = v_world_pos.z + center_height + r_eye_sq * 6.8306e-8;
     highp vec2 cn = u_canopySlot >= 0 ? slotCoord(u_canopySlot) : vec2(0.0);
     highp vec2 cf =
         u_canopyFarSlot >= 0 ? slotCoord(u_canopyFarSlot) : vec2(0.0);
@@ -978,6 +959,8 @@ void main() {
     vec3 ct = canopyTrees(cn, cf, nearEdge, farEdge);
     if (surface.waterFactor < 0.99)
       canopyGeometry(r_eye, cn, cf, nearEdge, farEdge);
+    // Height above the sea: compensate Earth's curvature drop.
+    highp float elev = v_world_pos.z + center_height + r_eye_sq * 6.8306e-8;
     // Beyond the canopies, the EEA tree cover: forest where its density is
     // over ~30-60%. Its leaf type (10 m) says conifer or broadleaf wherever it
     // has trees, inside the canopies too: finer than the land cover's classes,
@@ -1069,13 +1052,14 @@ void main() {
     }
   }
 
+  highp float v_dist = length(vec3(center_offset, 0.0) - v_world_pos);
   applySlopeModification(surface, slope);
 
   // Sample packed detail map via triplanar projection
   highp float scale = 0.002; // ~500m per texture repeat
-  Triplanar tri =
-      sampleTriplanar(v_world_pos, normal, scale, triplanarSideGate(normal));
-  vec4 texNoise = triplanarCombine(tri);
+  vec3 triW;
+  vec4 texNoise = sampleTriplanar(v_world_pos, normal, scale,
+                                  triplanarSideGate(normal), triW);
 
   // -----------------------------------------------------------------------
   // STEP A: HEIGHT-BASED BLENDING ("Clumping")
@@ -1282,7 +1266,7 @@ void main() {
 
   // Procedural normal perturbation (replaces rock_normal_map)
   if (waterMask < 0.99)
-    final_normal = perturbNormal(normal, tri, surface.roughness, finalWeights,
+    final_normal = perturbNormal(normal, triW, surface.roughness, finalWeights,
                                  data_step, fp, v_dist);
   // Crowns stand vertical whatever the slope under them: each tilts the
   // ground's normal about the vertical axis -- a horizontal offset -- rather
@@ -1424,7 +1408,13 @@ void main() {
   float waterGloss = smoothstep(0.0, 0.1, waterMask);
   float mirror = 0.4 * 0.3 * iceMirror;
 
-  // === Specular & Environment Reflection ===
+  // === Specular, Environment Reflection & Pre-Shadow Lighting ===
+  // View direction computed here so it is not kept live across material/bump.
+  highp vec3 view_dir_n =
+      (vec3(center_offset, 0.0) - v_world_pos) / max(v_dist, 1e-4);
+  vec3 view_dir_m = vec3(view_dir_n);
+  float view_z = view_dir_m.z;
+
   // Highp, and guarded: looking straight at the sun past a ridge the two
   // directions cancel, and at fp16 they do so exactly over a ~5e-4 rad patch,
   // where normalize() would return NaN.
@@ -1459,88 +1449,11 @@ void main() {
   highp float denom = (NdotH > 0.0) ? dot(NxH, NxH) + a * a : 1.0;
   float D = roughSq / (3.14159 * denom * denom + 0.0001);
   float final_l = max(0.0, dot(final_normal, lightDir));
-  float specular = D * final_l;
-
-  // === Shadow Calculation ===
-  // Both consumers of shadow_val (specular below, direct light further down)
-  // are multiplied by final_l, so the 5-tap PCF is pure waste on unlit
-  // fragments. The branch is quad-coherent (whole slopes face away).
-  float shadow_val = 1.0;
-  if (final_l > 0.0) {
-    int cascade = 2;
-    if (v_dist < shadow_splits[0])
-      cascade = 0;
-    else if (v_dist < shadow_splits[1])
-      cascade = 1;
-
-    float slopeScale = 1.0 - cosTheta;
-    // One shadow texel in world units for this cascade (ortho width / 2048).
-    highp float texelWorld = shadow_cascades[cascade].x;
-    float normalOffset = texelWorld * slopeScale;
-    // World coordinates, and everything derived from them down to the depth
-    // comparison, must stay highp: at fp16 [offset_pos] alone is quantised to
-    // 2 m at 3 km and 16 m at 20 km, and [proj_coords.z] to 10/23/73 m of
-    // world depth per cascade -- far more than the bias below is sized for.
-    highp vec3 offset_pos =
-        v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
-
-    highp vec3 proj_coords = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
-
-    highp float current_depth = proj_coords.z;
-    // World-space depth bias, expressed in this cascade's [0,1] depth range
-    // (20/48/150 km): a small constant for sun-facing surfaces plus a
-    // slope-proportional term covering the depth a shadow texel
-    // (2.93/11.7/36.6 m) spans on surfaces tilted toward the light's
-    // direction. Too little and the texel rows band such slopes (acne); a
-    // large constant (the previous 30/72/225 m) detaches every shadow from
-    // its caster instead.
-    highp float depthSpan = shadow_cascades[cascade].y;
-    highp float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
-                                        max(cosTheta, 0.1));
-    highp float bias = (4.0 + 1.5 * texelWorld * slopeTan) / depthSpan;
-    // Only inside the cascade's box: past it (the last one's ends at 37.5 km,
-    // and the ground goes on to 140) the clamped fetches would stretch its
-    // border texels outwards. The last cascade fades out over its outer 5%,
-    // so that its shadows do not stop at a line.
-    highp vec2 inBox = min(proj_coords.xy, 1.0 - proj_coords.xy);
-    highp float edge = min(inBox.x, inBox.y);
-    if (proj_coords.z <= 1.0 && proj_coords.z >= 0.0 && edge > 0.0) {
-      shadow_val = pcf_shadow(cascade, proj_coords.xy, current_depth - bias,
-                              vec2(0.000488));
-      if (cascade == 2)
-        shadow_val = mix(1.0, shadow_val, smoothstep(0.0, 0.05, float(edge)));
-    }
-    // The trees' shadows, at ~0.5 m per texel: the layer holds nothing else,
-    // so a small bias does (a trunk's buried foot is below the ground).
-    if (u_treeShadowOn && v_dist < 600.0) {
-      highp vec3 t_coords =
-          u_treeShadowMatrix *
-          vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
-      if (all(greaterThan(t_coords.xy, vec2(0.0))) &&
-          all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z >= 0.0 &&
-          t_coords.z <= 1.0)
-        shadow_val *= pcf_shadow(3, t_coords.xy, t_coords.z - 0.3 / 4000.0,
-                                 vec2(0.000488));
-    }
-  }
-
-  // Environment reflection (sky color for glossy surfaces): z of
-  // reflect(-view_dir_m, final_normal) = 2 * dot(N, V) * N.z - V.z.
-  float skyReflect = max(0.0, 2.0 * NdotV_raw * final_normal.z - view_dir_m.z);
-  // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
-  // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
-  // We use the exact same mixing factor for consistency
-  float sky_mix = smoothstep(0.0, 0.35, skyReflect);
-  vec3 envColor = mix(u_fogColor, u_zenithColor, sky_mix);
-
-  // Specular and reflection are incident light: they are added after the
-  // diffuse lighting multiply at the end, not folded into the albedo.
   float specBoost =
       mix(1.0, 2.5, max(waterGloss, smoothstep(0.4, 0.6, iceAmount)));
-  vec3 specColor = vec3(1.0, 0.98, 0.95) * u_sunTint * specular *
-                   (1.0 - material_roughness) * shadow_val * specBoost;
+  float specTerm = D * final_l * (1.0 - material_roughness) * specBoost * 0.4;
 
-  // Fresnel for water
+  // Fresnel for water and grazing sheen for land.
   float oneMinusNdotV = 1.0 - NdotV;
   float om2 = oneMinusNdotV * oneMinusNdotV;
   float om5 = om2 * om2 * oneMinusNdotV;
@@ -1548,48 +1461,15 @@ void main() {
     // Schlick's approximation
     float fresnel = 0.02 + 0.98 * om5;
     mirror = mix(mirror, fresnel, waterMask);
-    // Removed explicit fog mixing here; let distance fog handle it
-    // envColor = mix(envColor, fog_color, waterMask);
   }
-
-  // === Lighting ===
-
-  // Matched to Sky Shader: Horizon -> Zenith
-  vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
-  vec3 ground_color =
-      vec3(0.08, 0.07, 0.05); // Deeper ground bounce for contrast
-  float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
-  // The two used to arrive in equal measure, which cost the picture the whole
-  // of its relief: sunlit and shaded ground came out within a factor of two of
-  // each other, every slope carried the blue of the sky more strongly than the
-  // colour of its own material, and a band of ridges spanned a fifth of the
-  // display range -- little enough to disappear entirely under sunlight falling
-  // on the screen. See AMBIENT_LIGHT against the direct term below.
-  vec3 ambient = mix(ground_color, sky_color, sky_factor) * AMBIENT_LIGHT;
-
-  // Rectified Geometric Normal for Micro-AO comparison
-  // Use flat normal (0,0,1) for water to avoid dark artifacts at shorelines
-  vec3 geoNormal = mix(normal, vec3(0.0, 0.0, 1.0), waterMask);
-
-  // Normal-based Micro-AO: Darken steep crevices
-  // Compare final normal (with detail) against the underlying geometric shape
-  float normalAO = mix(0.85, 1.0, max(0.0, dot(final_normal, geoNormal)));
-
-  // Noise-based Micro-AO: Darken crevasses/gaps (low noise values)
-  vec3 matAO = smoothstep(
-      vec3(0.0), vec3(0.6, 0.5, 0.6),
-      vec3(texNoise.r, mix(texNoise.b, crownTone, crownFade), texNoise.a));
-  float combinedNoiseAO = dot(matAO, finalWeights.rba) + finalWeights.g;
-
-  // 3. Remap to valid range (0.5 to 1.0) so it doesn't get too dark
-  float noiseAO = mix(0.5, 1.0, combinedNoiseAO);
-
-  // Combine both AO terms
-  float finalMicroAO = normalAO * noiseAO;
-  ambient *= finalMicroAO;
-
-  vec3 sun_color = vec3(1.0, 0.95, 0.9) * u_sunTint;
-  vec3 direct = sun_color * final_l * shadow_val * DIRECT_LIGHT;
+  // What land returns of the sky: a few percent face-on, rising towards
+  // grazing, and added on top of the material rather than in place of it.
+  // Scaled by AMBIENT_LIGHT because it is the same sky the ambient term carries
+  // and has to stay in proportion to it, and by smoothness because a rough
+  // surface scatters it too wide to show.
+  float sheenAmt = (1.0 - iceMirror) * (1.0 - waterGloss) *
+                   (1.0 - material_roughness) * (0.04 + 0.6 * om5) *
+                   AMBIENT_LIGHT;
 
   // A canopy is not a Lambertian surface: it is crowns standing proud of the
   // ground, each with a lit and a shaded side and a shadow behind it. With
@@ -1600,47 +1480,130 @@ void main() {
   // read as a flat carpet. [cosg] is the cosine of the phase angle (1 with
   // the sun straight behind the viewer); the factor is 1 side-on, so forest
   // keeps its overall brightness and only its direction changes.
-  if (finalWeights.b > 0.01) {
+  float direct_l = final_l;
+  if (final_l > 0.0 && finalWeights.b > 0.01) {
     highp float cosg = dot(view_dir_n, lightDir);
     float back = max(-float(cosg), 0.0);
     float back3 = back * back * back;
     float phase = clamp(1.0 + 0.6 * float(cosg), 0.25, 2.0) +
                   0.4 * exp((float(cosg) - 1.0) / 0.015) +
                   0.8 * (back3 * back3) * (om2 * oneMinusNdotV);
-    direct *= mix(1.0, phase, finalWeights.b);
+    direct_l *= mix(1.0, phase, finalWeights.b);
   }
-  // Baked AO measures sky visibility: it attenuates the ambient term and the
-  // sky reflection, not the direct sun, which the shadow map already handles
-  // (multiplying the whole color darkened sunlit couloirs twice).
-  // The far field has its own bake beyond the base grid, faded into like the
-  // normals; without it the ground there is taken as open to the sky.
-  float occlusion = 1.0;
-  if (fb < 1.0 && far_valid)
-    occlusion = texture(far_ao, farReliefCoord()).r;
-  if (fb > 0.0)
-    occlusion = mix(occlusion, texture(ao, reliefCoord).r, fb);
-  vec3 lighting = (ambient * occlusion) + direct;
 
-  // Diffuse lighting scales the albedo; reflected light is added on top.
-  // Applying the reflection before the lighting multiply darkened the sky
-  // reflection by the diffuse term, turning grazing lakes muddy, and applied
-  // the (already shadowed) specular through the shadowed direct term twice.
-  vec3 lit = lighting * terrain_color;
-  lit = mix(lit, envColor * occlusion, mirror);
-  // What land returns of the sky: a few percent face-on, rising towards
-  // grazing, and added on top of the material rather than in place of it.
-  // Scaled by AMBIENT_LIGHT because it is the same sky the ambient term carries
-  // and has to stay in proportion to it, and by smoothness because a rough
-  // surface scatters it too wide to show.
-  float landShare = (1.0 - iceMirror) * (1.0 - waterGloss);
-  if (landShare > 0.0) {
-    float sheen = 0.04 + 0.6 * om5;
-    lit += envColor * occlusion * AMBIENT_LIGHT * sheen *
-           (1.0 - material_roughness) * landShare;
+  // Matched to Sky Shader: Horizon -> Zenith
+  vec3 sky_color = u_fogColor * 0.8 + u_zenithColor * 0.2;
+  vec3 ground_color =
+      vec3(0.08, 0.07, 0.05); // Deeper ground bounce for contrast
+  float sky_factor = final_normal.z * 0.6 + 0.4; // Weighted more towards sky
+  // Rectified Geometric Normal for Micro-AO comparison
+  // Use flat normal (0,0,1) for water to avoid dark artifacts at shorelines
+  vec3 geoNormal = mix(normal, vec3(0.0, 0.0, 1.0), waterMask);
+  // Normal-based Micro-AO: Darken steep crevices
+  float normalAO = mix(0.85, 1.0, max(0.0, dot(final_normal, geoNormal)));
+  // Noise-based Micro-AO: Darken crevasses/gaps (low noise values)
+  vec3 matAO = smoothstep(
+      vec3(0.0), vec3(0.6, 0.5, 0.6),
+      vec3(texNoise.r, mix(texNoise.b, crownTone, crownFade), texNoise.a));
+  float noiseAO = mix(0.5, 1.0, dot(matAO, finalWeights.rba) + finalWeights.g);
+  // The two used to arrive in equal measure, which cost the picture the whole
+  // of its relief: sunlit and shaded ground came out within a factor of two of
+  // each other, every slope carried the blue of the sky more strongly than the
+  // colour of its own material, and a band of ridges spanned a fifth of the
+  // display range -- little enough to disappear entirely under sunlight falling
+  // on the screen. See AMBIENT_LIGHT against the direct term below.
+  vec3 ambient = mix(ground_color, sky_color, sky_factor) *
+                 (AMBIENT_LIGHT * normalAO * noiseAO * occlusion);
+
+  // Environment reflection (sky color for glossy surfaces): z of
+  // reflect(-view_dir_m, final_normal) = 2 * dot(N, V) * N.z - V.z.
+  float skyReflect = max(0.0, 2.0 * NdotV_raw * final_normal.z - view_z);
+  // Updated to match new sky: Horizon(u_fogColor) -> Zenith(u_zenithColor)
+  // Sky Shader uses smoothstep(0.0, 0.35, cos_theta)
+  // We use the exact same mixing factor for consistency
+  vec3 envOcc =
+      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, skyReflect)) *
+      occlusion;
+
+  // Collapse unshadowed and shadowed lighting into two vec3s before the shadow
+  // map fetches so none of the material, normal, noise, or view terms stay
+  // live across the shadow block (keeps peak register footprint minimal).
+  // Diffuse lighting scales the albedo; reflected and specular light are added
+  // on top so grazing lakes do not darken by the diffuse term.
+  vec3 base_lit =
+      mix(ambient * terrain_color, envOcc, mirror) + envOcc * sheenAmt;
+  vec3 sun_lit =
+      vec3(1.0, 0.95, 0.9) * u_sunTint *
+          ((direct_l * (1.0 - mirror) * DIRECT_LIGHT) * terrain_color) +
+      vec3(1.0, 0.98, 0.95) * u_sunTint * specTerm;
+
+  // === Shadow Calculation ===
+  // Both consumers of shadow_val (specular and direct light, combined in
+  // sun_lit above) are multiplied by final_l, so the 5-tap PCF is pure waste
+  // on unlit fragments. The branch is quad-coherent (whole slopes face away).
+  float shadow_val = 1.0;
+  if (final_l > 0.0) {
+    int cascade = 2;
+    if (v_dist < shadow_splits[0])
+      cascade = 0;
+    else if (v_dist < shadow_splits[1])
+      cascade = 1;
+
+    // One shadow texel in world units (x) and depth span (y) for this cascade.
+    highp vec2 casc = shadow_cascades[cascade];
+    float normalOffset = casc.x * (1.0 - cosTheta);
+    // World coordinates, and everything derived from them down to the depth
+    // comparison, must stay highp: at fp16 [offset_pos] alone is quantised to
+    // 2 m at 3 km and 16 m at 20 km, and [proj_coords.z] to 10/23/73 m of
+    // world depth per cascade -- far more than the bias below is sized for.
+    highp vec4 swp = vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
+    highp vec3 proj_coords =
+        shadow_matrices[cascade] * (swp + vec4(normal * normalOffset, 0.0));
+
+    // World-space depth bias, expressed in this cascade's [0,1] depth range
+    // (20/48/150 km): a small constant for sun-facing surfaces plus a
+    // slope-proportional term covering the depth a shadow texel
+    // (2.93/11.7/36.6 m) spans on surfaces tilted toward the light's
+    // direction. Too little and the texel rows band such slopes (acne); a
+    // large constant (the previous 30/72/225 m) detaches every shadow from
+    // its caster instead.
+    float slopeTan = min(4.0, sqrt(max(0.0, 1.0 - cosTheta * cosTheta)) /
+                                  max(cosTheta, 0.1));
+    highp float ref_depth =
+        proj_coords.z - (4.0 + 1.5 * casc.x * slopeTan) / casc.y;
+    // Only inside the cascade's box: past it (the last one's ends at 37.5 km,
+    // and the ground goes on to 140) the clamped fetches would stretch its
+    // border texels outwards. The last cascade fades out over its outer 5%,
+    // so that its shadows do not stop at a line.
+    vec2 inBox = min(vec2(proj_coords.xy), 1.0 - vec2(proj_coords.xy));
+    float edge = min(inBox.x, inBox.y);
+    if (proj_coords.z <= 1.0 && proj_coords.z >= 0.0 && edge > 0.0) {
+      shadow_val =
+          pcf_shadow(cascade, proj_coords.xy, ref_depth, vec2(0.000488));
+      if (cascade == 2)
+        shadow_val = mix(1.0, shadow_val, smoothstep(0.0, 0.05, edge));
+    }
+    // The trees' shadows, at ~0.5 m per texel: the layer holds nothing else,
+    // so a small bias does (a trunk's buried foot is below the ground).
+    if (u_treeShadowOn && v_dist < 600.0) {
+      highp vec3 t_coords = u_treeShadowMatrix * swp;
+      if (all(greaterThan(t_coords.xy, vec2(0.0))) &&
+          all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z >= 0.0 &&
+          t_coords.z <= 1.0)
+        shadow_val *= pcf_shadow(3, t_coords.xy, t_coords.z - 0.3 / 4000.0,
+                                 vec2(0.000488));
+    }
   }
-  lit += specColor * 0.4;
+
+  vec3 lit = base_lit + sun_lit * shadow_val;
 
   // === Fog & Haze ===
+  // Blend toward the zenith colour above the eye line exactly as sky.frag
+  // does (-view.z is the sky's cos_theta), so fogged ridges meet the sky
+  // without a tonal step. At or below the eye line the smoothstep is 0 and
+  // this is exactly u_fogColor.
+  vec3 fog_color =
+      mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_z));
   // Height-based haze, exp(-h/H) with H~1667m, taken at the mean altitude of
   // the camera-to-fragment path rather than the fragment's own: with the
   // fragment altitude alone, a low valley seen from a summit was over-hazed

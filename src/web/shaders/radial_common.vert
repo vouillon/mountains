@@ -295,10 +295,11 @@ bool nearWater(highp vec2 c, highp float s) {
   int xs[3] = int[3](p0.x, p1.x, p2.x);
   int ys[3] = int[3](p0.y, p1.y, p2.y);
   for (int dy = 0; dy < 3; dy++) {
-    for (int dx = 0; dx < 3; dx++) {
-      if (texelFetch(u_coverMap, ivec3(xs[dx], ys[dy], level), 0).r >= 38u)
-        return true;
-    }
+    uint r0 = texelFetch(u_coverMap, ivec3(xs[0], ys[dy], level), 0).r;
+    uint r1 = texelFetch(u_coverMap, ivec3(xs[1], ys[dy], level), 0).r;
+    uint r2 = texelFetch(u_coverMap, ivec3(xs[2], ys[dy], level), 0).r;
+    if (max(r0, max(r1, r2)) >= 38u)
+      return true;
   }
   return false;
 }
