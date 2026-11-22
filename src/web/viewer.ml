@@ -1345,10 +1345,11 @@ let compute_ao ?radius_width ?update ctx width height scale relief_texture
 
   Gl.uniform1i ctx bake_u.relief 0;
   (* Keep generating noise/radius based on FULL width for consistent world scale.
-     The radius is 50 texels of a grid [radius_width] wide, and [scale] that
-     grid's metres per texel: the far field passes the base grid's for both,
-     so that its occlusion is gathered over the same ground, a quarter as many
-     of its own texels. *)
+     The radius is 50 texels of a grid [radius_width] wide over the texture,
+     and [scale] that grid's metres per texel: the far field, whose square is
+     twice the base grid's side, passes twice the base grid's width and the
+     base grid's metres, so that its occlusion is gathered over the same
+     ground, a quarter as many of its own texels. *)
   Gl.uniform1i ctx bake_u.width (Option.value ~default:width radius_width);
   let scale_x, scale_y = scale in
   Gl.uniform2f ctx bake_u.scale scale_x scale_y;
@@ -6002,7 +6003,7 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                 let heights, normals = pyramids in
                 let ao =
                   time_gpu ctx "compute_ao_far" (fun () ->
-                      compute_ao ~radius_width:w ctx (w / 2) (h / 2)
+                      compute_ao ~radius_width:(2 * w) ctx (w / 2) (h / 2)
                         (deltax, deltay) heights nearest_sampler ao_bake_pid
                         ao_blur_pid ao_bake_uniforms ao_blur_uniforms)
                 in
