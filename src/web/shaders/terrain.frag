@@ -1052,9 +1052,11 @@ void main() {
       // gradients give, the read being in a branch.
       highp vec2 uv = canopyCoverUV(cu, level);
       highp vec2 dx = dFdx(uv), dy = dFdy(uv);
-      vec4 tc =
-          coverTrust < 1.0 ? textureGrad(u_canopy, uv, dx, dy) : vec4(0.0);
-      float e = canopyEdge(cu) * tc.b * (1.0 - coverTrust);
+      // Nor outside the level's block, where its weight is zero anyway.
+      float ce = canopyEdge(cu);
+      vec4 tc = ce > 0.0 && coverTrust < 1.0 ? textureGrad(u_canopy, uv, dx, dy)
+                                             : vec4(0.0);
+      float e = ce * tc.b * (1.0 - coverTrust);
       if (e > 0.0) {
         float density = tc.r / tc.b;
         float total = ct.y + (1.0 - ct.y) * e;
