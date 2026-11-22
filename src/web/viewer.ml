@@ -565,10 +565,9 @@ let scissored ctx rects draw =
 
 (* [skip]: a rectangle whose texels are not uploaded (left at zero), for a
    pass that will not read them. *)
-let make_tile_texture ?skip ctx tile =
-  let tid = Gl.create_texture ctx in
+let upload_tile_level0 ?skip ctx tid tile =
   Gl.bind_texture ctx Gl.texture_2d (Some tid);
-  (* Input is RG8 format: 2 bytes per pixel (high, low) *)
+  (* Input is RG8 format: 2 bytes per pixel (low, high) *)
   let height = Bigarray.Array2.dim1 tile.Dem_loader.data in
   let width = Bigarray.Array2.dim2 tile.Dem_loader.data / 2 in
   let data =
@@ -576,10 +575,9 @@ let make_tile_texture ?skip ctx tile =
   in
   (match skip with
   | None ->
-      Gl.tex_image2d ctx Gl.texture_2d 0 Gl.rg8 width height 0 Gl.rg
+      Gl.tex_sub_image2d ctx Gl.texture_2d 0 0 0 width height Gl.rg
         Gl.unsigned_byte data 0
   | Some rect ->
-      Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rg8 width height;
       Gl.pixel_storei ctx Gl.unpack_row_length width;
       List.iter
         (fun (x, y, w, h) ->
@@ -588,9 +586,7 @@ let make_tile_texture ?skip ctx tile =
             (((y * width) + x) * 2))
         (outside ~w:width ~h:height rect);
       Gl.pixel_storei ctx Gl.unpack_row_length 0);
-  Web_utils.set_texture_params_nearest_clamp ctx Gl.texture_2d;
-  Gl.bind_texture ctx Gl.texture_2d None;
-  tid
+  Gl.bind_texture ctx Gl.texture_2d None
 
 (* Anisotropic filtering support *)
 let aniso_ext = ref None
@@ -1446,8 +1442,8 @@ let downsample_k _level = 0.25
    downsampled from are, and its normal where its eight neighbours' heights
    are. Not with [border]. *)
 let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
-    ?(height_offset = -500.) ?update ctx width height lat triangle_geo
-    tile_texture normal_pid downsample_pid (u : Render_state.relief_uniforms)
+    ?update ctx width height lat triangle_geo tile normal_pid downsample_pid
+    (u : Render_state.relief_uniforms)
     (downsample_u : Render_state.downsample_uniforms) =
   assert (width = height);
   assert (not (border && update <> None));
@@ -1457,15 +1453,14 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
     Option.map (fun r -> outside ~w ~h (shrink n r)) !same
   in
 
-  (* Not used in shader explicitly yet, using pow directly *)
   let max_level = Web_utils.log2 (max width height) in
   let levels = max_level + 1 in
   (* Uniforms belong to the program rather than the draw, so the quantisation
      goes up once. [downsample.frag] decodes to u16/255, hence the 255. *)
   Gl.use_program ctx normal_pid;
   Gl.uniform1f ctx u.height_scale height_scale;
-  Gl.uniform1f ctx u.height_offset height_offset;
   Gl.use_program ctx downsample_pid;
+  Gl.uniform1i ctx downsample_u.source_texture 0;
   Gl.uniform1f ctx downsample_u.height_scale_n (height_scale *. 255.);
 
   (* Heights and encoded normals live in two RG8 pyramids instead of one RGBA8:
@@ -1503,48 +1498,40 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
         (create_rg8_pyramid ~filtered:false, create_rg8_pyramid ~filtered:true)
   in
 
-  (* normal.frag writes heights to attachment 0 and the encoded normal to
-     attachment 1, so both pyramids are filled by the same passes as before. *)
-  let fb = Gl.create_framebuffer ctx in
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
-  let attach_level level =
-    Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
-      Gl.texture_2d tid level;
-    Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment1
-      Gl.texture_2d nid level
-  in
-  attach_level 0;
-  Gl.draw_buffers ctx [ Gl.color_attachment0; Gl.color_attachment1 ];
-  Gl.viewport ctx 0 0 width height;
-
-  (* Clear both relief textures to zero first *)
-  if update = None then begin
-    Gl.clear_color ctx 0. 0. 0. 0.;
-    Gl.clear ctx Gl.color_buffer_bit
-  end;
-
-  (* Use Scissor to leave 1-pixel border zero *)
-  if border then begin
-    Gl.enable ctx Gl.scissor_test;
-    Gl.scissor ctx 1 1 (width - 2) (height - 2)
-  end;
-
-  Gl.use_program ctx normal_pid;
-  (* Draw normals (Level 0) *)
+  (* Upload source heights directly into level 0 of [tid], avoiding a transient
+     32 MiB source texture and an extra MRT write on every texel. *)
   Gl.active_texture ctx Gl.texture0;
-  Gl.bind_texture ctx Gl.texture_2d (Some tile_texture);
+  upload_tile_level0 ?skip:!same ctx tid tile;
 
-  Gl.bind_vertex_array ctx (Some triangle_geo);
-  Gl.uniform2f ctx u.size (float width) (float height);
+  let fb = Gl.create_framebuffer ctx in
+  let ds_fb = Gl.create_framebuffer ctx in
 
-  (* Use the provided latitude for normals *)
+  let pin_height_mip level =
+    Gl.active_texture ctx Gl.texture0;
+    Gl.bind_texture ctx Gl.texture_2d (Some tid);
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level level;
+    Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level level
+  in
+  let clear_border ~w ~h =
+    Gl.clear_color ctx 0. 0. 0. 0.;
+    if w <= 2 || h <= 2 then Gl.clear ctx Gl.color_buffer_bit
+    else begin
+      Gl.enable ctx Gl.scissor_test;
+      let strip x y sw sh =
+        Gl.scissor ctx x y sw sh;
+        Gl.clear ctx Gl.color_buffer_bit
+      in
+      strip 0 0 w 1;
+      strip 0 (h - 1) w 1;
+      strip 0 1 1 (h - 2);
+      strip (w - 1) 1 1 (h - 2);
+      Gl.disable ctx Gl.scissor_test
+    end
+  in
+
   (* One grid step as an east/north displacement in metres. The base pyramid's
      axes are east and north by construction; a refinement passes its own, which
-     for a grid in a projected CRS are turned by that CRS's grid convergence.
-     [normal.frag] differentiates along the grid, so it is handed both the step
-     lengths and the rotation that takes the result back to east/north -- without
-     which a ring's normals sit 2.44 degrees round from those of the surface
-     beyond its edge, and the boundary shows. *)
+     for a grid in a projected CRS are turned by that CRS's grid convergence. *)
   let (ax, ay), (bx, by) =
     match axes with
     | Some a -> a
@@ -1553,42 +1540,44 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
         ((dx, 0.), (0., dy))
   in
   let deltax = Float.hypot ax ay and deltay = Float.hypot bx by in
+
+  (* Level 0 normals: [tid] mip 0 -> [nid] mip 0 (single render target). *)
+  Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
+  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
+    nid 0;
+  Gl.viewport ctx 0 0 width height;
+
+  if border then clear_border ~w:width ~h:height;
+
+  Gl.use_program ctx normal_pid;
+  pin_height_mip 0;
+  Gl.bind_vertex_array ctx (Some triangle_geo);
+  Gl.uniform2f ctx u.size (float width) (float height);
   Gl.uniform2f ctx u.delta deltax deltay;
   Render_state.upload_grad_rot ctx u
     ~col:(ax /. deltax, ay /. deltax)
     ~row:(bx /. deltay, by /. deltay);
 
-  if update = None then Gl.draw_arrays ctx Gl.triangle_strip 0 4
+  if border then begin
+    Gl.enable ctx Gl.scissor_test;
+    Gl.scissor ctx 1 1 (width - 2) (height - 2);
+    Gl.draw_arrays ctx Gl.triangle_strip 0 4;
+    Gl.disable ctx Gl.scissor_test;
+    (* Zero the 1-px border of [tid] mip 0 after Sobel has read it. *)
+    Gl.bind_texture ctx Gl.texture_2d None;
+    Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
+    Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+      Gl.texture_2d tid 0;
+    clear_border ~w:width ~h:height
+  end
+  else if update = None then Gl.draw_arrays ctx Gl.triangle_strip 0 4
   else
     scissored ctx (outside_of 1 ~w:width ~h:height) (fun () ->
         Gl.draw_arrays ctx Gl.triangle_strip 0 4);
 
-  Gl.disable ctx Gl.scissor_test;
-
-  (* Common Uniforms *)
-  Gl.use_program ctx downsample_pid;
-  Gl.uniform1i ctx downsample_u.source_texture 0;
-
-  (* Start from level 1 *)
-
-  (* Temporary texture for height downsampling (RG8) *)
-  let temp_tid = Gl.create_texture ctx in
-  Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_min_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_mag_filter Gl.nearest;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_s Gl.clamp_to_edge;
-  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_wrap_t Gl.clamp_to_edge;
-  Gl.tex_storage2d ctx Gl.texture_2d 1 Gl.rg8 width height;
-  Gl.bind_texture ctx Gl.texture_2d None;
-
-  (* Separate single-attachment framebuffer for the height downsample: [fb] has
-     a normal target bound to attachment 1 and downsample.frag writes no second
-     output, so reusing it would leave that attachment undefined. *)
-  let ds_fb = Gl.create_framebuffer ctx in
-  Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
-  Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0 Gl.texture_2d
-    temp_tid 0;
-
+  (* Levels 1..max_level: downsample writes directly to [tid] mip [level] with
+     TEXTURE_BASE_LEVEL/MAX_LEVEL pinned to [level - 1] (spec-legal non-
+     feedback), then normal.frag reads [tid] mip [level] -> [nid] mip [level]. *)
   let rec loop level w h =
     if level > max_level || w < 1 || h < 1 then ()
     else (
@@ -1597,79 +1586,70 @@ let compute_relief ?axes ?(border = true) ?(height_scale = 9500. /. 65535.)
           (fun (x0, y0, x1, y1) ->
             ((x0 + 1) asr 1, (y0 + 1) asr 1, (x1 - 1) asr 1, (y1 - 1) asr 1))
           !same;
-      (* 1. Downsample Height: tid(Level N-1) -> temp_tid *)
-      Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
-
-      (* Bind Source: tid *)
-      Gl.active_texture ctx Gl.texture0;
-      Gl.bind_texture ctx Gl.texture_2d (Some tid);
-
-      (* Use Downsample Program *)
-      Gl.use_program ctx downsample_pid;
-      Gl.uniform1i ctx downsample_u.level (level - 1);
-      Gl.uniform1f ctx downsample_u.k (downsample_k level);
-
-      let source_w = float (w * 2) in
-      let source_h = float (h * 2) in
-      Gl.uniform2f ctx downsample_u.source_size source_w source_h;
-
-      Gl.viewport ctx 0 0 w h;
-
-      (* Draw Quad: under an update, wherever the normal pass below reads. *)
-      scissored ctx (outside_of 2 ~w ~h) (fun () ->
-          Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0);
-
-      (* 2. Compute Normals: temp_tid -> tid/nid(Level N) *)
-
-      (* Bind FBO to Dest: tid and nid at Level N *)
-      Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
-      attach_level level;
-
-      (* Bind Source: temp_tid *)
-      Gl.active_texture ctx Gl.texture0;
-      Gl.bind_texture ctx Gl.texture_2d (Some temp_tid);
-
-      (* Use Normal Program *)
-      Gl.use_program ctx normal_pid;
-      Gl.uniform2f ctx u.size (float w) (float h);
-
-      (* Scale delta for this level *)
-      let scale = 2.0 ** float level in
-      Gl.uniform2f ctx u.delta (deltax *. scale) (deltay *. scale);
-
-      (* Temp texture is full size (width), but we only wrote to top-left w*h;
-         normal.frag clamps its taps to [size] for exactly that reason. *)
-      Gl.viewport ctx 0 0 w h;
-
-      (* Clear Mip Level to Zero *)
-      if update = None then begin
+      if border && (w <= 2 || h <= 2) then begin
+        Gl.active_texture ctx Gl.texture0;
+        Gl.bind_texture ctx Gl.texture_2d None;
+        Gl.viewport ctx 0 0 w h;
         Gl.clear_color ctx 0. 0. 0. 0.;
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
+        Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+          Gl.texture_2d tid level;
+        Gl.clear ctx Gl.color_buffer_bit;
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
+        Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+          Gl.texture_2d nid level;
         Gl.clear ctx Gl.color_buffer_bit
+      end
+      else begin
+        (* 1. Downsample Height: tid(level - 1) -> tid(level) *)
+        pin_height_mip (level - 1);
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
+        Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+          Gl.texture_2d tid level;
+        Gl.use_program ctx downsample_pid;
+        Gl.uniform1f ctx downsample_u.k (downsample_k level);
+        Gl.viewport ctx 0 0 w h;
+        scissored ctx (outside_of 2 ~w ~h) (fun () ->
+            Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0);
+
+        (* 2. Compute Normals: tid(level) -> nid(level) *)
+        Gl.bind_framebuffer ctx Gl.framebuffer (Some fb);
+        Gl.framebuffer_texture2d ctx Gl.framebuffer Gl.color_attachment0
+          Gl.texture_2d nid level;
+        pin_height_mip level;
+        Gl.use_program ctx normal_pid;
+        Gl.uniform2f ctx u.size (float w) (float h);
+        let scale = 2.0 ** float level in
+        Gl.uniform2f ctx u.delta (deltax *. scale) (deltay *. scale);
+        Gl.viewport ctx 0 0 w h;
+        if border then begin
+          clear_border ~w ~h;
+          Gl.enable ctx Gl.scissor_test;
+          Gl.scissor ctx 1 1 (w - 2) (h - 2);
+          Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
+          Gl.disable ctx Gl.scissor_test;
+          Gl.bind_texture ctx Gl.texture_2d None;
+          Gl.bind_framebuffer ctx Gl.framebuffer (Some ds_fb);
+          clear_border ~w ~h
+        end
+        else
+          scissored ctx (outside_of 1 ~w ~h) (fun () ->
+              Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0)
       end;
-
-      if not border then
-        scissored ctx (outside_of 1 ~w ~h) (fun () ->
-            Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0)
-      else if w > 2 && h > 2 then (
-        (* Enable scissor to render only inner area, leaving 1-pixel border *)
-        Gl.enable ctx Gl.scissor_test;
-        Gl.scissor ctx 1 1 (w - 2) (h - 2);
-
-        Gl.draw_elements ctx Gl.triangles 6 Gl.unsigned_byte 0;
-
-        Gl.disable ctx Gl.scissor_test);
 
       loop (level + 1) (w / 2) (h / 2))
   in
   loop 1 (width / 2) (height / 2);
 
-  Gl.delete_texture ctx temp_tid;
-
-  (* Restore Framebuffer *)
+  (* Restore full mip range on [tid] and clean up FBOs. *)
   Gl.bind_framebuffer ctx Gl.framebuffer None;
+  Gl.active_texture ctx Gl.texture0;
+  Gl.bind_texture ctx Gl.texture_2d (Some tid);
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_base_level 0;
+  Gl.tex_parameteri ctx Gl.texture_2d Gl.texture_max_level (levels - 1);
+  Gl.bind_texture ctx Gl.texture_2d None;
   Gl.delete_framebuffer ctx ds_fb;
   Gl.delete_framebuffer ctx fb;
-
   Gl.bind_vertex_array ctx None;
 
   (tid, nid)
@@ -6005,24 +5985,12 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
        the outer tiles of a partial one come. *)
     let bake_base_relief tile =
       let relief_texture, relief_normal_texture =
-        let tile_texture = make_tile_texture ctx tile in
-        let pyramids =
-          time_gpu ctx "compute_relief" (fun () ->
-              (* No sunken border: the far field has the ground beyond the
-                 edge, and the shaders fade into it -- or down to the same
-                 depth without it. *)
-              compute_relief ~border:false ctx w h alat triangle_geo
-                tile_texture normal_pid downsample_pid relief_uniforms
-                downsample_uniforms)
-        in
-        (* Nothing reads the source grid on the GPU after the bake: it is not
-           among the textures [bind_terrain_textures] binds, and every
-           consumer goes through the pyramids. Freeing it here rather than
-           with the location keeps 32 MiB (RG8 4096^2) out of the
-           per-location footprint, as the high-resolution bake below already
-           does with its own source. *)
-        Gl.delete_texture ctx tile_texture;
-        pyramids
+        time_gpu ctx "compute_relief" (fun () ->
+            (* No sunken border: the far field has the ground beyond the
+               edge, and the shaders fade into it -- or down to the same
+               depth without it. *)
+            compute_relief ~border:false ctx w h alat triangle_geo tile
+              normal_pid downsample_pid relief_uniforms downsample_uniforms)
       in
       let ao_texture =
         time_gpu ctx "compute_ao" (fun () ->
@@ -6079,18 +6047,15 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
           let far =
             Option.map
               (fun far_tile ->
-                let tile_texture = make_tile_texture ctx far_tile in
                 let step = float far_step in
-                let pyramids =
+                let heights, normals =
                   time_gpu ctx "compute_relief_far" (fun () ->
                       compute_relief
                         ~axes:((step *. deltax, 0.), (0., step *. deltay))
-                        ctx (w / 2) (h / 2) alat triangle_geo tile_texture
+                        ctx (w / 2) (h / 2) alat triangle_geo far_tile
                         normal_pid downsample_pid relief_uniforms
                         downsample_uniforms)
                 in
-                Gl.delete_texture ctx tile_texture;
-                let heights, normals = pyramids in
                 let ao =
                   time_gpu ctx "compute_ao_far" (fun () ->
                       compute_ao ~radius_width:(2 * w) ctx (w / 2) (h / 2)
@@ -6164,18 +6129,15 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
             | `Pending -> Pending
             | `Blank block -> Blank block
             | `Blended (block, (g : Hd_dem.t), raw) ->
-                let tex = make_tile_texture ctx g.grid in
                 let hd_relief_texture, hd_relief_normal_texture =
                   time_gpu ctx "compute_relief_hd" (fun () ->
                       compute_relief
                         ~axes:(g.frame.axis_x, g.frame.axis_y)
-                        ~border:false ~height_scale:g.height_scale
-                        ~height_offset:g.height_offset ctx g.layer.size
-                        g.layer.size alat triangle_geo tex normal_pid
-                        downsample_pid relief_uniforms downsample_uniforms)
+                        ~border:false ~height_scale:g.height_scale ctx
+                        g.layer.size g.layer.size alat triangle_geo g.grid
+                        normal_pid downsample_pid relief_uniforms
+                        downsample_uniforms)
                 in
-                (* Nothing reads the source grid on the GPU after the bake. *)
-                Gl.delete_texture ctx tex;
                 Blended
                   ( block,
                     {
@@ -6756,9 +6718,6 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                   (match old.valid with
                   | Some (r0, c0, r1, c1) ->
                       let held = (c0, r0, c1, r1) in
-                      let tile_texture =
-                        make_tile_texture ~skip:(shrink 2 held) ctx old.tile
-                      in
                       time_gpu ctx "compute_relief" (fun () ->
                           ignore
                             (compute_relief
@@ -6766,10 +6725,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
                                  ( old.relief_texture,
                                    old.relief_normal_texture,
                                    held )
-                               ~border:false ctx w h alat triangle_geo
-                               tile_texture normal_pid downsample_pid
-                               relief_uniforms downsample_uniforms));
-                      Gl.delete_texture ctx tile_texture;
+                               ~border:false ctx w h alat triangle_geo old.tile
+                               normal_pid downsample_pid relief_uniforms
+                               downsample_uniforms));
                       time_gpu ctx "compute_ao" (fun () ->
                           ignore
                             (compute_ao ~update:(old.ao_texture, held) ctx w h

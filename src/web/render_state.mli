@@ -116,15 +116,12 @@ type relief_uniforms = {
   delta : Gl.uniform_location;
   grad_rot : Gl.uniform_location;
   height_scale : Gl.uniform_location;
-  height_offset : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
 type downsample_uniforms = {
   k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
-  source_size : Gl.uniform_location;
-  level : Gl.uniform_location;
   height_scale_n : Gl.uniform_location;
 }
 (** Cached uniform locations for the downsample shader. *)

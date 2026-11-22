@@ -9,66 +9,43 @@ uniform vec2 delta;
 // switch at the boundary shows as a seam.
 uniform highp mat2 grad_rot;
 uniform sampler2D tile;
-// The grid's own quantisation. Each blended refinement spans only the height
-// range it holds, so this is not the base tile's 9500 m over 65536 steps; see
-// [Hd_dem.blend]. Decoded and re-encoded with the same pair, so the pyramid
-// inherits the grid's scale.
-uniform highp float height_scale;  // metres per u16 step
-uniform highp float height_offset; // metres at u16 zero
-// Two render targets: heights (16-bit fixed point, little-endian) and the
-// encoded normal go to separate RG8 textures. Every consumer reads only one of
-// the two pairs (heights via texelFetch in the vertex shaders and the AO
-// passes' NEAREST sampler, normals only through terrain.frag's filtered fetch),
-// so splitting halves the bytes per tap at identical total memory.
-layout(location = 0) out mediump vec2 height_out;
-layout(location = 1) out mediump vec2 normal_out;
+// The grid's own quantisation (metres per u16 step); see [Hd_dem.blend].
+// Height differences cancel the offset, so only the scale enters the slope.
+uniform highp float height_scale;
+// Single render target: heights already live in the height pyramid (uploaded
+// directly at level 0 and written directly by downsample.frag at levels 1+),
+// so normal.frag only writes the encoded normal (8 taps, half the writes).
+layout(location = 0) out mediump vec2 normal_out;
 
-// The source holds this level's [size] grid in its lower-left corner and the
-// target is drawn texel for texel, so each tap is an integer fetch clamped to
-// that grid -- not to the texture's own edge: past level 0 the source is the
-// full-size downsample scratch, whose texels beyond [size] still hold the
-// previous level (or nothing at level 1), and a +1 tap on the last column or
-// row used to read them.
-float get_z(ivec2 offset) {
-  ivec2 p = clamp(ivec2(gl_FragCoord.xy) + offset, ivec2(0), ivec2(size) - 1);
-  // Decode from RG8: R=low byte, G=high byte (little-endian)
-  // Samples are in [0, 1], need to multiply by 255 to get 0..255
-  vec2 rg = texelFetch(tile, p, 0).rg * 255.0;
-  float h_val = rg.g * 256.0 + rg.r;
-  return h_val * height_scale + height_offset;
+// Raw u16/255 height at integer texel [p], clamped to this level's [size].
+float get_raw(ivec2 p, ivec2 max_p) {
+  return dot(texelFetch(tile, clamp(p, ivec2(0), max_p), 0).rg,
+             vec2(1.0, 256.0));
 }
 
 void main() {
-  // Sobel filter
-  float tl = get_z(ivec2(-1, -1));
-  float t = get_z(ivec2(0, -1));
-  float tr = get_z(ivec2(1, -1));
-  float l = get_z(ivec2(-1, 0));
-  float c = get_z(ivec2(0, 0));
-  float r = get_z(ivec2(1, 0));
-  float bl = get_z(ivec2(-1, 1));
-  float b = get_z(ivec2(0, 1));
-  float br = get_z(ivec2(1, 1));
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 max_p = ivec2(size) - 1;
+
+  // Sobel filter (8 surrounding taps; center is unused)
+  float tl = get_raw(p + ivec2(-1, -1), max_p);
+  float t = get_raw(p + ivec2(0, -1), max_p);
+  float tr = get_raw(p + ivec2(1, -1), max_p);
+  float l = get_raw(p + ivec2(-1, 0), max_p);
+  float r = get_raw(p + ivec2(1, 0), max_p);
+  float bl = get_raw(p + ivec2(-1, 1), max_p);
+  float b = get_raw(p + ivec2(0, 1), max_p);
+  float br = get_raw(p + ivec2(1, 1), max_p);
 
   float dX = tr + 2.0 * r + br - (tl + 2.0 * l + bl);
   float dY = bl + 2.0 * b + br - (tl + 2.0 * t + tr);
 
-  // Normal vector
-  // Note: dX is dHeight/dPixelX * 8 (scaling of Sobel).
-  // We divide by (8 * deltax) to get slope.
-  vec2 slope = grad_rot * vec2(-dX / (8.0 * delta.x), -dY / (8.0 * delta.y));
+  // Normal vector: raw is u16/255, Sobel scales by 8, so multiply by
+  // -(255/8) * height_scale / delta.
+  vec2 slope =
+      grad_rot * (vec2(dX, dY) * ((-255.0 / 8.0) * height_scale / delta));
   vec3 n = normalize(vec3(slope, 1.0));
 
   // Encode Normal (xy components to [0,1])
-  vec2 encN = n.xy * 0.5 + 0.5;
-
-  // Rounded: the decode/re-encode round trip can land a hair under an integer,
-  // and a value just below k * 256 would otherwise split as (k - 1, 255).
-  float h_val = floor((c - height_offset) / height_scale + 0.5);
-  float h_high = floor(h_val / 256.0) / 255.0;
-  float h_low = mod(h_val, 256.0) / 255.0;
-
-  // Little-Endian: R=Low, G=High
-  height_out = vec2(h_low, h_high);
-  normal_out = encN;
+  normal_out = n.xy * 0.5 + 0.5;
 }

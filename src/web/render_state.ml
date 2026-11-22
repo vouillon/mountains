@@ -157,15 +157,12 @@ type relief_uniforms = {
   delta : Gl.uniform_location;
   grad_rot : Gl.uniform_location;
   height_scale : Gl.uniform_location;
-  height_offset : Gl.uniform_location;
 }
 (** Cached uniform locations for the relief shader. *)
 
 type downsample_uniforms = {
   k : Gl.uniform_location;
   source_texture : Gl.uniform_location;
-  source_size : Gl.uniform_location;
-  level : Gl.uniform_location;
   height_scale_n : Gl.uniform_location;
 }
 (** Cached uniform locations for the downsample shader. *)
@@ -324,7 +321,6 @@ let init_relief_uniforms ctx pid =
     delta = u "delta";
     grad_rot = u "grad_rot";
     height_scale = u "height_scale";
-    height_offset = u "height_offset";
   }
 
 (** Initialize downsample uniform locations. Call once after program creation.
@@ -334,8 +330,6 @@ let init_downsample_uniforms ctx pid =
   {
     k = u "k";
     source_texture = u "source_texture";
-    source_size = u "source_size";
-    level = u "level";
     height_scale_n = u "height_scale_n";
   }
 
