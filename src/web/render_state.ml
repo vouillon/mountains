@@ -82,25 +82,19 @@ type terrain_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   (* Matrices *)
-  proj : Gl.uniform_location;
-  transform : Gl.uniform_location;
+  view_proj : Gl.uniform_location;
   (* Texture samplers *)
   relief : Gl.uniform_location; (* heights, vertex stage *)
   relief_normal : Gl.uniform_location; (* encoded normals, fragment stage *)
   (* Near-field high-resolution relief (see [Hd_dem]) *)
-  hd_valid : Gl.uniform_location array;
+  hd_valid : Gl.uniform_location;
   hd_relief : Gl.uniform_location array; (* heights, vertex stage *)
   hd_relief_normal : Gl.uniform_location array; (* encoded normals, fragment *)
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
-  hd_half_texel : Gl.uniform_location array;
-  hd_step : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
+  hd_step : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_bumpGrad : Gl.uniform_location;
@@ -143,16 +137,11 @@ type shadow_uniforms = {
   shadow_view_proj : Gl.uniform_location;
   (* Near-field high-resolution relief (see [Hd_dem]): the shadow bake shares
      radial_common.vert, so it inherits the HD terrain once these are set. *)
-  hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -257,34 +246,19 @@ let init_terrain_uniforms ctx pid =
     inv_delta = u "inv_delta";
     meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
-    proj = u "proj";
-    transform = u "transform";
+    view_proj = u "view_proj";
     relief = u "relief";
     relief_normal = u "relief_normal";
-    hd_valid =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
+    hd_valid = u "hd_valid";
     hd_relief =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
     hd_relief_normal =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief_normal[%d]" i));
-    hd_mat = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_mat[%d]" i));
-    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
-    hd_quad_x =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_x[%d]" i));
-    hd_quad_y =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_y[%d]" i));
-    hd_lod_bias =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
-    hd_max_lod =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
-    hd_height_scale_n =
-      Array.init hd_slots (fun i ->
-          u (Printf.sprintf "hd_height_scale_n[%d]" i));
-    hd_height_offset =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
-    hd_half_texel =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_half_texel[%d]" i));
-    hd_step = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_step[%d]" i));
+    hd_mat4 = u "hd_mat4";
+    hd_bias4 = u "hd_bias4";
+    hd_quad = u "hd_quad";
+    hd_params = u "hd_params";
+    hd_step = u "hd_step";
     ao = u "ao";
     u_detailMap = u "u_detailMap";
     u_bumpGrad = u "u_bumpGrad";
@@ -321,25 +295,12 @@ let init_shadow_uniforms ctx pid =
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
     shadow_view_proj = u "shadow_view_proj";
-    hd_valid =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
     hd_relief =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
-    hd_mat = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_mat[%d]" i));
-    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
-    hd_quad_x =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_x[%d]" i));
-    hd_quad_y =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_y[%d]" i));
-    hd_lod_bias =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
-    hd_max_lod =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
-    hd_height_scale_n =
-      Array.init hd_slots (fun i ->
-          u (Printf.sprintf "hd_height_scale_n[%d]" i));
-    hd_height_offset =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
+    hd_mat4 = u "hd_mat4";
+    hd_bias4 = u "hd_bias4";
+    hd_quad = u "hd_quad";
+    hd_params = u "hd_params";
   }
 
 (** Initialize sky uniform locations. Call once after program creation. *)
@@ -577,41 +538,102 @@ let upload_hd_mat ctx loc_mat loc_bias loc_qx loc_qy (w : Warp.t) =
   Gl.uniform3f ctx loc_qx w.xuu w.xuv w.xvv;
   Gl.uniform3f ctx loc_qy w.yuu w.yuv w.yvv
 
+(* Pack the 4 HD ring slots into the 4 compact vec4 uniform arrays declared by
+   radial_common.vert:
+     hd_mat4[i]   = (a, d, b, e)
+     hd_bias4[i]  = (c, f, half_texel, float valid)
+     hd_quad[6]   = 4 x 6 quadratic coeffs (xuu, xuv, xvv, yuu, yuv, yvv)
+     hd_params[i] = (lod_bias, float max_lod, hscale, hoffset) *)
+let pack_hd_uniforms (hd : hd_params option list) =
+  let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
+  let mat4 =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (4 * hd_slots)
+  in
+  let bias4 =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (4 * hd_slots)
+  in
+  let quad =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (6 * hd_slots)
+  in
+  let params =
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (4 * hd_slots)
+  in
+  let valids = Array.make hd_slots 0 in
+  let steps = Array.make hd_slots hd_step_sentinel in
+  for i = 0 to hd_slots - 1 do
+    let s = slot i in
+    let valid, w, lod_bias, max_lod, half_texel, hscale, hoffset =
+      hd_slot_values s
+    in
+    let m = w.Warp.lin in
+    let o4 = 4 * i in
+    mat4.{o4} <- m.Affine.a;
+    mat4.{o4 + 1} <- m.Affine.d;
+    mat4.{o4 + 2} <- m.Affine.b;
+    mat4.{o4 + 3} <- m.Affine.e;
+    bias4.{o4} <- m.Affine.c;
+    bias4.{o4 + 1} <- m.Affine.f;
+    bias4.{o4 + 2} <- half_texel;
+    bias4.{o4 + 3} <- float valid;
+    let o6 = 6 * i in
+    quad.{o6} <- w.xuu;
+    quad.{o6 + 1} <- w.xuv;
+    quad.{o6 + 2} <- w.xvv;
+    quad.{o6 + 3} <- w.yuu;
+    quad.{o6 + 4} <- w.yuv;
+    quad.{o6 + 5} <- w.yvv;
+    params.{o4} <- lod_bias;
+    params.{o4 + 1} <- float max_lod;
+    params.{o4 + 2} <- hscale;
+    params.{o4 + 3} <- hoffset;
+    valids.(i) <- valid;
+    steps.(i) <-
+      (match s with Some p -> p.hd_step_m | None -> hd_step_sentinel)
+  done;
+  ( Brr.Tarray.of_bigarray1 mat4,
+    Brr.Tarray.of_bigarray1 bias4,
+    Brr.Tarray.of_bigarray1 quad,
+    Brr.Tarray.of_bigarray1 params,
+    valids,
+    steps )
+
 (** Upload the rings' geometry to the terrain and shadow programs, innermost
     first. Slots past the end of [hd] are disabled, which restores exactly the
     base-only rendering for them. *)
 let upload_hd_params ctx terrain_pid shadow_pid (u : terrain_uniforms)
     (shadow_u : shadow_uniforms) (hd : hd_params option list) =
-  let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
+  let mat4, bias4, quad, params, valids, steps = pack_hd_uniforms hd in
   Gl.use_program ctx terrain_pid;
-  for i = 0 to hd_slots - 1 do
-    let valid, m, lod_bias, max_lod, half_texel, hscale, hoffset =
-      hd_slot_values (slot i)
-    in
-    Gl.uniform1i ctx u.hd_valid.(i) valid;
-    upload_hd_mat ctx u.hd_mat.(i) u.hd_bias.(i) u.hd_quad_x.(i) u.hd_quad_y.(i)
-      m;
-    Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
-    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
-    Gl.uniform1f ctx u.hd_half_texel.(i) half_texel;
-    Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
-    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset;
-    Gl.uniform1f ctx u.hd_step.(i)
-      (match slot i with Some p -> p.hd_step_m | None -> hd_step_sentinel)
-  done;
+  Gl.uniform4i ctx u.hd_valid valids.(0) valids.(1) valids.(2) valids.(3);
+  Gl.uniform4f ctx u.hd_step steps.(0) steps.(1) steps.(2) steps.(3);
+  Gl.uniform4fv ctx u.hd_mat4 mat4;
+  Gl.uniform4fv ctx u.hd_bias4 bias4;
+  Gl.uniform4fv ctx u.hd_quad quad;
+  Gl.uniform4fv ctx u.hd_params params;
   Gl.use_program ctx shadow_pid;
-  for i = 0 to hd_slots - 1 do
-    let valid, m, lod_bias, max_lod, _, hscale, hoffset =
-      hd_slot_values (slot i)
-    in
-    Gl.uniform1i ctx shadow_u.hd_valid.(i) valid;
-    upload_hd_mat ctx shadow_u.hd_mat.(i) shadow_u.hd_bias.(i)
-      shadow_u.hd_quad_x.(i) shadow_u.hd_quad_y.(i) m;
-    Gl.uniform1f ctx shadow_u.hd_lod_bias.(i) lod_bias;
-    Gl.uniform1i ctx shadow_u.hd_max_lod.(i) max_lod;
-    Gl.uniform1f ctx shadow_u.hd_height_scale_n.(i) hscale;
-    Gl.uniform1f ctx shadow_u.hd_height_offset.(i) hoffset
+  Gl.uniform4fv ctx shadow_u.hd_mat4 mat4;
+  Gl.uniform4fv ctx shadow_u.hd_bias4 bias4;
+  Gl.uniform4fv ctx shadow_u.hd_quad quad;
+  Gl.uniform4fv ctx shadow_u.hd_params params
+
+(* Write an orthographic shadow matrix (column-major 4x4, row 3 = (0,0,0,1))
+   into [dst] at float offset [off] as a column-major mat4x3 (12 floats) with
+   the clip-to-[0, 1] [0.5 * x + 0.5] transform baked in. *)
+let write_ortho_shadow_mat4x3 dst off (mat : Matrix.t) =
+  let m = Matrix.array mat in
+  for col = 0 to 2 do
+    for row = 0 to 2 do
+      dst.{off + (col * 3) + row} <- m.{(col * 4) + row} *. 0.5
+    done
+  done;
+  for row = 0 to 2 do
+    dst.{off + 9 + row} <- (m.{12 + row} *. 0.5) +. 0.5
   done
+
+let upload_ortho_shadow_mat4x3 ctx loc (mat : Matrix.t) =
+  let buf = Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 12 in
+  write_ortho_shadow_mat4x3 buf 0 mat;
+  Gl.uniform_matrix4x3fv ctx loc false (Brr.Tarray.of_bigarray1 buf)
 
 (** Upload session-static uniforms. Call once after computing initial values.
     These uniforms don't change during the session:
@@ -654,17 +676,14 @@ let upload_session_static ctx terrain_pid sky_pid shadow_pid
   let zr, zg, zb = zenith_color in
   Gl.uniform3f ctx u.u_zenithColor zr zg zb;
 
-  (* Shadow matrices and splits *)
+  (* Shadow matrices (ortho mat4x3 with [0.5 * x + 0.5] baked in) and splits *)
   let flat_matrices =
-    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (16 * 3)
+    Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout (12 * 3)
   in
   for i = 0 to 2 do
-    let m = Matrix.array shadow_matrices.(i) in
-    for j = 0 to 15 do
-      flat_matrices.{(i * 16) + j} <- m.{j}
-    done
+    write_ortho_shadow_mat4x3 flat_matrices (i * 12) shadow_matrices.(i)
   done;
-  Gl.uniform_matrix4fv ctx u.shadow_matrices false
+  Gl.uniform_matrix4x3fv ctx u.shadow_matrices false
     (Brr.Tarray.of_bigarray1 flat_matrices);
   let splits_ba =
     Bigarray.Array1.of_array Bigarray.float32 Bigarray.c_layout shadow_splits
@@ -726,16 +745,11 @@ type path_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
-  hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
 }
 
 let init_path_uniforms ctx pid =
@@ -757,25 +771,12 @@ let init_path_uniforms ctx pid =
     meridian_conv = u "meridian_conv";
     inv_avg_delta = u "inv_avg_delta";
     relief = u "relief";
-    hd_valid =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_valid[%d]" i));
     hd_relief =
       Array.init hd_slots (fun i -> u (Printf.sprintf "hd_relief[%d]" i));
-    hd_mat = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_mat[%d]" i));
-    hd_bias = Array.init hd_slots (fun i -> u (Printf.sprintf "hd_bias[%d]" i));
-    hd_quad_x =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_x[%d]" i));
-    hd_quad_y =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_quad_y[%d]" i));
-    hd_lod_bias =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_lod_bias[%d]" i));
-    hd_max_lod =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_max_lod[%d]" i));
-    hd_height_scale_n =
-      Array.init hd_slots (fun i ->
-          u (Printf.sprintf "hd_height_scale_n[%d]" i));
-    hd_height_offset =
-      Array.init hd_slots (fun i -> u (Printf.sprintf "hd_height_offset[%d]" i));
+    hd_mat4 = u "hd_mat4";
+    hd_bias4 = u "hd_bias4";
+    hd_quad = u "hd_quad";
+    hd_params = u "hd_params";
   }
 
 let upload_path_static ctx (u : path_uniforms) (p : radial_params) =
@@ -806,19 +807,11 @@ let upload_path_session ctx (u : path_uniforms) ~w ~lat ~eye_x ~eye_y =
 (* The path program shares radial_common.vert's selector, so a GPX trace resolves
    its height from the same ring as the ground beneath it. *)
 let upload_path_hd_params ctx (u : path_uniforms) (hd : hd_params option list) =
-  let slot i = match List.nth_opt hd i with Some p -> p | None -> None in
-  for i = 0 to hd_slots - 1 do
-    let valid, m, lod_bias, max_lod, _, hscale, hoffset =
-      hd_slot_values (slot i)
-    in
-    Gl.uniform1i ctx u.hd_valid.(i) valid;
-    upload_hd_mat ctx u.hd_mat.(i) u.hd_bias.(i) u.hd_quad_x.(i) u.hd_quad_y.(i)
-      m;
-    Gl.uniform1f ctx u.hd_lod_bias.(i) lod_bias;
-    Gl.uniform1i ctx u.hd_max_lod.(i) max_lod;
-    Gl.uniform1f ctx u.hd_height_scale_n.(i) hscale;
-    Gl.uniform1f ctx u.hd_height_offset.(i) hoffset
-  done
+  let mat4, bias4, quad, params, _, _ = pack_hd_uniforms hd in
+  Gl.uniform4fv ctx u.hd_mat4 mat4;
+  Gl.uniform4fv ctx u.hd_bias4 bias4;
+  Gl.uniform4fv ctx u.hd_quad quad;
+  Gl.uniform4fv ctx u.hd_params params
 
 let anisotropy_ext = ref None
 

@@ -9,18 +9,19 @@ uniform highp sampler2D relief_normal;
 // shared with it, and bool needs no precision qualifier, so the two
 // declarations cannot disagree.
 #define HD_SLOTS 4
-uniform bool hd_valid[HD_SLOTS];
+uniform bvec4 hd_valid;
 uniform highp sampler2D hd_relief_normal[HD_SLOTS];
 // Encoded normals of the far field, which has the ground beyond the base grid
 // (see radial_common.vert, which shares [far_valid]).
 uniform bool far_valid;
+uniform highp vec3 far_uv_map; // (offset.x, offset.y, scale) from reliefCoord
 uniform highp sampler2D far_relief_normal;
 uniform mediump sampler2D far_ao; // and its ambient occlusion
 // Each ring's sample pitch in metres (the coarser axis). The bump weighs
 // itself against it per pixel in [perturbNormal]: footprints far below the
 // pitch show scales no grid sample can express, footprints at the pitch and
 // above show exactly the band the data owns (see [Render_state]).
-uniform mediump float hd_step[HD_SLOTS];
+uniform mediump vec4 hd_step;
 uniform mediump sampler2D ao;
 uniform mediump sampler2D
     u_detailMap; // Packed RGBA: R=Rock, G=Grass, B=Forest, A=Ice
@@ -88,14 +89,17 @@ uniform int u_numLevels;                    // Number of clipmap levels
 // units: it is baked around the eye, and the anchor is held across moves
 // that it is not (Viewer.cover_shift).
 uniform highp vec2 u_coverShift;
-uniform highp mat4 shadow_matrices[3]; // Must be highp for projection
+// Orthographic shadow matrices with clip -> [0, 1] UV/depth (* 0.5 + 0.5)
+// baked in on the CPU: mat4x3 saves 16 uniform registers across the 4 layers
+// and skips the / w division and * 0.5 + 0.5 per fragment.
+uniform highp mat4x3 shadow_matrices[3]; // Must be highp for projection
 uniform mediump float shadow_splits[3];
 // Per cascade: world metres per shadow texel, and the depth range its [0,1]
 // spans, both from the ortho box [calculate_shadow_matrices] builds.
 uniform highp vec2 shadow_cascades[3];
 // Shadow layer 3: the trees near the eye alone (Viewer.tree_shadow_box), if
 // it holds any.
-uniform highp mat4 u_treeShadowMatrix;
+uniform highp mat4x3 u_treeShadowMatrix;
 uniform bool u_treeShadowOn;
 uniform vec3 u_lightDir; // Pre-normalized on CPU
 // What the air leaves of the sun's colour at its height (Viewer.sun_tint):
@@ -108,9 +112,6 @@ in highp vec2 hdReliefCoord0;
 in highp vec2 hdReliefCoord1;
 in highp vec2 hdReliefCoord2;
 in highp vec2 hdReliefCoord3;
-in highp vec2 farReliefCoord;
-in highp float v_dist;
-in highp vec3 v_view_dir;
 in highp vec3 v_world_pos; // Highp for world coords
 
 out mediump vec4 color;
@@ -372,13 +373,17 @@ mediump float baseFade() {
   return smoothstep(0.0, 0.03, min(d2.x, d2.y));
 }
 
+highp vec2 farReliefCoord() {
+  return reliefCoord * far_uv_map.z + far_uv_map.xy;
+}
+
 // The encoded normal beneath every ring: the base grid's, the far field's
 // beyond it, and both across the band where one fades into the other ([fb],
 // from [baseFade]).
 mediump vec2 baseNormal(mediump float fb) {
   if (fb >= 1.0 || !far_valid)
     return texture(relief_normal, reliefCoord).rg;
-  mediump vec2 n = texture(far_relief_normal, farReliefCoord).rg;
+  mediump vec2 n = texture(far_relief_normal, farReliefCoord()).rg;
   if (fb > 0.0)
     n = mix(n, texture(relief_normal, reliefCoord).rg, fb);
   return n;
@@ -697,7 +702,8 @@ vec3 bumpGrad(Triplanar t, highp vec3 pos, float scale, int s, vec2 amp,
 // plane blend and fades serve every scale. [fpL] is the anisotropic pixel
 // footprint computed once in main.
 vec3 perturbNormal(vec3 geomNormal, Triplanar tri, float roughness,
-                   vec4 detailWeights, float dataStep, highp float fpL) {
+                   vec4 detailWeights, float dataStep, highp float fpL,
+                   highp float v_dist) {
   // Near-field masks: the macro scale only beyond ~200 m, the mid scale
   // beyond ~30 m. Each band bows out once the pixel footprint passes its
   // longest wavelength: past that its mips hold only box-filter residue,
@@ -917,7 +923,10 @@ void main() {
   // does (-view.z is the sky's cos_theta), so fogged ridges meet the sky
   // without a tonal step. At or below the eye line the smoothstep is 0 and
   // this is exactly u_fogColor.
-  highp vec3 view_dir_n = normalize(v_view_dir);
+  // View vector and distance from v_world_pos (saves 4 highp varying floats).
+  highp vec3 to_eye = vec3(center_offset, 0.0) - v_world_pos;
+  highp float v_dist = length(to_eye);
+  highp vec3 view_dir_n = to_eye / max(v_dist, 1e-4);
   vec3 fog_color =
       mix(u_fogColor, u_zenithColor, smoothstep(0.0, 0.35, -view_dir_n.z));
 
@@ -1318,7 +1327,7 @@ void main() {
   // Procedural normal perturbation (replaces rock_normal_map)
   if (waterMask < 0.99)
     final_normal = perturbNormal(normal, tri, surface.roughness, finalWeights,
-                                 data_step, fp);
+                                 data_step, fp, v_dist);
   // Crowns stand vertical whatever the slope under them: each tilts the
   // ground's normal about the vertical axis -- a horizontal offset -- rather
   // than within the slope's tangent plane. As a bump on the slope every crown
@@ -1519,9 +1528,7 @@ void main() {
     highp vec3 offset_pos =
         v_world_pos + normal * normalOffset + vec3(0., 0., center_height);
 
-    highp vec4 s_pos = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
-    highp vec3 proj_coords = s_pos.xyz / s_pos.w;
-    proj_coords = proj_coords * 0.5 + 0.5;
+    highp vec3 proj_coords = shadow_matrices[cascade] * vec4(offset_pos, 1.0);
 
     highp float current_depth = proj_coords.z;
     // World-space depth bias, expressed in this cascade's [0,1] depth range
@@ -1543,9 +1550,9 @@ void main() {
     // The trees' shadows, at ~0.5 m per texel: the layer holds nothing else,
     // so a small bias does (a trunk's buried foot is below the ground).
     if (u_treeShadowOn && v_dist < 600.0) {
-      highp vec4 t_pos = u_treeShadowMatrix *
-                         vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
-      highp vec3 t_coords = t_pos.xyz / t_pos.w * 0.5 + 0.5;
+      highp vec3 t_coords =
+          u_treeShadowMatrix *
+          vec4(v_world_pos + vec3(0., 0., center_height), 1.0);
       if (all(greaterThan(t_coords.xy, vec2(0.0))) &&
           all(lessThan(t_coords.xy, vec2(1.0))) && t_coords.z <= 1.0)
         shadow_val *= pcf_shadow(3, t_coords.xy, t_coords.z - 0.3 / 4000.0,
@@ -1649,7 +1656,7 @@ void main() {
   // normals; without it the ground there is taken as open to the sky.
   float occlusion = 1.0;
   if (fb < 1.0 && far_valid)
-    occlusion = texture(far_ao, farReliefCoord).r;
+    occlusion = texture(far_ao, farReliefCoord()).r;
   if (fb > 0.0)
     occlusion = mix(occlusion, texture(ao, reliefCoord).r, fb);
   vec3 lighting = (ambient * occlusion) + direct;

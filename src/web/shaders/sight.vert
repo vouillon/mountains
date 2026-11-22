@@ -40,7 +40,7 @@ highp float ground(highp vec2 p, out highp float pitch) {
   pitch = (baseWeight(norm_coord) > 0.0 ? 0.5 : 2.0) / inv_avg_delta;
   for (int i = HD_SLOTS - 1; i >= 0; i--)
     if (insideHd(i, hdCoord(i, coord)))
-      pitch = 0.5 * exp2(-hd_lod_bias[i]) / inv_avg_delta;
+      pitch = 0.5 * exp2(-hd_params[i].x) / inv_avg_delta;
   return sampleTerrainHeight(coord, norm_coord, -100.0) - dot(p, p) * 6.8306e-8;
 }
 
@@ -64,8 +64,8 @@ void main() {
   highp float stop = d - min(EXEMPT, EXEMPT_SHARE * d);
   highp float near_step = 0.5 * base;
   for (int i = 0; i < HD_SLOTS; i++)
-    if (hd_valid[i])
-      near_step = min(near_step, 0.5 * exp2(-hd_lod_bias[i]) * base);
+    if (hd_bias4[i].w > 0.5)
+      near_step = min(near_step, 0.5 * exp2(-hd_params[i].x) * base);
   highp float t = 0.0;
   f_seen = 0.5;
   for (int i = 0; i < MAX_STEPS; i++) {

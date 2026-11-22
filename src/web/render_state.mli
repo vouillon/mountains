@@ -51,23 +51,17 @@ type terrain_uniforms = {
   inv_delta : Gl.uniform_location;
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
-  proj : Gl.uniform_location;
-  transform : Gl.uniform_location;
+  view_proj : Gl.uniform_location;
   relief : Gl.uniform_location;
   relief_normal : Gl.uniform_location;
-  hd_valid : Gl.uniform_location array;
+  hd_valid : Gl.uniform_location;
   hd_relief : Gl.uniform_location array;
   hd_relief_normal : Gl.uniform_location array;
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
-  hd_half_texel : Gl.uniform_location array;
-  hd_step : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
+  hd_step : Gl.uniform_location;
   ao : Gl.uniform_location;
   u_detailMap : Gl.uniform_location;
   u_bumpGrad : Gl.uniform_location;
@@ -102,16 +96,11 @@ type shadow_uniforms = {
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
   shadow_view_proj : Gl.uniform_location;
-  hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
 }
 (** Cached uniform locations for the shadow shader. *)
 
@@ -253,6 +242,10 @@ val upload_hd_params :
     [hd], and [None] entries, are disabled -- with none valid this restores
     exactly the base-only rendering. *)
 
+val upload_ortho_shadow_mat4x3 : Gl.t -> Gl.uniform_location -> Matrix.t -> unit
+(** Upload an orthographic shadow matrix as a [mat4x3] with the clip-to-[0, 1]
+    [* 0.5 + 0.5] transform baked in. *)
+
 val upload_session_static :
   Gl.t ->
   Gl.program ->
@@ -303,16 +296,11 @@ type path_uniforms = {
   meridian_conv : Gl.uniform_location;
   inv_avg_delta : Gl.uniform_location;
   relief : Gl.uniform_location;
-  hd_valid : Gl.uniform_location array;
   hd_relief : Gl.uniform_location array;
-  hd_mat : Gl.uniform_location array;
-  hd_bias : Gl.uniform_location array;
-  hd_quad_x : Gl.uniform_location array;
-  hd_quad_y : Gl.uniform_location array;
-  hd_lod_bias : Gl.uniform_location array;
-  hd_max_lod : Gl.uniform_location array;
-  hd_height_scale_n : Gl.uniform_location array;
-  hd_height_offset : Gl.uniform_location array;
+  hd_mat4 : Gl.uniform_location;
+  hd_bias4 : Gl.uniform_location;
+  hd_quad : Gl.uniform_location;
+  hd_params : Gl.uniform_location;
 }
 
 val init_path_uniforms : Gl.t -> Gl.program -> path_uniforms

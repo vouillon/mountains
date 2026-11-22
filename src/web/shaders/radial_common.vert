@@ -41,25 +41,20 @@ const highp float FAR_LOD_BIAS = -2.0;
 // dynamically; the sampler arrays it only lets us index by literal, hence the
 // unrolled chain in [sampleTerrainHeight].
 #define HD_SLOTS 4
-uniform bool hd_valid[HD_SLOTS];
 uniform highp sampler2D hd_relief[HD_SLOTS];
-// Arcseconds from the anchor to a position normalized over the ring. A ring on
-// a projected grid has axes turned from north by its CRS's grid convergence, so
-// this is a 2x2 rather than one scale per axis; the translation is separate
-// because GLSL ES 3.0 has no mat3x2.
-uniform highp mat2 hd_mat[HD_SLOTS];
-uniform highp vec2 hd_bias[HD_SLOTS];
-// And curving: over a block of kilometres a projected grid is not an affine
-// image of the arcsecond one -- a second of longitude shortens with latitude,
-// the grid convergence changes across the block -- and the best affine map
-// misplaces a 5 km ring's corners by a metre. Each output's coefficients of
-// (u^2, u v, v^2), from [Hd_dem.frame]'s fitted [Warp]; zero on the graticule.
-uniform highp vec3 hd_quad_x[HD_SLOTS];
-uniform highp vec3 hd_quad_y[HD_SLOTS];
-uniform highp float hd_lod_bias[HD_SLOTS]; // log2 of refinement over the base
-uniform highp int hd_max_lod[HD_SLOTS];
-uniform highp float hd_height_scale_n[HD_SLOTS];
-uniform highp float hd_height_offset[HD_SLOTS];
+// Packed per-slot ring transforms and decoding parameters (vec4 arrays avoid
+// GLSL per-element vec4 padding that otherwise overflows Valhall's 128 uniform
+// registers):
+//   hd_mat4[i]   = (m00, m10, m01, m11)  -- column-major 2x2 from arcseconds
+//   hd_bias4[i]  = (bias.x, bias.y, half_texel, valid > 0.5)
+//   hd_params[i] = (lod_bias, float(max_lod), height_scale_n, height_offset)
+//   hd_quad[6]   = 4 slots x 6 quadratic coeffs (xuu, xuv, xvv, yuu, yuv, yvv)
+//                  for (u^2, u v, v^2) from [Hd_dem.frame]'s [Warp]; zero on
+//                  the graticule.
+uniform highp vec4 hd_mat4[HD_SLOTS];
+uniform highp vec4 hd_bias4[HD_SLOTS];
+uniform highp vec4 hd_quad[6];
+uniform highp vec4 hd_params[HD_SLOTS];
 
 // The base pyramid's quantisation: 9500 m over 65536 steps, the .dem
 // pipeline's.
@@ -132,14 +127,22 @@ highp float baseWeight(highp vec2 c) {
 // from the anchor.
 highp vec2 hdCoord(int i, highp vec2 c) {
   highp vec3 q = vec3(c.x * c.x, c.x * c.y, c.y * c.y);
-  return hd_mat[i] * c + hd_bias[i] +
-         vec2(dot(hd_quad_x[i], q), dot(hd_quad_y[i], q));
+  highp vec4 m = hd_mat4[i];
+  highp vec3 qx = i == 0   ? hd_quad[0].xyz
+                  : i == 1 ? vec3(hd_quad[1].zw, hd_quad[2].x)
+                  : i == 2 ? hd_quad[3].xyz
+                           : vec3(hd_quad[4].zw, hd_quad[5].x);
+  highp vec3 qy = i == 0   ? vec3(hd_quad[0].w, hd_quad[1].xy)
+                  : i == 1 ? hd_quad[2].yzw
+                  : i == 2 ? vec3(hd_quad[3].w, hd_quad[4].xy)
+                           : hd_quad[5].yzw;
+  return mat2(m.xy, m.zw) * c + hd_bias4[i].xy + vec2(dot(qx, q), dot(qy, q));
 }
 
 // True where ring [i] covers this coordinate and must be used in preference to
 // anything coarser.
 bool insideHd(int i, highp vec2 c) {
-  return hd_valid[i] && all(greaterThanEqual(c, vec2(0.0))) &&
+  return hd_bias4[i].w > 0.5 && all(greaterThanEqual(c, vec2(0.0))) &&
          all(lessThanEqual(c, vec2(1.0)));
 }
 
@@ -157,23 +160,23 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
   if (insideHd(0, c0))
     return sampleReliefHeight(
         hd_relief[0], c0,
-        min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]),
-        hd_height_scale_n[0], hd_height_offset[0]);
+        min(int(max(0.0, lod_raw + hd_params[0].x)), int(hd_params[0].y)),
+        hd_params[0].z, hd_params[0].w);
   if (insideHd(1, c1))
     return sampleReliefHeight(
         hd_relief[1], c1,
-        min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]),
-        hd_height_scale_n[1], hd_height_offset[1]);
+        min(int(max(0.0, lod_raw + hd_params[1].x)), int(hd_params[1].y)),
+        hd_params[1].z, hd_params[1].w);
   if (insideHd(2, c2))
     return sampleReliefHeight(
         hd_relief[2], c2,
-        min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]),
-        hd_height_scale_n[2], hd_height_offset[2]);
+        min(int(max(0.0, lod_raw + hd_params[2].x)), int(hd_params[2].y)),
+        hd_params[2].z, hd_params[2].w);
   if (insideHd(3, c3))
     return sampleReliefHeight(
         hd_relief[3], c3,
-        min(int(max(0.0, lod_raw + hd_lod_bias[3])), hd_max_lod[3]),
-        hd_height_scale_n[3], hd_height_offset[3]);
+        min(int(max(0.0, lod_raw + hd_params[3].x)), int(hd_params[3].y)),
+        hd_params[3].z, hd_params[3].w);
   highp float w = baseWeight(norm_coord);
   highp float h = BASE_OFFSET;
   if (w < 1.0 && far_valid)

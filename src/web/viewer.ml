@@ -2535,6 +2535,12 @@ let screen_is_rotated () =
 
 (* Scratch matrix for the per-POI transforms (see [text_transform]). *)
 let poi_transform : Matrix.t = Array.make 16 0.
+let terrain_view_proj : Matrix.t = Array.make 16 0.
+
+let terrain_view_proj_ba =
+  Bigarray.Array1.create Bigarray.float32 Bigarray.c_layout 16
+
+let terrain_view_proj_ta = Brr.Tarray.of_bigarray1 terrain_view_proj_ba
 
 (* Helper functions for orientation control *)
 let get_inclination_rad q =
@@ -3935,9 +3941,10 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   in
   (* Matrices - change with camera orientation and aspect ratio *)
   Matrix.blit proj proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
   Matrix.blit transform transform_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.transform false transform_ta;
+  Matrix.mult_into terrain_view_proj transform proj;
+  Matrix.blit terrain_view_proj terrain_view_proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.view_proj false terrain_view_proj_ta;
   set_depth_range ctx `Near;
   draw_trees ctx ~proj_ta ~transform_ta;
   Gl.use_program ctx terrain_pid;
@@ -3950,15 +3957,15 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
   Gl.depth_func ctx Gl.less;
   draw_rings ~first:0 ~last:split_ring;
   (* The same projection but for its near plane, which is all of its
-     fifteenth entry: set there, and back for the trace. *)
+     fifteenth entry: set there, and back for the trace. [proj_ba] keeps the
+     near projection untouched for the GPX path below. *)
   set_depth_range ctx `Far;
   proj.(14) <- -2. *. far_depth_near;
-  Matrix.blit proj proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
+  Matrix.mult_into terrain_view_proj transform proj;
+  Matrix.blit terrain_view_proj terrain_view_proj_ba;
+  Gl.uniform_matrix4fv ctx terrain_uniforms.view_proj false terrain_view_proj_ta;
   draw_rings ~first:split_ring ~last:(n_rings - 1);
   proj.(14) <- -2.;
-  Matrix.blit proj proj_ba;
-  Gl.uniform_matrix4fv ctx terrain_uniforms.proj false proj_ta;
   set_depth_range ctx `Near;
   Gl.depth_func ctx Gl.lequal;
   Gl.bind_vertex_array ctx None;
@@ -5443,8 +5450,12 @@ let apply_far ctx pids ~placeholder ~w ~anchor_lat ~anchor_lon ~valid far =
       Gl.uniform1i ctx (u "far_relief") 16;
       Gl.uniform1i ctx (u "far_relief_normal") 17;
       Gl.uniform1i ctx (u "far_ao") 18;
-      Gl.uniform3f ctx (u "far_map") origin_x origin_y
-        (1. /. float (far_step * size));
+      let far_scale = 1. /. float (far_step * size) in
+      Gl.uniform3f ctx (u "far_map") origin_x origin_y far_scale;
+      Gl.uniform3f ctx (u "far_uv_map")
+        ((origin_x +. 1.5 -. (0.5 *. float w)) *. far_scale)
+        ((origin_y +. 1.5 -. (0.5 *. float w)) *. far_scale)
+        (float w *. far_scale);
       Gl.uniform1i ctx (u "far_max_lod") (Web_utils.log2 size))
     pids
 
@@ -6301,10 +6312,9 @@ let load_location ctx ~gpu ~w ~h ~lat ~lon =
         ~valid:(base_valid_rect ~w base.valid)
         base.far;
       Gl.use_program ctx terrain_pid;
-      Gl.uniform_matrix4fv ctx
+      Render_state.upload_ortho_shadow_mat4x3 ctx
         (Gl.get_uniform_location ctx terrain_pid (Jstr.v "u_treeShadowMatrix"))
-        false
-        (Brr.Tarray.of_bigarray1 (Matrix.array tree_shadow_matrix));
+        tree_shadow_matrix;
       let hd_params =
         List.map
           (fun (g : Hd_dem.t) ->

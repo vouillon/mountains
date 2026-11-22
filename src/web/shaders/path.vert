@@ -1,3 +1,6 @@
+uniform mat4 proj;
+uniform mat4 transform;
+
 in vec3 prev_pos;
 in vec3 position;
 in vec3 next_pos;
