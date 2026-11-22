@@ -149,29 +149,26 @@ bool insideHd(int i, highp vec2 c) {
 // a GPX trace resolving its height differently from the mesh under it would
 // float or sink.
 highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
-                                highp float lod_raw) {
+                                highp float lod_raw, highp vec2 c0,
+                                highp vec2 c1, highp vec2 c2, highp vec2 c3) {
   // The bias is relative to the base spacing, and applies before the clamp to
   // level 0: near the camera the mesh is finer than the base grid, which is
   // precisely where the extra levels pay off.
-  highp vec2 c0 = hdCoord(0, coord);
   if (insideHd(0, c0))
     return sampleReliefHeight(
         hd_relief[0], c0,
         min(int(max(0.0, lod_raw + hd_lod_bias[0])), hd_max_lod[0]),
         hd_height_scale_n[0], hd_height_offset[0]);
-  highp vec2 c1 = hdCoord(1, coord);
   if (insideHd(1, c1))
     return sampleReliefHeight(
         hd_relief[1], c1,
         min(int(max(0.0, lod_raw + hd_lod_bias[1])), hd_max_lod[1]),
         hd_height_scale_n[1], hd_height_offset[1]);
-  highp vec2 c2 = hdCoord(2, coord);
   if (insideHd(2, c2))
     return sampleReliefHeight(
         hd_relief[2], c2,
         min(int(max(0.0, lod_raw + hd_lod_bias[2])), hd_max_lod[2]),
         hd_height_scale_n[2], hd_height_offset[2]);
-  highp vec2 c3 = hdCoord(3, coord);
   if (insideHd(3, c3))
     return sampleReliefHeight(
         hd_relief[3], c3,
@@ -191,6 +188,13 @@ highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
                                BASE_SCALE_N, BASE_OFFSET),
             w);
   return h;
+}
+
+highp float sampleTerrainHeight(highp vec2 coord, highp vec2 norm_coord,
+                                highp float lod_raw) {
+  return sampleTerrainHeight(coord, norm_coord, lod_raw, hdCoord(0, coord),
+                             hdCoord(1, coord), hdCoord(2, coord),
+                             hdCoord(3, coord));
 }
 
 // The LIDAR HD canopy over the 1 m ring's block (see terrain.frag and
@@ -271,32 +275,34 @@ float canopyCover(float tone) { return smoothstep(0.2, 0.4, tone); }
 // the canopy model has crowns over the water along a wooded shore, and what
 // it has on open water is noise, neither of which may raise the water.
 uniform mediump usampler2DArray u_coverMap;
-uniform mediump sampler2D u_paletteTex;
 // Where the cover map is centred, from the anchor (terrain.frag's).
 uniform highp vec2 u_coverShift;
 
-// Whether the land cover is water at the base grid's normalised coordinate
-// [c]: the nearest texel of the level terrain.frag's [sampleCLCBilinear]
-// reads there.
-bool overWater(highp vec2 c) {
-  highp vec2 uv = (c - u_coverShift + 0.5 * inv_w - 0.5) * 0.5 + 0.5;
-  highp float d = max(max(abs(uv.x - 0.5), abs(uv.y - 0.5)), 0.000001);
-  int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
-  highp vec2 luv = (uv - 0.5) * exp2(float(7 - level)) + 0.5;
-  ivec2 size = textureSize(u_coverMap, 0).xy;
-  ivec2 p = clamp(ivec2(floor(luv * vec2(size))), ivec2(0), size - 1);
-  uint id = texelFetch(u_coverMap, ivec3(p, level), 0).r;
-  return texelFetch(u_paletteTex, ivec2(int(id) * 3 + 1, 0), 0).a > 0.5;
-}
-
 // Whether there is water within a mesh interval, [s] m, of [c]: a vertex
 // raised beside one on the water would draw the water between them up the
-// side of the canopy.
+// side of the canopy. Palette indices >= 38u match [Clc_palette]'s
+// water_factor > 0.5 (salines, intertidal flats, water bodies, sea), avoiding
+// a palette texture fetch per tap; clipmap level and size are hoisted once for
+// the 3x3 stencil.
 bool nearWater(highp vec2 c, highp float s) {
-  highp vec2 e = s * inv_delta * inv_w;
-  for (int k = 0; k < 9; k++)
-    if (overWater(c + e * vec2(float(k % 3 - 1), float(k / 3 - 1))))
-      return true;
+  highp vec2 uv = (c - u_coverShift + 0.5 * inv_w - 0.5) * 0.5 + 0.5;
+  highp vec2 e = s * inv_delta * (0.5 * inv_w);
+  highp vec2 ad = abs(uv - 0.5) + e;
+  highp float d = max(max(ad.x, ad.y), 0.000001);
+  int level = clamp(int(ceil(8.0 + log2(d))), 0, 7);
+  highp float scale = exp2(float(7 - level));
+  ivec2 size = textureSize(u_coverMap, 0).xy;
+  highp vec2 fsize = vec2(size);
+  highp vec2 base = ((uv - 0.5) * scale + 0.5) * fsize;
+  highp vec2 step_t = e * scale * fsize;
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      ivec2 p = clamp(ivec2(floor(base + step_t * vec2(float(dx), float(dy)))),
+                      ivec2(0), size - 1);
+      if (texelFetch(u_coverMap, ivec3(p, level), 0).r >= 38u)
+        return true;
+    }
+  }
   return false;
 }
 
@@ -319,6 +325,8 @@ highp float liftOf(vec4 s) {
 // it, [c] being the base grid's normalised coordinate.
 highp float canopyLift(highp vec2 c, highp vec2 cn, highp vec2 cf,
                        highp float r, highp float grid_spacing) {
+  if ((u_canopySlot >= 0 && r < 40.0) || (u_canopySlot < 0 && r < 300.0))
+    return 0.0;
   float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
   float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
   // Where the near canopy has no data (across a border, a tile that did not
@@ -391,7 +399,9 @@ RadialVertex computeRadialVertex() {
   v.hd_coord[2] = hdCoord(2, coord);
   v.hd_coord[3] = hdCoord(3, coord);
   v.far_coord = (coord + far_map.xy) * far_map.z;
-  v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw);
+  v.height = sampleTerrainHeight(vec2(coord.x, coord.y), v.norm_coord, lod_raw,
+                                 v.hd_coord[0], v.hd_coord[1], v.hd_coord[2],
+                                 v.hd_coord[3]);
   v.height += canopyLift(
       v.norm_coord,
       slotCoord(v.hd_coord[0], v.hd_coord[1], v.hd_coord[2], u_canopySlot),
