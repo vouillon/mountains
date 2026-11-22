@@ -3937,7 +3937,7 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
      (exactly 512 sectors, so the seams are watertight), and only out to
      [extra_ring_cap]: off-wedge terrain exists only when pitched down, and is
      then visible only below the frustum's highest ray. *)
-  let g_half, extra_ring_cap =
+  let g_half, ring_cap =
     let tx = 1. /. x_scale and ty = 1. /. y_scale in
     (* r and u are columns 0 and 1 of [orientation]'s rotation (column 2 is
        -[fwd]), expanded as scalars — cf. [Quaternion.to_matrix] — so that no
@@ -3981,42 +3981,37 @@ let draw terrain_pid terrain_geo triangle_pid text_pid text_geo path_pid
         in
         if n < 1 then 1 else if n > 32 then 32 else n
     in
-    let extra_ring_cap =
-      if g_half <= n_index_blocks / 2 then 0
-      else
-        (* Highest frustum ray: pitch plus the cone half-angle (roll-safe).
-           When extras are needed it is normally below the horizon, and a
-           ground point d metres below the camera is then within
-           d / tan(-e_max) plus what the curvature drop adds; the +502 spans
-           the height range floor and the eye, 1.05 and the +1 ring absorb
-           the approximations. NaN or a near-horizontal bound draws full
-           rings. *)
-        let tan_beta = sqrt ((tx *. tx) +. (ty *. ty)) in
-        let e_max = asin (Float.max (-1.) (Float.min 1. fz)) +. atan tan_beta in
-        if e_max < -0.001 then
-          let depth = height +. 502. in
-          let t = Float.tan (-.e_max) in
-          let r0 = depth /. t in
-          let r = (depth +. (r0 *. r0 *. 6.8306e-8)) /. t *. 1.05 in
-          let gs = radial_params.Render_state.grid_scale in
-          min (n_rings - 1)
-            (max 1 (int_of_float (ceil (log ((r /. gs) +. 1.) /. grid_k)) + 1))
-        else n_rings - 1
+    (* Highest frustum ray: pitch plus the cone half-angle (roll-safe).
+       When pitched below the horizon, a ground point d metres below the camera
+       is within d / tan(-e_max) plus what the curvature drop adds; the +502
+       spans the height range floor and the eye, 1.05 and the +1 ring absorb
+       the approximations. NaN or a near-horizontal bound draws full rings. *)
+    let ring_cap =
+      let tan_beta = sqrt ((tx *. tx) +. (ty *. ty)) in
+      let e_max = asin (Float.max (-1.) (Float.min 1. fz)) +. atan tan_beta in
+      if e_max < -0.001 then
+        let depth = height +. 502. in
+        let t = Float.tan (-.e_max) in
+        let r0 = depth /. t in
+        let r = (depth +. (r0 *. r0 *. 6.8306e-8)) /. t *. 1.05 in
+        let gs = radial_params.Render_state.grid_scale in
+        min (n_rings - 1)
+          (max 1 (int_of_float (ceil (log ((r /. gs) +. 1.) /. grid_k)) + 1))
+      else n_rings - 1
     in
-    (g_half, extra_ring_cap)
+    (g_half, ring_cap)
   in
   let gmin = -g_half and gmax = g_half - 1 in
   let indices_per_block = index_count / n_index_blocks in
   let strip_indices = indices_per_block / (n_rings - 1) in
   (* Draw the blocks of one wedge rotation covering circle blocks
      [g_lo, g_hi] (their wedge-local index is g + b_off), clipped to the
-     needed range: the central wedge in one call with full rings, the extra
-     rotations per block with rings capped. *)
+     needed range and capped at [ring_cap] when pitched below the horizon. *)
   (* Of each block, the strips [first, last): a strip joins a ring to the next
      one out, and a block's strips follow each other from the eye outwards. *)
   let draw_wedge_seg ~first ~last rot g_lo g_hi b_off =
     let lo = max gmin g_lo and hi = min gmax g_hi in
-    let last = if rot = 0 then last else min last extra_ring_cap in
+    let last = min last ring_cap in
     if lo <= hi && first < last then begin
       Gl.uniform1f ctx terrain_uniforms.snapped_alpha
         (snapped_alpha +. (float rot *. (pi /. 2.)));

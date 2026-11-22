@@ -293,16 +293,18 @@ vec4 sampleTriplanar(highp vec3 worldPos, vec3 normal, float scale,
   // changes. Two noises average less than three, so walls read a little
   // crisper. Below the gate the blend is untouched.
   float weakest = min(min(blend.x, blend.y), blend.z);
-  blend = mix(blend, max(blend - weakest, 0.0), sideGate);
+  vec3 bi = max(blend - weakest, 0.0);
+  bi /= (bi.x + bi.y + bi.z + 0.0001);
+  blend = mix(blend, bi, sideGate);
   blend /= (blend.x + blend.y + blend.z + 0.0001);
 
-  // Sample each projection plane. The side projections are faded by their
-  // blend weight and by [sideGate] (see [triplanarSideGate]), and default to
-  // the neutral 0.5. What the material blend loses under the gate is a
-  // statistically identical share of the same noise, sampled less obliquely.
+  // Sample each projection plane. The side projections use [bi] so the weaker
+  // side plane stays at zero across the [sideGate] ramp instead of opening a
+  // third (most oblique) plane on 49-63 degree slopes, and default to the
+  // neutral 0.5.
   float bias = 1.;
-  float w_y = blend.y * smoothstep(0.003, 0.01, blend.y) * sideGate;
-  float w_x = blend.x * smoothstep(0.003, 0.01, blend.x) * sideGate;
+  float w_y = bi.y * smoothstep(0.003, 0.01, bi.y) * sideGate;
+  float w_x = bi.x * smoothstep(0.003, 0.01, bi.x) * sideGate;
   triW = vec3(w_x, w_y, blend.z);
 
   vec4 res = vec4(0.5 * (blend.y - w_y + blend.x - w_x));
@@ -943,8 +945,6 @@ void main() {
     float nearEdge = u_canopySlot >= 0 ? canopyEdge(cn) : 0.0;
     float farEdge = u_canopyFarSlot >= 0 ? canopyEdge(cf) : 0.0;
     vec3 ct = canopyTrees(cn, cf, nearEdge, farEdge);
-    if (surface.waterFactor < 0.99)
-      canopyGeometry(r_eye, cn, cf, nearEdge, farEdge);
     // Height above the sea: compensate Earth's curvature drop.
     highp float elev = v_world_pos.z + center_height + r_eye_sq * 6.8306e-8;
     // Beyond the canopies, the EEA tree cover: forest where its density is
@@ -959,7 +959,8 @@ void main() {
     surface.conifer =
         mix(surface.conifer, 1.0,
             smoothstep(u_coniferLine, u_coniferLine + 500.0, elev));
-    if (u_treeCoverOn || u_treeCoverFarOn) {
+    if ((u_treeCoverOn || u_treeCoverFarOn) &&
+        (ct.y < 1.0 || ct.x > 0.0 || surface.detailWeights.b > 0.01)) {
       highp vec2 drc_dx = dFdx(reliefCoord);
       highp vec2 drc_dy = dFdy(reliefCoord);
       float coverTrust = 0.0;
@@ -998,6 +999,8 @@ void main() {
             (1.0 - smoothstep(2500.0, 2800.0, elev));
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
+    if (trust * ct.x > 0.0)
+      canopyGeometry(r_eye, cn, cf, nearEdge, farEdge);
     // Where tree.vert stands the trees, this is the ground under them: no
     // canopy, crowns or forest bump of its own, but forest floor -- the open
     // ground's detail, and needle litter and moss for colour.
