@@ -51,7 +51,8 @@ uniform highp vec2 u_canopyMidBias;
 uniform highp vec3 u_canopyMidQx;
 uniform highp vec3 u_canopyMidQy;
 // The EEA tree cover (Tree_cover, ~20 m over ~20 km), the atlas's third
-// region (see tree_cover_prep.frag): R density, G conifer share, B data. Read
+// region (see tree_cover_prep.frag): R density, B data, G conifer share
+// premultiplied by A, where the leaf type is known. Read
 // at [reliefCoord * u_treeCoverMap.xy + u_treeCoverMap.zw], if
 // [u_treeCoverOn].
 uniform bool u_treeCoverOn;
@@ -1080,8 +1081,12 @@ void main() {
         ct.x = mix(max(smoothstep(0.3, 0.6, density), clcForest), ct.x,
                    ct.y / total);
         ct.y = total;
-        surface.conifer = mix(surface.conifer, clamp(tc.g, 0.0, 1.0),
-                              e * smoothstep(0.1, 0.4, density));
+        // Only as far as the leaf type is known: elsewhere the conifer
+        // line's share, or the class's, stands (as in tree_find.vert). With
+        // G premultiplied by A, mix(conifer, G / A, w A) without the
+        // division.
+        surface.conifer +=
+            (tc.g - surface.conifer * tc.a) * e * smoothstep(0.1, 0.4, density);
         coverTrust += e;
       }
     }

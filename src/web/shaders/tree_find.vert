@@ -200,7 +200,7 @@ void main() {
           u_canopy,
           ivec2(2 * csize + int(uv.x * float(csize)), int(uv.y * float(csize))),
           0);
-      if (tc.b > 0.5 && abs(tc.g - 0.5) > 0.25)
+      if (tc.b > 0.5 && tc.a > 0.5)
         conifer = tc.g > 0.5;
     }
   }

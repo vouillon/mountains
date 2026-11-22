@@ -1,9 +1,14 @@
 // Bakes the EEA tree cover (Viewer.tree_cover_texture, Tree_cover) into the
 // canopy atlas's third region, RGBA8 per ~20 m sample, rows from the south:
 // - R: tree cover density, 0-1;
-// - G: share of conifers: 1 coniferous, 0 broadleaved, 0.5 neither;
+// - G: 1 coniferous, 0 broadleaved or unknown -- premultiplied by A, so that
+//   the mipmaps average the share over the samples that know it;
 // - B: 1 where the density has data, 0 elsewhere (outside the EEA's
-//   coverage, and where the service answers stray values above 100).
+//   coverage, and where the service answers stray values above 100);
+// - A: 1 where the leaf type is known (broadleaved or coniferous), 0 where it
+//   has no tree or no data. An unknown sample once read as a share of 0.5,
+//   which pulled the conifers above Viewer's [conifer_line] -- the sparse
+//   stands whose trees the 10 m leaf type misses -- halfway to broadleaf.
 
 // R8, rows north-up as served, [u_width] samples across of [u_size] rows
 // (Tree_cover.t's [width]: the service's samples are square in degrees): the
@@ -29,6 +34,7 @@ void main() {
   float l =
       floor(texelFetch(u_input, q + ivec2(u_stride, 0), 0).r * 255.0 + 0.5);
   bool valid = d <= 100.0;
-  color = vec4(valid ? d / 100.0 : 0.0, l == 2.0 ? 1.0 : (l == 1.0 ? 0.0 : 0.5),
-               valid ? 1.0 : 0.0, 0.0);
+  bool known = l == 1.0 || l == 2.0;
+  color = vec4(valid ? d / 100.0 : 0.0, l == 2.0 ? 1.0 : 0.0, valid ? 1.0 : 0.0,
+               known ? 1.0 : 0.0);
 }
