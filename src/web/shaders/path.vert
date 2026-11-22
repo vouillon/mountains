@@ -1,7 +1,9 @@
-in vec3 prev_pos;
-in vec3 position;
-in vec3 next_pos;
-in float side;
+// Bound where Viewer.build_gpx_path points them: unbound, the linker may
+// number them in any order.
+layout(location = 0) in vec3 prev_pos;
+layout(location = 1) in vec3 position;
+layout(location = 2) in vec3 next_pos;
+layout(location = 3) in float side;
 
 uniform vec4 u_color;
 uniform vec2 u_viewport;
