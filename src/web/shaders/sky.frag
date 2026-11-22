@@ -5,7 +5,7 @@ uniform highp vec3 u_lightDir;
 uniform vec3 u_sunTint; // terrain.frag's
 uniform vec3 u_fogColor;
 uniform vec3 u_zenithColor;
-uniform vec2 sky_params; // x_scale, y_scale
+uniform highp vec2 sky_params; // x_scale, y_scale (highp to match terrain proj)
 in highp vec2 v_uv;
 out vec4 color;
 
@@ -54,12 +54,13 @@ void main() {
 
   // Sun disc, ~0.53 degrees across with a soft limb (the real angular size;
   // the previous hard cutoff at 0.9995 made a jagged disc 3.6 degrees wide).
-  // The thresholds must be highp: mediump cannot represent values this close
-  // to 1 (fp16 ulp near 1 is ~5e-4).
-  const highp float disc_outer = 0.9999870; // cos(0.29 deg)
-  const highp float disc_inner = 0.9999910; // cos(0.24 deg)
+  // Compare chord distance |view_dir - u_lightDir| = 2*sin(theta/2) instead of
+  // cos_gamma near 1.0, where the limb spanned only ~67 fp32 ULPs.
+  const highp float disc_inner = 0.00418879; // 2 * sin(0.24 deg / 2)
+  const highp float disc_outer = 0.00506145; // 2 * sin(0.29 deg / 2)
+  highp float sun_chord = length(view_dir - u_lightDir);
   sky = mix(sky, vec3(1.0, 0.95, 0.8) * u_sunTint * 20.0,
-            smoothstep(disc_outer, disc_inner, cos_gamma));
+            1.0 - smoothstep(disc_inner, disc_outer, sun_chord));
 
   // Tone curve -- the same one the terrain applies, so the horizon they share
   // stays continuous -- then gamma correction (Linear -> sRGB), then a

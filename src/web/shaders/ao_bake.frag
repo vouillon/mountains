@@ -29,7 +29,9 @@ void main() {
     // Metres covered by the full radius along this direction
     float R_world = 50.0 * length(dir * scale);
 
-    mediump float max_tan = -100.0;
+    // Kept highp: on a sheer cliff (max_tan > 256), 1 + max_tan^2 overflows
+    // fp16 (> 65504) to Inf and Inf/Inf = NaN spreads through ao_blur.frag.
+    float max_tan = 0.0;
 
     for (mediump float s = 1.0; s <= STEPS; s++) {
       float t_linear = (s + 1.0 + noise) / (STEPS + 2.0);
@@ -44,8 +46,7 @@ void main() {
       max_tan = max(max_tan, tan_s);
     }
 
-    mediump float sin_horizon = max_tan / sqrt(1.0 + max_tan * max_tan);
-    totalOcclusion += max(0.0, sin_horizon);
+    totalOcclusion += max_tan * inversesqrt(1.0 + max_tan * max_tan);
   }
 
   occlusion = 1.0 - totalOcclusion / DIRECTIONS;

@@ -102,7 +102,8 @@ uniform highp vec2 shadow_cascades[3];
 // it holds any.
 uniform highp mat4x3 u_treeShadowMatrix;
 uniform bool u_treeShadowOn;
-uniform vec3 u_lightDir; // Pre-normalized on CPU
+// Pre-normalized on CPU; highp to match sky.frag and highp half-vector math.
+uniform highp vec3 u_lightDir;
 // What the air leaves of the sun's colour at its height (Viewer.sun_tint):
 // white with the sun high, warmer and dimmer as it drops.
 uniform vec3 u_sunTint;
@@ -1418,7 +1419,7 @@ void main() {
   // Highp, and guarded: looking straight at the sun past a ridge the two
   // directions cancel, and at fp16 they do so exactly over a ~5e-4 rad patch,
   // where normalize() would return NaN.
-  highp vec3 halfSum = lightDir + view_dir_n;
+  highp vec3 halfSum = u_lightDir + view_dir_n;
   highp vec3 halfVec = halfSum * inversesqrt(max(dot(halfSum, halfSum), 1e-12));
 
   // GGX distribution with a hand-tuned strength in front of it, which is not a
@@ -1482,7 +1483,7 @@ void main() {
   // keeps its overall brightness and only its direction changes.
   float direct_l = final_l;
   if (final_l > 0.0 && finalWeights.b > 0.01) {
-    highp float cosg = dot(view_dir_n, lightDir);
+    highp float cosg = dot(view_dir_n, u_lightDir);
     float back = max(-float(cosg), 0.0);
     float back3 = back * back * back;
     float phase = clamp(1.0 + 0.6 * float(cosg), 0.25, 2.0) +
@@ -1609,7 +1610,10 @@ void main() {
   // fragment altitude alone, a low valley seen from a summit was over-hazed
   // by the dense air it does not actually lie under.
   float haze_density = exp((-center_height - (0.5 * v_world_pos.z)) * 0.0006);
-  float fog_coeff = exp(v_dist * -0.4e-4 * haze_density);
+  // Divide by -25000 in highp: -0.4e-4 is subnormal in fp16 (< 6.1e-5) and
+  // could flush to zero if reassociated with mediump haze_density.
+  highp float fog_arg = (v_dist / -25000.0) * haze_density;
+  float fog_coeff = exp(fog_arg);
 
   vec3 final_color = mix(fog_color, lit, fog_coeff);
 
