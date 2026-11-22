@@ -24,10 +24,17 @@ type response =
 type worker_handle = {
   worker : Brr_webworkers.Worker.t;
   pending : response Lwt.u Queue.t;
-  mutable in_use : bool;
+  mutable in_flight : int;
+  depth : int;  (** messages it may have in flight at once *)
 }
 
 let pool_size = 4
+
+(* A decode worker takes its messages one after the other (worker.ml), and may
+   be sent [decode_depth] at once: with one, it sat idle while the page handled
+   its reply and sent the next -- half its time in a warm load on a Pixel 8a
+   (3.8 ms a decode, 3.5 ms waiting for the next). *)
+let decode_depth = 3
 let pool = ref [||]
 let waiting_queue = Queue.create ()
 
@@ -38,7 +45,7 @@ let waiting_queue = Queue.create ()
 let blender = ref None
 let blend_queue = Queue.create ()
 
-let create_worker () =
+let create_worker ~depth =
   let worker = Brr_webworkers.Worker.create (Jstr.v "worker.bc.js") in
   let pending = Queue.create () in
 
@@ -79,12 +86,12 @@ let create_worker () =
   ignore
     (Brr.Ev.listen Brr_io.Message.Ev.message on_msg
        (Brr_webworkers.Worker.as_target worker));
-  { worker; pending; in_use = false }
+  { worker; pending; in_flight = 0; depth }
 
 let init () =
   if Array.length !pool = 0 then begin
-    pool := Array.init pool_size (fun _ -> create_worker ());
-    let w = create_worker () in
+    pool := Array.init pool_size (fun _ -> create_worker ~depth:decode_depth);
+    let w = create_worker ~depth:1 in
     (* No reply: nothing is queued for it. *)
     Brr_webworkers.Worker.post w.worker
       (Jv.obj [| ("type", Jv.of_string "preload_blend") |]);
@@ -95,11 +102,20 @@ let acquire () =
   let open Lwt.Syntax in
   init ();
 
-  (* Find available worker *)
-  let available = Array.find_opt (fun w -> not w.in_use) !pool in
+  (* The least loaded worker with room *)
+  let available =
+    Array.fold_left
+      (fun best w ->
+        if w.in_flight >= w.depth then best
+        else
+          match best with
+          | Some b when b.in_flight <= w.in_flight -> best
+          | _ -> Some w)
+      None !pool
+  in
   match available with
   | Some w ->
-      w.in_use <- true;
+      w.in_flight <- w.in_flight + 1;
       Lwt.return w
   | None ->
       (* Wait for a worker *)
@@ -111,8 +127,8 @@ let acquire () =
 let acquire_blender () =
   init ();
   let w = Option.get !blender in
-  if not w.in_use then begin
-    w.in_use <- true;
+  if w.in_flight < w.depth then begin
+    w.in_flight <- w.in_flight + 1;
     Lwt.return w
   end
   else begin
@@ -126,10 +142,10 @@ let release w =
     match !blender with Some b when b == w -> blend_queue | _ -> waiting_queue
   in
   if not (Queue.is_empty queue) then
-    (* Pass worker directly to next waiter *)
+    (* Its place goes straight to the next waiter *)
     let u = Queue.pop queue in
     Lwt.wakeup u w
-  else w.in_use <- false
+  else w.in_flight <- w.in_flight - 1
 
 let post w req =
   let msg, transfer =

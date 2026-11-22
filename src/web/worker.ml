@@ -635,7 +635,17 @@ let on_message ~dem_inst ~clc_inst e =
 let () =
   let dem_inst = Wasm.load_dem () in
   let clc_inst = Wasm.load_clc () in
+  (* One message after the other: a decode awaits its inflates, and two at once
+     would share the wasm memory's fixed offsets -- and reply out of order,
+     where [Worker_pool] matches replies to requests by order. The page may
+     send several ([Worker_pool.decode_depth]); this keeps them in line.
+     [on_message] never fails, so the chain does not break. *)
+  let last = ref Lwt.return_unit in
   ignore
     (Brr.Ev.listen Brr_io.Message.Ev.message
-       (fun e -> Lwt.async (fun () -> on_message ~dem_inst ~clc_inst e))
+       (fun e ->
+         let prev = !last in
+         let t = Lwt.bind prev (fun () -> on_message ~dem_inst ~clc_inst e) in
+         last := t;
+         Lwt.async (fun () -> t))
        (Brr.Ev.target_of_jv (Jv.get Jv.global "self")))
