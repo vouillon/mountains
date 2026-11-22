@@ -534,6 +534,13 @@ float canopyEdge(highp vec2 c) {
 // ground under standing trees was shaded as canopy still.
 uniform highp vec2 center_offset;
 highp float eyeRadius() { return length(v_world_pos.xy - center_offset); }
+// Height above the sea: the mesh is lowered by the Earth's curvature
+// (radial_common.vert), 250 m at 60 km, which would otherwise raise the
+// altitude limits below by as much on distant slopes.
+highp float elevation() {
+  highp vec2 d = v_world_pos.xy - center_offset;
+  return v_world_pos.z + center_height + dot(d, d) * 6.8306e-8;
+}
 float treesStood(highp float r, float nearEdge) {
   return u_treesStand ? (1.0 - smoothstep(840.0, 960.0, r)) * nearEdge : 0.0;
 }
@@ -1048,9 +1055,9 @@ void main() {
     // 44.58, 6.85 it reads 0-9% on 70% of the LIDAR's trees over 3 m), so
     // where it has no trees but the land cover says forest, that is sparse
     // forest, half trees, rather than meadow.
-    surface.conifer = mix(surface.conifer, 1.0,
-                          smoothstep(u_coniferLine, u_coniferLine + 500.0,
-                                     v_world_pos.z + center_height));
+    surface.conifer =
+        mix(surface.conifer, 1.0,
+            smoothstep(u_coniferLine, u_coniferLine + 500.0, elevation()));
     float coverTrust = 0.0;
     float clcForest = 0.5 * smoothstep(0.35, 0.6, surface.detailWeights.b);
     for (int level = 0; level < 2; level++) {
@@ -1081,7 +1088,7 @@ void main() {
     // No forest on glaciers -- the canopy models read seracs and crevasses
     // as a metre or two of trees -- nor above the treeline.
     ct.x *= (1.0 - surface.detailWeights.a) *
-            (1.0 - smoothstep(2500.0, 2800.0, v_world_pos.z + center_height));
+            (1.0 - smoothstep(2500.0, 2800.0, elevation()));
     float trust = ct.y * (1.0 - surface.built) *
                   (1.0 - smoothstep(0.3, 0.6, surface.waterFactor));
     // Where tree.vert stands the trees, this is the ground under them: no
